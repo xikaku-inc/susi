@@ -11,6 +11,7 @@
 - **Machine limits** — control how many machines a single license can activate
 - **Optional activation server** — HTTP server for online activation and management
 - **Cross-platform** — Linux and Windows support
+- **C++ client library** — drop-in header+source for C++ projects (OpenSSL-based)
 
 ## Architecture
 
@@ -44,6 +45,7 @@
 | `susi_client` | Library | Lightweight verification library to embed in your application |
 | `susi_admin` | Binary | CLI tool for key generation, license creation, and management |
 | `susi_server` | Binary | HTTP activation server with SQLite backend |
+| `cpp/` | C++ Library | Standalone verification client for C++ applications |
 
 ## Quick Start
 
@@ -119,6 +121,40 @@ match status {
     }
     other => eprintln!("License error: {:?}", other),
 }
+```
+
+### 5. Verify in your C++ application
+
+The `cpp/` directory contains a standalone C++ client (`susi.h` + `susi.cpp`) that uses OpenSSL for verification. Add it to your CMake project:
+
+```cmake
+add_subdirectory(susi/cpp)
+target_link_libraries(your_target PRIVATE susi)
+```
+
+Then use it:
+
+```cpp
+#include <susi.h>
+
+SusiClient susi;
+
+// Pass the "LicenseInfo" section of your config as JSON:
+bool valid = susi.checkLicense(R"({"LicenseFile": "license.json"})");
+
+if (valid) {
+    if (susi.hasFeature("pro")) {
+        // enable pro features
+    }
+}
+```
+
+Before building for production, paste your public key (from `susi-admin keygen`) into the `DEFAULT_PUBLIC_KEY` constant in `susi.cpp`. When the key is empty, license checks are skipped (development mode).
+
+To use your own logging framework instead of `fprintf`, define `SUSI_LOG` before including `susi.cpp`:
+
+```cpp
+#define SUSI_LOG(fmt, ...) my_logger("susi", fmt, ##__VA_ARGS__)
 ```
 
 ## License File Format
