@@ -328,6 +328,63 @@ async fn handle_deactivate(
     Ok(Json(serde_json::json!({ "status": "deactivated" })))
 }
 
+#[derive(Serialize)]
+struct PublicLicenseStatus {
+    license_key: String,
+    product: String,
+    customer: String,
+    expires: String,
+    features: Vec<String>,
+    max_machines: u32,
+    active_machines: Vec<PublicMachineSummary>,
+    revoked: bool,
+}
+
+#[derive(Serialize)]
+struct PublicMachineSummary {
+    machine_code: String,
+    friendly_name: String,
+    lease_expires_at: Option<String>,
+    lease_active: bool,
+}
+
+async fn handle_license_status(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+) -> Result<Json<PublicLicenseStatus>, (StatusCode, Json<ErrorResponse>)> {
+    let db = state.db.lock().unwrap();
+
+    let license = db
+        .get_license_by_key(&key)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "License key not found"))?;
+
+    let now = Utc::now();
+    Ok(Json(PublicLicenseStatus {
+        license_key: license.license_key.clone(),
+        product: license.product.clone(),
+        customer: license.customer.clone(),
+        expires: license
+            .expires
+            .map(|dt| dt.to_rfc3339())
+            .unwrap_or_else(|| "perpetual".to_string()),
+        features: license.features.clone(),
+        max_machines: license.max_machines,
+        active_machines: license
+            .machines
+            .iter()
+            .filter(|m| m.is_lease_active(now))
+            .map(|m| PublicMachineSummary {
+                machine_code: m.machine_code.clone(),
+                friendly_name: m.friendly_name.clone(),
+                lease_expires_at: m.lease_expires_at.map(|dt| dt.to_rfc3339()),
+                lease_active: m.is_lease_active(now),
+            })
+            .collect(),
+        revoked: license.revoked,
+    }))
+}
+
 // ---------------------------------------------------------------------------
 // Admin endpoints
 // ---------------------------------------------------------------------------
@@ -551,6 +608,7 @@ async fn main() -> Result<()> {
         .route("/api/v1/activate", post(handle_activate))
         .route("/api/v1/verify", post(handle_verify))
         .route("/api/v1/deactivate", post(handle_deactivate))
+        .route("/api/v1/licenses/{key}/status", get(handle_license_status))
         // Admin endpoints
         .route("/api/v1/licenses", get(handle_list_licenses))
         .route("/api/v1/licenses", post(handle_create_license))
