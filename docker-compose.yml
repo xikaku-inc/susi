@@ -1,0 +1,22 @@
+services:
+  susi-server:
+    build: .
+    container_name: susi-server
+    restart: unless-stopped
+    ports:
+      - "3100:3100"
+    environment:
+      - SUSI_ADMIN_KEY=${SUSI_ADMIN_KEY:?Set SUSI_ADMIN_KEY in .env}
+      - RUST_LOG=info
+    volumes:
+      - susi-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3100/health"]
+      interval: 30s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+
+volumes:
+  susi-data:
+    name: susi-data
