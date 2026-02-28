@@ -23,3 +23,7 @@ tower-http = { version = "0.6", features = ["cors"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 rsa = { version = "0.9", features = ["pem"] }
 pkcs8 = { version = "0.10", features = ["pem"] }
+argon2 = "0.5"
+jsonwebtoken = "9"
+totp-rs = { version = "5", features = ["qr"] }
+rand = "0.8"

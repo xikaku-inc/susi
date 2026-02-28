@@ -283,6 +283,62 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
 /* Search */
 #searchInput { min-width: 200px; }
 
+/* Auth overlays */
+.auth-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: var(--bg);
+    z-index: 300;
+    justify-content: center;
+    align-items: center;
+}
+.auth-overlay.visible { display: flex; }
+.auth-card {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 32px;
+    width: 100%;
+    max-width: 400px;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+}
+.auth-card h2 { font-size: 18px; margin-bottom: 4px; }
+.auth-card .subtitle { font-size: 13px; color: var(--text2); margin-bottom: 20px; }
+.auth-card .form-row { margin-bottom: 14px; }
+.auth-card .form-row input { width: 100%; }
+.auth-card .auth-error {
+    background: rgba(248, 113, 113, 0.1);
+    border: 1px solid var(--red);
+    color: var(--red);
+    padding: 8px 12px;
+    border-radius: var(--radius);
+    font-size: 13px;
+    margin-bottom: 14px;
+    display: none;
+}
+.auth-card .auth-error.visible { display: block; }
+.auth-card button { width: 100%; padding: 10px; font-size: 14px; }
+.auth-card button + button { margin-top: 8px; }
+
+/* 2FA modal extras */
+.qr-container { text-align: center; margin: 16px 0; }
+.qr-container img { max-width: 200px; border-radius: var(--radius); background: #fff; padding: 8px; }
+.secret-display {
+    font-family: "SF Mono", "Fira Code", "Consolas", monospace;
+    font-size: 13px;
+    background: var(--bg);
+    padding: 8px 12px;
+    border-radius: var(--radius);
+    text-align: center;
+    user-select: all;
+    word-break: break-all;
+    margin: 8px 0;
+}
+
+/* Header buttons */
+.header-actions { display: flex; gap: 8px; align-items: center; }
+
 @media (max-width: 768px) {
     .container { padding: 12px; }
     .detail-grid { grid-template-columns: 1fr; }
@@ -295,7 +351,13 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
 
 <div class="header">
     <h1>FusionHub License Server</h1>
-    <span id="connectionStatus" class="status">Connecting...</span>
+    <div class="header-actions">
+        <span id="connectionStatus" class="status">Connecting...</span>
+        <button id="btnUsers" class="small secondary" onclick="showUsersModal()" style="display:none;">Users</button>
+        <button id="btn2FA" class="small secondary" onclick="show2FAModal()" style="display:none;">2FA</button>
+        <span id="currentUser" style="display:none;font-size:13px;color:var(--text2);"></span>
+        <button id="btnLogout" class="small secondary" onclick="logout()" style="display:none;">Logout</button>
+    </div>
 </div>
 
 <div class="container">
@@ -458,24 +520,258 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
     </div>
 </div>
 
+<!-- Login overlay -->
+<div id="loginOverlay" class="auth-overlay">
+    <div class="auth-card">
+        <h2>Login</h2>
+        <div class="subtitle">FusionHub License Server</div>
+        <div id="loginError" class="auth-error"></div>
+        <div class="form-row">
+            <label>Username</label>
+            <input type="text" id="loginUsername" placeholder="Username" autocomplete="username" onkeydown="if(event.key==='Enter')document.getElementById('loginPassword').focus()">
+        </div>
+        <div class="form-row">
+            <label>Password</label>
+            <input type="password" id="loginPassword" placeholder="Password" autocomplete="current-password" onkeydown="if(event.key==='Enter')submitLogin()">
+        </div>
+        <div id="loginTotpRow" class="form-row" style="display:none;">
+            <label>2FA Code</label>
+            <input type="text" id="loginTotp" placeholder="6-digit code" maxlength="6" autocomplete="one-time-code" onkeydown="if(event.key==='Enter')submitLogin()">
+        </div>
+        <button onclick="submitLogin()">Sign In</button>
+    </div>
+</div>
+
+<!-- Forced password change overlay -->
+<div id="changePasswordOverlay" class="auth-overlay">
+    <div class="auth-card">
+        <h2>Change Password</h2>
+        <div class="subtitle">You must change the default password before continuing.</div>
+        <div id="changePasswordError" class="auth-error"></div>
+        <div class="form-row">
+            <label>Current Password</label>
+            <input type="password" id="cpCurrent" placeholder="Current password">
+        </div>
+        <div class="form-row">
+            <label>New Password (min 8 chars)</label>
+            <input type="password" id="cpNew" placeholder="New password">
+        </div>
+        <div class="form-row">
+            <label>Confirm New Password</label>
+            <input type="password" id="cpConfirm" placeholder="Confirm password" onkeydown="if(event.key==='Enter')submitChangePassword()">
+        </div>
+        <button onclick="submitChangePassword()">Change Password</button>
+    </div>
+</div>
+
+<!-- 2FA Settings Modal -->
+<div id="tfaModal" class="modal-overlay" onclick="if(event.target===this)closeTFAModal()">
+    <div class="modal">
+        <h2>Two-Factor Authentication</h2>
+        <div id="tfaContent"></div>
+        <div class="form-actions">
+            <button class="secondary" onclick="closeTFAModal()">Close</button>
+        </div>
+    </div>
+</div>
+
+<!-- Users Management Modal -->
+<div id="usersModal" class="modal-overlay" onclick="if(event.target===this)closeUsersModal()">
+    <div class="modal" style="max-width:600px;">
+        <h2>User Management</h2>
+        <div id="usersTableContainer" style="margin-bottom:16px;">
+            <table>
+                <thead><tr><th>Username</th><th>2FA</th><th>Status</th><th></th></tr></thead>
+                <tbody id="usersTableBody"><tr><td colspan="4">Loading...</td></tr></tbody>
+            </table>
+        </div>
+        <div style="border-top:1px solid var(--border);padding-top:16px;">
+            <h3 style="font-size:14px;margin-bottom:12px;">Add User</h3>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                <input type="text" id="newUsername" placeholder="Username" style="flex:1;min-width:120px;">
+                <input type="password" id="newPassword" placeholder="Password (min 8)" style="flex:1;min-width:120px;">
+                <button onclick="createUser()" style="width:auto;">Add</button>
+            </div>
+        </div>
+        <div class="form-actions">
+            <button class="secondary" onclick="closeUsersModal()">Close</button>
+        </div>
+    </div>
+</div>
+
 <script>
 const API = '/api/v1';
-let adminKey = '';
+let authToken = '';
+let currentUsername = '';
 let licenses = [];
 let selectedKey = null;
+let totpEnabled = false;
 
-// On load, prompt for admin key
 (function init() {
-    adminKey = localStorage.getItem('license_admin_key') || '';
-    if (!adminKey) {
-        adminKey = prompt('Enter admin API key:') || '';
-        if (adminKey) localStorage.setItem('license_admin_key', adminKey);
+    authToken = localStorage.getItem('auth_token') || '';
+    if (!authToken) {
+        showLogin();
+    } else {
+        checkAuthStatus();
     }
-    loadLicenses();
 })();
 
+function showLogin() {
+    document.getElementById('loginOverlay').classList.add('visible');
+    document.getElementById('changePasswordOverlay').classList.remove('visible');
+    document.getElementById('loginUsername').value = '';
+    document.getElementById('loginPassword').value = '';
+    document.getElementById('loginTotp').value = '';
+    document.getElementById('loginTotpRow').style.display = 'none';
+    document.getElementById('loginError').classList.remove('visible');
+    document.getElementById('btnLogout').style.display = 'none';
+    document.getElementById('btn2FA').style.display = 'none';
+    document.getElementById('btnUsers').style.display = 'none';
+    document.getElementById('currentUser').style.display = 'none';
+    setTimeout(() => document.getElementById('loginUsername').focus(), 50);
+}
+
+async function submitLogin() {
+    const errEl = document.getElementById('loginError');
+    errEl.classList.remove('visible');
+
+    const username = document.getElementById('loginUsername').value.trim();
+    const password = document.getElementById('loginPassword').value;
+    if (!username) { errEl.textContent = 'Username is required'; errEl.classList.add('visible'); return; }
+    if (!password) { errEl.textContent = 'Password is required'; errEl.classList.add('visible'); return; }
+
+    const body = { username, password };
+    const totpCode = document.getElementById('loginTotp').value.trim();
+    if (totpCode) body.totp_code = totpCode;
+
+    try {
+        const resp = await fetch(API + '/auth/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const data = await resp.json();
+
+        if (data.totp_required) {
+            document.getElementById('loginTotpRow').style.display = '';
+            document.getElementById('loginTotp').focus();
+            errEl.textContent = 'Enter your 2FA code';
+            errEl.classList.add('visible');
+            return;
+        }
+
+        if (!resp.ok) {
+            errEl.textContent = data.error || 'Login failed';
+            errEl.classList.add('visible');
+            return;
+        }
+
+        authToken = data.token;
+        localStorage.setItem('auth_token', authToken);
+        totpEnabled = data.totp_enabled;
+
+        if (data.must_change_password) {
+            document.getElementById('loginOverlay').classList.remove('visible');
+            showChangePassword();
+        } else {
+            document.getElementById('loginOverlay').classList.remove('visible');
+            enterDashboard();
+        }
+    } catch (e) {
+        errEl.textContent = 'Connection failed: ' + e.message;
+        errEl.classList.add('visible');
+    }
+}
+
+function showChangePassword() {
+    document.getElementById('changePasswordOverlay').classList.add('visible');
+    document.getElementById('cpCurrent').value = '';
+    document.getElementById('cpNew').value = '';
+    document.getElementById('cpConfirm').value = '';
+    document.getElementById('changePasswordError').classList.remove('visible');
+    setTimeout(() => document.getElementById('cpCurrent').focus(), 50);
+}
+
+async function submitChangePassword() {
+    const errEl = document.getElementById('changePasswordError');
+    errEl.classList.remove('visible');
+
+    const current = document.getElementById('cpCurrent').value;
+    const newPw = document.getElementById('cpNew').value;
+    const confirm = document.getElementById('cpConfirm').value;
+
+    if (!current || !newPw) { errEl.textContent = 'All fields are required'; errEl.classList.add('visible'); return; }
+    if (newPw.length < 8) { errEl.textContent = 'New password must be at least 8 characters'; errEl.classList.add('visible'); return; }
+    if (newPw !== confirm) { errEl.textContent = 'Passwords do not match'; errEl.classList.add('visible'); return; }
+
+    try {
+        const resp = await fetch(API + '/auth/change-password', {
+            method: 'POST',
+            headers: authHeaders(),
+            body: JSON.stringify({ current_password: current, new_password: newPw }),
+        });
+        if (!resp.ok) {
+            const data = await resp.json();
+            errEl.textContent = data.error || 'Failed to change password';
+            errEl.classList.add('visible');
+            return;
+        }
+        document.getElementById('changePasswordOverlay').classList.remove('visible');
+        toast('Password changed successfully', 'success');
+        enterDashboard();
+    } catch (e) {
+        errEl.textContent = 'Connection failed: ' + e.message;
+        errEl.classList.add('visible');
+    }
+}
+
+async function checkAuthStatus() {
+    try {
+        const resp = await fetch(API + '/auth/status', { headers: authHeaders() });
+        if (resp.status === 401) {
+            authToken = '';
+            localStorage.removeItem('auth_token');
+            showLogin();
+            return;
+        }
+        const data = await resp.json();
+        totpEnabled = data.totp_enabled;
+        currentUsername = data.username || '';
+        if (data.must_change_password) {
+            showChangePassword();
+        } else {
+            enterDashboard();
+        }
+    } catch (e) {
+        showLogin();
+    }
+}
+
+function enterDashboard() {
+    document.getElementById('loginOverlay').classList.remove('visible');
+    document.getElementById('changePasswordOverlay').classList.remove('visible');
+    document.getElementById('btnLogout').style.display = '';
+    document.getElementById('btn2FA').style.display = '';
+    document.getElementById('btnUsers').style.display = '';
+    const userEl = document.getElementById('currentUser');
+    userEl.textContent = currentUsername;
+    userEl.style.display = '';
+    loadLicenses();
+}
+
+function logout() {
+    authToken = '';
+    currentUsername = '';
+    localStorage.removeItem('auth_token');
+    licenses = [];
+    selectedKey = null;
+    document.getElementById('licenseTableBody').innerHTML = '<tr><td colspan="7" class="empty-state"><p>Loading...</p></td></tr>';
+    closeDetail();
+    showLogin();
+}
+
 function authHeaders() {
-    return { 'Authorization': 'Bearer ' + adminKey, 'Content-Type': 'application/json' };
+    return { 'Authorization': 'Bearer ' + authToken, 'Content-Type': 'application/json' };
 }
 
 function toast(msg, type) {
@@ -503,13 +799,15 @@ async function loadLicenses() {
     try {
         const resp = await fetch(API + '/licenses', { headers: authHeaders() });
         if (resp.status === 401) {
-            status.textContent = 'Unauthorized';
+            status.textContent = 'Session expired';
             status.className = 'status err';
-            adminKey = prompt('Invalid admin key. Enter correct key:') || '';
-            if (adminKey) {
-                localStorage.setItem('license_admin_key', adminKey);
-                return loadLicenses();
-            }
+            authToken = '';
+            localStorage.removeItem('auth_token');
+            showLogin();
+            return;
+        }
+        if (resp.status === 403) {
+            showChangePassword();
             return;
         }
         licenses = await resp.json();
@@ -780,11 +1078,205 @@ async function doExport() {
     }
 }
 
+// 2FA settings
+function show2FAModal() {
+    const content = document.getElementById('tfaContent');
+    if (totpEnabled) {
+        content.innerHTML =
+            '<p style="margin-bottom:14px;">Two-factor authentication is <strong style="color:var(--green);">enabled</strong>.</p>' +
+            '<div class="form-row"><label>Enter current 2FA code to disable</label>' +
+            '<input type="text" id="tfaDisableCode" placeholder="6-digit code" maxlength="6" autocomplete="one-time-code"></div>' +
+            '<button class="danger" onclick="disable2FA()">Disable 2FA</button>';
+    } else {
+        content.innerHTML =
+            '<p style="margin-bottom:14px;">Two-factor authentication is <strong style="color:var(--text2);">disabled</strong>.</p>' +
+            '<button onclick="setup2FA()">Enable 2FA</button>';
+    }
+    document.getElementById('tfaModal').classList.add('visible');
+}
+
+function closeTFAModal() {
+    document.getElementById('tfaModal').classList.remove('visible');
+}
+
+async function setup2FA() {
+    try {
+        const resp = await fetch(API + '/auth/setup-2fa', {
+            method: 'POST',
+            headers: authHeaders(),
+        });
+        if (!resp.ok) {
+            const data = await resp.json();
+            toast('Error: ' + data.error, 'error');
+            return;
+        }
+        const data = await resp.json();
+        const content = document.getElementById('tfaContent');
+        content.innerHTML =
+            '<p style="margin-bottom:12px;">Scan this QR code with Google Authenticator:</p>' +
+            '<div class="qr-container"><img src="' + data.qr_code + '" alt="QR Code"></div>' +
+            '<p style="font-size:12px;color:var(--text2);margin-bottom:4px;">Or enter this secret manually:</p>' +
+            '<div class="secret-display">' + esc(data.secret) + '</div>' +
+            '<div class="form-row" style="margin-top:16px;"><label>Verification Code</label>' +
+            '<input type="text" id="tfaVerifyCode" placeholder="Enter 6-digit code from app" maxlength="6" autocomplete="one-time-code"></div>' +
+            '<button onclick="verify2FA()">Verify &amp; Enable</button>';
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function verify2FA() {
+    const code = document.getElementById('tfaVerifyCode').value.trim();
+    if (!code) { toast('Enter the 6-digit code', 'error'); return; }
+
+    try {
+        const resp = await fetch(API + '/auth/verify-2fa', {
+            method: 'POST',
+            headers: authHeaders(),
+            body: JSON.stringify({ totp_code: code }),
+        });
+        if (!resp.ok) {
+            const data = await resp.json();
+            toast('Error: ' + data.error, 'error');
+            return;
+        }
+        totpEnabled = true;
+        toast('2FA enabled successfully', 'success');
+        closeTFAModal();
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function disable2FA() {
+    const code = document.getElementById('tfaDisableCode').value.trim();
+    if (!code) { toast('Enter your current 2FA code', 'error'); return; }
+
+    try {
+        const resp = await fetch(API + '/auth/disable-2fa', {
+            method: 'POST',
+            headers: authHeaders(),
+            body: JSON.stringify({ totp_code: code }),
+        });
+        if (!resp.ok) {
+            const data = await resp.json();
+            toast('Error: ' + data.error, 'error');
+            return;
+        }
+        totpEnabled = false;
+        toast('2FA disabled', 'success');
+        closeTFAModal();
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+// User management
+async function showUsersModal() {
+    document.getElementById('usersModal').classList.add('visible');
+    await loadUsers();
+}
+
+function closeUsersModal() {
+    document.getElementById('usersModal').classList.remove('visible');
+}
+
+async function loadUsers() {
+    try {
+        const resp = await fetch(API + '/auth/users', { headers: authHeaders() });
+        if (!resp.ok) return;
+        const users = await resp.json();
+        const tbody = document.getElementById('usersTableBody');
+        tbody.innerHTML = users.map(u => {
+            const isSelf = u.username === currentUsername;
+            const status = u.must_change_password ? '<span style="color:var(--yellow);">Must change password</span>' : '<span style="color:var(--green);">Active</span>';
+            const tfa = u.totp_enabled ? '<span style="color:var(--green);">Enabled</span>' : '<span style="color:var(--text2);">Off</span>';
+            const actions = isSelf
+                ? '<span style="color:var(--text2);font-size:11px;">You</span>'
+                : '<button class="small secondary" onclick="resetUserPassword(\'' + esc(u.username) + '\')">Reset PW</button> ' +
+                  '<button class="small danger" onclick="deleteUser(\'' + esc(u.username) + '\')">Delete</button>';
+            return '<tr><td>' + esc(u.username) + '</td><td>' + tfa + '</td><td>' + status + '</td><td style="text-align:right;">' + actions + '</td></tr>';
+        }).join('');
+    } catch (e) {
+        toast('Failed to load users: ' + e.message, 'error');
+    }
+}
+
+async function createUser() {
+    const username = document.getElementById('newUsername').value.trim();
+    const password = document.getElementById('newPassword').value;
+    if (!username) { toast('Username is required', 'error'); return; }
+    if (password.length < 8) { toast('Password must be at least 8 characters', 'error'); return; }
+
+    try {
+        const resp = await fetch(API + '/auth/users', {
+            method: 'POST',
+            headers: authHeaders(),
+            body: JSON.stringify({ username, password }),
+        });
+        if (!resp.ok) {
+            const data = await resp.json();
+            toast('Error: ' + data.error, 'error');
+            return;
+        }
+        document.getElementById('newUsername').value = '';
+        document.getElementById('newPassword').value = '';
+        toast('User "' + username + '" created', 'success');
+        await loadUsers();
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function deleteUser(username) {
+    if (!confirm('Delete user "' + username + '"? This cannot be undone.')) return;
+    try {
+        const resp = await fetch(API + '/auth/users/' + encodeURIComponent(username), {
+            method: 'DELETE',
+            headers: authHeaders(),
+        });
+        if (!resp.ok) {
+            const data = await resp.json();
+            toast('Error: ' + data.error, 'error');
+            return;
+        }
+        toast('User deleted', 'success');
+        await loadUsers();
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function resetUserPassword(username) {
+    const newPw = prompt('New password for "' + username + '" (min 8 chars):');
+    if (!newPw) return;
+    if (newPw.length < 8) { toast('Password must be at least 8 characters', 'error'); return; }
+
+    try {
+        const resp = await fetch(API + '/auth/users/' + encodeURIComponent(username) + '/reset-password', {
+            method: 'POST',
+            headers: authHeaders(),
+            body: JSON.stringify({ new_password: newPw }),
+        });
+        if (!resp.ok) {
+            const data = await resp.json();
+            toast('Error: ' + data.error, 'error');
+            return;
+        }
+        toast('Password reset for "' + username + '"', 'success');
+        await loadUsers();
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
 // Keyboard shortcuts
 document.addEventListener('keydown', e => {
     if (e.key === 'Escape') {
         closeCreateModal();
         closeExportModal();
+        closeTFAModal();
+        closeUsersModal();
     }
 });
 </script>

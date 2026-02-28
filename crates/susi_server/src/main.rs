@@ -1,6 +1,8 @@
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
+use argon2::{self, Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
+use argon2::password_hash::SaltString;
 use axum::{
     extract::{Path, State},
     http::{header, HeaderMap, StatusCode},
@@ -10,11 +12,14 @@ use axum::{
 };
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use clap::Parser;
+use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
+use rand::Rng;
 use susi_core::crypto::{private_key_from_pem, sign_license};
 use susi_core::db::LicenseDb;
 use susi_core::{License, DEFAULT_LEASE_DURATION_HOURS, DEFAULT_LEASE_GRACE_HOURS};
 use rsa::RsaPrivateKey;
 use serde::{Deserialize, Serialize};
+use totp_rs::{Algorithm, Secret, TOTP};
 
 #[derive(Parser)]
 #[command(name = "susi-server", about = "Susi License Server")]
@@ -31,15 +36,19 @@ struct Cli {
     #[arg(long, default_value = "0.0.0.0:3100")]
     listen: String,
 
-    /// Admin API key (required for admin endpoints)
-    #[arg(long, env = "SUSI_ADMIN_KEY")]
-    admin_key: String,
 }
 
 struct AppState {
     db: Mutex<LicenseDb>,
     private_key: RsaPrivateKey,
-    admin_key: String,
+    jwt_secret: [u8; 32],
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Claims {
+    sub: String,
+    iat: i64,
+    exp: i64,
 }
 
 // ---------------------------------------------------------------------------
@@ -190,17 +199,279 @@ fn error_response(status: StatusCode, msg: &str) -> (StatusCode, Json<ErrorRespo
     )
 }
 
-fn check_admin(headers: &HeaderMap, admin_key: &str) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+fn create_jwt(secret: &[u8; 32], username: &str) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
+    let now = Utc::now().timestamp();
+    let claims = Claims {
+        sub: username.into(),
+        iat: now,
+        exp: now + 86400, // 24h
+    };
+    encode(&Header::default(), &claims, &EncodingKey::from_secret(secret))
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))
+}
+
+fn validate_jwt(
+    headers: &HeaderMap,
+    jwt_secret: &[u8; 32],
+) -> Result<Claims, (StatusCode, Json<ErrorResponse>)> {
     let auth = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-
     let token = auth.strip_prefix("Bearer ").unwrap_or("");
-    if token != admin_key {
-        return Err(error_response(StatusCode::UNAUTHORIZED, "Invalid admin key"));
+    if token.is_empty() {
+        return Err(error_response(StatusCode::UNAUTHORIZED, "Missing authentication token"));
+    }
+    let validation = Validation::new(jsonwebtoken::Algorithm::HS256);
+    decode::<Claims>(token, &DecodingKey::from_secret(jwt_secret), &validation)
+        .map(|data| data.claims)
+        .map_err(|e| {
+            let msg = match e.kind() {
+                jsonwebtoken::errors::ErrorKind::ExpiredSignature => "Token expired",
+                _ => "Invalid token",
+            };
+            error_response(StatusCode::UNAUTHORIZED, msg)
+        })
+}
+
+fn require_password_changed(
+    state: &AppState,
+    username: &str,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    let db = state.db.lock().unwrap();
+    if db.user_must_change_password(username).unwrap_or(true) {
+        return Err(error_response(
+            StatusCode::FORBIDDEN,
+            "Password change required before accessing admin features",
+        ));
     }
     Ok(())
+}
+
+fn hash_password(password: &str) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
+    let salt = SaltString::generate(&mut rand::thread_rng());
+    Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .map(|h| h.to_string())
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))
+}
+
+fn verify_password(
+    password: &str,
+    hash: &str,
+) -> Result<bool, (StatusCode, Json<ErrorResponse>)> {
+    let parsed = PasswordHash::new(hash)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    Ok(Argon2::default()
+        .verify_password(password.as_bytes(), &parsed)
+        .is_ok())
+}
+
+// ---------------------------------------------------------------------------
+// Auth endpoints
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct LoginRequest {
+    username: String,
+    password: String,
+    totp_code: Option<String>,
+}
+
+async fn handle_login(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<LoginRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let db = state.db.lock().unwrap();
+    let hash = db
+        .get_user_password_hash(&req.username)
+        .map_err(|_| error_response(StatusCode::UNAUTHORIZED, "Invalid credentials"))?;
+
+    if !verify_password(&req.password, &hash)? {
+        return Err(error_response(StatusCode::UNAUTHORIZED, "Invalid credentials"));
+    }
+
+    let totp_enabled = db.user_totp_enabled(&req.username).unwrap_or(false);
+    if totp_enabled {
+        match &req.totp_code {
+            None => {
+                return Ok(Json(serde_json::json!({
+                    "error": "TOTP code required",
+                    "totp_required": true
+                })));
+            }
+            Some(code) => {
+                let secret_b32 = db
+                    .get_user_totp_secret(&req.username)
+                    .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+                    .ok_or_else(|| error_response(StatusCode::INTERNAL_SERVER_ERROR, "TOTP secret missing"))?;
+                let secret_bytes = Secret::Encoded(secret_b32)
+                    .to_bytes()
+                    .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+                let totp = TOTP::new(Algorithm::SHA1, 6, 1, 30, secret_bytes,
+                    Some("Susi License Server".into()), req.username.clone().into())
+                    .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+                if !totp.check_current(code).unwrap_or(false) {
+                    return Err(error_response(StatusCode::UNAUTHORIZED, "Invalid TOTP code"));
+                }
+            }
+        }
+    }
+
+    let must_change = db.user_must_change_password(&req.username).unwrap_or(false);
+    drop(db);
+
+    let token = create_jwt(&state.jwt_secret, &req.username)?;
+    Ok(Json(serde_json::json!({
+        "token": token,
+        "must_change_password": must_change,
+        "totp_enabled": totp_enabled
+    })))
+}
+
+async fn handle_auth_status(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let claims = validate_jwt(&headers, &state.jwt_secret)?;
+    let db = state.db.lock().unwrap();
+    let must_change = db.user_must_change_password(&claims.sub).unwrap_or(false);
+    let totp_enabled = db.user_totp_enabled(&claims.sub).unwrap_or(false);
+    Ok(Json(serde_json::json!({
+        "must_change_password": must_change,
+        "totp_enabled": totp_enabled,
+        "username": claims.sub
+    })))
+}
+
+#[derive(Deserialize)]
+struct ChangePasswordRequest {
+    current_password: String,
+    new_password: String,
+}
+
+async fn handle_change_password(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<ChangePasswordRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let claims = validate_jwt(&headers, &state.jwt_secret)?;
+
+    if req.new_password.len() < 8 {
+        return Err(error_response(StatusCode::BAD_REQUEST, "Password must be at least 8 characters"));
+    }
+
+    let db = state.db.lock().unwrap();
+    let hash = db
+        .get_user_password_hash(&claims.sub)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    if !verify_password(&req.current_password, &hash)? {
+        return Err(error_response(StatusCode::UNAUTHORIZED, "Current password is incorrect"));
+    }
+
+    let new_hash = hash_password(&req.new_password)?;
+    db.update_user_password(&claims.sub, &new_hash)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    Ok(Json(serde_json::json!({ "status": "OK" })))
+}
+
+async fn handle_setup_2fa(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let claims = validate_jwt(&headers, &state.jwt_secret)?;
+    require_password_changed(&state, &claims.sub)?;
+
+    let secret_bytes: [u8; 20] = rand::thread_rng().gen();
+    let secret = Secret::Raw(secret_bytes.to_vec());
+    let secret_b32 = secret.to_encoded().to_string();
+
+    let totp = TOTP::new(Algorithm::SHA1, 6, 1, 30, secret_bytes.to_vec(),
+        Some("Susi License Server".into()), claims.sub.clone().into())
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    let qr_code = totp
+        .get_qr_base64()
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    let db = state.db.lock().unwrap();
+    db.set_user_totp_secret(&claims.sub, &secret_b32)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    Ok(Json(serde_json::json!({
+        "secret": secret_b32,
+        "qr_code": format!("data:image/png;base64,{}", qr_code),
+        "otpauth_uri": totp.get_url()
+    })))
+}
+
+#[derive(Deserialize)]
+struct TotpCodeRequest {
+    totp_code: String,
+}
+
+async fn handle_verify_2fa(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<TotpCodeRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let claims = validate_jwt(&headers, &state.jwt_secret)?;
+
+    let db = state.db.lock().unwrap();
+    let secret_b32 = db
+        .get_user_totp_secret(&claims.sub)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .ok_or_else(|| error_response(StatusCode::BAD_REQUEST, "No 2FA setup in progress"))?;
+
+    let secret = Secret::Encoded(secret_b32)
+        .to_bytes()
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    let totp = TOTP::new(Algorithm::SHA1, 6, 1, 30, secret,
+        Some("Susi License Server".into()), claims.sub.clone().into())
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    if !totp.check_current(&req.totp_code).unwrap_or(false) {
+        return Err(error_response(StatusCode::BAD_REQUEST, "Invalid TOTP code"));
+    }
+
+    db.enable_user_totp(&claims.sub)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    Ok(Json(serde_json::json!({ "status": "OK" })))
+}
+
+async fn handle_disable_2fa(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<TotpCodeRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let claims = validate_jwt(&headers, &state.jwt_secret)?;
+
+    let db = state.db.lock().unwrap();
+    let secret_b32 = db
+        .get_user_totp_secret(&claims.sub)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .ok_or_else(|| error_response(StatusCode::BAD_REQUEST, "2FA is not enabled"))?;
+
+    let secret = Secret::Encoded(secret_b32)
+        .to_bytes()
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    let totp = TOTP::new(Algorithm::SHA1, 6, 1, 30, secret,
+        Some("Susi License Server".into()), claims.sub.clone().into())
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    if !totp.check_current(&req.totp_code).unwrap_or(false) {
+        return Err(error_response(StatusCode::UNAUTHORIZED, "Invalid TOTP code"));
+    }
+
+    db.disable_user_totp(&claims.sub)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    Ok(Json(serde_json::json!({ "status": "OK" })))
 }
 
 // ---------------------------------------------------------------------------
@@ -393,7 +664,8 @@ async fn handle_list_licenses(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<LicenseSummary>>, (StatusCode, Json<ErrorResponse>)> {
-    check_admin(&headers, &state.admin_key)?;
+    let claims = validate_jwt(&headers, &state.jwt_secret)?;
+    require_password_changed(&state, &claims.sub)?;
 
     let db = state.db.lock().unwrap();
     let licenses = db
@@ -409,7 +681,8 @@ async fn handle_get_license(
     headers: HeaderMap,
     Path(key): Path<String>,
 ) -> Result<Json<LicenseSummary>, (StatusCode, Json<ErrorResponse>)> {
-    check_admin(&headers, &state.admin_key)?;
+    let claims = validate_jwt(&headers, &state.jwt_secret)?;
+    require_password_changed(&state, &claims.sub)?;
 
     let db = state.db.lock().unwrap();
     let license = db
@@ -425,7 +698,8 @@ async fn handle_create_license(
     headers: HeaderMap,
     Json(req): Json<CreateLicenseRequest>,
 ) -> Result<(StatusCode, Json<LicenseSummary>), (StatusCode, Json<ErrorResponse>)> {
-    check_admin(&headers, &state.admin_key)?;
+    let claims = validate_jwt(&headers, &state.jwt_secret)?;
+    require_password_changed(&state, &claims.sub)?;
 
     let expires_dt = if req.perpetual {
         None
@@ -465,7 +739,8 @@ async fn handle_revoke_license(
     headers: HeaderMap,
     Path(key): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    check_admin(&headers, &state.admin_key)?;
+    let claims = validate_jwt(&headers, &state.jwt_secret)?;
+    require_password_changed(&state, &claims.sub)?;
 
     let db = state.db.lock().unwrap();
     let revoked = db
@@ -485,7 +760,8 @@ async fn handle_export_license(
     Path(key): Path<String>,
     Json(req): Json<ExportRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    check_admin(&headers, &state.admin_key)?;
+    let claims = validate_jwt(&headers, &state.jwt_secret)?;
+    require_password_changed(&state, &claims.sub)?;
 
     let db = state.db.lock().unwrap();
     let license = db
@@ -549,7 +825,8 @@ async fn handle_deactivate_machine(
     headers: HeaderMap,
     Path((key, machine_code)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    check_admin(&headers, &state.admin_key)?;
+    let claims = validate_jwt(&headers, &state.jwt_secret)?;
+    require_password_changed(&state, &claims.sub)?;
 
     let db = state.db.lock().unwrap();
     let license = db
@@ -561,6 +838,98 @@ async fn handle_deactivate_machine(
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
     Ok(Json(serde_json::json!({ "status": "deactivated" })))
+}
+
+// ---------------------------------------------------------------------------
+// User management endpoints
+// ---------------------------------------------------------------------------
+
+async fn handle_list_users(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<susi_core::db::UserInfo>>, (StatusCode, Json<ErrorResponse>)> {
+    let claims = validate_jwt(&headers, &state.jwt_secret)?;
+    require_password_changed(&state, &claims.sub)?;
+    let db = state.db.lock().unwrap();
+    let users = db
+        .list_users()
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    Ok(Json(users))
+}
+
+#[derive(Deserialize)]
+struct CreateUserRequest {
+    username: String,
+    password: String,
+}
+
+async fn handle_create_user(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<CreateUserRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let claims = validate_jwt(&headers, &state.jwt_secret)?;
+    require_password_changed(&state, &claims.sub)?;
+
+    let username = req.username.trim();
+    if username.is_empty() || username.len() > 64 {
+        return Err(error_response(StatusCode::BAD_REQUEST, "Username must be 1-64 characters"));
+    }
+    if req.password.len() < 8 {
+        return Err(error_response(StatusCode::BAD_REQUEST, "Password must be at least 8 characters"));
+    }
+
+    let pw_hash = hash_password(&req.password)?;
+    let db = state.db.lock().unwrap();
+    db.create_user(username, &pw_hash)
+        .map_err(|e| error_response(StatusCode::CONFLICT, &e.to_string()))?;
+
+    Ok(Json(serde_json::json!({ "status": "OK", "username": username })))
+}
+
+async fn handle_delete_user(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(username): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let claims = validate_jwt(&headers, &state.jwt_secret)?;
+    require_password_changed(&state, &claims.sub)?;
+
+    if claims.sub == username {
+        return Err(error_response(StatusCode::BAD_REQUEST, "Cannot delete your own account"));
+    }
+
+    let db = state.db.lock().unwrap();
+    db.delete_user(&username)
+        .map_err(|e| error_response(StatusCode::BAD_REQUEST, &e.to_string()))?;
+
+    Ok(Json(serde_json::json!({ "status": "OK" })))
+}
+
+#[derive(Deserialize)]
+struct ResetPasswordRequest {
+    new_password: String,
+}
+
+async fn handle_reset_user_password(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(username): Path<String>,
+    Json(req): Json<ResetPasswordRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let claims = validate_jwt(&headers, &state.jwt_secret)?;
+    require_password_changed(&state, &claims.sub)?;
+
+    if req.new_password.len() < 8 {
+        return Err(error_response(StatusCode::BAD_REQUEST, "Password must be at least 8 characters"));
+    }
+
+    let pw_hash = hash_password(&req.new_password)?;
+    let db = state.db.lock().unwrap();
+    db.reset_user_password(&username, &pw_hash)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    Ok(Json(serde_json::json!({ "status": "OK" })))
 }
 
 // ---------------------------------------------------------------------------
@@ -593,10 +962,21 @@ async fn main() -> Result<()> {
     log::info!("Opening database at {}", cli.db);
     let db = LicenseDb::open(&cli.db).context("Failed to open database")?;
 
+    let default_hash = hash_password("changeme")
+        .map_err(|_| anyhow::anyhow!("Failed to hash default password"))?;
+    if db.seed_admin(&default_hash).context("Failed to seed admin")? {
+        log::info!("Default admin user created (password: changeme)");
+    }
+    if db.user_must_change_password("admin").unwrap_or(false) {
+        log::warn!("=== Default admin password is active. Change it at the dashboard! ===");
+    }
+
+    let jwt_secret: [u8; 32] = rand::random();
+
     let state = Arc::new(AppState {
         db: Mutex::new(db),
         private_key,
-        admin_key: cli.admin_key,
+        jwt_secret,
     });
 
     let app = Router::new()
@@ -604,12 +984,24 @@ async fn main() -> Result<()> {
         .route("/", get(handle_dashboard))
         // Health
         .route("/health", get(handle_health))
+        // Auth endpoints
+        .route("/api/v1/auth/login", post(handle_login))
+        .route("/api/v1/auth/status", get(handle_auth_status))
+        .route("/api/v1/auth/change-password", post(handle_change_password))
+        .route("/api/v1/auth/setup-2fa", post(handle_setup_2fa))
+        .route("/api/v1/auth/verify-2fa", post(handle_verify_2fa))
+        .route("/api/v1/auth/disable-2fa", post(handle_disable_2fa))
+        // User management
+        .route("/api/v1/auth/users", get(handle_list_users))
+        .route("/api/v1/auth/users", post(handle_create_user))
+        .route("/api/v1/auth/users/{username}", axum::routing::delete(handle_delete_user))
+        .route("/api/v1/auth/users/{username}/reset-password", post(handle_reset_user_password))
         // Public client endpoints
         .route("/api/v1/activate", post(handle_activate))
         .route("/api/v1/verify", post(handle_verify))
         .route("/api/v1/deactivate", post(handle_deactivate))
         .route("/api/v1/licenses/{key}/status", get(handle_license_status))
-        // Admin endpoints
+        // Admin endpoints (JWT-protected)
         .route("/api/v1/licenses", get(handle_list_licenses))
         .route("/api/v1/licenses", post(handle_create_license))
         .route("/api/v1/licenses/{key}", get(handle_get_license))

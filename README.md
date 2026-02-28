@@ -11,6 +11,7 @@
 - **Machine limits** — control how many machines a single license can activate
 - **Lease-based seat management** — time-limited activations that expire automatically, preventing unauthorized concurrent usage
 - **Optional activation server** — HTTP server for online activation and management
+- **Web dashboard** — browser-based management UI with multi-user authentication and 2FA
 - **USB hardware tokens** — bind a license to a physical USB stick instead of a machine
 - **Cross-platform** — Linux and Windows support
 - **C++ client library** — drop-in header+source for C++ projects (OpenSSL-based)
@@ -302,9 +303,10 @@ For online license management, run the activation server:
 susi-server \
   --private-key ./keys/private.pem \
   --db licenses.db \
-  --listen 0.0.0.0:3100 \
-  --admin-key "your-secret-admin-key"
+  --listen 0.0.0.0:3100
 ```
+
+On first run, the server creates an `admin` user with password `changeme`. Open the dashboard in your browser to log in and manage users.
 
 ### API Endpoints
 
@@ -313,15 +315,47 @@ susi-server \
 | `POST` | `/api/v1/activate` | Public | Activate a license on a machine (grants/renews lease) |
 | `POST` | `/api/v1/verify` | Public | Verify a license and renew its lease (heartbeat) |
 | `POST` | `/api/v1/deactivate` | Public | Remove a machine activation |
-| `GET` | `/api/v1/licenses` | Admin | List all licenses |
-| `POST` | `/api/v1/licenses` | Admin | Create a new license |
-| `GET` | `/api/v1/licenses/{key}` | Admin | Get a specific license |
-| `POST` | `/api/v1/licenses/{key}/revoke` | Admin | Revoke a license |
-| `POST` | `/api/v1/licenses/{key}/export` | Admin | Export a signed license file |
-| `DELETE` | `/api/v1/licenses/{key}/machines/{code}` | Admin | Deactivate a machine |
+| `GET` | `/api/v1/licenses` | JWT | List all licenses |
+| `POST` | `/api/v1/licenses` | JWT | Create a new license |
+| `GET` | `/api/v1/licenses/{key}` | JWT | Get a specific license |
+| `POST` | `/api/v1/licenses/{key}/revoke` | JWT | Revoke a license |
+| `POST` | `/api/v1/licenses/{key}/export` | JWT | Export a signed license file |
+| `DELETE` | `/api/v1/licenses/{key}/machines/{code}` | JWT | Deactivate a machine |
 | `GET` | `/health` | None | Health check |
 
-Admin endpoints require `Authorization: Bearer <admin-key>` header.
+Admin endpoints require JWT authentication (see below).
+
+### Web Dashboard
+
+The server includes a built-in web dashboard at the root URL (`http://localhost:3100/`). It provides a browser-based interface for managing licenses, viewing activations, and administering users — no API calls required.
+
+### Authentication & Multi-User Support
+
+The server uses JWT-based authentication with multi-user support. Each team member gets their own account with independent credentials and optional 2FA.
+
+**Default credentials** — on first run, the server seeds an `admin` user with password `changeme`. This must be changed on first login.
+
+#### Auth Endpoints
+
+| Method | Endpoint | Auth | Description |
+|---|---|---|---|
+| `POST` | `/api/v1/auth/login` | None | Login with username + password (+ TOTP if enabled) |
+| `GET` | `/api/v1/auth/status` | JWT | Check session status, get username and 2FA/password state |
+| `POST` | `/api/v1/auth/change-password` | JWT | Change own password |
+| `POST` | `/api/v1/auth/setup-2fa` | JWT | Generate TOTP secret and QR code |
+| `POST` | `/api/v1/auth/verify-2fa` | JWT | Verify TOTP code to enable 2FA |
+| `POST` | `/api/v1/auth/disable-2fa` | JWT | Disable 2FA (requires valid TOTP code) |
+| `GET` | `/api/v1/auth/users` | JWT | List all users |
+| `POST` | `/api/v1/auth/users` | JWT | Create a new user |
+| `DELETE` | `/api/v1/auth/users/{username}` | JWT | Delete a user (cannot delete self or last user) |
+| `POST` | `/api/v1/auth/users/{username}/reset-password` | JWT | Reset a user's password (forces change on next login) |
+
+#### Security
+
+- Passwords are hashed with **Argon2id**
+- Sessions use **HS256 JWT tokens** with 24-hour expiry
+- 2FA uses **TOTP** (compatible with Google Authenticator, Authy, etc.)
+- New users and password resets force a password change on next login
 
 ### Activate a license
 
@@ -336,8 +370,14 @@ Returns a `SignedLicense` JSON that can be saved to disk for offline verificatio
 ### Create a license via API
 
 ```bash
+# First, obtain a JWT token by logging in:
+TOKEN=$(curl -s -X POST http://localhost:3100/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username": "admin", "password": "your-password"}' | jq -r .token)
+
+# Then create a license:
 curl -X POST http://localhost:3100/api/v1/licenses \
-  -H "Authorization: Bearer your-secret-admin-key" \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "customer": "Acme Corp",
@@ -470,9 +510,10 @@ From your **local machine**, in the susi project root:
 
 The script will:
 1. Create `/opt/susi` on the server and sync project files
-2. Generate a random **admin key** (saved in `.env` — printed once, **save it!**)
-3. Generate a **4096-bit RSA keypair** if none exists
-4. Build the Docker image and start the container
+2. Generate a **4096-bit RSA keypair** if none exists
+3. Build the Docker image and start the container
+
+On first run, the server creates an `admin` user with password `changeme`. Log in at `http://<YOUR_INSTANCE_IP>:3100/` and change the password immediately.
 
 ### 4. Verify
 
@@ -496,13 +537,19 @@ Embed this key in:
 
 ### 6. Create and activate licenses
 
+Use the web dashboard at `http://<YOUR_INSTANCE_IP>:3100/` to create licenses and manage users. Or use the API:
+
 ```bash
-ADMIN_KEY="<your-admin-key>"
 SERVER="http://<YOUR_INSTANCE_IP>:3100"
 
-# Create a license (admin)
+# Login to get a JWT token
+TOKEN=$(curl -s -X POST $SERVER/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username": "admin", "password": "your-password"}' | jq -r .token)
+
+# Create a license
 curl -X POST $SERVER/api/v1/licenses \
-  -H "Authorization: Bearer $ADMIN_KEY" \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "customer": "Acme Corp",
@@ -579,7 +626,8 @@ Then open port **443** and close port **3100** from public access in your Lights
 | Private key | Docker volume `susi-data` → `/data/private.pem` |
 | Public key | Docker volume `susi-data` → `/data/public.pem` |
 | Database | Docker volume `susi-data` → `/data/licenses.db` |
-| Admin key | `/opt/susi/.env` |
+| Dashboard | `http://<IP>:3100/` |
+| Default login | `admin` / `changeme` (must change on first login) |
 | Logs | `docker compose logs -f` in `/opt/susi` |
 | Health check | `GET http://<IP>:3100/health` |
 
@@ -607,6 +655,9 @@ Key dependencies:
 - [`aes-gcm`](https://crates.io/crates/aes-gcm) — AES-256-GCM encryption for USB tokens
 - [`hkdf`](https://crates.io/crates/hkdf) — HKDF-SHA256 key derivation for USB tokens
 - [`axum`](https://crates.io/crates/axum) — HTTP server (susi_server only)
+- [`argon2`](https://crates.io/crates/argon2) — Argon2id password hashing (susi_server only)
+- [`jsonwebtoken`](https://crates.io/crates/jsonwebtoken) — JWT session tokens (susi_server only)
+- [`totp-rs`](https://crates.io/crates/totp-rs) — TOTP 2FA (susi_server only)
 - [`rusqlite`](https://crates.io/crates/rusqlite) — SQLite storage (server/admin only, bundled)
 - [`reqwest`](https://crates.io/crates/reqwest) — HTTP client for online refresh (susi_client only)
 

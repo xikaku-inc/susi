@@ -1,8 +1,17 @@
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
+use serde::Serialize;
 
 use crate::error::LicenseError;
 use crate::license::{License, MachineActivation};
+
+#[derive(Debug, Serialize)]
+pub struct UserInfo {
+    pub username: String,
+    pub totp_enabled: bool,
+    pub must_change_password: bool,
+    pub created_at: String,
+}
 
 pub struct LicenseDb {
     conn: Connection,
@@ -46,7 +55,18 @@ impl LicenseDb {
             );
 
             CREATE INDEX IF NOT EXISTS idx_license_key ON licenses(license_key);
-            CREATE INDEX IF NOT EXISTS idx_activations_license ON machine_activations(license_id);",
+            CREATE INDEX IF NOT EXISTS idx_activations_license ON machine_activations(license_id);
+
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                must_change_password INTEGER NOT NULL DEFAULT 1,
+                totp_secret TEXT,
+                totp_enabled INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );",
             )
             .map_err(|e| LicenseError::Other(format!("DB init: {}", e)))?;
         self.migrate()?;
@@ -60,6 +80,21 @@ impl LicenseDb {
              ALTER TABLE licenses ADD COLUMN lease_grace_hours INTEGER NOT NULL DEFAULT 24;
              ALTER TABLE machine_activations ADD COLUMN lease_expires_at TEXT NOT NULL DEFAULT '';"
         );
+        // Migrate single-admin table to multi-user table
+        let has_admin_user: bool = self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='admin_user'",
+                [], |r| r.get::<_, i64>(0),
+            )
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        if has_admin_user {
+            let _ = self.conn.execute_batch(
+                "INSERT OR IGNORE INTO users (username, password_hash, must_change_password, totp_secret, totp_enabled, created_at, updated_at)
+                 SELECT 'admin', password_hash, must_change_password, totp_secret, totp_enabled, created_at, updated_at FROM admin_user WHERE id = 1;
+                 DROP TABLE admin_user;"
+            );
+        }
         Ok(())
     }
 
@@ -293,6 +328,178 @@ impl LicenseDb {
             .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))?;
         Ok(rows > 0)
     }
+
+    // -----------------------------------------------------------------------
+    // User management
+    // -----------------------------------------------------------------------
+
+    pub fn seed_admin(&self, password_hash: &str) -> Result<bool, LicenseError> {
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?;
+        if count > 0 {
+            return Ok(false);
+        }
+        let now = Utc::now().to_rfc3339();
+        self.conn
+            .execute(
+                "INSERT INTO users (username, password_hash, must_change_password, totp_enabled, created_at, updated_at)
+                 VALUES ('admin', ?1, 1, 0, ?2, ?2)",
+                params![password_hash, now],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB insert: {}", e)))?;
+        Ok(true)
+    }
+
+    pub fn get_user_password_hash(&self, username: &str) -> Result<String, LicenseError> {
+        self.conn
+            .query_row(
+                "SELECT password_hash FROM users WHERE username = ?1",
+                params![username],
+                |r| r.get(0),
+            )
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))
+    }
+
+    pub fn user_must_change_password(&self, username: &str) -> Result<bool, LicenseError> {
+        let v: i32 = self
+            .conn
+            .query_row(
+                "SELECT must_change_password FROM users WHERE username = ?1",
+                params![username],
+                |r| r.get(0),
+            )
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?;
+        Ok(v != 0)
+    }
+
+    pub fn user_totp_enabled(&self, username: &str) -> Result<bool, LicenseError> {
+        let v: i32 = self
+            .conn
+            .query_row(
+                "SELECT totp_enabled FROM users WHERE username = ?1",
+                params![username],
+                |r| r.get(0),
+            )
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?;
+        Ok(v != 0)
+    }
+
+    pub fn get_user_totp_secret(&self, username: &str) -> Result<Option<String>, LicenseError> {
+        self.conn
+            .query_row(
+                "SELECT totp_secret FROM users WHERE username = ?1",
+                params![username],
+                |r| r.get(0),
+            )
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))
+    }
+
+    pub fn update_user_password(&self, username: &str, new_hash: &str) -> Result<(), LicenseError> {
+        let now = Utc::now().to_rfc3339();
+        self.conn
+            .execute(
+                "UPDATE users SET password_hash = ?1, must_change_password = 0, updated_at = ?2 WHERE username = ?3",
+                params![new_hash, now, username],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))?;
+        Ok(())
+    }
+
+    pub fn set_user_totp_secret(&self, username: &str, secret: &str) -> Result<(), LicenseError> {
+        let now = Utc::now().to_rfc3339();
+        self.conn
+            .execute(
+                "UPDATE users SET totp_secret = ?1, totp_enabled = 0, updated_at = ?2 WHERE username = ?3",
+                params![secret, now, username],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))?;
+        Ok(())
+    }
+
+    pub fn enable_user_totp(&self, username: &str) -> Result<(), LicenseError> {
+        let now = Utc::now().to_rfc3339();
+        self.conn
+            .execute(
+                "UPDATE users SET totp_enabled = 1, updated_at = ?1 WHERE username = ?2",
+                params![now, username],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))?;
+        Ok(())
+    }
+
+    pub fn disable_user_totp(&self, username: &str) -> Result<(), LicenseError> {
+        let now = Utc::now().to_rfc3339();
+        self.conn
+            .execute(
+                "UPDATE users SET totp_secret = NULL, totp_enabled = 0, updated_at = ?1 WHERE username = ?2",
+                params![now, username],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))?;
+        Ok(())
+    }
+
+    pub fn list_users(&self) -> Result<Vec<UserInfo>, LicenseError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT username, totp_enabled, must_change_password, created_at FROM users ORDER BY created_at")
+            .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
+        let users = stmt
+            .query_map([], |r| {
+                Ok(UserInfo {
+                    username: r.get(0)?,
+                    totp_enabled: r.get::<_, i32>(1)? != 0,
+                    must_change_password: r.get::<_, i32>(2)? != 0,
+                    created_at: r.get(3)?,
+                })
+            })
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(users)
+    }
+
+    pub fn create_user(&self, username: &str, password_hash: &str) -> Result<(), LicenseError> {
+        let now = Utc::now().to_rfc3339();
+        self.conn
+            .execute(
+                "INSERT INTO users (username, password_hash, must_change_password, totp_enabled, created_at, updated_at)
+                 VALUES (?1, ?2, 1, 0, ?3, ?3)",
+                params![username, password_hash, now],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB insert: {}", e)))?;
+        Ok(())
+    }
+
+    pub fn delete_user(&self, username: &str) -> Result<(), LicenseError> {
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?;
+        if count <= 1 {
+            return Err(LicenseError::Other("Cannot delete the last user".into()));
+        }
+        self.conn
+            .execute("DELETE FROM users WHERE username = ?1", params![username])
+            .map_err(|e| LicenseError::Other(format!("DB delete: {}", e)))?;
+        Ok(())
+    }
+
+    pub fn reset_user_password(&self, username: &str, new_hash: &str) -> Result<(), LicenseError> {
+        let now = Utc::now().to_rfc3339();
+        self.conn
+            .execute(
+                "UPDATE users SET password_hash = ?1, must_change_password = 1, updated_at = ?2 WHERE username = ?3",
+                params![new_hash, now, username],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))?;
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // License listing
+    // -----------------------------------------------------------------------
 
     pub fn list_licenses(&self) -> Result<Vec<License>, LicenseError> {
         let mut stmt = self
