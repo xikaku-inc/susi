@@ -561,7 +561,7 @@ function renderTable() {
             '<td>' + esc(l.product) + '</td>' +
             '<td><span class="badge ' + status + '">' + status + '</span></td>' +
             '<td>' + formatDate(l.expires) + '</td>' +
-            '<td>' + l.machine_count + '/' + (l.max_machines === 0 ? '\u221e' : l.max_machines) + '</td>' +
+            '<td>' + l.active_machine_count + '/' + (l.max_machines === 0 ? '\u221e' : l.max_machines) + '</td>' +
             '<td>' + (features || '<span style="color:var(--text2)">none</span>') + '</td>' +
             '</tr>';
     }).join('');
@@ -590,7 +590,7 @@ function selectLicense(key) {
     document.getElementById('detailCreated').textContent = formatDate(lic.created);
     document.getElementById('detailExpires').textContent = formatDate(lic.expires);
     document.getElementById('detailFeatures').innerHTML = lic.features.map(f => '<span class="feature-tag">' + esc(f) + '</span>').join(' ') || 'none';
-    document.getElementById('detailMachineCount').textContent = lic.machine_count + ' / ' + (lic.max_machines === 0 ? '\u221e' : lic.max_machines);
+    document.getElementById('detailMachineCount').textContent = lic.active_machine_count + ' / ' + (lic.max_machines === 0 ? '\u221e' : lic.max_machines);
 
     const btnRevoke = document.getElementById('btnRevoke');
     btnRevoke.style.display = status === 'revoked' ? 'none' : '';

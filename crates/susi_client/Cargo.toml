@@ -11,6 +11,7 @@ chrono = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
 reqwest = { version = "0.12", features = ["blocking", "json"] }
+hostname = "0.4"
 rsa = { version = "0.9", features = ["pem"] }
 pkcs8 = { version = "0.10", features = ["pem"] }
 

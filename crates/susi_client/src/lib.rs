@@ -211,10 +211,15 @@ impl LicenseClient {
         let machine_code = fingerprint::get_machine_code()
             .map_err(|e| format!("Fingerprint error: {}", e))?;
 
+        let friendly_name = hostname::get()
+            .map(|h| h.to_string_lossy().to_string())
+            .unwrap_or_default();
+
         let url = format!("{}/activate", server_url.trim_end_matches('/'));
         let body = serde_json::json!({
             "license_key": license_key,
             "machine_code": machine_code,
+            "friendly_name": friendly_name,
         });
 
         let response = reqwest::blocking::Client::new()
