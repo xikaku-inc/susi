@@ -312,11 +312,6 @@ bool SusiClient::checkLicense(std::string jsonLicenseInfo)
     m_features.clear();
     m_leaseExpiresEpoch = 0;
 
-    if (std::string(DEFAULT_PUBLIC_KEY).empty()) {
-        SUSI_LOG("No public key compiled in, skipping license check");
-        return true;
-    }
-
     json info;
     try {
         info = json::parse(jsonLicenseInfo);
@@ -632,7 +627,7 @@ static bool hkdfSha256(
         HMAC_CTX_free(ctx);
         tLen = len;
 
-        size_t copyLen = std::min(tLen, okmLen - offset);
+        size_t copyLen = (std::min)(tLen, okmLen - offset);
         memcpy(okm + offset, t, copyLen);
         offset += copyLen;
         counter++;
@@ -693,11 +688,6 @@ bool SusiClient::checkLicenseToken()
 {
     m_features.clear();
     m_leaseExpiresEpoch = 0;
-
-    if (std::string(DEFAULT_PUBLIC_KEY).empty()) {
-        SUSI_LOG("No public key compiled in, skipping license check");
-        return true;
-    }
 
     auto devices = enumerateUsbDevices();
     if (devices.empty()) {
