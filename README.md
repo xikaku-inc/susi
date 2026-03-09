@@ -149,14 +149,36 @@ match status {
 
 ### 5. Verify in your C++ application
 
-The `cpp/` directory contains a standalone C++ client (`susi.h` + `susi.cpp`) that uses OpenSSL for verification. Add it to your CMake project:
+The `cpp/` directory contains a standalone C++ client that uses OpenSSL for verification. There are two ways to integrate it:
+
+#### Option A: Conan package
+
+Build and publish the library to your local Conan cache, then consume it from your project:
+
+```bash
+# Execute in the susi/cpp directory. This installs susi into your local cache.
+conan create .
+
+# In your project's conanfile, add:
+#   requires = "susi/<version>"/self.requires("susi/<version>")
+# Then build your project using conan.
+conan install . --build=missing
+cmake --preset=<preset>
+cmake --build --preset=<preset>
+```
+
+#### Option B: CMake add_subdirectory
+
+Copy or clone the `cpp/` directory into your project and add it as a subdirectory:
 
 ```cmake
 add_subdirectory(susi/cpp)
 target_link_libraries(your_target PRIVATE susi)
 ```
 
-Then use it:
+With this approach you must provide OpenSSL yourself and make sure CMake can find it.
+
+Then yout can use it in your project:
 
 ```cpp
 #include <susi.h>

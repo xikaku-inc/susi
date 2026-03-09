@@ -4,3 +4,7 @@ Cargo.lock
 keys/
 *.pem
 license.json
+
+# CMake and Conan
+build/
+CMakeUserPresets.json

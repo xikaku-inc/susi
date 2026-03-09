@@ -15,8 +15,8 @@ if(NOT CMAKE_PROJECT_NAME)
     project(susi LANGUAGES CXX)
 endif()
 
-add_library(susi STATIC susi.cpp susi.h)
-target_include_directories(susi PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+add_library(susi STATIC src/susi.cpp include/susi.h)
+target_include_directories(susi PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(susi PUBLIC cxx_std_17)
 
 # OpenSSL
@@ -42,3 +42,6 @@ endif()
 if(WIN32)
     target_link_libraries(susi PRIVATE iphlpapi ws2_32)
 endif()
+
+set_target_properties(susi PROPERTIES PUBLIC_HEADER "include/susi.h")
+install(TARGETS susi)
