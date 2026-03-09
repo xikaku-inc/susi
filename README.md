@@ -192,7 +192,7 @@ Then you can use it in your project:
 ```cpp
 #include <susi.h>
 
-SusiClient susi;
+SusiClient susi("your-public-key");
 
 // Pass the "LicenseInfo" section of your config as JSON:
 bool valid = susi.checkLicense(R"({"LicenseFile": "license.json"})");
@@ -206,8 +206,6 @@ if (valid) {
     }
 }
 ```
-
-Before building for production, paste your public key (from `susi-admin keygen`) into the `DEFAULT_PUBLIC_KEY` constant in `susi.cpp`.
 
 To use your own logging framework instead of `fprintf`, define `SUSI_LOG` before including `susi.cpp`:
 
