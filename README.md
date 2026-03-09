@@ -155,13 +155,17 @@ The `cpp/` directory contains a standalone C++ client that uses OpenSSL for veri
 
 Build and publish the library to your local Conan cache, then consume it from your project:
 
-```bash
-# Execute in the susi/cpp directory. This installs susi into your local cache.
-conan create .
 
-# In your project's conanfile, add:
-#   requires = "susi/<version>"/self.requires("susi/<version>")
-# Then build your project using conan.
+1. Install susi into your local cache, by executing this in the `cpp/` directory: `conan create .`
+2. In you project's conanfile, add: `requires = "susi/<version>"/self.requires("susi/<version>")`
+3. Add the following two lines to you ´CMakeLists.txt´:
+```cmake
+find_package(susi REQUIRED)
+...
+target_link_libraries(your_target PRIVATE susi::susi)
+```
+4. Build using conan and CMake:
+```bash
 conan install . --build=missing
 cmake --preset=<preset>
 cmake --build --preset=<preset>
@@ -169,16 +173,21 @@ cmake --build --preset=<preset>
 
 #### Option B: CMake add_subdirectory
 
-Copy or clone the `cpp/` directory into your project and add it as a subdirectory:
-
+1. Copy or clone the `cpp/` directory into your project
+2. Add it as a subdirectory to you `CMakeLists.txt`:
 ```cmake
 add_subdirectory(susi/cpp)
-target_link_libraries(your_target PRIVATE susi)
+target_link_libraries(your_target PRIVATE susi::susi)
+```
+3. Build using CMake:
+```bash
+cmake -B build -S .
+cmake --build build
 ```
 
 With this approach you must provide OpenSSL yourself and make sure CMake can find it.
 
-Then yout can use it in your project:
+Then you can use it in your project:
 
 ```cpp
 #include <susi.h>

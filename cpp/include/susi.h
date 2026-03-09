@@ -9,8 +9,13 @@ class SusiClient {
     std::vector<std::string> m_features;
     int64_t m_leaseExpiresEpoch = 0; // 0 = no lease
     int64_t m_graceHours = 24;
+    std::string m_publicKey;
 
 public:
+    SusiClient(std::string publicKey) : m_publicKey(publicKey) {};
+
+    std::string getPublicKeyPem();
+
     bool checkLicense(std::string jsonLicenseInfo);
     bool checkLicenseToken();
 

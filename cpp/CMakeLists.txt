@@ -28,6 +28,7 @@ find_package(nlohmann_json QUIET)
 if(nlohmann_json_FOUND)
     target_link_libraries(susi PRIVATE nlohmann_json::nlohmann_json)
 else()
+    message(STATUS "nlohmann_json not found locally, fetching from remote...")
     include(FetchContent)
     FetchContent_Declare(json
         GIT_REPOSITORY https://github.com/nlohmann/json.git

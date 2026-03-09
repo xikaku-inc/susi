@@ -285,14 +285,9 @@ static bool isExpired(const json& payload)
 // ---------------------------------------------------------------------------
 // SusiClient::checkLicense
 // ---------------------------------------------------------------------------
-
-// Default embedded public key.
-// Replace this with your actual public key generated via: susi-admin keygen
-static const char* DEFAULT_PUBLIC_KEY = "";
-
-static std::string getPublicKeyPem()
+std::string SusiClient::getPublicKeyPem()
 {
-    std::string key(DEFAULT_PUBLIC_KEY);
+    std::string key(m_publicKey);
     if (key.empty() || key.find("-----BEGIN") != std::string::npos) {
         return key;
     }
