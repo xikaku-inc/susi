@@ -22,22 +22,9 @@ target_compile_features(susi PUBLIC cxx_std_17)
 # OpenSSL
 find_package(OpenSSL REQUIRED)
 target_link_libraries(susi PRIVATE OpenSSL::SSL OpenSSL::Crypto)
-
 # nlohmann/json
-find_package(nlohmann_json QUIET)
-if(nlohmann_json_FOUND)
-    target_link_libraries(susi PRIVATE nlohmann_json::nlohmann_json)
-else()
-    message(STATUS "nlohmann_json not found locally, fetching from remote...")
-    include(FetchContent)
-    FetchContent_Declare(json
-        GIT_REPOSITORY https://github.com/nlohmann/json.git
-        GIT_TAG        v3.11.3
-        GIT_SHALLOW    TRUE
-    )
-    FetchContent_MakeAvailable(json)
-    target_link_libraries(susi PRIVATE nlohmann_json::nlohmann_json)
-endif()
+find_package(nlohmann_json REQUIRED)
+target_link_libraries(susi PRIVATE nlohmann_json::nlohmann_json)
 
 # Windows network libraries
 if(WIN32)
