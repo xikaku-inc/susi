@@ -10,14 +10,22 @@ class SusiClient {
     int64_t m_leaseExpiresEpoch = 0; // 0 = no lease
     int64_t m_graceHours = 24;
     std::string m_publicKey;
+    std::string m_serverUrl;
 
 public:
-    SusiClient(std::string publicKey) : m_publicKey(publicKey) {};
+    SusiClient(std::string publicKey) : m_publicKey(std::move(publicKey)) {}
+    /// Create a client with an activation server URL (e.g. "https://license.example.com/api/v1").
+    SusiClient(std::string publicKey, std::string serverUrl)
+        : m_publicKey(std::move(publicKey)), m_serverUrl(std::move(serverUrl)) {}
 
     std::string getPublicKeyPem();
 
+    bool verifySignedLicenseJson(std::string signedLicenseStr);
     bool checkLicense(std::string jsonLicenseInfo);
     bool checkLicenseToken();
+    /// Contact the activation server to refresh the lease, then verify the license.
+    /// Falls back to the cached local file if the server is unreachable.
+    bool checkLicenseAndRefresh(const std::string& licensePath, const std::string& licenseKey);
 
     const std::vector<std::string>& features() const { return m_features; }
 

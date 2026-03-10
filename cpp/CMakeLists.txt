@@ -25,6 +25,9 @@ target_link_libraries(susi PRIVATE OpenSSL::SSL OpenSSL::Crypto)
 # nlohmann/json
 find_package(nlohmann_json REQUIRED)
 target_link_libraries(susi PRIVATE nlohmann_json::nlohmann_json)
+# libcurl (for server-activated license refresh)
+find_package(CURL REQUIRED)
+target_link_libraries(susi PRIVATE CURL::libcurl)
 
 # Windows network libraries
 if(WIN32)

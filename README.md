@@ -421,7 +421,9 @@ curl -X POST http://localhost:3100/api/v1/licenses \
 
 ## Client Library with Online Refresh
 
-The client library can optionally contact the server to refresh the license and renew the lease, falling back to the cached local file if the server is unreachable:
+The client library can optionally contact the server to refresh the license and renew the lease, falling back to the cached local file if the server is unreachable.
+
+### Rust
 
 ```rust
 let client = LicenseClient::with_server(
@@ -439,7 +441,27 @@ if status.needs_renewal() {
 }
 ```
 
-Call `verify_and_refresh` periodically (e.g. at startup and every few hours) to keep the lease alive. The server will renew the lease on each successful call.
+### C++
+
+```cpp
+// Pass the server URL as the second constructor argument
+SusiClient susi("your-public-key", "https://license.example.com/api/v1");
+
+// Contacts the server to renew the lease, writes the updated license.json,
+// then verifies it. Falls back to the cached file if the server is unreachable.
+bool valid = susi.checkLicenseAndRefresh("license.json", "XXXXX-XXXXX-XXXXX-XXXXX");
+
+if (valid) {
+    if (susi.isInGracePeriod()) {
+        // Lease expired but still within grace period — try to renew soon
+    }
+    if (susi.hasFeature("pro")) {
+        // enable pro features
+    }
+}
+```
+
+Call `verify_and_refresh`/`checkLicenseAndRefresh` periodically (e.g. at startup and every few hours) to keep the lease alive. The server will renew the lease on each successful call.
 
 ## Lease System
 

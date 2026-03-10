@@ -4,16 +4,18 @@
 #include <chrono>
 #include <cstdio>
 #include <fstream>
+#include <mutex>
 #include <sstream>
 
 #include <nlohmann/json.hpp>
 
 #include <openssl/bio.h>
 #include <openssl/evp.h>
+#include <openssl/hmac.h>
 #include <openssl/pem.h>
 #include <openssl/sha.h>
 
-#include <openssl/hmac.h>
+#include <curl/curl.h>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -104,7 +106,6 @@ static bool verifySignature(
 // ---------------------------------------------------------------------------
 // Hardware fingerprinting (must match susi_core::fingerprint)
 // ---------------------------------------------------------------------------
-
 #ifdef _WIN32
 static std::vector<std::string> getMacAddresses()
 {
@@ -283,8 +284,61 @@ static bool isExpired(const json& payload)
 }
 
 // ---------------------------------------------------------------------------
-// SusiClient::checkLicense
+// HTTP helper for server activation
 // ---------------------------------------------------------------------------
+static size_t curlWriteCallback(char* ptr, size_t size, size_t nmemb, std::string* data)
+{
+    data->append(ptr, size * nmemb);
+    return size * nmemb;
+}
+
+static void initCurl()
+{
+    static std::once_flag flag;
+    std::call_once(flag, [] {
+        curl_global_init(CURL_GLOBAL_DEFAULT);
+        atexit([] { curl_global_cleanup(); });
+    });
+}
+
+static bool httpPost(const std::string& url, const std::string& body, std::string& response)
+{
+    initCurl();
+
+    CURL* curl = curl_easy_init();
+    if (!curl) return false;
+
+    curl_slist* headers = nullptr;
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_POST, 1L);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curlWriteCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+
+    CURLcode res = curl_easy_perform(curl);
+
+    long httpCode = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
+
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+
+    if (res != CURLE_OK) {
+        SUSI_LOG("HTTP request failed: %s", curl_easy_strerror(res));
+        return false;
+    }
+    if (httpCode < 200 || httpCode >= 300) {
+        SUSI_LOG("Server returned HTTP %ld: %s", httpCode, response.c_str());
+        return false;
+    }
+    return true;
+}
+
+
 std::string SusiClient::getPublicKeyPem()
 {
     std::string key(m_publicKey);
@@ -301,41 +355,21 @@ std::string SusiClient::getPublicKeyPem()
     return pem;
 }
 
-bool SusiClient::checkLicense(std::string jsonLicenseInfo)
+// ---------------------------------------------------------------------------
+// Shared license verify logic
+// ---------------------------------------------------------------------------
+bool SusiClient::verifySignedLicenseJson(std::string signedLicenseStr)
 {
-    m_features.clear();
-    m_leaseExpiresEpoch = 0;
-
-    json info;
-    try {
-        info = json::parse(jsonLicenseInfo);
-    } catch (const json::exception& e) {
-        SUSI_LOG("Could not parse license info JSON: %s", e.what());
-        return false;
-    }
-
-    std::string licenseFilePath = "license.json";
-    if (info.contains("LicenseFile") && info.at("LicenseFile").is_string()) {
-        licenseFilePath = info.at("LicenseFile").get<std::string>();
-    }
-
-    // Load signed license file
-    std::ifstream licenseFile(licenseFilePath);
-    if (!licenseFile.is_open()) {
-        SUSI_LOG("License file not found: %s", licenseFilePath.c_str());
-        return false;
-    }
-
     json signedLicense;
     try {
-        signedLicense = json::parse(licenseFile);
+        signedLicense = json::parse(signedLicenseStr);
     } catch (const json::exception& e) {
-        SUSI_LOG("Invalid license file format: %s", e.what());
+        SUSI_LOG("Invalid license format: %s", e.what());
         return false;
     }
 
     if (!signedLicense.contains("license_data") || !signedLicense.contains("signature")) {
-        SUSI_LOG("License file missing required fields (license_data, signature)");
+        SUSI_LOG("License missing required fields (license_data, signature)");
         return false;
     }
 
@@ -351,7 +385,7 @@ bool SusiClient::checkLicense(std::string jsonLicenseInfo)
 
     // Verify RSA-SHA256 signature
     if (!verifySignature(getPublicKeyPem(), licenseData, signatureBytes)) {
-        SUSI_LOG("License file has an invalid signature");
+        SUSI_LOG("License has an invalid signature");
         return false;
     }
 
@@ -366,14 +400,13 @@ bool SusiClient::checkLicense(std::string jsonLicenseInfo)
 
     // Check expiry
     if (isExpired(payload)) {
-        std::string expiresStr = payload.value("expires", std::string("unknown"));
-        SUSI_LOG("License expired: %s", expiresStr.c_str());
+        SUSI_LOG("License expired: %s", payload.value("expires", std::string("unknown")).c_str());
         return false;
     }
 
     // Check machine code
     if (payload.contains("machine_codes") && payload.at("machine_codes").is_array()) {
-        auto& codes = payload.at("machine_codes");
+        const auto& codes = payload.at("machine_codes");
         if (!codes.empty()) {
             std::string localCode = getMachineCode();
             bool found = false;
@@ -406,7 +439,7 @@ bool SusiClient::checkLicense(std::string jsonLicenseInfo)
             return false;
         }
         if (now > leaseExpires) {
-            SUSI_LOG("Lease expired at %s, in grace period — renew soon!", leaseStr.c_str());
+            SUSI_LOG("Lease expired at %s, in grace period - renew soon!", leaseStr.c_str());
         }
     }
 
@@ -442,6 +475,82 @@ bool SusiClient::checkLicense(std::string jsonLicenseInfo)
     }
 
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// License check from file
+// ---------------------------------------------------------------------------
+bool SusiClient::checkLicense(std::string jsonLicenseInfo)
+{
+    m_features.clear();
+    m_leaseExpiresEpoch = 0;
+
+    json info;
+    try {
+        info = json::parse(jsonLicenseInfo);
+    } catch (const json::exception& e) {
+        SUSI_LOG("Could not parse license info JSON: %s", e.what());
+        return false;
+    }
+
+    std::string licenseFilePath = "license.json";
+    if (info.contains("LicenseFile") && info.at("LicenseFile").is_string())
+        licenseFilePath = info.at("LicenseFile").get<std::string>();
+
+    std::ifstream licenseFile(licenseFilePath);
+    if (!licenseFile.is_open()) {
+        SUSI_LOG("License file not found: %s", licenseFilePath.c_str());
+        return false;
+    }
+
+    std::string licenseContents((std::istreambuf_iterator<char>(licenseFile)), std::istreambuf_iterator<char>());
+    return verifySignedLicenseJson(licenseContents);
+}
+
+// ---------------------------------------------------------------------------
+// Online license check
+// ---------------------------------------------------------------------------
+bool SusiClient::checkLicenseAndRefresh(const std::string& licensePath, const std::string& licenseKey)
+{
+    m_features.clear();
+    m_leaseExpiresEpoch = 0;
+
+    if (!m_serverUrl.empty()) {
+        std::string url = m_serverUrl;
+        if (!url.empty() && url.back() == '/') url.pop_back();
+        url += "/activate";
+
+        json body;
+        body["license_key"] = licenseKey;
+        body["machine_code"] = getMachineCode();
+        body["friendly_name"] = getHostname();
+
+        std::string response;
+        if (httpPost(url, body.dump(), response)) {
+            bool valid = verifySignedLicenseJson(response);
+
+            if(valid){
+                std::ofstream f(licensePath);
+                if (f.is_open()) {
+                    f << response;
+                }
+            }
+
+            return valid;
+        } else {
+            SUSI_LOG("Online license refresh failed, falling back to cached file");
+        }
+    }
+
+    // Fall back to local file
+    std::ifstream licenseFile(licensePath);
+    if (!licenseFile.is_open()) {
+        SUSI_LOG("License file not found: %s", licensePath.c_str());
+        return false;
+    }
+
+    std::string licenseContents((std::istreambuf_iterator<char>(licenseFile)), std::istreambuf_iterator<char>());
+    return verifySignedLicenseJson(licenseContents);
 }
 
 // ---------------------------------------------------------------------------
@@ -716,48 +825,11 @@ bool SusiClient::checkLicenseToken()
         std::string decrypted = decryptToken(blob, dev.serial);
         if (decrypted.empty()) continue;
 
-        json signedLicense;
-        try {
-            signedLicense = json::parse(decrypted);
-        } catch (...) {
+        if (!verifySignedLicenseJson(decrypted)) {
             continue;
         }
 
-        if (!signedLicense.contains("license_data") || !signedLicense.contains("signature"))
-            continue;
-
-        std::string licenseData = signedLicense.at("license_data").get<std::string>();
-        std::string signatureB64 = signedLicense.at("signature").get<std::string>();
-
-        auto signatureBytes = base64Decode(signatureB64);
-        if (signatureBytes.empty()) continue;
-
-        if (!verifySignature(getPublicKeyPem(), licenseData, signatureBytes))
-            continue;
-
-        json payload;
-        try {
-            payload = json::parse(licenseData);
-        } catch (...) {
-            continue;
-        }
-
-        if (isExpired(payload)) continue;
-
-        // Token-bound: no machine_codes check (machine_codes is empty)
-
-        // Extract features
-        if (payload.contains("features") && payload.at("features").is_array()) {
-            for (const auto& feat : payload.at("features")) {
-                if (feat.is_string())
-                    m_features.push_back(feat.get<std::string>());
-            }
-        }
-
-        std::string product = payload.value("product", std::string("unknown"));
-        std::string customer = payload.value("customer", std::string("unknown"));
-        SUSI_LOG("License valid via USB token '%s' (serial: %s, product: %s, customer: %s)",
-                 dev.name.c_str(), dev.serial.c_str(), product.c_str(), customer.c_str());
+        SUSI_LOG("License token: device '%s' (serial: %s)", dev.name.c_str(), dev.serial.c_str());
         return true;
     }
 
