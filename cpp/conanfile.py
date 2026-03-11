@@ -15,6 +15,7 @@ class SusiRecipe(ConanFile):
     def requirements(self):
         self.requires("openssl/3.6.1")
         self.requires("nlohmann_json/[~3.11]")
+        self.requires("libcurl/[>=7.85 <9]")
 
     def layout(self):
         cmake_layout(self)
