@@ -301,12 +301,12 @@ static void initCurl()
     });
 }
 
-static bool httpPost(const std::string& url, const std::string& body, std::string& response)
+static long httpPost(const std::string& url, const std::string& body, std::string& response)
 {
     initCurl();
 
     CURL* curl = curl_easy_init();
-    if (!curl) return false;
+    if (!curl) return 0;
 
     curl_slist* headers = nullptr;
     headers = curl_slist_append(headers, "Content-Type: application/json");
@@ -329,13 +329,9 @@ static bool httpPost(const std::string& url, const std::string& body, std::strin
 
     if (res != CURLE_OK) {
         SUSI_LOG("HTTP request failed: %s", curl_easy_strerror(res));
-        return false;
+        return 0;
     }
-    if (httpCode < 200 || httpCode >= 300) {
-        SUSI_LOG("Server returned HTTP %ld: %s", httpCode, response.c_str());
-        return false;
-    }
-    return true;
+    return httpCode;
 }
 
 
@@ -528,10 +524,11 @@ bool SusiClient::checkLicenseAndRefresh(const std::string& licensePath, const st
         body["friendly_name"] = getHostname();
 
         std::string response;
-        if (httpPost(url, body.dump(), response)) {
+        long httpCode = httpPost(url, body.dump(), response);
+        if (httpCode >= 200 && httpCode < 300) { // got license file
             bool valid = verifySignedLicenseJson(response);
 
-            if(valid){
+            if (valid) {
                 std::ofstream f(licensePath);
                 if (f.is_open()) {
                     f << response;
@@ -539,7 +536,11 @@ bool SusiClient::checkLicenseAndRefresh(const std::string& licensePath, const st
             }
 
             return valid;
-        } else {
+        } else if (httpCode == 403 || httpCode == 404) { // license not valid or not found
+            SUSI_LOG("Server rejected license (HTTP %ld) - removing cached file", httpCode);
+            std::remove(licensePath.c_str());
+            return false;
+        } else { // other error occured
             SUSI_LOG("Online license refresh failed, falling back to cached file");
         }
     } else {
@@ -549,7 +550,7 @@ bool SusiClient::checkLicenseAndRefresh(const std::string& licensePath, const st
     // Fall back to local file
     std::ifstream licenseFile(licensePath);
     if (!licenseFile.is_open()) {
-        SUSI_LOG("License file not found: %s", licensePath.c_str());
+        SUSI_LOG("Cached license file cannot be found: %s", licensePath.c_str());
         return false;
     }
 

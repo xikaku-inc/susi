@@ -143,6 +143,12 @@ match status {
     LicenseStatus::InvalidSignature => {
         eprintln!("License file has been tampered with");
     }
+    LicenseStatus::InvalidLicenseKey => {
+        eprintln!("License key is not valid");
+    }
+    LicenseStatus::Revoked => {
+        eprintln!("License has been revoked");
+    }
     other => eprintln!("License error: {:?}", other),
 }
 ```

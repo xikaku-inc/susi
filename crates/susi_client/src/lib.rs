@@ -31,6 +31,8 @@ pub enum LicenseStatus {
         actual: String,
     },
     InvalidSignature,
+    InvalidLicenseKey,
+    Revoked,
     TokenNotFound,
     FileNotFound(String),
     Error(String),
@@ -198,10 +200,38 @@ impl LicenseClient {
                     }
                     return self.verify_signed(&signed);
                 }
+                Err(LicenseError::Revoked) => {
+                    log::warn!("License revoked by server - removing cached file");
+                    if let Err(e) = std::fs::remove_file(path) {
+                        if e.kind() != std::io::ErrorKind::NotFound {
+                            log::error!("Failed to remove cached license file: {}", e);
+                        }
+                    }
+                    return LicenseStatus::Revoked;
+                }
+                Err(LicenseError::NotFound) => {
+                    log::warn!("License not found on server - removing cached file");
+                    if let Err(e) = std::fs::remove_file(path) {
+                        if e.kind() != std::io::ErrorKind::NotFound {
+                            log::error!("Failed to remove cached license file: {}", e);
+                        }
+                    }
+                    return LicenseStatus::InvalidLicenseKey;
+                }
+                Err(LicenseError::MachineLimitReached(max)) => {
+                    log::warn!("Cannot activate license - machine limit reached");
+                    return LicenseStatus::Error(format!("Machine limit reached: {}", max));
+                }
                 Err(e) => {
                     log::warn!("Online license refresh failed, using cached file: {}", e);
                 }
             }
+        } else {
+            log::warn!("No server supplied. Online license check will fail. Falling back to cached file.");
+        }
+
+        if !path.exists() {
+            return LicenseStatus::Error(format!("Online license check failed, cached license file cannot be found: {}", path.display()));
         }
 
         // Fall back to local file
@@ -212,9 +242,9 @@ impl LicenseClient {
         &self,
         server_url: &str,
         license_key: &str,
-    ) -> Result<SignedLicense, String> {
+    ) -> Result<SignedLicense, LicenseError> {
         let machine_code = fingerprint::get_machine_code()
-            .map_err(|e| format!("Fingerprint error: {}", e))?;
+            .map_err(|e| LicenseError::Other(format!("Fingerprint error: {}", e)))?;
 
         let friendly_name = hostname::get()
             .map(|h| h.to_string_lossy().to_string())
@@ -232,17 +262,33 @@ impl LicenseClient {
             .json(&body)
             .timeout(std::time::Duration::from_secs(10))
             .send()
-            .map_err(|e| format!("HTTP request failed: {}", e))?;
+            .map_err(|e| LicenseError::Other(format!("HTTP request failed: {}", e)))?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response.text().unwrap_or_default();
-            return Err(format!("Server returned {}: {}", status, text));
+        let status = response.status().as_u16();
+        if (200..300).contains(&status) {
+            return response
+                .json::<SignedLicense>()
+                .map_err(|e| LicenseError::Other(format!("Invalid server response: {}", e)));
         }
 
-        response
-            .json::<SignedLicense>()
-            .map_err(|e| format!("Invalid server response: {}", e))
+        #[derive(serde::Deserialize)]
+        struct ErrorBody { error: String }
+        let msg = response.json::<ErrorBody>()
+            .map(|b| b.error)
+            .unwrap_or_default();
+
+        Err(match status {
+            404 => LicenseError::NotFound,
+            403 if msg.contains("revoked") => LicenseError::Revoked,
+            403 if msg.contains("expired") => LicenseError::Expired(msg),
+            403 if msg.contains("Machine limit") => {
+                let max = msg.split("max ").nth(1)
+                    .and_then(|s| s.trim_end_matches(')').parse().ok())
+                    .unwrap_or(0);
+                LicenseError::MachineLimitReached(max)
+            }
+            _ => LicenseError::Other(format!("Server returned {}: {}", status, msg)),
+        })
     }
 
     /// Verify a license from a connected USB hardware token.
