@@ -132,8 +132,25 @@ impl LicenseClient {
         self.verify_signed(&signed)
     }
 
-    /// Verify a SignedLicense object (e.g. received from server or loaded from disk).
+     /// Verify a SignedLicense object (e.g. received from server or loaded from disk).
+     /// Use local machine code for machine check.
     pub fn verify_signed(&self, signed: &SignedLicense) -> LicenseStatus {
+        match fingerprint::get_machine_code() {
+            Ok(local_code) => {
+                return self.verify_signed_with_activation_code(signed, &local_code);
+            }
+            Err(e) => {
+                return LicenseStatus::Error(format!(
+                    "Could not compute machine fingerprint: {}",
+                    e
+                ));
+            }
+        }
+    }
+
+    /// Verify a SignedLicense object (e.g. received from server or loaded from disk).
+    /// Use given activation code for machine check.
+    pub fn verify_signed_with_activation_code(&self, signed: &SignedLicense, activation_code: &str) -> LicenseStatus {
         let payload = match verify_license(&self.public_key, signed) {
             Ok(p) => p,
             Err(LicenseError::InvalidSignature) => return LicenseStatus::InvalidSignature,
@@ -147,23 +164,11 @@ impl LicenseClient {
         }
 
         // Check machine code if the payload has machine restrictions
-        if !payload.machine_codes.is_empty() {
-            match fingerprint::get_machine_code() {
-                Ok(local_code) => {
-                    if !payload.is_machine_authorized(&local_code) {
-                        return LicenseStatus::InvalidMachine {
-                            expected: payload.machine_codes.clone(),
-                            actual: local_code,
-                        };
-                    }
-                }
-                Err(e) => {
-                    return LicenseStatus::Error(format!(
-                        "Could not compute machine fingerprint: {}",
-                        e
-                    ));
-                }
-            }
+        if !payload.is_machine_authorized(&activation_code) {
+            return LicenseStatus::InvalidMachine {
+                expected: payload.machine_codes.clone(),
+                actual: activation_code.to_string(),
+            };
         }
 
         // Check lease expiry
@@ -262,7 +267,8 @@ impl LicenseClient {
 
             match susi_core::token::read_token(&device.mount_path, &device.serial) {
                 Ok(signed) => {
-                    let status = self.verify_signed(&signed);
+                    let activation_code = format!("usb:{}", device.serial);
+                    let status = self.verify_signed_with_activation_code(&signed, &activation_code);
                     if status.is_valid() {
                         return status;
                     }

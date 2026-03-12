@@ -534,7 +534,7 @@ fn cmd_export_token(
         created: license.created,
         expires: license.expires,
         features: license.features.clone(),
-        machine_codes: vec![],
+        machine_codes: vec![activation_code],
         lease_expires: None,
     };
 

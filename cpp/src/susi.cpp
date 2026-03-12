@@ -358,7 +358,7 @@ std::string SusiClient::getPublicKeyPem()
 // ---------------------------------------------------------------------------
 // Shared license verify logic
 // ---------------------------------------------------------------------------
-bool SusiClient::verifySignedLicenseJson(std::string signedLicenseStr)
+bool SusiClient::verifySignedLicenseJson(std::string signedLicenseStr, std::string activationCode)
 {
     json signedLicense;
     try {
@@ -408,16 +408,18 @@ bool SusiClient::verifySignedLicenseJson(std::string signedLicenseStr)
     if (payload.contains("machine_codes") && payload.at("machine_codes").is_array()) {
         const auto& codes = payload.at("machine_codes");
         if (!codes.empty()) {
-            std::string localCode = getMachineCode();
+            if(activationCode.empty()){
+                activationCode = getMachineCode();
+            }
             bool found = false;
             for (const auto& code : codes) {
-                if (code.is_string() && code.get<std::string>() == localCode) {
+                if (code.is_string() && code.get<std::string>() == activationCode) {
                     found = true;
                     break;
                 }
             }
             if (!found) {
-                SUSI_LOG("License not valid for this machine (code: %s)", localCode.c_str());
+                SUSI_LOG("License not valid for this machine (code: %s)", activationCode.c_str());
                 return false;
             }
         }
@@ -827,7 +829,9 @@ bool SusiClient::checkLicenseToken()
         std::string decrypted = decryptToken(blob, dev.serial);
         if (decrypted.empty()) continue;
 
-        if (!verifySignedLicenseJson(decrypted)) {
+        std::string usbActivationCode = "usb:" + dev.serial;
+
+        if (!verifySignedLicenseJson(decrypted, usbActivationCode)) {
             continue;
         }
 

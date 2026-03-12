@@ -20,7 +20,9 @@ public:
 
     std::string getPublicKeyPem();
 
-    bool verifySignedLicenseJson(std::string signedLicenseStr);
+    /// Checks if license is signed correctly and still valid.
+    /// If no activation code is given to check against, the local machine code is used.
+    bool verifySignedLicenseJson(std::string signedLicenseStr, std::string activationCode = "");
     bool checkLicense(std::string jsonLicenseInfo);
     bool checkLicenseToken();
     /// Contact the activation server to refresh the lease, then verify the license.

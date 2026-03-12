@@ -266,7 +266,7 @@ Instead of binding a license to a specific machine, you can bind it to a physica
 3. The encrypted blob is written to `<usb_mount>/.susi/license.bin`
 4. At runtime, the client scans connected USB drives for this file, decrypts it using the device's serial, and verifies the RSA signature as usual
 
-Token-bound licenses have empty `machine_codes`, so they are not tied to any specific machine.
+Token-bound licenses have a machine code based on the serial number of the USB stick: `usb:<serial>`.
 
 ### Export a license to a USB token
 
