@@ -18,7 +18,7 @@ clap = { version = "4", features = ["derive", "env"] }
 tokio = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
-axum = "0.8"
+axum = { version = "0.8", features = ["multipart"] }
 tower-http = { version = "0.6", features = ["cors"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 rsa = { version = "0.9", features = ["pem"] }

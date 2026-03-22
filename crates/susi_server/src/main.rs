@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use argon2::{self, Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use argon2::password_hash::SaltString;
 use axum::{
-    extract::{Path, State},
+    extract::{Multipart, Path, State},
     http::{header, HeaderMap, StatusCode},
     response::{Html, IntoResponse},
     routing::{get, post},
@@ -36,12 +36,16 @@ struct Cli {
     #[arg(long, default_value = "0.0.0.0:3100")]
     listen: String,
 
+    /// Directory for persistent data (keys, database, release assets)
+    #[arg(long, default_value = "/data")]
+    data_dir: String,
 }
 
 struct AppState {
     db: Mutex<LicenseDb>,
     private_key: RsaPrivateKey,
     jwt_secret: [u8; 32],
+    data_dir: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -933,6 +937,250 @@ async fn handle_reset_user_password(
 }
 
 // ---------------------------------------------------------------------------
+// Release endpoints
+// ---------------------------------------------------------------------------
+
+fn validate_license_key(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    let key = headers
+        .get("x-license-key")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    if key.is_empty() {
+        return Err(error_response(StatusCode::UNAUTHORIZED, "Missing X-License-Key header"));
+    }
+
+    let db = state.db.lock().unwrap();
+    let license = db
+        .get_license_by_key(key)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "Invalid license key"))?;
+
+    if license.revoked {
+        return Err(error_response(StatusCode::FORBIDDEN, "License has been revoked"));
+    }
+    if license.is_expired() {
+        return Err(error_response(StatusCode::FORBIDDEN, "License has expired"));
+    }
+
+    Ok(())
+}
+
+fn releases_dir(state: &AppState) -> std::path::PathBuf {
+    std::path::Path::new(&state.data_dir).join("releases")
+}
+
+/// List releases — available to licensed clients
+async fn handle_get_releases(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    validate_license_key(&state, &headers)?;
+
+    let db = state.db.lock().unwrap();
+    let rows = db.list_releases()
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    let mut releases = Vec::new();
+    for (id, tag, name, body, prerelease, created_at) in &rows {
+        let assets = db.get_release_assets(*id).unwrap_or_default();
+        releases.push(serde_json::json!({
+            "tag": tag,
+            "name": name,
+            "body": body,
+            "published_at": created_at,
+            "prerelease": prerelease,
+            "assets": assets.iter().map(|(name, size)| serde_json::json!({
+                "name": name,
+                "size": size,
+            })).collect::<Vec<_>>(),
+        }));
+    }
+
+    Ok(Json(serde_json::json!({ "releases": releases })))
+}
+
+/// Download a release asset — available to licensed clients
+async fn handle_download_asset(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((tag, asset_name)): Path<(String, String)>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    validate_license_key(&state, &headers)?;
+
+    let file_path = releases_dir(&state).join(&tag).join(&asset_name);
+    if !file_path.exists() {
+        return Err(error_response(StatusCode::NOT_FOUND, "Asset not found"));
+    }
+
+    let bytes = std::fs::read(&file_path)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("Read error: {}", e)))?;
+
+    let mut resp_headers = HeaderMap::new();
+    resp_headers.insert(header::CONTENT_TYPE, "application/octet-stream".parse().unwrap());
+    resp_headers.insert(
+        header::CONTENT_DISPOSITION,
+        format!("attachment; filename=\"{}\"", asset_name).parse().unwrap(),
+    );
+    resp_headers.insert(header::CONTENT_LENGTH, bytes.len().into());
+
+    Ok((resp_headers, bytes))
+}
+
+/// List releases — admin view (JWT)
+async fn handle_list_releases_admin(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let claims = validate_jwt(&headers, &state.jwt_secret)?;
+    require_password_changed(&state, &claims.sub)?;
+
+    let db = state.db.lock().unwrap();
+    let rows = db.list_releases()
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    let mut releases = Vec::new();
+    for (id, tag, name, body, prerelease, created_at) in &rows {
+        let assets = db.get_release_assets(*id).unwrap_or_default();
+        releases.push(serde_json::json!({
+            "tag": tag,
+            "name": name,
+            "body": body,
+            "published_at": created_at,
+            "prerelease": prerelease,
+            "assets": assets.iter().map(|(name, size)| serde_json::json!({
+                "name": name,
+                "size": size,
+            })).collect::<Vec<_>>(),
+        }));
+    }
+
+    Ok(Json(serde_json::json!({ "releases": releases })))
+}
+
+/// Upload a new release — admin only (JWT)
+async fn handle_upload_release(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let claims = validate_jwt(&headers, &state.jwt_secret)?;
+    require_password_changed(&state, &claims.sub)?;
+
+    let mut tag = String::new();
+    let mut name = String::new();
+    let mut body = String::new();
+    let mut prerelease = false;
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+
+    while let Some(field) = multipart.next_field().await
+        .map_err(|e| error_response(StatusCode::BAD_REQUEST, &format!("Multipart error: {}", e)))?
+    {
+        let field_name = field.name().unwrap_or("").to_string();
+        match field_name.as_str() {
+            "tag" => {
+                tag = field.text().await
+                    .map_err(|e| error_response(StatusCode::BAD_REQUEST, &e.to_string()))?;
+            }
+            "name" => {
+                name = field.text().await
+                    .map_err(|e| error_response(StatusCode::BAD_REQUEST, &e.to_string()))?;
+            }
+            "body" => {
+                body = field.text().await
+                    .map_err(|e| error_response(StatusCode::BAD_REQUEST, &e.to_string()))?;
+            }
+            "prerelease" => {
+                let val = field.text().await
+                    .map_err(|e| error_response(StatusCode::BAD_REQUEST, &e.to_string()))?;
+                prerelease = val == "true" || val == "1";
+            }
+            "file" => {
+                let file_name = field.file_name().unwrap_or("unknown").to_string();
+                let data = field.bytes().await
+                    .map_err(|e| error_response(StatusCode::BAD_REQUEST, &format!("File read error: {}", e)))?;
+                files.push((file_name, data.to_vec()));
+            }
+            _ => {}
+        }
+    }
+
+    if tag.is_empty() {
+        return Err(error_response(StatusCode::BAD_REQUEST, "Missing 'tag' field"));
+    }
+    if files.is_empty() {
+        return Err(error_response(StatusCode::BAD_REQUEST, "No files uploaded"));
+    }
+
+    // Save to database
+    let release_id = {
+        let db = state.db.lock().unwrap();
+        if db.get_release_by_tag(&tag)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+            .is_some()
+        {
+            return Err(error_response(StatusCode::CONFLICT, &format!("Release {} already exists", tag)));
+        }
+        db.insert_release(&tag, &name, &body, prerelease)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+    };
+
+    // Save files to disk
+    let tag_dir = releases_dir(&state).join(&tag);
+    std::fs::create_dir_all(&tag_dir)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("Cannot create dir: {}", e)))?;
+
+    let mut asset_names = Vec::new();
+    for (file_name, data) in &files {
+        let file_path = tag_dir.join(file_name);
+        std::fs::write(&file_path, data)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("Write error: {}", e)))?;
+
+        let db = state.db.lock().unwrap();
+        db.add_release_asset(release_id, file_name, data.len() as u64)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+        asset_names.push(file_name.clone());
+    }
+
+    log::info!("Release {} created with assets: {}", tag, asset_names.join(", "));
+
+    Ok(Json(serde_json::json!({
+        "status": "OK",
+        "tag": tag,
+        "assets": asset_names,
+    })))
+}
+
+/// Delete a release — admin only (JWT)
+async fn handle_delete_release(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(tag): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let claims = validate_jwt(&headers, &state.jwt_secret)?;
+    require_password_changed(&state, &claims.sub)?;
+
+    let db = state.db.lock().unwrap();
+    if !db.delete_release(&tag)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+    {
+        return Err(error_response(StatusCode::NOT_FOUND, "Release not found"));
+    }
+    drop(db);
+
+    // Remove files from disk
+    let tag_dir = releases_dir(&state).join(&tag);
+    let _ = std::fs::remove_dir_all(&tag_dir);
+
+    log::info!("Release {} deleted", tag);
+
+    Ok(Json(serde_json::json!({ "status": "OK" })))
+}
+
+// ---------------------------------------------------------------------------
 // Dashboard (embedded HTML)
 // ---------------------------------------------------------------------------
 
@@ -973,10 +1221,16 @@ async fn main() -> Result<()> {
 
     let jwt_secret: [u8; 32] = rand::random();
 
+    // Ensure releases asset directory exists
+    let releases_dir = std::path::Path::new(&cli.data_dir).join("releases");
+    std::fs::create_dir_all(&releases_dir)
+        .with_context(|| format!("Failed to create releases dir at {}", releases_dir.display()))?;
+
     let state = Arc::new(AppState {
         db: Mutex::new(db),
         private_key,
         jwt_secret,
+        data_dir: cli.data_dir,
     });
 
     let app = Router::new()
@@ -1011,6 +1265,12 @@ async fn main() -> Result<()> {
             "/api/v1/licenses/{key}/machines/{machine_code}",
             axum::routing::delete(handle_deactivate_machine),
         )
+        // Releases — client endpoints (license-key protected)
+        .route("/api/v1/updates/releases", get(handle_get_releases))
+        .route("/api/v1/updates/download/{tag}/{asset}", get(handle_download_asset))
+        // Releases — admin endpoints (JWT protected)
+        .route("/api/v1/releases", get(handle_list_releases_admin).post(handle_upload_release))
+        .route("/api/v1/releases/{tag}", axum::routing::delete(handle_delete_release))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&cli.listen)

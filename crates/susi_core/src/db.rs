@@ -57,6 +57,24 @@ impl LicenseDb {
             CREATE INDEX IF NOT EXISTS idx_license_key ON licenses(license_key);
             CREATE INDEX IF NOT EXISTS idx_activations_license ON machine_activations(license_id);
 
+            CREATE TABLE IF NOT EXISTS releases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tag TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL DEFAULT '',
+                body TEXT NOT NULL DEFAULT '',
+                prerelease INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS release_assets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                release_id INTEGER NOT NULL,
+                file_name TEXT NOT NULL,
+                file_size INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY (release_id) REFERENCES releases(id) ON DELETE CASCADE,
+                UNIQUE(release_id, file_name)
+            );
+
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 username TEXT NOT NULL UNIQUE,
@@ -495,6 +513,100 @@ impl LicenseDb {
             )
             .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))?;
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // License listing
+    // -----------------------------------------------------------------------
+
+    // -----------------------------------------------------------------------
+    // Releases
+    // -----------------------------------------------------------------------
+
+    pub fn insert_release(
+        &self,
+        tag: &str,
+        name: &str,
+        body: &str,
+        prerelease: bool,
+    ) -> Result<i64, LicenseError> {
+        let now = Utc::now().to_rfc3339();
+        self.conn
+            .execute(
+                "INSERT INTO releases (tag, name, body, prerelease, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![tag, name, body, prerelease as i32, now],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB insert release: {}", e)))?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn add_release_asset(
+        &self,
+        release_id: i64,
+        file_name: &str,
+        file_size: u64,
+    ) -> Result<(), LicenseError> {
+        self.conn
+            .execute(
+                "INSERT INTO release_assets (release_id, file_name, file_size) VALUES (?1, ?2, ?3)",
+                params![release_id, file_name, file_size as i64],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB insert asset: {}", e)))?;
+        Ok(())
+    }
+
+    pub fn list_releases(&self) -> Result<Vec<(i64, String, String, String, bool, String)>, LicenseError> {
+        let mut stmt = self.conn
+            .prepare("SELECT id, tag, name, body, prerelease, created_at FROM releases ORDER BY id DESC")
+            .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, i32>(4)? != 0,
+                    r.get::<_, String>(5)?,
+                ))
+            })
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    pub fn get_release_assets(&self, release_id: i64) -> Result<Vec<(String, u64)>, LicenseError> {
+        let mut stmt = self.conn
+            .prepare("SELECT file_name, file_size FROM release_assets WHERE release_id = ?1")
+            .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
+        let rows = stmt
+            .query_map(params![release_id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64))
+            })
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    pub fn get_release_by_tag(&self, tag: &str) -> Result<Option<i64>, LicenseError> {
+        match self.conn.query_row(
+            "SELECT id FROM releases WHERE tag = ?1",
+            params![tag],
+            |r| r.get(0),
+        ) {
+            Ok(id) => Ok(Some(id)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(LicenseError::Other(format!("DB query: {}", e))),
+        }
+    }
+
+    pub fn delete_release(&self, tag: &str) -> Result<bool, LicenseError> {
+        let rows = self.conn
+            .execute("DELETE FROM releases WHERE tag = ?1", params![tag])
+            .map_err(|e| LicenseError::Other(format!("DB delete: {}", e)))?;
+        Ok(rows > 0)
     }
 
     // -----------------------------------------------------------------------

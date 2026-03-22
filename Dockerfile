@@ -27,7 +27,7 @@ RUN touch crates/susi_core/src/lib.rs crates/susi_server/src/main.rs && \
 FROM debian:bookworm-slim
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates && \
+    apt-get install -y --no-install-recommends ca-certificates curl && \
     rm -rf /var/lib/apt/lists/*
 
 RUN useradd --create-home --shell /bin/bash susi

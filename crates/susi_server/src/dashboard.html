@@ -437,6 +437,17 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
         </div>
     </div>
 
+    <!-- Releases section -->
+    <div style="margin-top:32px;margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;">
+        <h2 style="font-size:16px;font-weight:600;">Software Releases</h2>
+        <button onclick="showUploadReleaseModal()">+ Upload Release</button>
+    </div>
+    <div class="card" id="releasesCard">
+        <div id="releasesContainer" style="padding:16px;color:var(--text2);font-size:13px;">Loading...</div>
+    </div>
+
+    <h2 style="font-size:16px;font-weight:600;margin-top:32px;margin-bottom:16px;">Licenses</h2>
+
     <!-- License table -->
     <div class="card">
         <table>
@@ -516,6 +527,44 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
         <div class="form-actions">
             <button class="secondary" onclick="closeExportModal()">Cancel</button>
             <button onclick="doExport()">Export &amp; Download</button>
+        </div>
+    </div>
+</div>
+
+<!-- Upload Release Modal -->
+<div id="uploadReleaseModal" class="modal-overlay" onclick="if(event.target===this)closeUploadReleaseModal()">
+    <div class="modal">
+        <h2>Upload Release</h2>
+        <div class="form-row">
+            <label>Version Tag</label>
+            <input type="text" id="releaseTag" placeholder="e.g. v1.3.0">
+        </div>
+        <div class="form-row">
+            <label>Release Name (optional)</label>
+            <input type="text" id="releaseName" placeholder="e.g. FusionHub v1.3.0">
+        </div>
+        <div class="form-row">
+            <label>Release Notes (Markdown)</label>
+            <textarea id="releaseBody" rows="6" style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:var(--radius);font-size:13px;font-family:inherit;width:100%;resize:vertical;" placeholder="## Changes&#10;- Fixed something&#10;- Added feature"></textarea>
+        </div>
+        <div class="form-row">
+            <label class="checkbox" style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:var(--text2);">
+                <input type="checkbox" id="releasePrerelease" style="accent-color:var(--accent);width:16px;height:16px;">
+                Pre-release
+            </label>
+        </div>
+        <div class="form-row">
+            <label>Asset File (zip)</label>
+            <input type="file" id="releaseFile" style="font-size:13px;color:var(--text);">
+        </div>
+        <div id="uploadProgress" style="display:none;margin-bottom:12px;">
+            <div style="background:var(--bg);border-radius:4px;height:22px;overflow:hidden;">
+                <div id="uploadProgressBar" style="height:100%;background:var(--accent);transition:width 0.3s;width:0%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;color:#fff;"></div>
+            </div>
+        </div>
+        <div class="form-actions">
+            <button class="secondary" onclick="closeUploadReleaseModal()">Cancel</button>
+            <button id="uploadBtn" onclick="uploadRelease()">Upload</button>
         </div>
     </div>
 </div>
@@ -757,6 +806,7 @@ function enterDashboard() {
     userEl.textContent = currentUsername;
     userEl.style.display = '';
     loadLicenses();
+    loadReleases();
 }
 
 function logout() {
@@ -1270,6 +1320,152 @@ async function resetUserPassword(username) {
     }
 }
 
+// Releases
+let releases = [];
+
+async function loadReleases() {
+    const container = document.getElementById('releasesContainer');
+    try {
+        const resp = await fetch(API + '/releases', {
+            headers: authHeaders(),
+        });
+        if (!resp.ok) {
+            container.innerHTML = '<span style="color:var(--text2);">Failed to load releases</span>';
+            return;
+        }
+        const data = await resp.json();
+        releases = data.releases || [];
+        renderReleases();
+    } catch (e) {
+        container.innerHTML = '<span style="color:var(--text2);">Failed to connect</span>';
+    }
+}
+
+function formatSize(bytes) {
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+function renderReleases() {
+    const container = document.getElementById('releasesContainer');
+    if (releases.length === 0) {
+        container.innerHTML = '<span style="color:var(--text2);">No releases uploaded yet</span>';
+        return;
+    }
+    container.innerHTML = releases.map(r => {
+        const assets = (r.assets || []).map(a =>
+            '<span style="font-family:monospace;font-size:12px;color:var(--text);">' + esc(a.name) + '</span>' +
+            '<span style="color:var(--text2);font-size:11px;margin-left:8px;">' + formatSize(a.size) + '</span>'
+        ).join('<br>');
+        const pre = r.prerelease ? ' <span style="background:rgba(251,191,36,0.15);color:var(--yellow);font-size:11px;font-weight:600;padding:2px 8px;border-radius:4px;">Pre-release</span>' : '';
+        return '<div style="display:flex;align-items:flex-start;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border);">' +
+            '<div>' +
+                '<div style="font-weight:600;font-size:14px;font-family:monospace;">' + esc(r.tag) + pre + '</div>' +
+                (r.name && r.name !== r.tag ? '<div style="font-size:13px;color:var(--text2);">' + esc(r.name) + '</div>' : '') +
+                '<div style="font-size:12px;color:var(--text2);margin-top:4px;">' + formatDate(r.published_at) + '</div>' +
+                (assets ? '<div style="margin-top:6px;">' + assets + '</div>' : '') +
+            '</div>' +
+            '<button class="small danger" onclick="deleteRelease(\'' + esc(r.tag) + '\')">Delete</button>' +
+        '</div>';
+    }).join('');
+}
+
+function showUploadReleaseModal() {
+    document.getElementById('releaseTag').value = '';
+    document.getElementById('releaseName').value = '';
+    document.getElementById('releaseBody').value = '';
+    document.getElementById('releasePrerelease').checked = false;
+    document.getElementById('releaseFile').value = '';
+    document.getElementById('uploadProgress').style.display = 'none';
+    document.getElementById('uploadBtn').disabled = false;
+    document.getElementById('uploadReleaseModal').classList.add('visible');
+    document.getElementById('releaseTag').focus();
+}
+
+function closeUploadReleaseModal() {
+    document.getElementById('uploadReleaseModal').classList.remove('visible');
+}
+
+async function uploadRelease() {
+    const tag = document.getElementById('releaseTag').value.trim();
+    const name = document.getElementById('releaseName').value.trim();
+    const body = document.getElementById('releaseBody').value;
+    const prerelease = document.getElementById('releasePrerelease').checked;
+    const fileInput = document.getElementById('releaseFile');
+
+    if (!tag) { toast('Version tag is required', 'error'); return; }
+    if (!fileInput.files.length) { toast('Select a file to upload', 'error'); return; }
+
+    const formData = new FormData();
+    formData.append('tag', tag);
+    formData.append('name', name);
+    formData.append('body', body);
+    formData.append('prerelease', prerelease ? 'true' : 'false');
+    formData.append('file', fileInput.files[0]);
+
+    document.getElementById('uploadBtn').disabled = true;
+    document.getElementById('uploadProgress').style.display = '';
+
+    try {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', API + '/releases');
+        xhr.setRequestHeader('Authorization', 'Bearer ' + authToken);
+
+        xhr.upload.onprogress = function(e) {
+            if (e.lengthComputable) {
+                const pct = Math.round((e.loaded / e.total) * 100);
+                const bar = document.getElementById('uploadProgressBar');
+                bar.style.width = pct + '%';
+                bar.textContent = pct + '%';
+            }
+        };
+
+        xhr.onload = function() {
+            if (xhr.status >= 200 && xhr.status < 300) {
+                toast('Release ' + tag + ' uploaded', 'success');
+                closeUploadReleaseModal();
+                loadReleases();
+            } else {
+                try {
+                    const data = JSON.parse(xhr.responseText);
+                    toast('Error: ' + (data.error || 'Upload failed'), 'error');
+                } catch { toast('Upload failed', 'error'); }
+                document.getElementById('uploadBtn').disabled = false;
+            }
+        };
+
+        xhr.onerror = function() {
+            toast('Upload failed', 'error');
+            document.getElementById('uploadBtn').disabled = false;
+        };
+
+        xhr.send(formData);
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+        document.getElementById('uploadBtn').disabled = false;
+    }
+}
+
+async function deleteRelease(tag) {
+    if (!confirm('Delete release ' + tag + '? This cannot be undone.')) return;
+    try {
+        const resp = await fetch(API + '/releases/' + encodeURIComponent(tag), {
+            method: 'DELETE',
+            headers: authHeaders(),
+        });
+        if (!resp.ok) {
+            const data = await resp.json();
+            toast('Error: ' + data.error, 'error');
+            return;
+        }
+        toast('Release ' + tag + ' deleted', 'success');
+        await loadReleases();
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
 // Keyboard shortcuts
 document.addEventListener('keydown', e => {
     if (e.key === 'Escape') {
@@ -1277,6 +1473,7 @@ document.addEventListener('keydown', e => {
         closeExportModal();
         closeTFAModal();
         closeUsersModal();
+        closeUploadReleaseModal();
     }
 });
 </script>
