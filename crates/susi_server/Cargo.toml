@@ -18,7 +18,7 @@ clap = { version = "4", features = ["derive", "env"] }
 tokio = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
-axum = { version = "0.8", features = ["multipart"] }
+axum = { version = "0.8", features = ["multipart", "ws"] }
 tower-http = { version = "0.6", features = ["cors"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 rsa = { version = "0.9", features = ["pem"] }
@@ -28,3 +28,5 @@ jsonwebtoken = "9"
 totp-rs = { version = "5", features = ["qr"] }
 rand = "0.8"
 uuid = { version = "1", features = ["v4"] }
+base64 = "0.22"
+futures-util = "0.3"

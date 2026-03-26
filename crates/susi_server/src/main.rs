@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
@@ -5,6 +6,7 @@ use argon2::{self, Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use argon2::password_hash::SaltString;
 use axum::{
     extract::{Multipart, Path, State},
+    extract::ws::{Message, WebSocket, WebSocketUpgrade},
     http::{header, HeaderMap, StatusCode},
     response::{Html, IntoResponse},
     routing::{get, post},
@@ -20,6 +22,7 @@ use susi_core::{License, DEFAULT_LEASE_DURATION_HOURS, DEFAULT_LEASE_GRACE_HOURS
 use rsa::RsaPrivateKey;
 use serde::{Deserialize, Serialize};
 use totp_rs::{Algorithm, Secret, TOTP};
+use futures_util::StreamExt;
 
 #[derive(Parser)]
 #[command(name = "susi-server", about = "Susi License Server")]
@@ -41,11 +44,39 @@ struct Cli {
     data_dir: String,
 }
 
+/// A connected relay device. Requests are sent via `tx`, responses come back on a per-request oneshot.
+struct RelayDevice {
+    workspace_id: String,
+    username: String,
+    friendly_name: String,
+    connected_at: String,
+    tx: tokio::sync::mpsc::Sender<RelayRequest>,
+}
+
+struct RelayRequest {
+    id: String,
+    method: String,
+    path: String,
+    resp_tx: tokio::sync::oneshot::Sender<RelayResponse>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct RelayResponse {
+    id: String,
+    status: u16,
+    #[serde(default)]
+    content_type: String,
+    body_base64: String,
+}
+
+type RelayMap = Arc<tokio::sync::Mutex<HashMap<String, RelayDevice>>>;
+
 struct AppState {
     db: Mutex<LicenseDb>,
     private_key: RsaPrivateKey,
     jwt_secret: [u8; 32],
     data_dir: String,
+    relays: RelayMap,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1540,6 +1571,204 @@ async fn handle_get_latest_config(
 }
 
 // ---------------------------------------------------------------------------
+// Relay endpoints
+// ---------------------------------------------------------------------------
+
+/// WebSocket endpoint for field devices to connect as relay targets.
+/// Auth via query param: `/api/v1/relay/connect?token=JWT&workspace=ID&name=FRIENDLY`
+async fn handle_relay_connect(
+    State(state): State<Arc<AppState>>,
+    ws: WebSocketUpgrade,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> std::result::Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let token = params.get("token").cloned().unwrap_or_default();
+    let workspace_id = params.get("workspace").cloned().unwrap_or_default();
+    let friendly_name = params.get("name").cloned().unwrap_or_else(|| "unknown".into());
+
+    // Validate JWT
+    let mut headers = HeaderMap::new();
+    headers.insert("authorization", format!("Bearer {}", token).parse().unwrap());
+    let claims = validate_jwt(&headers, &state.jwt_secret)?;
+
+    if workspace_id.is_empty() {
+        return Err(error_response(StatusCode::BAD_REQUEST, "Missing workspace parameter"));
+    }
+
+    // Verify workspace membership
+    {
+        let db = state.db.lock().unwrap();
+        db.get_workspace_member_role(&workspace_id, &claims.sub)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+            .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
+    }
+
+    let device_id = uuid::Uuid::new_v4().to_string();
+    let relays = state.relays.clone();
+    let username = claims.sub.clone();
+
+    log::info!("Relay device '{}' ({}) connecting from user {}", friendly_name, device_id, username);
+
+    Ok(ws.on_upgrade(move |socket| handle_relay_socket(socket, device_id, workspace_id, username, friendly_name, relays)))
+}
+
+async fn handle_relay_socket(
+    socket: WebSocket,
+    device_id: String,
+    workspace_id: String,
+    username: String,
+    friendly_name: String,
+    relays: RelayMap,
+) {
+    let (mut ws_tx, mut ws_rx) = socket.split();
+    let (req_tx, mut req_rx) = tokio::sync::mpsc::channel::<RelayRequest>(32);
+
+    // Register device
+    {
+        let mut map = relays.lock().await;
+        map.insert(device_id.clone(), RelayDevice {
+            workspace_id,
+            username,
+            friendly_name: friendly_name.clone(),
+            connected_at: Utc::now().to_rfc3339(),
+            tx: req_tx,
+        });
+    }
+
+    // Track pending responses
+    let pending: Arc<tokio::sync::Mutex<HashMap<String, tokio::sync::oneshot::Sender<RelayResponse>>>> =
+        Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+
+    let pending_clone = pending.clone();
+    let device_id_clone = device_id.clone();
+
+    // Forward incoming requests to WebSocket
+    let send_task = tokio::spawn(async move {
+        use futures_util::SinkExt;
+        while let Some(req) = req_rx.recv().await {
+            let msg = serde_json::json!({
+                "type": "request",
+                "id": req.id,
+                "method": req.method,
+                "path": req.path,
+            });
+            {
+                let mut p = pending_clone.lock().await;
+                p.insert(req.id.clone(), req.resp_tx);
+            }
+            if ws_tx.send(Message::Text(msg.to_string().into())).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    // Receive responses from WebSocket
+    let recv_task = tokio::spawn({
+        let pending = pending.clone();
+        async move {
+            use futures_util::StreamExt;
+            while let Some(Ok(msg)) = ws_rx.next().await {
+                if let Message::Text(text) = msg {
+                    if let Ok(resp) = serde_json::from_str::<RelayResponse>(&text) {
+                        let mut p = pending.lock().await;
+                        if let Some(tx) = p.remove(&resp.id) {
+                            let _ = tx.send(resp);
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    // Wait for either task to finish (connection closed)
+    tokio::select! {
+        _ = send_task => {},
+        _ = recv_task => {},
+    }
+
+    // Cleanup
+    {
+        let mut map = relays.lock().await;
+        map.remove(&device_id_clone);
+    }
+    log::info!("Relay device '{}' ({}) disconnected", friendly_name, device_id_clone);
+}
+
+/// List connected relay devices visible to the authenticated user.
+async fn handle_list_relay_devices(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> std::result::Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let claims = validate_jwt(&headers, &state.jwt_secret)?;
+    require_password_changed(&state, &claims.sub)?;
+
+    // Get workspaces user belongs to
+    let workspace_ids: Vec<String> = {
+        let db = state.db.lock().unwrap();
+        db.list_workspaces_for_user(&claims.sub)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+            .iter()
+            .map(|(id, ..)| id.clone())
+            .collect()
+    };
+
+    let map = state.relays.lock().await;
+    let devices: Vec<_> = map.iter()
+        .filter(|(_, dev)| workspace_ids.contains(&dev.workspace_id))
+        .map(|(id, dev)| serde_json::json!({
+            "device_id": id,
+            "workspace_id": dev.workspace_id,
+            "username": dev.username,
+            "friendly_name": dev.friendly_name,
+            "connected_at": dev.connected_at,
+        }))
+        .collect();
+
+    Ok(Json(serde_json::json!({ "devices": devices })))
+}
+
+/// Proxy an observer's request to a relay device. GET-only for read-only mode.
+async fn handle_relay_proxy(
+    State(state): State<Arc<AppState>>,
+    Path((device_id, path)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let map = state.relays.lock().await;
+    let device = match map.get(&device_id) {
+        Some(d) => d,
+        None => return (StatusCode::NOT_FOUND, HeaderMap::new(), b"Device not connected".to_vec()),
+    };
+
+    let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+    let req = RelayRequest {
+        id: uuid::Uuid::new_v4().to_string(),
+        method: "GET".into(),
+        path: format!("/{}", path),
+        resp_tx,
+    };
+
+    if device.tx.send(req).await.is_err() {
+        return (StatusCode::BAD_GATEWAY, HeaderMap::new(), b"Device connection lost".to_vec());
+    }
+    drop(map);
+
+    match tokio::time::timeout(std::time::Duration::from_secs(30), resp_rx).await {
+        Ok(Ok(resp)) => {
+            let body = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &resp.body_base64)
+                .unwrap_or_default();
+            let status = StatusCode::from_u16(resp.status).unwrap_or(StatusCode::BAD_GATEWAY);
+            let mut headers = HeaderMap::new();
+            if !resp.content_type.is_empty() {
+                if let Ok(val) = resp.content_type.parse() {
+                    headers.insert(header::CONTENT_TYPE, val);
+                }
+            }
+            (status, headers, body)
+        }
+        Ok(Err(_)) => (StatusCode::BAD_GATEWAY, HeaderMap::new(), b"Device did not respond".to_vec()),
+        Err(_) => (StatusCode::GATEWAY_TIMEOUT, HeaderMap::new(), b"Relay timeout".to_vec()),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Dashboard (embedded HTML)
 // ---------------------------------------------------------------------------
 
@@ -1590,6 +1819,7 @@ async fn main() -> Result<()> {
         private_key,
         jwt_secret,
         data_dir: cli.data_dir,
+        relays: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
     });
 
     let app = Router::new()
@@ -1639,6 +1869,10 @@ async fn main() -> Result<()> {
         .route("/api/v1/workspaces/{id}/configs", get(handle_list_configs).post(handle_push_config))
         .route("/api/v1/workspaces/{id}/configs/latest", get(handle_get_latest_config))
         .route("/api/v1/workspaces/{id}/configs/{version}", get(handle_get_config))
+        // Relay endpoints
+        .route("/api/v1/relay/connect", get(handle_relay_connect))
+        .route("/api/v1/relay/devices", get(handle_list_relay_devices))
+        .route("/relay/{device_id}/{*path}", get(handle_relay_proxy))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&cli.listen)
