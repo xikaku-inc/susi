@@ -24,6 +24,8 @@ public:
 private:
     bool m_isValid = false;
     std::vector<std::string> m_features;
+    std::string m_product;
+    std::string m_customer;
     int64_t m_leaseExpiresEpoch = 0; // 0 = no lease
     int64_t m_graceHours = 24;
     std::string m_publicKey;
@@ -50,6 +52,10 @@ public:
     const std::vector<std::string>& features() const { return m_features; }
 
     bool hasFeature(const std::string& feature) const;
+
+    const std::string& product() const { return m_product; }
+    
+    const std::string& customer() const { return m_customer; }
 
     /// Returns true if there is an active lease that has not yet expired.
     bool isLeaseValid() const;

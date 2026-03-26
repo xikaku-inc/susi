@@ -450,7 +450,7 @@ SusiClient::LicenseStatus SusiClient::verifySignedLicenseJson(const std::string&
         }
     }
 
-    // Extract features
+    // Extract information
     if (payload.contains("features") && payload.at("features").is_array()) {
         for (const auto& f : payload.at("features")) {
             if (f.is_string()) {
@@ -459,9 +459,10 @@ SusiClient::LicenseStatus SusiClient::verifySignedLicenseJson(const std::string&
         }
     }
 
+    m_product = payload.value("product", std::string("unknown"));
+    m_customer = payload.value("customer", std::string("unknown"));
+    
     // Log success
-    std::string product = payload.value("product", std::string("unknown"));
-    std::string customer = payload.value("customer", std::string("unknown"));
     std::string expiresDisplay;
     if (payload.contains("expires") && !payload.at("expires").is_null()) {
         expiresDisplay = payload.at("expires").get<std::string>();
@@ -470,7 +471,7 @@ SusiClient::LicenseStatus SusiClient::verifySignedLicenseJson(const std::string&
     }
 
     SUSI_LOG("License valid for '%s' (customer: %s, expires: %s)",
-             product.c_str(), customer.c_str(), expiresDisplay.c_str());
+             m_product.c_str(), m_customer.c_str(), expiresDisplay.c_str());
 
     if (!m_features.empty()) {
         std::string featureList;
@@ -490,6 +491,8 @@ SusiClient::LicenseStatus SusiClient::verifySignedLicenseJson(const std::string&
 SusiClient::LicenseStatus SusiClient::checkLicense(const std::filesystem::path& licensePath)
 {
     m_features.clear();
+    m_product.clear();
+    m_customer.clear();
     m_leaseExpiresEpoch = 0;
 
     std::ifstream licenseFile(licensePath);
@@ -511,6 +514,8 @@ SusiClient::LicenseStatus SusiClient::checkLicense(const std::filesystem::path& 
 SusiClient::LicenseStatus SusiClient::checkLicenseAndRefresh(const std::filesystem::path& licensePath, const std::string& licenseKey)
 {
     m_features.clear();
+    m_product.clear();
+    m_customer.clear();
     m_leaseExpiresEpoch = 0;
 
     if (!m_serverUrl.empty()) {
@@ -912,6 +917,8 @@ static std::string decryptToken(const std::vector<unsigned char>& blob, const st
 SusiClient::LicenseStatus SusiClient::checkLicenseToken()
 {
     m_features.clear();
+    m_product.clear();
+    m_customer.clear();
     m_leaseExpiresEpoch = 0;
 
     auto devices = enumerateUsbDevices();
