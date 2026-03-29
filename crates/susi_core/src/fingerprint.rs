@@ -151,15 +151,79 @@ fn get_hostname() -> Result<String, LicenseError> {
         })
 }
 
-// Fallback for other platforms (e.g. macOS during development)
-#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+#[cfg(target_os = "macos")]
+fn get_mac_addresses() -> Result<Vec<String>, LicenseError> {
+    use std::ptr;
+
+    // AF_LINK on macOS
+    const AF_LINK: i32 = 18;
+
+    // Minimal sockaddr_dl layout for reading MAC addresses
+    #[repr(C)]
+    struct SockaddrDl {
+        sdl_len: u8,
+        sdl_family: u8,
+        _sdl_index: u16,
+        sdl_type: u8,
+        sdl_nlen: u8,
+        sdl_alen: u8,
+        _sdl_slen: u8,
+        sdl_data: [u8; 46],
+    }
+
+    // IFT_ETHER
+    const IFT_ETHER: u8 = 6;
+
+    let mut ifap: *mut libc::ifaddrs = ptr::null_mut();
+    if unsafe { libc::getifaddrs(&mut ifap) } != 0 {
+        return Err(LicenseError::Other("getifaddrs failed".to_string()));
+    }
+
+    let mut macs = Vec::new();
+    let mut cur = ifap;
+    while !cur.is_null() {
+        let ifa = unsafe { &*cur };
+        if !ifa.ifa_addr.is_null() {
+            let sa = unsafe { &*ifa.ifa_addr };
+            if sa.sa_family as i32 == AF_LINK {
+                let sdl = unsafe { &*(ifa.ifa_addr as *const SockaddrDl) };
+                if sdl.sdl_type == IFT_ETHER && sdl.sdl_alen == 6 {
+                    let offset = sdl.sdl_nlen as usize;
+                    let mac = &sdl.sdl_data[offset..offset + 6];
+                    if mac.iter().any(|&b| b != 0) {
+                        macs.push(hex::encode(mac));
+                    }
+                }
+            }
+        }
+        cur = ifa.ifa_next;
+    }
+
+    unsafe { libc::freeifaddrs(ifap) };
+    macs.sort();
+    macs.dedup();
+    Ok(macs)
+}
+
+#[cfg(target_os = "macos")]
+fn get_hostname() -> Result<String, LicenseError> {
+    let mut buf = [0u8; 256];
+    let result = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut i8, buf.len()) };
+    if result != 0 {
+        return Err(LicenseError::Other("gethostname failed".to_string()));
+    }
+    let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    Ok(String::from_utf8_lossy(&buf[..len]).to_string())
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
 fn get_mac_addresses() -> Result<Vec<String>, LicenseError> {
     Err(LicenseError::Other(
         "Platform not supported for hardware fingerprinting".to_string(),
     ))
 }
 
-#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
 fn get_hostname() -> Result<String, LicenseError> {
     Err(LicenseError::Other(
         "Platform not supported for hardware fingerprinting".to_string(),
@@ -213,6 +277,16 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn test_get_machine_code_linux() {
+        let code = get_machine_code().unwrap();
+        assert_eq!(code.len(), 64);
+        assert!(code.chars().all(|c| c.is_ascii_hexdigit()));
+        let code2 = get_machine_code().unwrap();
+        assert_eq!(code, code2);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_get_machine_code_macos() {
         let code = get_machine_code().unwrap();
         assert_eq!(code.len(), 64);
         assert!(code.chars().all(|c| c.is_ascii_hexdigit()));
