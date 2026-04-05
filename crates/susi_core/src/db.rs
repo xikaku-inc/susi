@@ -84,7 +84,41 @@ impl LicenseDb {
                 totp_enabled INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
-            );",
+            );
+
+            CREATE TABLE IF NOT EXISTS workspaces (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                product TEXT NOT NULL DEFAULT '',
+                description TEXT NOT NULL DEFAULT '',
+                created_by TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS workspace_members (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                workspace_id TEXT NOT NULL,
+                username TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'viewer',
+                added_at TEXT NOT NULL,
+                FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+                UNIQUE(workspace_id, username)
+            );
+            CREATE INDEX IF NOT EXISTS idx_workspace_members_user ON workspace_members(username);
+
+            CREATE TABLE IF NOT EXISTS config_revisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                workspace_id TEXT NOT NULL,
+                version INTEGER NOT NULL,
+                config_json TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                author TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+                UNIQUE(workspace_id, version)
+            );
+            CREATE INDEX IF NOT EXISTS idx_config_revisions_workspace ON config_revisions(workspace_id);",
             )
             .map_err(|e| LicenseError::Other(format!("DB init: {}", e)))?;
         self.migrate()?;
@@ -98,6 +132,11 @@ impl LicenseDb {
              ALTER TABLE licenses ADD COLUMN lease_grace_hours INTEGER NOT NULL DEFAULT 24;
              ALTER TABLE machine_activations ADD COLUMN lease_expires_at TEXT NOT NULL DEFAULT '';"
         );
+        // Add workspace_id to releases for per-workspace scoping
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE releases ADD COLUMN workspace_id TEXT DEFAULT NULL;"
+        );
+
         // Migrate single-admin table to multi-user table
         let has_admin_user: bool = self.conn
             .query_row(
@@ -516,11 +555,298 @@ impl LicenseDb {
     }
 
     // -----------------------------------------------------------------------
-    // License listing
+    // Workspaces
     // -----------------------------------------------------------------------
 
+    pub fn create_workspace(
+        &self,
+        id: &str,
+        name: &str,
+        product: &str,
+        description: &str,
+        created_by: &str,
+    ) -> Result<(), LicenseError> {
+        let now = Utc::now().to_rfc3339();
+        self.conn
+            .execute(
+                "INSERT INTO workspaces (id, name, product, description, created_by, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+                params![id, name, product, description, created_by, now],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB insert workspace: {}", e)))?;
+        // Add creator as owner
+        self.conn
+            .execute(
+                "INSERT INTO workspace_members (workspace_id, username, role, added_at)
+                 VALUES (?1, ?2, 'owner', ?3)",
+                params![id, created_by, now],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB insert workspace member: {}", e)))?;
+        Ok(())
+    }
+
+    pub fn get_workspace(
+        &self,
+        id: &str,
+    ) -> Result<Option<(String, String, String, String, String, String, String)>, LicenseError> {
+        match self.conn.query_row(
+            "SELECT id, name, product, description, created_by, created_at, updated_at
+             FROM workspaces WHERE id = ?1",
+            params![id],
+            |r| Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
+                r.get::<_, String>(6)?,
+            )),
+        ) {
+            Ok(row) => Ok(Some(row)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(LicenseError::Other(format!("DB query: {}", e))),
+        }
+    }
+
+    pub fn list_workspaces_for_user(
+        &self,
+        username: &str,
+    ) -> Result<Vec<(String, String, String, String, String, String, String, String)>, LicenseError> {
+        let mut stmt = self.conn
+            .prepare(
+                "SELECT w.id, w.name, w.product, w.description, w.created_by, w.created_at, w.updated_at, wm.role
+                 FROM workspaces w
+                 JOIN workspace_members wm ON w.id = wm.workspace_id
+                 WHERE wm.username = ?1
+                 ORDER BY w.name"
+            )
+            .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
+        let rows = stmt
+            .query_map(params![username], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
+                    r.get::<_, String>(6)?,
+                    r.get::<_, String>(7)?,
+                ))
+            })
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    pub fn update_workspace(
+        &self,
+        id: &str,
+        name: &str,
+        product: &str,
+        description: &str,
+    ) -> Result<bool, LicenseError> {
+        let now = Utc::now().to_rfc3339();
+        let rows = self.conn
+            .execute(
+                "UPDATE workspaces SET name = ?1, product = ?2, description = ?3, updated_at = ?4 WHERE id = ?5",
+                params![name, product, description, now, id],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))?;
+        Ok(rows > 0)
+    }
+
+    pub fn delete_workspace(&self, id: &str) -> Result<bool, LicenseError> {
+        let rows = self.conn
+            .execute("DELETE FROM workspaces WHERE id = ?1", params![id])
+            .map_err(|e| LicenseError::Other(format!("DB delete: {}", e)))?;
+        Ok(rows > 0)
+    }
+
     // -----------------------------------------------------------------------
-    // Releases
+    // Workspace members
+    // -----------------------------------------------------------------------
+
+    pub fn add_workspace_member(
+        &self,
+        workspace_id: &str,
+        username: &str,
+        role: &str,
+    ) -> Result<(), LicenseError> {
+        let now = Utc::now().to_rfc3339();
+        self.conn
+            .execute(
+                "INSERT INTO workspace_members (workspace_id, username, role, added_at)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(workspace_id, username) DO UPDATE SET role = excluded.role",
+                params![workspace_id, username, role, now],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB insert member: {}", e)))?;
+        Ok(())
+    }
+
+    pub fn remove_workspace_member(
+        &self,
+        workspace_id: &str,
+        username: &str,
+    ) -> Result<bool, LicenseError> {
+        let rows = self.conn
+            .execute(
+                "DELETE FROM workspace_members WHERE workspace_id = ?1 AND username = ?2",
+                params![workspace_id, username],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB delete member: {}", e)))?;
+        Ok(rows > 0)
+    }
+
+    pub fn list_workspace_members(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<(String, String, String)>, LicenseError> {
+        let mut stmt = self.conn
+            .prepare(
+                "SELECT username, role, added_at FROM workspace_members WHERE workspace_id = ?1 ORDER BY added_at"
+            )
+            .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
+        let rows = stmt
+            .query_map(params![workspace_id], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    pub fn get_workspace_member_role(
+        &self,
+        workspace_id: &str,
+        username: &str,
+    ) -> Result<Option<String>, LicenseError> {
+        match self.conn.query_row(
+            "SELECT role FROM workspace_members WHERE workspace_id = ?1 AND username = ?2",
+            params![workspace_id, username],
+            |r| r.get(0),
+        ) {
+            Ok(role) => Ok(Some(role)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(LicenseError::Other(format!("DB query: {}", e))),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Config revisions
+    // -----------------------------------------------------------------------
+
+    pub fn push_config_revision(
+        &self,
+        workspace_id: &str,
+        config_json: &str,
+        description: &str,
+        author: &str,
+    ) -> Result<i64, LicenseError> {
+        let now = Utc::now().to_rfc3339();
+        // Auto-increment version per workspace
+        let next_version: i64 = self.conn
+            .query_row(
+                "SELECT COALESCE(MAX(version), 0) + 1 FROM config_revisions WHERE workspace_id = ?1",
+                params![workspace_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?;
+        self.conn
+            .execute(
+                "INSERT INTO config_revisions (workspace_id, version, config_json, description, author, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![workspace_id, next_version, config_json, description, author, now],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB insert config: {}", e)))?;
+        Ok(next_version)
+    }
+
+    pub fn list_config_revisions(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<(i64, i64, String, String, String)>, LicenseError> {
+        let mut stmt = self.conn
+            .prepare(
+                "SELECT id, version, description, author, created_at
+                 FROM config_revisions WHERE workspace_id = ?1
+                 ORDER BY version DESC"
+            )
+            .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
+        let rows = stmt
+            .query_map(params![workspace_id], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                ))
+            })
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    pub fn get_config_revision(
+        &self,
+        workspace_id: &str,
+        version: i64,
+    ) -> Result<Option<(i64, i64, String, String, String, String)>, LicenseError> {
+        match self.conn.query_row(
+            "SELECT id, version, config_json, description, author, created_at
+             FROM config_revisions WHERE workspace_id = ?1 AND version = ?2",
+            params![workspace_id, version],
+            |r| Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
+            )),
+        ) {
+            Ok(row) => Ok(Some(row)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(LicenseError::Other(format!("DB query: {}", e))),
+        }
+    }
+
+    pub fn get_latest_config_revision(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Option<(i64, i64, String, String, String, String)>, LicenseError> {
+        match self.conn.query_row(
+            "SELECT id, version, config_json, description, author, created_at
+             FROM config_revisions WHERE workspace_id = ?1
+             ORDER BY version DESC LIMIT 1",
+            params![workspace_id],
+            |r| Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
+            )),
+        ) {
+            Ok(row) => Ok(Some(row)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(LicenseError::Other(format!("DB query: {}", e))),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Releases (with workspace scoping)
     // -----------------------------------------------------------------------
 
     pub fn insert_release(
@@ -529,12 +855,13 @@ impl LicenseDb {
         name: &str,
         body: &str,
         prerelease: bool,
+        workspace_id: Option<&str>,
     ) -> Result<i64, LicenseError> {
         let now = Utc::now().to_rfc3339();
         self.conn
             .execute(
-                "INSERT INTO releases (tag, name, body, prerelease, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![tag, name, body, prerelease as i32, now],
+                "INSERT INTO releases (tag, name, body, prerelease, created_at, workspace_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![tag, name, body, prerelease as i32, now, workspace_id],
             )
             .map_err(|e| LicenseError::Other(format!("DB insert release: {}", e)))?;
         Ok(self.conn.last_insert_rowid())
@@ -555,12 +882,39 @@ impl LicenseDb {
         Ok(())
     }
 
-    pub fn list_releases(&self) -> Result<Vec<(i64, String, String, String, bool, String)>, LicenseError> {
+    pub fn list_releases(&self) -> Result<Vec<(i64, String, String, String, bool, String, Option<String>)>, LicenseError> {
         let mut stmt = self.conn
-            .prepare("SELECT id, tag, name, body, prerelease, created_at FROM releases ORDER BY id DESC")
+            .prepare("SELECT id, tag, name, body, prerelease, created_at, workspace_id FROM releases ORDER BY id DESC")
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
         let rows = stmt
             .query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, i32>(4)? != 0,
+                    r.get::<_, String>(5)?,
+                    r.get::<_, Option<String>>(6)?,
+                ))
+            })
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    /// List releases visible to a workspace (workspace-specific + global).
+    pub fn list_releases_for_workspace(&self, workspace_id: &str) -> Result<Vec<(i64, String, String, String, bool, String)>, LicenseError> {
+        let mut stmt = self.conn
+            .prepare(
+                "SELECT id, tag, name, body, prerelease, created_at FROM releases
+                 WHERE workspace_id = ?1 OR workspace_id IS NULL
+                 ORDER BY id DESC"
+            )
+            .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
+        let rows = stmt
+            .query_map(params![workspace_id], |r| {
                 Ok((
                     r.get::<_, i64>(0)?,
                     r.get::<_, String>(1)?,
@@ -941,5 +1295,169 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(retrieved.machines.len(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Workspace tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_create_and_get_workspace() {
+        let db = test_db();
+        db.create_workspace("ws-1", "Test Workspace", "FusionHub", "A test", "admin").unwrap();
+
+        let ws = db.get_workspace("ws-1").unwrap().unwrap();
+        assert_eq!(ws.0, "ws-1");
+        assert_eq!(ws.1, "Test Workspace");
+        assert_eq!(ws.2, "FusionHub");
+        assert_eq!(ws.3, "A test");
+        assert_eq!(ws.4, "admin");
+    }
+
+    #[test]
+    fn test_workspace_creator_is_owner() {
+        let db = test_db();
+        db.create_workspace("ws-1", "WS", "", "", "admin").unwrap();
+
+        let role = db.get_workspace_member_role("ws-1", "admin").unwrap();
+        assert_eq!(role, Some("owner".to_string()));
+    }
+
+    #[test]
+    fn test_list_workspaces_for_user() {
+        let db = test_db();
+        db.create_workspace("ws-1", "One", "", "", "admin").unwrap();
+        db.create_workspace("ws-2", "Two", "", "", "admin").unwrap();
+        db.create_workspace("ws-3", "Three", "", "", "other").unwrap();
+
+        let list = db.list_workspaces_for_user("admin").unwrap();
+        assert_eq!(list.len(), 2);
+
+        let list = db.list_workspaces_for_user("other").unwrap();
+        assert_eq!(list.len(), 1);
+    }
+
+    #[test]
+    fn test_workspace_members() {
+        let db = test_db();
+        db.create_workspace("ws-1", "WS", "", "", "admin").unwrap();
+
+        db.add_workspace_member("ws-1", "user1", "editor").unwrap();
+        db.add_workspace_member("ws-1", "user2", "viewer").unwrap();
+
+        let members = db.list_workspace_members("ws-1").unwrap();
+        assert_eq!(members.len(), 3); // admin + user1 + user2
+
+        assert_eq!(db.get_workspace_member_role("ws-1", "user1").unwrap(), Some("editor".to_string()));
+        assert_eq!(db.get_workspace_member_role("ws-1", "user2").unwrap(), Some("viewer".to_string()));
+        assert_eq!(db.get_workspace_member_role("ws-1", "nobody").unwrap(), None);
+
+        // Update role via upsert
+        db.add_workspace_member("ws-1", "user2", "editor").unwrap();
+        assert_eq!(db.get_workspace_member_role("ws-1", "user2").unwrap(), Some("editor".to_string()));
+
+        // Remove member
+        db.remove_workspace_member("ws-1", "user1").unwrap();
+        let members = db.list_workspace_members("ws-1").unwrap();
+        assert_eq!(members.len(), 2);
+    }
+
+    #[test]
+    fn test_update_workspace() {
+        let db = test_db();
+        db.create_workspace("ws-1", "Old Name", "P", "D", "admin").unwrap();
+
+        let updated = db.update_workspace("ws-1", "New Name", "NewP", "NewD").unwrap();
+        assert!(updated);
+
+        let ws = db.get_workspace("ws-1").unwrap().unwrap();
+        assert_eq!(ws.1, "New Name");
+        assert_eq!(ws.2, "NewP");
+    }
+
+    #[test]
+    fn test_delete_workspace_cascades() {
+        let db = test_db();
+        db.create_workspace("ws-1", "WS", "", "", "admin").unwrap();
+        db.add_workspace_member("ws-1", "user1", "viewer").unwrap();
+        db.push_config_revision("ws-1", "{}", "init", "admin").unwrap();
+
+        db.delete_workspace("ws-1").unwrap();
+
+        assert!(db.get_workspace("ws-1").unwrap().is_none());
+        assert_eq!(db.list_workspace_members("ws-1").unwrap().len(), 0);
+        assert_eq!(db.list_config_revisions("ws-1").unwrap().len(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Config revision tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_push_and_list_configs() {
+        let db = test_db();
+        db.create_workspace("ws-1", "WS", "", "", "admin").unwrap();
+
+        let v1 = db.push_config_revision("ws-1", r#"{"a":1}"#, "first", "admin").unwrap();
+        let v2 = db.push_config_revision("ws-1", r#"{"a":2}"#, "second", "admin").unwrap();
+        assert_eq!(v1, 1);
+        assert_eq!(v2, 2);
+
+        let list = db.list_config_revisions("ws-1").unwrap();
+        assert_eq!(list.len(), 2);
+        // Newest first
+        assert_eq!(list[0].1, 2);
+        assert_eq!(list[1].1, 1);
+    }
+
+    #[test]
+    fn test_get_config_revision() {
+        let db = test_db();
+        db.create_workspace("ws-1", "WS", "", "", "admin").unwrap();
+        db.push_config_revision("ws-1", r#"{"key":"value"}"#, "test", "admin").unwrap();
+
+        let rev = db.get_config_revision("ws-1", 1).unwrap().unwrap();
+        assert_eq!(rev.1, 1); // version
+        assert_eq!(rev.2, r#"{"key":"value"}"#); // config_json
+        assert_eq!(rev.3, "test"); // description
+
+        assert!(db.get_config_revision("ws-1", 99).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_get_latest_config() {
+        let db = test_db();
+        db.create_workspace("ws-1", "WS", "", "", "admin").unwrap();
+
+        assert!(db.get_latest_config_revision("ws-1").unwrap().is_none());
+
+        db.push_config_revision("ws-1", r#"{"v":1}"#, "v1", "admin").unwrap();
+        db.push_config_revision("ws-1", r#"{"v":2}"#, "v2", "admin").unwrap();
+
+        let latest = db.get_latest_config_revision("ws-1").unwrap().unwrap();
+        assert_eq!(latest.1, 2);
+        assert_eq!(latest.2, r#"{"v":2}"#);
+    }
+
+    #[test]
+    fn test_releases_with_workspace_scoping() {
+        let db = test_db();
+        db.create_workspace("ws-1", "WS", "", "", "admin").unwrap();
+
+        db.insert_release("v1.0", "Global", "", false, None).unwrap();
+        db.insert_release("v1.1", "Scoped", "", false, Some("ws-1")).unwrap();
+
+        // Global list shows all
+        let all = db.list_releases().unwrap();
+        assert_eq!(all.len(), 2);
+
+        // Workspace list shows global + workspace-specific
+        let ws_releases = db.list_releases_for_workspace("ws-1").unwrap();
+        assert_eq!(ws_releases.len(), 2);
+
+        // Different workspace only sees global
+        let other = db.list_releases_for_workspace("ws-other").unwrap();
+        assert_eq!(other.len(), 1);
+        assert_eq!(other[0].1, "v1.0");
     }
 }

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>FusionHub License Server</title>
+<title>Susi Server</title>
 <style>
 :root {
     --bg: #0f1117;
@@ -350,7 +350,7 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
 <body>
 
 <div class="header">
-    <h1>FusionHub License Server</h1>
+    <h1>Susi Server</h1>
     <div class="header-actions">
         <span id="connectionStatus" class="status">Connecting...</span>
         <button id="btnUsers" class="small secondary" onclick="showUsersModal()" style="display:none;">Users</button>
@@ -434,6 +434,65 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
             </div>
             <div class="detail-section-title">Activated Machines</div>
             <div id="detailMachines" class="machines-list"></div>
+        </div>
+    </div>
+
+    <!-- Workspaces section -->
+    <div style="margin-top:32px;margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;">
+        <h2 style="font-size:16px;font-weight:600;">Workspaces</h2>
+        <button onclick="showCreateWorkspaceModal()">+ New Workspace</button>
+    </div>
+    <div id="workspacesContainer" style="display:flex;flex-wrap:wrap;gap:12px;margin-bottom:20px;"></div>
+
+    <!-- Workspace detail panel -->
+    <div id="wsDetailPanel" class="detail-panel card">
+        <div class="detail-header">
+            <h3 id="wsDetailTitle">Workspace</h3>
+            <div>
+                <button class="small secondary" onclick="closeWsDetail()">&times; Close</button>
+            </div>
+        </div>
+        <div class="detail-body">
+            <div class="detail-grid">
+                <div class="detail-field">
+                    <div class="field-label">Product</div>
+                    <div class="field-value" id="wsDetailProduct"></div>
+                </div>
+                <div class="detail-field">
+                    <div class="field-label">Description</div>
+                    <div class="field-value" id="wsDetailDesc"></div>
+                </div>
+                <div class="detail-field">
+                    <div class="field-label">Created By</div>
+                    <div class="field-value" id="wsDetailCreatedBy"></div>
+                </div>
+                <div class="detail-field">
+                    <div class="field-label">Your Role</div>
+                    <div class="field-value" id="wsDetailRole"></div>
+                </div>
+            </div>
+
+            <div class="detail-section-title">Members</div>
+            <div id="wsDetailMembers" class="machines-list"></div>
+            <div id="wsAddMemberRow" style="display:flex;gap:8px;margin-top:8px;">
+                <input type="text" id="wsNewMember" placeholder="Username" style="flex:1;">
+                <select id="wsNewMemberRole" style="width:100px;">
+                    <option value="viewer">Viewer</option>
+                    <option value="editor">Editor</option>
+                    <option value="owner">Owner</option>
+                </select>
+                <button class="small" onclick="addWsMember()">Add</button>
+            </div>
+
+            <div class="detail-section-title">Online Devices</div>
+            <div id="wsDetailDevices" class="machines-list"></div>
+
+            <div class="detail-section-title">Config Revisions</div>
+            <div id="wsDetailConfigs" class="machines-list"></div>
+
+            <div style="margin-top:16px;display:flex;justify-content:flex-end;">
+                <button class="small danger" onclick="deleteWorkspace()">Delete Workspace</button>
+            </div>
         </div>
     </div>
 
@@ -569,11 +628,34 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
     </div>
 </div>
 
+<!-- Create Workspace Modal -->
+<div id="createWorkspaceModal" class="modal-overlay" onclick="if(event.target===this)closeCreateWorkspaceModal()">
+    <div class="modal">
+        <h2>Create Workspace</h2>
+        <div class="form-row">
+            <label>Name</label>
+            <input type="text" id="wsCreateName" placeholder="e.g. Nexco Highway Tracking">
+        </div>
+        <div class="form-row">
+            <label>Product</label>
+            <input type="text" id="wsCreateProduct" placeholder="e.g. FusionHub">
+        </div>
+        <div class="form-row">
+            <label>Description (optional)</label>
+            <input type="text" id="wsCreateDesc" placeholder="Short description">
+        </div>
+        <div class="form-actions">
+            <button class="secondary" onclick="closeCreateWorkspaceModal()">Cancel</button>
+            <button onclick="createWorkspace()">Create</button>
+        </div>
+    </div>
+</div>
+
 <!-- Login overlay -->
 <div id="loginOverlay" class="auth-overlay">
     <div class="auth-card">
         <h2>Login</h2>
-        <div class="subtitle">FusionHub License Server</div>
+        <div class="subtitle">Susi Server</div>
         <div id="loginError" class="auth-error"></div>
         <div class="form-row">
             <label>Username</label>
@@ -807,6 +889,7 @@ function enterDashboard() {
     userEl.style.display = '';
     loadLicenses();
     loadReleases();
+    loadWorkspaces();
 }
 
 function logout() {
@@ -1466,6 +1549,247 @@ async function deleteRelease(tag) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Workspaces
+// ---------------------------------------------------------------------------
+
+let workspaces = [];
+let selectedWsId = null;
+
+async function loadWorkspaces() {
+    const container = document.getElementById('workspacesContainer');
+    try {
+        const resp = await fetch(API + '/workspaces', { headers: authHeaders() });
+        if (!resp.ok) { container.innerHTML = '<span style="color:var(--text2)">Failed to load workspaces</span>'; return; }
+        const data = await resp.json();
+        workspaces = data.workspaces || [];
+        renderWorkspaces();
+    } catch (e) {
+        container.innerHTML = '<span style="color:var(--text2)">Failed to load workspaces</span>';
+    }
+}
+
+function renderWorkspaces() {
+    const container = document.getElementById('workspacesContainer');
+    if (workspaces.length === 0) {
+        container.innerHTML = '<div class="empty-state" style="width:100%;padding:24px;"><p>No workspaces yet.</p></div>';
+        return;
+    }
+    container.innerHTML = workspaces.map(ws => `
+        <div class="stat-card" style="cursor:pointer;min-width:200px;max-width:300px;border:1px solid ${ws.id === selectedWsId ? 'var(--accent)' : 'var(--border)'};"
+             onclick="showWsDetail('${ws.id}')">
+            <div style="font-weight:600;font-size:14px;margin-bottom:4px;">${esc(ws.name)}</div>
+            ${ws.product ? `<span class="badge active" style="font-size:10px;">${esc(ws.product)}</span>` : ''}
+            ${ws.description ? `<div style="font-size:12px;color:var(--text2);margin-top:4px;">${esc(ws.description)}</div>` : ''}
+            <div style="font-size:11px;color:var(--text2);margin-top:6px;">${esc(ws.role)} &middot; by ${esc(ws.created_by)}</div>
+        </div>
+    `).join('');
+}
+
+function esc(str) {
+    const div = document.createElement('div');
+    div.textContent = str || '';
+    return div.innerHTML;
+}
+
+async function showWsDetail(id) {
+    selectedWsId = id;
+    renderWorkspaces();
+    const panel = document.getElementById('wsDetailPanel');
+    panel.classList.add('visible');
+
+    try {
+        const resp = await fetch(API + '/workspaces/' + id, { headers: authHeaders() });
+        if (!resp.ok) { toast('Failed to load workspace', 'error'); return; }
+        const ws = await resp.json();
+
+        document.getElementById('wsDetailTitle').textContent = ws.name;
+        document.getElementById('wsDetailProduct').textContent = ws.product || '-';
+        document.getElementById('wsDetailDesc').textContent = ws.description || '-';
+        document.getElementById('wsDetailCreatedBy').textContent = ws.created_by;
+        document.getElementById('wsDetailRole').textContent = ws.role;
+
+        // Members
+        const members = ws.members || [];
+        document.getElementById('wsDetailMembers').innerHTML = members.length === 0
+            ? '<div style="color:var(--text2);font-size:13px;">No members</div>'
+            : members.map(m => `
+                <div class="machine-item">
+                    <span><strong>${esc(m.username)}</strong> <span class="badge active" style="font-size:10px;">${esc(m.role)}</span></span>
+                    ${m.username !== currentUsername && ws.role === 'owner' ? `<button class="small danger" onclick="removeWsMember('${id}','${esc(m.username)}')">Remove</button>` : ''}
+                </div>
+            `).join('');
+
+        // Show add member only for owners
+        document.getElementById('wsAddMemberRow').style.display = ws.role === 'owner' ? 'flex' : 'none';
+
+        // Load devices
+        loadWsDevices(id);
+
+        // Load configs
+        loadWsConfigs(id);
+    } catch (e) {
+        toast('Error: ' + e.message, 'error');
+    }
+}
+
+function closeWsDetail() {
+    selectedWsId = null;
+    document.getElementById('wsDetailPanel').classList.remove('visible');
+    renderWorkspaces();
+}
+
+async function loadWsDevices(wsId) {
+    const container = document.getElementById('wsDetailDevices');
+    try {
+        const resp = await fetch(API + '/relay/devices', { headers: authHeaders() });
+        if (!resp.ok) { container.innerHTML = '<div style="color:var(--text2);font-size:13px;">Failed to load</div>'; return; }
+        const data = await resp.json();
+        const devices = (data.devices || []).filter(d => d.workspace_id === wsId);
+        if (devices.length === 0) {
+            container.innerHTML = '<div style="color:var(--text2);font-size:13px;">No devices online</div>';
+            return;
+        }
+        container.innerHTML = devices.map(d => `
+            <div class="machine-item">
+                <span>
+                    <strong>${esc(d.friendly_name)}</strong>
+                    <span class="machine-code">${esc(d.username)}</span>
+                </span>
+                <a href="/relay/${d.device_id}/" target="_blank" class="small" style="background:var(--accent);color:#fff;padding:4px 10px;border-radius:var(--radius);font-size:12px;font-weight:500;">
+                    Open UI
+                </a>
+            </div>
+        `).join('');
+    } catch (e) {
+        container.innerHTML = '<div style="color:var(--text2);font-size:13px;">Failed to load devices</div>';
+    }
+}
+
+async function loadWsConfigs(wsId) {
+    const container = document.getElementById('wsDetailConfigs');
+    try {
+        const resp = await fetch(API + '/workspaces/' + wsId + '/configs', { headers: authHeaders() });
+        if (!resp.ok) { container.innerHTML = '<div style="color:var(--text2);font-size:13px;">Failed to load</div>'; return; }
+        const data = await resp.json();
+        const configs = data.configs || [];
+        if (configs.length === 0) {
+            container.innerHTML = '<div style="color:var(--text2);font-size:13px;">No config revisions</div>';
+            return;
+        }
+        container.innerHTML = configs.map(c => `
+            <div class="machine-item">
+                <span>
+                    <strong style="color:var(--accent);">v${c.version}</strong>
+                    <span style="margin-left:8px;">${esc(c.description) || 'No description'}</span>
+                </span>
+                <span class="machine-code">${esc(c.author)} &middot; ${formatDate(c.created_at)}</span>
+            </div>
+        `).join('');
+    } catch (e) {
+        container.innerHTML = '<div style="color:var(--text2);font-size:13px;">Failed to load configs</div>';
+    }
+}
+
+async function addWsMember() {
+    const username = document.getElementById('wsNewMember').value.trim();
+    const role = document.getElementById('wsNewMemberRole').value;
+    if (!username || !selectedWsId) return;
+    try {
+        const resp = await fetch(API + '/workspaces/' + selectedWsId + '/members', {
+            method: 'POST',
+            headers: authHeaders(),
+            body: JSON.stringify({ username, role }),
+        });
+        if (!resp.ok) {
+            const data = await resp.json();
+            toast('Error: ' + data.error, 'error');
+            return;
+        }
+        document.getElementById('wsNewMember').value = '';
+        toast('Member added', 'success');
+        showWsDetail(selectedWsId);
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function removeWsMember(wsId, username) {
+    if (!confirm('Remove ' + username + ' from this workspace?')) return;
+    try {
+        const resp = await fetch(API + '/workspaces/' + wsId + '/members/' + encodeURIComponent(username), {
+            method: 'DELETE',
+            headers: authHeaders(),
+        });
+        if (!resp.ok) {
+            const data = await resp.json();
+            toast('Error: ' + data.error, 'error');
+            return;
+        }
+        toast('Member removed', 'success');
+        showWsDetail(wsId);
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function deleteWorkspace() {
+    if (!selectedWsId) return;
+    if (!confirm('Delete this workspace? This cannot be undone.')) return;
+    try {
+        const resp = await fetch(API + '/workspaces/' + selectedWsId, {
+            method: 'DELETE',
+            headers: authHeaders(),
+        });
+        if (!resp.ok) {
+            const data = await resp.json();
+            toast('Error: ' + data.error, 'error');
+            return;
+        }
+        toast('Workspace deleted', 'success');
+        closeWsDetail();
+        loadWorkspaces();
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+function showCreateWorkspaceModal() {
+    document.getElementById('wsCreateName').value = '';
+    document.getElementById('wsCreateProduct').value = '';
+    document.getElementById('wsCreateDesc').value = '';
+    document.getElementById('createWorkspaceModal').classList.add('visible');
+    setTimeout(() => document.getElementById('wsCreateName').focus(), 50);
+}
+
+function closeCreateWorkspaceModal() {
+    document.getElementById('createWorkspaceModal').classList.remove('visible');
+}
+
+async function createWorkspace() {
+    const name = document.getElementById('wsCreateName').value.trim();
+    const product = document.getElementById('wsCreateProduct').value.trim();
+    const description = document.getElementById('wsCreateDesc').value.trim();
+    if (!name) { toast('Workspace name is required', 'error'); return; }
+    try {
+        const resp = await fetch(API + '/workspaces', {
+            method: 'POST',
+            headers: authHeaders(),
+            body: JSON.stringify({ name, product, description }),
+        });
+        if (!resp.ok) {
+            const data = await resp.json();
+            toast('Error: ' + data.error, 'error');
+            return;
+        }
+        closeCreateWorkspaceModal();
+        toast('Workspace created', 'success');
+        loadWorkspaces();
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
 // Keyboard shortcuts
 document.addEventListener('keydown', e => {
     if (e.key === 'Escape') {
@@ -1474,6 +1798,7 @@ document.addEventListener('keydown', e => {
         closeTFAModal();
         closeUsersModal();
         closeUploadReleaseModal();
+        closeCreateWorkspaceModal();
     }
 });
 </script>
