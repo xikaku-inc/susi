@@ -32,7 +32,8 @@ pub struct WorkspaceMember {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ConfigRevisionInfo {
     pub id: i64,
-    pub version: i64,
+    #[serde(default)]
+    pub name: String,
     #[serde(default)]
     pub description: String,
     pub author: String,
@@ -43,8 +44,9 @@ pub struct ConfigRevisionInfo {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ConfigRevision {
     pub id: i64,
-    pub version: i64,
     pub config_json: String,
+    #[serde(default)]
+    pub name: String,
     #[serde(default)]
     pub description: String,
     pub author: String,
@@ -229,27 +231,52 @@ impl WorkspaceClient {
         &self,
         workspace_id: &str,
         config_json: &str,
+        name: &str,
         description: &str,
     ) -> Result<i64, WorkspaceError> {
         #[derive(Deserialize)]
-        struct Resp { version: i64 }
+        struct Resp { id: i64 }
 
         let resp: Resp = self.post(
             &format!("/api/v1/workspaces/{}/configs", workspace_id),
             &serde_json::json!({
                 "config_json": config_json,
+                "name": name,
                 "description": description,
             }),
         )?;
-        Ok(resp.version)
+        Ok(resp.id)
+    }
+
+    pub fn update_config(
+        &self,
+        workspace_id: &str,
+        id: i64,
+        name: &str,
+        description: &str,
+    ) -> Result<(), WorkspaceError> {
+        self.put::<serde_json::Value>(
+            &format!("/api/v1/workspaces/{}/configs/{}", workspace_id, id),
+            &serde_json::json!({ "name": name, "description": description }),
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_config(
+        &self,
+        workspace_id: &str,
+        id: i64,
+    ) -> Result<(), WorkspaceError> {
+        self.delete(&format!("/api/v1/workspaces/{}/configs/{}", workspace_id, id))?;
+        Ok(())
     }
 
     pub fn get_config(
         &self,
         workspace_id: &str,
-        version: i64,
+        id: i64,
     ) -> Result<ConfigRevision, WorkspaceError> {
-        self.get(&format!("/api/v1/workspaces/{}/configs/{}", workspace_id, version))
+        self.get(&format!("/api/v1/workspaces/{}/configs/{}", workspace_id, id))
     }
 
     pub fn get_latest_config(

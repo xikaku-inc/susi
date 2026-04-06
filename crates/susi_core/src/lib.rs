@@ -2,6 +2,7 @@ pub mod crypto;
 #[cfg(feature = "db")]
 pub mod db;
 pub mod error;
+pub mod features;
 pub mod fingerprint;
 pub mod license;
 pub mod token;

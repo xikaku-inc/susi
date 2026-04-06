@@ -1,12 +1,10 @@
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use argon2::{self, Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use argon2::password_hash::SaltString;
 use axum::{
-    extract::{Multipart, Path, State},
-    extract::ws::{Message, WebSocket, WebSocketUpgrade},
+    extract::{DefaultBodyLimit, Multipart, Path, State},
     http::{header, HeaderMap, StatusCode},
     response::{Html, IntoResponse},
     routing::{get, post},
@@ -22,8 +20,6 @@ use susi_core::{License, DEFAULT_LEASE_DURATION_HOURS, DEFAULT_LEASE_GRACE_HOURS
 use rsa::RsaPrivateKey;
 use serde::{Deserialize, Serialize};
 use totp_rs::{Algorithm, Secret, TOTP};
-use futures_util::StreamExt;
-
 #[derive(Parser)]
 #[command(name = "susi-server", about = "Susi License Server")]
 struct Cli {
@@ -44,39 +40,11 @@ struct Cli {
     data_dir: String,
 }
 
-/// A connected relay device. Requests are sent via `tx`, responses come back on a per-request oneshot.
-struct RelayDevice {
-    workspace_id: String,
-    username: String,
-    friendly_name: String,
-    connected_at: String,
-    tx: tokio::sync::mpsc::Sender<RelayRequest>,
-}
-
-struct RelayRequest {
-    id: String,
-    method: String,
-    path: String,
-    resp_tx: tokio::sync::oneshot::Sender<RelayResponse>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct RelayResponse {
-    id: String,
-    status: u16,
-    #[serde(default)]
-    content_type: String,
-    body_base64: String,
-}
-
-type RelayMap = Arc<tokio::sync::Mutex<HashMap<String, RelayDevice>>>;
-
 struct AppState {
     db: Mutex<LicenseDb>,
     private_key: RsaPrivateKey,
     jwt_secret: [u8; 32],
     data_dir: String,
-    relays: RelayMap,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -283,6 +251,18 @@ fn require_password_changed(
     Ok(())
 }
 
+fn require_admin(
+    state: &AppState,
+    username: &str,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    let db = state.db.lock().unwrap();
+    let role = db.get_user_role(username).unwrap_or_default();
+    if role != "admin" {
+        return Err(error_response(StatusCode::FORBIDDEN, "Admin access required"));
+    }
+    Ok(())
+}
+
 fn hash_password(password: &str) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
     let salt = SaltString::generate(&mut rand::thread_rng());
     Argon2::default()
@@ -354,13 +334,15 @@ async fn handle_login(
     }
 
     let must_change = db.user_must_change_password(&req.username).unwrap_or(false);
+    let role = db.get_user_role(&req.username).unwrap_or_else(|_| "user".into());
     drop(db);
 
     let token = create_jwt(&state.jwt_secret, &req.username)?;
     Ok(Json(serde_json::json!({
         "token": token,
         "must_change_password": must_change,
-        "totp_enabled": totp_enabled
+        "totp_enabled": totp_enabled,
+        "role": role
     })))
 }
 
@@ -372,10 +354,12 @@ async fn handle_auth_status(
     let db = state.db.lock().unwrap();
     let must_change = db.user_must_change_password(&claims.sub).unwrap_or(false);
     let totp_enabled = db.user_totp_enabled(&claims.sub).unwrap_or(false);
+    let role = db.get_user_role(&claims.sub).unwrap_or_else(|_| "user".into());
     Ok(Json(serde_json::json!({
         "must_change_password": must_change,
         "totp_enabled": totp_enabled,
-        "username": claims.sub
+        "username": claims.sub,
+        "role": role
     })))
 }
 
@@ -701,6 +685,7 @@ async fn handle_list_licenses(
 ) -> Result<Json<Vec<LicenseSummary>>, (StatusCode, Json<ErrorResponse>)> {
     let claims = validate_jwt(&headers, &state.jwt_secret)?;
     require_password_changed(&state, &claims.sub)?;
+    require_admin(&state, &claims.sub)?;
 
     let db = state.db.lock().unwrap();
     let licenses = db
@@ -718,6 +703,7 @@ async fn handle_get_license(
 ) -> Result<Json<LicenseSummary>, (StatusCode, Json<ErrorResponse>)> {
     let claims = validate_jwt(&headers, &state.jwt_secret)?;
     require_password_changed(&state, &claims.sub)?;
+    require_admin(&state, &claims.sub)?;
 
     let db = state.db.lock().unwrap();
     let license = db
@@ -735,6 +721,7 @@ async fn handle_create_license(
 ) -> Result<(StatusCode, Json<LicenseSummary>), (StatusCode, Json<ErrorResponse>)> {
     let claims = validate_jwt(&headers, &state.jwt_secret)?;
     require_password_changed(&state, &claims.sub)?;
+    require_admin(&state, &claims.sub)?;
 
     let expires_dt = if req.perpetual {
         None
@@ -776,6 +763,7 @@ async fn handle_revoke_license(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let claims = validate_jwt(&headers, &state.jwt_secret)?;
     require_password_changed(&state, &claims.sub)?;
+    require_admin(&state, &claims.sub)?;
 
     let db = state.db.lock().unwrap();
     let revoked = db
@@ -797,6 +785,7 @@ async fn handle_export_license(
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
     let claims = validate_jwt(&headers, &state.jwt_secret)?;
     require_password_changed(&state, &claims.sub)?;
+    require_admin(&state, &claims.sub)?;
 
     let db = state.db.lock().unwrap();
     let license = db
@@ -862,6 +851,7 @@ async fn handle_deactivate_machine(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let claims = validate_jwt(&headers, &state.jwt_secret)?;
     require_password_changed(&state, &claims.sub)?;
+    require_admin(&state, &claims.sub)?;
 
     let db = state.db.lock().unwrap();
     let license = db
@@ -885,6 +875,7 @@ async fn handle_list_users(
 ) -> Result<Json<Vec<susi_core::db::UserInfo>>, (StatusCode, Json<ErrorResponse>)> {
     let claims = validate_jwt(&headers, &state.jwt_secret)?;
     require_password_changed(&state, &claims.sub)?;
+    require_admin(&state, &claims.sub)?;
     let db = state.db.lock().unwrap();
     let users = db
         .list_users()
@@ -896,6 +887,12 @@ async fn handle_list_users(
 struct CreateUserRequest {
     username: String,
     password: String,
+    #[serde(default = "default_user_role")]
+    role: String,
+}
+
+fn default_user_role() -> String {
+    "user".to_string()
 }
 
 async fn handle_create_user(
@@ -905,6 +902,7 @@ async fn handle_create_user(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let claims = validate_jwt(&headers, &state.jwt_secret)?;
     require_password_changed(&state, &claims.sub)?;
+    require_admin(&state, &claims.sub)?;
 
     let username = req.username.trim();
     if username.is_empty() || username.len() > 64 {
@@ -913,13 +911,16 @@ async fn handle_create_user(
     if req.password.len() < 8 {
         return Err(error_response(StatusCode::BAD_REQUEST, "Password must be at least 8 characters"));
     }
+    if !matches!(req.role.as_str(), "admin" | "user") {
+        return Err(error_response(StatusCode::BAD_REQUEST, "Role must be admin or user"));
+    }
 
     let pw_hash = hash_password(&req.password)?;
     let db = state.db.lock().unwrap();
-    db.create_user(username, &pw_hash)
+    db.create_user(username, &pw_hash, &req.role)
         .map_err(|e| error_response(StatusCode::CONFLICT, &e.to_string()))?;
 
-    Ok(Json(serde_json::json!({ "status": "OK", "username": username })))
+    Ok(Json(serde_json::json!({ "status": "OK", "username": username, "role": req.role })))
 }
 
 async fn handle_delete_user(
@@ -929,6 +930,7 @@ async fn handle_delete_user(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let claims = validate_jwt(&headers, &state.jwt_secret)?;
     require_password_changed(&state, &claims.sub)?;
+    require_admin(&state, &claims.sub)?;
 
     if claims.sub == username {
         return Err(error_response(StatusCode::BAD_REQUEST, "Cannot delete your own account"));
@@ -954,6 +956,7 @@ async fn handle_reset_user_password(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let claims = validate_jwt(&headers, &state.jwt_secret)?;
     require_password_changed(&state, &claims.sub)?;
+    require_admin(&state, &claims.sub)?;
 
     if req.new_password.len() < 8 {
         return Err(error_response(StatusCode::BAD_REQUEST, "Password must be at least 8 characters"));
@@ -1004,12 +1007,15 @@ fn releases_dir(state: &AppState) -> std::path::PathBuf {
     std::path::Path::new(&state.data_dir).join("releases")
 }
 
-/// List releases — available to licensed clients
+/// List releases — available to licensed clients or authenticated users
 async fn handle_get_releases(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    validate_license_key(&state, &headers)?;
+    // Accept either license key or bearer token
+    if validate_license_key(&state, &headers).is_err() {
+        validate_jwt(&headers, &state.jwt_secret)?;
+    }
 
     let db = state.db.lock().unwrap();
     let rows = db.list_releases()
@@ -1034,13 +1040,18 @@ async fn handle_get_releases(
     Ok(Json(serde_json::json!({ "releases": releases })))
 }
 
-/// Download a release asset — available to licensed clients
+/// Download a release asset — available to licensed clients or logged-in users
 async fn handle_download_asset(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path((tag, asset_name)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    validate_license_key(&state, &headers)?;
+    // Allow either license key or JWT auth
+    let license_ok = validate_license_key(&state, &headers).is_ok();
+    let jwt_ok = validate_jwt(&headers, &state.jwt_secret).is_ok();
+    if !license_ok && !jwt_ok {
+        return Err(error_response(StatusCode::UNAUTHORIZED, "Authentication required"));
+    }
 
     let file_path = releases_dir(&state).join(&tag).join(&asset_name);
     if !file_path.exists() {
@@ -1068,6 +1079,7 @@ async fn handle_list_releases_admin(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let claims = validate_jwt(&headers, &state.jwt_secret)?;
     require_password_changed(&state, &claims.sub)?;
+    require_admin(&state, &claims.sub)?;
 
     let db = state.db.lock().unwrap();
     let rows = db.list_releases()
@@ -1101,6 +1113,7 @@ async fn handle_upload_release(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let claims = validate_jwt(&headers, &state.jwt_secret)?;
     require_password_changed(&state, &claims.sub)?;
+    require_admin(&state, &claims.sub)?;
 
     let mut tag = String::new();
     let mut name = String::new();
@@ -1202,6 +1215,7 @@ async fn handle_delete_release(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let claims = validate_jwt(&headers, &state.jwt_secret)?;
     require_password_changed(&state, &claims.sub)?;
+    require_admin(&state, &claims.sub)?;
 
     let db = state.db.lock().unwrap();
     if !db.delete_release(&tag)
@@ -1257,6 +1271,16 @@ fn default_member_role() -> String {
 struct PushConfigRequest {
     config_json: String,
     #[serde(default)]
+    name: String,
+    #[serde(default)]
+    description: String,
+}
+
+#[derive(Deserialize)]
+struct UpdateConfigRequest {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
     description: String,
 }
 
@@ -1267,6 +1291,7 @@ async fn handle_create_workspace(
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorResponse>)> {
     let claims = validate_jwt(&headers, &state.jwt_secret)?;
     require_password_changed(&state, &claims.sub)?;
+    require_admin(&state, &claims.sub)?;
 
     if req.name.is_empty() {
         return Err(error_response(StatusCode::BAD_REQUEST, "Workspace name is required"));
@@ -1380,15 +1405,9 @@ async fn handle_delete_workspace(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let claims = validate_jwt(&headers, &state.jwt_secret)?;
     require_password_changed(&state, &claims.sub)?;
+    require_admin(&state, &claims.sub)?;
 
     let db = state.db.lock().unwrap();
-    let role = db.get_workspace_member_role(&id, &claims.sub)
-        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
-        .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
-    if role != "owner" {
-        return Err(error_response(StatusCode::FORBIDDEN, "Only the owner can delete a workspace"));
-    }
-
     db.delete_workspace(&id)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
@@ -1408,17 +1427,16 @@ async fn handle_add_workspace_member(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let claims = validate_jwt(&headers, &state.jwt_secret)?;
     require_password_changed(&state, &claims.sub)?;
+    require_admin(&state, &claims.sub)?;
 
     let db = state.db.lock().unwrap();
-    let role = db.get_workspace_member_role(&workspace_id, &claims.sub)
-        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
-        .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
-    if role != "owner" {
-        return Err(error_response(StatusCode::FORBIDDEN, "Only the owner can manage members"));
-    }
 
     if !matches!(req.role.as_str(), "owner" | "editor" | "viewer") {
         return Err(error_response(StatusCode::BAD_REQUEST, "Role must be owner, editor, or viewer"));
+    }
+
+    if !db.user_exists(&req.username).unwrap_or(false) {
+        return Err(error_response(StatusCode::NOT_FOUND, "User does not exist"));
     }
 
     db.add_workspace_member(&workspace_id, &req.username, &req.role)
@@ -1434,19 +1452,9 @@ async fn handle_remove_workspace_member(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let claims = validate_jwt(&headers, &state.jwt_secret)?;
     require_password_changed(&state, &claims.sub)?;
+    require_admin(&state, &claims.sub)?;
 
     let db = state.db.lock().unwrap();
-    let role = db.get_workspace_member_role(&workspace_id, &claims.sub)
-        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
-        .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
-    if role != "owner" {
-        return Err(error_response(StatusCode::FORBIDDEN, "Only the owner can manage members"));
-    }
-
-    if username == claims.sub {
-        return Err(error_response(StatusCode::BAD_REQUEST, "Cannot remove yourself"));
-    }
-
     db.remove_workspace_member(&workspace_id, &username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
@@ -1478,11 +1486,11 @@ async fn handle_push_config(
     serde_json::from_str::<serde_json::Value>(&req.config_json)
         .map_err(|e| error_response(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {}", e)))?;
 
-    let version = db.push_config_revision(&workspace_id, &req.config_json, &req.description, &claims.sub)
+    let id = db.push_config_revision(&workspace_id, &req.config_json, &req.name, &req.description, &claims.sub)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
     Ok((StatusCode::CREATED, Json(serde_json::json!({
-        "version": version,
+        "id": id,
         "workspace_id": workspace_id,
     }))))
 }
@@ -1503,10 +1511,10 @@ async fn handle_list_configs(
     let rows = db.list_config_revisions(&workspace_id)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
-    let configs: Vec<_> = rows.iter().map(|(id, version, desc, author, created_at)| {
+    let configs: Vec<_> = rows.iter().map(|(id, name, desc, author, created_at)| {
         serde_json::json!({
             "id": id,
-            "version": version,
+            "name": name,
             "description": desc,
             "author": author,
             "created_at": created_at,
@@ -1519,7 +1527,7 @@ async fn handle_list_configs(
 async fn handle_get_config(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Path((workspace_id, version)): Path<(String, i64)>,
+    Path((workspace_id, config_id)): Path<(String, i64)>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let claims = validate_jwt(&headers, &state.jwt_secret)?;
     require_password_changed(&state, &claims.sub)?;
@@ -1529,14 +1537,14 @@ async fn handle_get_config(
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
 
-    let rev = db.get_config_revision(&workspace_id, version)
+    let rev = db.get_config_revision(&workspace_id, config_id)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Config revision not found"))?;
 
     Ok(Json(serde_json::json!({
         "id": rev.0,
-        "version": rev.1,
-        "config_json": rev.2,
+        "config_json": rev.1,
+        "name": rev.2,
         "description": rev.3,
         "author": rev.4,
         "created_at": rev.5,
@@ -1562,12 +1570,63 @@ async fn handle_get_latest_config(
 
     Ok(Json(serde_json::json!({
         "id": rev.0,
-        "version": rev.1,
-        "config_json": rev.2,
+        "config_json": rev.1,
+        "name": rev.2,
         "description": rev.3,
         "author": rev.4,
         "created_at": rev.5,
     })))
+}
+
+async fn handle_update_config(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((workspace_id, config_id)): Path<(String, i64)>,
+    Json(req): Json<UpdateConfigRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let claims = validate_jwt(&headers, &state.jwt_secret)?;
+    require_password_changed(&state, &claims.sub)?;
+
+    let db = state.db.lock().unwrap();
+    let role = db.get_workspace_member_role(&workspace_id, &claims.sub)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
+    if role == "viewer" {
+        return Err(error_response(StatusCode::FORBIDDEN, "Viewers cannot edit configs"));
+    }
+
+    let updated = db.update_config_revision(&workspace_id, config_id, &req.name, &req.description)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    if !updated {
+        return Err(error_response(StatusCode::NOT_FOUND, "Config revision not found"));
+    }
+
+    Ok(Json(serde_json::json!({ "status": "OK" })))
+}
+
+async fn handle_delete_config(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((workspace_id, config_id)): Path<(String, i64)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let claims = validate_jwt(&headers, &state.jwt_secret)?;
+    require_password_changed(&state, &claims.sub)?;
+
+    let db = state.db.lock().unwrap();
+    let role = db.get_workspace_member_role(&workspace_id, &claims.sub)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
+    if role == "viewer" {
+        return Err(error_response(StatusCode::FORBIDDEN, "Viewers cannot delete configs"));
+    }
+
+    let deleted = db.delete_config_revision(&workspace_id, config_id)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    if !deleted {
+        return Err(error_response(StatusCode::NOT_FOUND, "Config revision not found"));
+    }
+
+    Ok(Json(serde_json::json!({ "status": "OK" })))
 }
 
 /// List releases visible to a workspace (workspace-specific + global).
@@ -1607,204 +1666,6 @@ async fn handle_workspace_releases(
 }
 
 // ---------------------------------------------------------------------------
-// Relay endpoints
-// ---------------------------------------------------------------------------
-
-/// WebSocket endpoint for field devices to connect as relay targets.
-/// Auth via query param: `/api/v1/relay/connect?token=JWT&workspace=ID&name=FRIENDLY`
-async fn handle_relay_connect(
-    State(state): State<Arc<AppState>>,
-    ws: WebSocketUpgrade,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
-) -> std::result::Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    let token = params.get("token").cloned().unwrap_or_default();
-    let workspace_id = params.get("workspace").cloned().unwrap_or_default();
-    let friendly_name = params.get("name").cloned().unwrap_or_else(|| "unknown".into());
-
-    // Validate JWT
-    let mut headers = HeaderMap::new();
-    headers.insert("authorization", format!("Bearer {}", token).parse().unwrap());
-    let claims = validate_jwt(&headers, &state.jwt_secret)?;
-
-    if workspace_id.is_empty() {
-        return Err(error_response(StatusCode::BAD_REQUEST, "Missing workspace parameter"));
-    }
-
-    // Verify workspace membership
-    {
-        let db = state.db.lock().unwrap();
-        db.get_workspace_member_role(&workspace_id, &claims.sub)
-            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
-            .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
-    }
-
-    let device_id = uuid::Uuid::new_v4().to_string();
-    let relays = state.relays.clone();
-    let username = claims.sub.clone();
-
-    log::info!("Relay device '{}' ({}) connecting from user {}", friendly_name, device_id, username);
-
-    Ok(ws.on_upgrade(move |socket| handle_relay_socket(socket, device_id, workspace_id, username, friendly_name, relays)))
-}
-
-async fn handle_relay_socket(
-    socket: WebSocket,
-    device_id: String,
-    workspace_id: String,
-    username: String,
-    friendly_name: String,
-    relays: RelayMap,
-) {
-    let (mut ws_tx, mut ws_rx) = socket.split();
-    let (req_tx, mut req_rx) = tokio::sync::mpsc::channel::<RelayRequest>(32);
-
-    // Register device
-    {
-        let mut map = relays.lock().await;
-        map.insert(device_id.clone(), RelayDevice {
-            workspace_id,
-            username,
-            friendly_name: friendly_name.clone(),
-            connected_at: Utc::now().to_rfc3339(),
-            tx: req_tx,
-        });
-    }
-
-    // Track pending responses
-    let pending: Arc<tokio::sync::Mutex<HashMap<String, tokio::sync::oneshot::Sender<RelayResponse>>>> =
-        Arc::new(tokio::sync::Mutex::new(HashMap::new()));
-
-    let pending_clone = pending.clone();
-    let device_id_clone = device_id.clone();
-
-    // Forward incoming requests to WebSocket
-    let send_task = tokio::spawn(async move {
-        use futures_util::SinkExt;
-        while let Some(req) = req_rx.recv().await {
-            let msg = serde_json::json!({
-                "type": "request",
-                "id": req.id,
-                "method": req.method,
-                "path": req.path,
-            });
-            {
-                let mut p = pending_clone.lock().await;
-                p.insert(req.id.clone(), req.resp_tx);
-            }
-            if ws_tx.send(Message::Text(msg.to_string().into())).await.is_err() {
-                break;
-            }
-        }
-    });
-
-    // Receive responses from WebSocket
-    let recv_task = tokio::spawn({
-        let pending = pending.clone();
-        async move {
-            use futures_util::StreamExt;
-            while let Some(Ok(msg)) = ws_rx.next().await {
-                if let Message::Text(text) = msg {
-                    if let Ok(resp) = serde_json::from_str::<RelayResponse>(&text) {
-                        let mut p = pending.lock().await;
-                        if let Some(tx) = p.remove(&resp.id) {
-                            let _ = tx.send(resp);
-                        }
-                    }
-                }
-            }
-        }
-    });
-
-    // Wait for either task to finish (connection closed)
-    tokio::select! {
-        _ = send_task => {},
-        _ = recv_task => {},
-    }
-
-    // Cleanup
-    {
-        let mut map = relays.lock().await;
-        map.remove(&device_id_clone);
-    }
-    log::info!("Relay device '{}' ({}) disconnected", friendly_name, device_id_clone);
-}
-
-/// List connected relay devices visible to the authenticated user.
-async fn handle_list_relay_devices(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> std::result::Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    let claims = validate_jwt(&headers, &state.jwt_secret)?;
-    require_password_changed(&state, &claims.sub)?;
-
-    // Get workspaces user belongs to
-    let workspace_ids: Vec<String> = {
-        let db = state.db.lock().unwrap();
-        db.list_workspaces_for_user(&claims.sub)
-            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
-            .iter()
-            .map(|(id, ..)| id.clone())
-            .collect()
-    };
-
-    let map = state.relays.lock().await;
-    let devices: Vec<_> = map.iter()
-        .filter(|(_, dev)| workspace_ids.contains(&dev.workspace_id))
-        .map(|(id, dev)| serde_json::json!({
-            "device_id": id,
-            "workspace_id": dev.workspace_id,
-            "username": dev.username,
-            "friendly_name": dev.friendly_name,
-            "connected_at": dev.connected_at,
-        }))
-        .collect();
-
-    Ok(Json(serde_json::json!({ "devices": devices })))
-}
-
-/// Proxy an observer's request to a relay device. GET-only for read-only mode.
-async fn handle_relay_proxy(
-    State(state): State<Arc<AppState>>,
-    Path((device_id, path)): Path<(String, String)>,
-) -> impl IntoResponse {
-    let map = state.relays.lock().await;
-    let device = match map.get(&device_id) {
-        Some(d) => d,
-        None => return (StatusCode::NOT_FOUND, HeaderMap::new(), b"Device not connected".to_vec()),
-    };
-
-    let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-    let req = RelayRequest {
-        id: uuid::Uuid::new_v4().to_string(),
-        method: "GET".into(),
-        path: format!("/{}", path),
-        resp_tx,
-    };
-
-    if device.tx.send(req).await.is_err() {
-        return (StatusCode::BAD_GATEWAY, HeaderMap::new(), b"Device connection lost".to_vec());
-    }
-    drop(map);
-
-    match tokio::time::timeout(std::time::Duration::from_secs(30), resp_rx).await {
-        Ok(Ok(resp)) => {
-            let body = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &resp.body_base64)
-                .unwrap_or_default();
-            let status = StatusCode::from_u16(resp.status).unwrap_or(StatusCode::BAD_GATEWAY);
-            let mut headers = HeaderMap::new();
-            if !resp.content_type.is_empty() {
-                if let Ok(val) = resp.content_type.parse() {
-                    headers.insert(header::CONTENT_TYPE, val);
-                }
-            }
-            (status, headers, body)
-        }
-        Ok(Err(_)) => (StatusCode::BAD_GATEWAY, HeaderMap::new(), b"Device did not respond".to_vec()),
-        Err(_) => (StatusCode::GATEWAY_TIMEOUT, HeaderMap::new(), b"Relay timeout".to_vec()),
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Dashboard (embedded HTML)
 // ---------------------------------------------------------------------------
 
@@ -1814,6 +1675,10 @@ async fn handle_dashboard() -> Html<&'static str> {
 
 async fn handle_health() -> &'static str {
     "OK"
+}
+
+async fn handle_features() -> Json<Vec<susi_core::features::FeatureInfo>> {
+    Json(susi_core::features::ALL_FEATURES.to_vec())
 }
 
 // ---------------------------------------------------------------------------
@@ -1855,7 +1720,6 @@ async fn main() -> Result<()> {
         private_key,
         jwt_secret,
         data_dir: cli.data_dir,
-        relays: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
     });
 
     let app = Router::new()
@@ -1863,6 +1727,8 @@ async fn main() -> Result<()> {
         .route("/", get(handle_dashboard))
         // Health
         .route("/health", get(handle_health))
+        // Available license features
+        .route("/api/v1/features", get(handle_features))
         // Auth endpoints
         .route("/api/v1/auth/login", post(handle_login))
         .route("/api/v1/auth/status", get(handle_auth_status))
@@ -1894,7 +1760,12 @@ async fn main() -> Result<()> {
         .route("/api/v1/updates/releases", get(handle_get_releases))
         .route("/api/v1/updates/download/{tag}/{asset}", get(handle_download_asset))
         // Releases — admin endpoints (JWT protected)
-        .route("/api/v1/releases", get(handle_list_releases_admin).post(handle_upload_release))
+        .route("/api/v1/releases", get(handle_list_releases_admin))
+        .merge(
+            Router::new()
+                .route("/api/v1/releases", post(handle_upload_release))
+                .layer(DefaultBodyLimit::max(500 * 1024 * 1024))
+        )
         .route("/api/v1/releases/{tag}", axum::routing::delete(handle_delete_release))
         // Workspace endpoints (JWT protected)
         .route("/api/v1/workspaces", get(handle_list_workspaces).post(handle_create_workspace))
@@ -1904,12 +1775,8 @@ async fn main() -> Result<()> {
         // Config revision endpoints (JWT protected)
         .route("/api/v1/workspaces/{id}/configs", get(handle_list_configs).post(handle_push_config))
         .route("/api/v1/workspaces/{id}/configs/latest", get(handle_get_latest_config))
-        .route("/api/v1/workspaces/{id}/configs/{version}", get(handle_get_config))
+        .route("/api/v1/workspaces/{id}/configs/{config_id}", get(handle_get_config).put(handle_update_config).delete(handle_delete_config))
         .route("/api/v1/workspaces/{id}/releases", get(handle_workspace_releases))
-        // Relay endpoints
-        .route("/api/v1/relay/connect", get(handle_relay_connect))
-        .route("/api/v1/relay/devices", get(handle_list_relay_devices))
-        .route("/relay/{device_id}/{*path}", get(handle_relay_proxy))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&cli.listen)

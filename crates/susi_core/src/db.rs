@@ -8,6 +8,7 @@ use crate::license::{License, MachineActivation};
 #[derive(Debug, Serialize)]
 pub struct UserInfo {
     pub username: String,
+    pub role: String,
     pub totp_enabled: bool,
     pub must_change_password: bool,
     pub created_at: String,
@@ -79,6 +80,7 @@ impl LicenseDb {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 username TEXT NOT NULL UNIQUE,
                 password_hash TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'admin',
                 must_change_password INTEGER NOT NULL DEFAULT 1,
                 totp_secret TEXT,
                 totp_enabled INTEGER NOT NULL DEFAULT 0,
@@ -112,6 +114,7 @@ impl LicenseDb {
                 workspace_id TEXT NOT NULL,
                 version INTEGER NOT NULL,
                 config_json TEXT NOT NULL,
+                name TEXT NOT NULL DEFAULT '',
                 description TEXT NOT NULL DEFAULT '',
                 author TEXT NOT NULL,
                 created_at TEXT NOT NULL,
@@ -135,6 +138,16 @@ impl LicenseDb {
         // Add workspace_id to releases for per-workspace scoping
         let _ = self.conn.execute_batch(
             "ALTER TABLE releases ADD COLUMN workspace_id TEXT DEFAULT NULL;"
+        );
+
+        // Add name column to config_revisions
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE config_revisions ADD COLUMN name TEXT NOT NULL DEFAULT '';"
+        );
+
+        // Add role column to users (existing users default to admin)
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'admin';"
         );
 
         // Migrate single-admin table to multi-user table
@@ -401,8 +414,8 @@ impl LicenseDb {
         let now = Utc::now().to_rfc3339();
         self.conn
             .execute(
-                "INSERT INTO users (username, password_hash, must_change_password, totp_enabled, created_at, updated_at)
-                 VALUES ('admin', ?1, 1, 0, ?2, ?2)",
+                "INSERT INTO users (username, password_hash, role, must_change_password, totp_enabled, created_at, updated_at)
+                 VALUES ('admin', ?1, 'admin', 1, 0, ?2, ?2)",
                 params![password_hash, now],
             )
             .map_err(|e| LicenseError::Other(format!("DB insert: {}", e)))?;
@@ -500,15 +513,16 @@ impl LicenseDb {
     pub fn list_users(&self) -> Result<Vec<UserInfo>, LicenseError> {
         let mut stmt = self
             .conn
-            .prepare("SELECT username, totp_enabled, must_change_password, created_at FROM users ORDER BY created_at")
+            .prepare("SELECT username, role, totp_enabled, must_change_password, created_at FROM users ORDER BY created_at")
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
         let users = stmt
             .query_map([], |r| {
                 Ok(UserInfo {
                     username: r.get(0)?,
-                    totp_enabled: r.get::<_, i32>(1)? != 0,
-                    must_change_password: r.get::<_, i32>(2)? != 0,
-                    created_at: r.get(3)?,
+                    role: r.get(1)?,
+                    totp_enabled: r.get::<_, i32>(2)? != 0,
+                    must_change_password: r.get::<_, i32>(3)? != 0,
+                    created_at: r.get(4)?,
                 })
             })
             .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
@@ -517,13 +531,13 @@ impl LicenseDb {
         Ok(users)
     }
 
-    pub fn create_user(&self, username: &str, password_hash: &str) -> Result<(), LicenseError> {
+    pub fn create_user(&self, username: &str, password_hash: &str, role: &str) -> Result<(), LicenseError> {
         let now = Utc::now().to_rfc3339();
         self.conn
             .execute(
-                "INSERT INTO users (username, password_hash, must_change_password, totp_enabled, created_at, updated_at)
-                 VALUES (?1, ?2, 1, 0, ?3, ?3)",
-                params![username, password_hash, now],
+                "INSERT INTO users (username, password_hash, role, must_change_password, totp_enabled, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, 1, 0, ?4, ?4)",
+                params![username, password_hash, role, now],
             )
             .map_err(|e| LicenseError::Other(format!("DB insert: {}", e)))?;
         Ok(())
@@ -541,6 +555,28 @@ impl LicenseDb {
             .execute("DELETE FROM users WHERE username = ?1", params![username])
             .map_err(|e| LicenseError::Other(format!("DB delete: {}", e)))?;
         Ok(())
+    }
+
+    pub fn get_user_role(&self, username: &str) -> Result<String, LicenseError> {
+        self.conn
+            .query_row(
+                "SELECT role FROM users WHERE username = ?1",
+                params![username],
+                |r| r.get(0),
+            )
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))
+    }
+
+    pub fn user_exists(&self, username: &str) -> Result<bool, LicenseError> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM users WHERE username = ?1",
+                params![username],
+                |r| r.get(0),
+            )
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?;
+        Ok(count > 0)
     }
 
     pub fn reset_user_password(&self, username: &str, new_hash: &str) -> Result<(), LicenseError> {
@@ -748,44 +784,37 @@ impl LicenseDb {
         &self,
         workspace_id: &str,
         config_json: &str,
+        name: &str,
         description: &str,
         author: &str,
     ) -> Result<i64, LicenseError> {
         let now = Utc::now().to_rfc3339();
-        // Auto-increment version per workspace
-        let next_version: i64 = self.conn
-            .query_row(
-                "SELECT COALESCE(MAX(version), 0) + 1 FROM config_revisions WHERE workspace_id = ?1",
-                params![workspace_id],
-                |r| r.get(0),
-            )
-            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?;
         self.conn
             .execute(
-                "INSERT INTO config_revisions (workspace_id, version, config_json, description, author, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![workspace_id, next_version, config_json, description, author, now],
+                "INSERT INTO config_revisions (workspace_id, version, config_json, name, description, author, created_at)
+                 VALUES (?1, 0, ?2, ?3, ?4, ?5, ?6)",
+                params![workspace_id, config_json, name, description, author, now],
             )
             .map_err(|e| LicenseError::Other(format!("DB insert config: {}", e)))?;
-        Ok(next_version)
+        Ok(self.conn.last_insert_rowid())
     }
 
     pub fn list_config_revisions(
         &self,
         workspace_id: &str,
-    ) -> Result<Vec<(i64, i64, String, String, String)>, LicenseError> {
+    ) -> Result<Vec<(i64, String, String, String, String)>, LicenseError> {
         let mut stmt = self.conn
             .prepare(
-                "SELECT id, version, description, author, created_at
+                "SELECT id, name, description, author, created_at
                  FROM config_revisions WHERE workspace_id = ?1
-                 ORDER BY version DESC"
+                 ORDER BY id DESC"
             )
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
         let rows = stmt
             .query_map(params![workspace_id], |r| {
                 Ok((
                     r.get::<_, i64>(0)?,
-                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(1)?,
                     r.get::<_, String>(2)?,
                     r.get::<_, String>(3)?,
                     r.get::<_, String>(4)?,
@@ -800,15 +829,15 @@ impl LicenseDb {
     pub fn get_config_revision(
         &self,
         workspace_id: &str,
-        version: i64,
-    ) -> Result<Option<(i64, i64, String, String, String, String)>, LicenseError> {
+        id: i64,
+    ) -> Result<Option<(i64, String, String, String, String, String)>, LicenseError> {
         match self.conn.query_row(
-            "SELECT id, version, config_json, description, author, created_at
-             FROM config_revisions WHERE workspace_id = ?1 AND version = ?2",
-            params![workspace_id, version],
+            "SELECT id, config_json, name, description, author, created_at
+             FROM config_revisions WHERE workspace_id = ?1 AND id = ?2",
+            params![workspace_id, id],
             |r| Ok((
                 r.get::<_, i64>(0)?,
-                r.get::<_, i64>(1)?,
+                r.get::<_, String>(1)?,
                 r.get::<_, String>(2)?,
                 r.get::<_, String>(3)?,
                 r.get::<_, String>(4)?,
@@ -824,15 +853,15 @@ impl LicenseDb {
     pub fn get_latest_config_revision(
         &self,
         workspace_id: &str,
-    ) -> Result<Option<(i64, i64, String, String, String, String)>, LicenseError> {
+    ) -> Result<Option<(i64, String, String, String, String, String)>, LicenseError> {
         match self.conn.query_row(
-            "SELECT id, version, config_json, description, author, created_at
+            "SELECT id, config_json, name, description, author, created_at
              FROM config_revisions WHERE workspace_id = ?1
-             ORDER BY version DESC LIMIT 1",
+             ORDER BY id DESC LIMIT 1",
             params![workspace_id],
             |r| Ok((
                 r.get::<_, i64>(0)?,
-                r.get::<_, i64>(1)?,
+                r.get::<_, String>(1)?,
                 r.get::<_, String>(2)?,
                 r.get::<_, String>(3)?,
                 r.get::<_, String>(4)?,
@@ -843,6 +872,37 @@ impl LicenseDb {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(LicenseError::Other(format!("DB query: {}", e))),
         }
+    }
+
+    pub fn update_config_revision(
+        &self,
+        workspace_id: &str,
+        id: i64,
+        name: &str,
+        description: &str,
+    ) -> Result<bool, LicenseError> {
+        let affected = self.conn
+            .execute(
+                "UPDATE config_revisions SET name = ?1, description = ?2
+                 WHERE workspace_id = ?3 AND id = ?4",
+                params![name, description, workspace_id, id],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB update config: {}", e)))?;
+        Ok(affected > 0)
+    }
+
+    pub fn delete_config_revision(
+        &self,
+        workspace_id: &str,
+        id: i64,
+    ) -> Result<bool, LicenseError> {
+        let affected = self.conn
+            .execute(
+                "DELETE FROM config_revisions WHERE workspace_id = ?1 AND id = ?2",
+                params![workspace_id, id],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB delete config: {}", e)))?;
+        Ok(affected > 0)
     }
 
     // -----------------------------------------------------------------------
