@@ -1405,7 +1405,8 @@ async function loadUsers() {
                 : '<span class="badge" style="background:var(--bg3);color:var(--text2);">user</span>';
             const actions = isSelf
                 ? '<span style="color:var(--text2);font-size:11px;">You</span>'
-                : '<button class="small secondary" onclick="resetUserPassword(\'' + esc(u.username) + '\')">Reset PW</button> ' +
+                : '<button class="small secondary" onclick="renameUser(\'' + esc(u.username) + '\')">Rename</button> ' +
+                  '<button class="small secondary" onclick="resetUserPassword(\'' + esc(u.username) + '\')">Reset PW</button> ' +
                   '<button class="small danger" onclick="deleteUser(\'' + esc(u.username) + '\')">Delete</button>';
             return '<tr><td>' + esc(u.username) + '</td><td>' + roleBadge + '</td><td>' + tfa + '</td><td>' + status + '</td><td style="text-align:right;">' + actions + '</td></tr>';
         }).join('');
@@ -1436,6 +1437,27 @@ async function createUser() {
         document.getElementById('newPassword').value = '';
         document.getElementById('newUserRole').value = 'user';
         toast('User "' + username + '" created', 'success');
+        await loadUsers();
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function renameUser(username) {
+    const newName = prompt('New username for "' + username + '":');
+    if (!newName || !newName.trim()) return;
+    try {
+        const resp = await fetch(API + '/auth/users/' + encodeURIComponent(username) + '/rename', {
+            method: 'POST',
+            headers: authHeaders(),
+            body: JSON.stringify({ new_username: newName.trim() }),
+        });
+        if (!resp.ok) {
+            const data = await resp.json();
+            toast('Error: ' + data.error, 'error');
+            return;
+        }
+        toast('User renamed to "' + newName.trim() + '"', 'success');
         await loadUsers();
     } catch (e) {
         toast('Failed: ' + e.message, 'error');

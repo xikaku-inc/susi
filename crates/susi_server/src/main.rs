@@ -944,6 +944,39 @@ async fn handle_delete_user(
 }
 
 #[derive(Deserialize)]
+struct RenameUserRequest {
+    new_username: String,
+}
+
+async fn handle_rename_user(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(username): Path<String>,
+    Json(req): Json<RenameUserRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let claims = validate_jwt(&headers, &state.jwt_secret)?;
+    require_password_changed(&state, &claims.sub)?;
+    require_admin(&state, &claims.sub)?;
+
+    let new = req.new_username.trim().to_string();
+    if new.is_empty() {
+        return Err(error_response(StatusCode::BAD_REQUEST, "Username cannot be empty"));
+    }
+    if new == username {
+        return Err(error_response(StatusCode::BAD_REQUEST, "New username is the same"));
+    }
+
+    let db = state.db.lock().unwrap();
+    if db.user_exists(&new).unwrap_or(false) {
+        return Err(error_response(StatusCode::CONFLICT, "Username already taken"));
+    }
+    db.rename_user(&username, &new)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    Ok(Json(serde_json::json!({ "status": "OK" })))
+}
+
+#[derive(Deserialize)]
 struct ResetPasswordRequest {
     new_password: String,
 }
@@ -1740,6 +1773,7 @@ async fn main() -> Result<()> {
         .route("/api/v1/auth/users", get(handle_list_users))
         .route("/api/v1/auth/users", post(handle_create_user))
         .route("/api/v1/auth/users/{username}", axum::routing::delete(handle_delete_user))
+        .route("/api/v1/auth/users/{username}/rename", post(handle_rename_user))
         .route("/api/v1/auth/users/{username}/reset-password", post(handle_reset_user_password))
         // Public client endpoints
         .route("/api/v1/activate", post(handle_activate))

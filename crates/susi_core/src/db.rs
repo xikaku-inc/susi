@@ -579,6 +579,29 @@ impl LicenseDb {
         Ok(count > 0)
     }
 
+    pub fn rename_user(&self, old_username: &str, new_username: &str) -> Result<(), LicenseError> {
+        let now = Utc::now().to_rfc3339();
+        self.conn
+            .execute(
+                "UPDATE users SET username = ?1, updated_at = ?2 WHERE username = ?3",
+                params![new_username, now, old_username],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))?;
+        self.conn
+            .execute(
+                "UPDATE workspace_members SET username = ?1 WHERE username = ?2",
+                params![new_username, old_username],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))?;
+        self.conn
+            .execute(
+                "UPDATE workspaces SET created_by = ?1 WHERE created_by = ?2",
+                params![new_username, old_username],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))?;
+        Ok(())
+    }
+
     pub fn reset_user_password(&self, username: &str, new_hash: &str) -> Result<(), LicenseError> {
         let now = Utc::now().to_rfc3339();
         self.conn
