@@ -1553,6 +1553,29 @@ function formatSize(bytes) {
     return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
 }
 
+let expandedRelease = null;
+
+function toggleRelease(tag) {
+    expandedRelease = expandedRelease === tag ? null : tag;
+    renderReleases();
+}
+
+function renderMarkdown(text) {
+    return text
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/^### (.+)$/gm, '<h4 style="margin:12px 0 4px;font-size:13px;font-weight:600;color:var(--text1);">$1</h4>')
+        .replace(/^## (.+)$/gm, '<h3 style="margin:14px 0 6px;font-size:14px;font-weight:600;color:var(--text1);">$1</h3>')
+        .replace(/^# (.+)$/gm, '<h2 style="margin:16px 0 8px;font-size:15px;font-weight:600;color:var(--text1);">$1</h2>')
+        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+        .replace(/\*(.+?)\*/g, '<em>$1</em>')
+        .replace(/`([^`]+)`/g, '<code style="background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:12px;">$1</code>')
+        .replace(/^- (.+)$/gm, '<li style="margin:2px 0;font-size:13px;">$1</li>')
+        .replace(/(<li[^>]*>.*<\/li>\n?)+/g, function(m) { return '<ul style="margin:4px 0 4px 16px;padding:0;list-style:disc;">' + m.replace(/\n/g, '') + '</ul>'; })
+        .replace(/\n*(<\/?(?:h[2-4]|ul)[^>]*>)\n*/g, '$1')
+        .replace(/\n{2,}/g, '<br><br>')
+        .replace(/\n/g, '<br>');
+}
+
 function renderReleases() {
     const container = document.getElementById('releasesContainer');
     if (releases.length === 0) {
@@ -1561,6 +1584,7 @@ function renderReleases() {
     }
     const isAdmin = userRole === 'admin';
     container.innerHTML = releases.map(r => {
+        const expanded = expandedRelease === r.tag;
         const assets = (r.assets || []).map(a =>
             '<a href="' + API + '/updates/download/' + encodeURIComponent(r.tag) + '/' + encodeURIComponent(a.name) + '" ' +
             'style="font-family:monospace;font-size:12px;color:var(--accent);text-decoration:none;" ' +
@@ -1568,15 +1592,25 @@ function renderReleases() {
             '<span style="color:var(--text2);font-size:11px;margin-left:8px;">' + formatSize(a.size) + '</span>'
         ).join('<br>');
         const pre = r.prerelease ? ' <span style="background:rgba(251,191,36,0.15);color:var(--yellow);font-size:11px;font-weight:600;padding:2px 8px;border-radius:4px;">Pre-release</span>' : '';
-        const deleteBtn = isAdmin ? '<button class="small danger" onclick="deleteRelease(\'' + esc(r.tag) + '\')">Delete</button>' : '';
-        return '<div style="display:flex;align-items:flex-start;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border);">' +
-            '<div>' +
-                '<div style="font-weight:600;font-size:14px;font-family:monospace;">' + esc(r.tag) + pre + '</div>' +
-                (r.name && r.name !== r.tag ? '<div style="font-size:13px;color:var(--text2);">' + esc(r.name) + '</div>' : '') +
-                '<div style="font-size:12px;color:var(--text2);margin-top:4px;">' + formatDate(r.published_at) + '</div>' +
-                (assets ? '<div style="margin-top:6px;">' + assets + '</div>' : '') +
+        const deleteBtn = isAdmin ? '<button class="small danger" onclick="event.stopPropagation();deleteRelease(\'' + esc(r.tag) + '\')">Delete</button>' : '';
+        const arrow = '<span style="color:var(--text2);font-size:10px;margin-right:4px;display:inline-block;transition:transform 0.15s;transform:rotate(' + (expanded ? '90' : '0') + 'deg);">&#9654;</span>';
+        const body = expanded ? (
+            '<div style="padding:8px 0 4px 18px;border-top:1px solid var(--border);margin-top:8px;">' +
+                (r.body ? '<div style="color:var(--text1);font-size:13px;line-height:1.5;">' + renderMarkdown(r.body) + '</div>'
+                        : '<div style="color:var(--text2);font-size:13px;font-style:italic;">No release notes.</div>') +
+                (assets ? '<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--border);"><div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:4px;">Assets</div>' + assets + '</div>' : '') +
+            '</div>'
+        ) : '';
+        return '<div style="padding:10px 0;border-bottom:1px solid var(--border);">' +
+            '<div onclick="toggleRelease(\'' + esc(r.tag) + '\')" style="display:flex;align-items:flex-start;justify-content:space-between;cursor:pointer;">' +
+                '<div>' +
+                    '<div style="font-weight:600;font-size:14px;font-family:monospace;">' + arrow + esc(r.tag) + pre + '</div>' +
+                    (r.name && r.name !== r.tag ? '<div style="font-size:13px;color:var(--text2);margin-left:18px;">' + esc(r.name) + '</div>' : '') +
+                    '<div style="font-size:12px;color:var(--text2);margin-top:4px;margin-left:18px;">' + formatDate(r.published_at) + '</div>' +
+                '</div>' +
+                deleteBtn +
             '</div>' +
-            deleteBtn +
+            body +
         '</div>';
     }).join('');
 }
@@ -1747,7 +1781,7 @@ async function showWsDetail(id) {
             ? '<div style="color:var(--text2);font-size:13px;">No members</div>'
             : members.map(m => `
                 <div class="machine-item">
-                    <span><strong>${esc(m.username)}</strong> <span class="badge active" style="font-size:10px;">${esc(m.role)}</span></span>
+                    <span style="display:flex;align-items:center;gap:8px;"><strong style="min-width:200px;">${esc(m.username)}</strong> <span class="badge active" style="font-size:10px;">${esc(m.role.toUpperCase())}</span></span>
                     ${userRole === 'admin' ? `<button class="small danger" onclick="removeWsMember('${id}','${esc(m.username)}')">Remove</button>` : ''}
                 </div>
             `).join('');
