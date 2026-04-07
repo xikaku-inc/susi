@@ -7,6 +7,7 @@
 #include <fstream>
 #include <mutex>
 #include <sstream>
+#include <string>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -21,18 +22,20 @@
 #include <curl/curl.h>
 
 #ifdef _WIN32
-#include <winsock2.h>
-#include <iphlpapi.h>
 #include <windows.h>
 #include <winioctl.h>
 #include <setupapi.h>
 #include <cfgmgr32.h>
-#pragma comment(lib, "iphlpapi.lib")
-#pragma comment(lib, "ws2_32.lib")
+#include <wbemidl.h>
+#pragma comment(lib, "wbemuuid.lib")
+#pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "oleaut32.lib")
 #pragma comment(lib, "setupapi.lib")
 #pragma comment(lib, "cfgmgr32.lib")
 #else
 #include <climits>
+#include <cstdint>
+#include <cstring>
 #include <dirent.h>
 #include <unistd.h>
 #include <unordered_map>
@@ -40,6 +43,14 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
 #include <sys/mount.h>
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <net/if_dl.h>
+#include <net/if_media.h>
+#include <net/if_types.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <sys/sockio.h>
 #endif
 #endif
 
@@ -119,43 +130,96 @@ static bool verifySignature(
 // Hardware fingerprinting (must match susi_core::fingerprint)
 // ---------------------------------------------------------------------------
 #ifdef _WIN32
+// PermanentAddress from MSFT_NetAdapter (ROOT\StandardCimv2): same population as Get-NetAdapter -Physical.
+static bool normalizeWmiMacString(const wchar_t* w, UINT wlen, std::string& out)
+{
+    std::string hex;
+    hex.reserve(12);
+    for (UINT i = 0; i < wlen; ++i) {
+        wchar_t c = w[i];
+        if (c >= L'0' && c <= L'9')
+            hex.push_back(static_cast<char>(c));
+        else if (c >= L'a' && c <= L'f')
+            hex.push_back(static_cast<char>(c));
+        else if (c >= L'A' && c <= L'F')
+            hex.push_back(static_cast<char>(c - L'A' + 'a'));
+    }
+    if (hex.size() != 12) return false;
+    for (char ch : hex) {
+        if (ch != '0') {
+            out = std::move(hex);
+            return true;
+        }
+    }
+    return false;
+}
+
 static std::vector<std::string> getMacAddresses()
 {
     std::vector<std::string> macs;
 
-    ULONG bufLen = 15000;
-    std::vector<unsigned char> buffer;
+    HRESULT hrCom = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    if (FAILED(hrCom) && hrCom != RPC_E_CHANGED_MODE) return macs;
+    const bool comInitByUs = (hrCom == S_OK);
 
-    for (;;) {
-        buffer.resize(bufLen);
-        ULONG ret = GetAdaptersAddresses(
-            AF_UNSPEC,
-            GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST,
-            nullptr,
-            reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buffer.data()),
-            &bufLen);
-
-        if (ret == ERROR_SUCCESS) break;
-        if (ret == ERROR_BUFFER_OVERFLOW) continue;
+    IWbemLocator* pLoc = nullptr;
+    HRESULT hres = CoCreateInstance(
+        CLSID_WbemLocator, nullptr, CLSCTX_INPROC_SERVER, IID_IWbemLocator, reinterpret_cast<void**>(&pLoc));
+    if (FAILED(hres)) {
+        if (comInitByUs) CoUninitialize();
         return macs;
     }
 
-    auto* adapter = reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buffer.data());
-    while (adapter) {
-        if (adapter->PhysicalAddressLength == 6) {
-            bool allZero = true;
-            for (DWORD i = 0; i < 6; ++i) {
-                if (adapter->PhysicalAddress[i] != 0) {
-                    allZero = false;
-                    break;
-                }
-            }
-            if (!allZero) {
-                macs.push_back(hexEncode(adapter->PhysicalAddress, 6));
-            }
-        }
-        adapter = adapter->Next;
+    IWbemServices* pSvc = nullptr;
+    BSTR ns = SysAllocString(L"ROOT\\StandardCimv2");
+    hres = pLoc->ConnectServer(ns, nullptr, nullptr, nullptr, 0, nullptr, nullptr, &pSvc);
+    SysFreeString(ns);
+    pLoc->Release();
+    if (FAILED(hres)) {
+        if (comInitByUs) CoUninitialize();
+        return macs;
     }
+
+    hres = CoSetProxyBlanket(pSvc, RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE, nullptr, RPC_C_AUTHN_LEVEL_CALL,
+        RPC_C_IMP_LEVEL_IMPERSONATE, nullptr, EOAC_NONE);
+    if (FAILED(hres)) {
+        pSvc->Release();
+        if (comInitByUs) CoUninitialize();
+        return macs;
+    }
+
+    IEnumWbemClassObject* pEnum = nullptr;
+    BSTR wql = SysAllocString(L"WQL");
+    BSTR query = SysAllocString(
+        L"SELECT PermanentAddress FROM MSFT_NetAdapter WHERE Virtual = FALSE AND Hidden = FALSE");
+    hres = pSvc->ExecQuery(wql, query, WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, nullptr,
+        &pEnum);
+    SysFreeString(query);
+    SysFreeString(wql);
+    pSvc->Release();
+    if (FAILED(hres)) {
+        if (comInitByUs) CoUninitialize();
+        return macs;
+    }
+
+    for (;;) {
+        IWbemClassObject* pObj = nullptr;
+        ULONG returned = 0;
+        const HRESULT hr = pEnum->Next(WBEM_INFINITE, 1, &pObj, &returned);
+        if (hr == WBEM_S_FALSE) break;
+        if (FAILED(hr) || returned == 0 || !pObj) break;
+
+        VARIANT vt;
+        VariantInit(&vt);
+        if (SUCCEEDED(pObj->Get(L"PermanentAddress", 0, &vt, nullptr, nullptr)) && vt.vt == VT_BSTR && vt.bstrVal) {
+            std::string n;
+            if (normalizeWmiMacString(vt.bstrVal, SysStringLen(vt.bstrVal), n)) macs.push_back(std::move(n));
+        }
+        VariantClear(&vt);
+        pObj->Release();
+    }
+    pEnum->Release();
+    if (comInitByUs) CoUninitialize();
 
     std::sort(macs.begin(), macs.end());
     macs.erase(std::unique(macs.begin(), macs.end()), macs.end());
@@ -177,7 +241,76 @@ static std::string getHostname()
     WideCharToMultiByte(CP_UTF8, 0, buf.data(), static_cast<int>(size), result.data(), needed, nullptr, nullptr);
     return result;
 }
-#else
+#elif defined(__APPLE__)
+static bool isPhysicalWiredOrWifiMedia(const char* ifname)
+{
+    int s = socket(AF_INET, SOCK_DGRAM, 0);
+    if (s < 0) return false;
+    struct ifmediareq ifmr = {};
+    strncpy(ifmr.ifm_name, ifname, sizeof(ifmr.ifm_name) - 1);
+    const int ok = ioctl(s, SIOCGIFMEDIA, &ifmr);
+    close(s);
+    if (ok < 0) return false;
+    const int t = IFM_TYPE(ifmr.ifm_active);
+    return t == IFM_ETHER || t == IFM_IEEE80211;
+}
+
+static std::vector<std::string> getMacAddresses()
+{
+    std::vector<std::string> macs;
+
+    ifaddrs* ifap = nullptr;
+    if (getifaddrs(&ifap) != 0) return macs;
+
+    for (ifaddrs* ifa = ifap; ifa; ifa = ifa->ifa_next) {
+        if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_LINK) continue;
+        const auto* sdl = reinterpret_cast<const sockaddr_dl*>(ifa->ifa_addr);
+        if (sdl->sdl_type != IFT_ETHER || sdl->sdl_alen != 6) continue;
+        if (!isPhysicalWiredOrWifiMedia(ifa->ifa_name)) continue;
+        const unsigned char* m = reinterpret_cast<const unsigned char*>(LLADDR(sdl));
+        bool allZero = true;
+        for (int i = 0; i < 6; ++i) {
+            if (m[i] != 0) {
+                allZero = false;
+                break;
+            }
+        }
+        if (!allZero) macs.push_back(hexEncode(m, 6));
+    }
+    freeifaddrs(ifap);
+
+    std::sort(macs.begin(), macs.end());
+    macs.erase(std::unique(macs.begin(), macs.end()), macs.end());
+    return macs;
+}
+
+static std::string getHostname()
+{
+    char buf[256] = {};
+    if (gethostname(buf, sizeof(buf)) == 0) return std::string(buf);
+    return "";
+}
+#elif defined(__linux__)
+// ARPHRD_ETHER / ARPHRD_IEEE80211; skip virtual sysfs devices (path contains "/virtual/").
+static bool isPhysicalWiredOrWifiIface(const std::string& name)
+{
+    if (name == "lo" || name == "." || name == "..") return false;
+
+    const std::string base = "/sys/class/net/" + name;
+    std::ifstream tf(base + "/type");
+    uint32_t arpType = 0;
+    if (!(tf >> arpType)) return false;
+    if (arpType != 1 && arpType != 801) return false;
+
+    try {
+        const auto canon = std::filesystem::canonical(base);
+        const std::string p = canon.string();
+        return p.find("/virtual/") == std::string::npos;
+    } catch (...) {
+        return false;
+    }
+}
+
 static std::vector<std::string> getMacAddresses()
 {
     std::vector<std::string> macs;
@@ -187,11 +320,10 @@ static std::vector<std::string> getMacAddresses()
 
     struct dirent* entry;
     while ((entry = readdir(dir)) != nullptr) {
-        std::string name = entry->d_name;
-        if (name == "lo" || name == "." || name == "..") continue;
+        const std::string ifaceName = entry->d_name;
+        if (!isPhysicalWiredOrWifiIface(ifaceName)) continue;
 
-        std::string path = "/sys/class/net/" + name + "/address";
-        std::ifstream f(path);
+        std::ifstream f("/sys/class/net/" + ifaceName + "/address");
         if (!f.is_open()) continue;
 
         std::string mac;
@@ -232,6 +364,18 @@ static std::string getHostname()
     if (gethostname(buf, sizeof(buf)) == 0) {
         return std::string(buf);
     }
+    return "";
+}
+#else
+static std::vector<std::string> getMacAddresses()
+{
+    return {};
+}
+
+static std::string getHostname()
+{
+    char buf[256] = {};
+    if (gethostname(buf, sizeof(buf)) == 0) return std::string(buf);
     return "";
 }
 #endif

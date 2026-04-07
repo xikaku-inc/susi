@@ -19,55 +19,59 @@ pub fn get_machine_code() -> Result<String, LicenseError> {
 
 // ---- Platform-specific implementations ----
 
+/// On **Windows**, MACs are taken from `MSFT_NetAdapter` in `ROOT\\StandardCimv2` with
+/// `Virtual = FALSE` and `Hidden = FALSE`, matching **`Get-NetAdapter -Physical`** (default,
+/// non-hidden adapters): **wired and Wi‑Fi** NICs, not virtual, including when disabled.
 #[cfg(target_os = "windows")]
 fn get_mac_addresses() -> Result<Vec<String>, LicenseError> {
-    use windows::Win32::NetworkManagement::IpHelper::{
-        GetAdaptersAddresses, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_MULTICAST,
-        IP_ADAPTER_ADDRESSES_LH,
-    };
-    use windows::Win32::Networking::WinSock::AF_UNSPEC;
+    use std::collections::HashMap;
 
-    let mut buf_len: u32 = 15000;
-    let mut buffer: Vec<u8>;
+    use wmi::{Variant, WMIConnection};
 
-    loop {
-        buffer = vec![0u8; buf_len as usize];
-        let ret = unsafe {
-            GetAdaptersAddresses(
-                AF_UNSPEC.0 as u32,
-                GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST,
-                None,
-                Some(buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH),
-                &mut buf_len,
-            )
-        };
-        if ret == 0 {
-            break;
+    /// Same population as `Get-NetAdapter -Physical` (excludes hidden unless `-IncludeHidden`).
+    /// `PermanentAddress` is the CIM field behind PowerShell's `MacAddress`.
+    const QUERY: &str =
+        "SELECT PermanentAddress FROM MSFT_NetAdapter WHERE Virtual = FALSE AND Hidden = FALSE";
+
+    fn mac_string_from_variant(v: &Variant) -> Option<String> {
+        match v {
+            Variant::String(s) if !s.is_empty() => Some(s.clone()),
+            Variant::Null | Variant::Empty => None,
+            _ => None,
         }
-        if ret == 111 {
-            // ERROR_BUFFER_OVERFLOW, try again with larger buffer
-            continue;
-        }
-        return Err(LicenseError::Other(format!(
-            "GetAdaptersAddresses failed with error {}",
-            ret
-        )));
     }
 
-    let mut macs = Vec::new();
-    let mut adapter = buffer.as_ptr() as *const IP_ADAPTER_ADDRESSES_LH;
-
-    while !adapter.is_null() {
-        let a = unsafe { &*adapter };
-        let phys_len = a.PhysicalAddressLength as usize;
-        if phys_len == 6 {
-            let mac = &a.PhysicalAddress[..phys_len];
-            // Skip all-zero MACs
-            if mac.iter().any(|&b| b != 0) {
-                macs.push(hex::encode(mac));
-            }
+    /// WMI uses hyphen-separated MACs (e.g. `AA-BB-CC-DD-EE-FF`); fingerprint uses 12 hex chars.
+    fn normalize_wmi_mac(s: &str) -> Option<String> {
+        let hex: String = s.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+        if hex.len() != 12 || hex.chars().all(|c| c == '0') {
+            return None;
         }
-        adapter = a.Next;
+        Some(hex.to_lowercase())
+    }
+
+    let wmi_con = WMIConnection::with_namespace_path(r"ROOT\StandardCimv2").map_err(|e| {
+        LicenseError::Other(format!("WMI connection to ROOT\\StandardCimv2: {}", e))
+    })?;
+
+    let rows: Vec<HashMap<String, Variant>> = wmi_con.raw_query(QUERY).map_err(|e| {
+        LicenseError::Other(format!(
+            "WMI query MSFT_NetAdapter (match Get-NetAdapter -Physical): {}",
+            e
+        ))
+    })?;
+
+    let mut macs = Vec::new();
+    for row in rows {
+        let Some(v) = row.get("PermanentAddress") else {
+            continue;
+        };
+        let Some(raw) = mac_string_from_variant(v) else {
+            continue;
+        };
+        if let Some(n) = normalize_wmi_mac(&raw) {
+            macs.push(n);
+        }
     }
 
     macs.sort();
@@ -105,8 +109,35 @@ fn get_hostname() -> Result<String, LicenseError> {
     Ok(String::from_utf16_lossy(&buffer[..size as usize]))
 }
 
+/// On **Linux**, **physical** interfaces only (sysfs path not under `/virtual/`): **Ethernet**
+/// (`ARPHRD_ETHER`) and **Wi‑Fi** (`ARPHRD_IEEE80211`), regardless of `OPERSTATE`.
 #[cfg(target_os = "linux")]
 fn get_mac_addresses() -> Result<Vec<String>, LicenseError> {
+    use std::path::Path;
+
+    /// linux/uapi/linux/if_arp.h
+    const ARPHRD_ETHER: u32 = 1;
+    const ARPHRD_IEEE80211: u32 = 801;
+
+    fn is_physical_wired_or_wifi_iface(name: &str) -> bool {
+        if name == "lo" {
+            return false;
+        }
+        let base = format!("/sys/class/net/{name}");
+        let type_path = format!("{base}/type");
+        let arp_type: u32 = match std::fs::read_to_string(&type_path) {
+            Ok(s) => s.trim().parse().unwrap_or(0),
+            Err(_) => return false,
+        };
+        if arp_type != ARPHRD_ETHER && arp_type != ARPHRD_IEEE80211 {
+            return false;
+        }
+        match std::fs::canonicalize(Path::new(&base)) {
+            Ok(p) => !p.to_string_lossy().contains("/virtual/"),
+            Err(_) => false,
+        }
+    }
+
     let mut macs = Vec::new();
 
     let entries = std::fs::read_dir("/sys/class/net")
@@ -114,8 +145,7 @@ fn get_mac_addresses() -> Result<Vec<String>, LicenseError> {
 
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
-        // Skip loopback
-        if name == "lo" {
+        if !is_physical_wired_or_wifi_iface(&name) {
             continue;
         }
         let addr_path = entry.path().join("address");
@@ -151,12 +181,63 @@ fn get_hostname() -> Result<String, LicenseError> {
         })
 }
 
+/// On **macOS**, link-layer addresses where **`SIOCGIFMEDIA`** reports **`IFM_ETHER`** or
+/// **`IFM_IEEE80211`** (wired or Wi‑Fi), excluding other virtual-style types when ioctl succeeds.
 #[cfg(target_os = "macos")]
 fn get_mac_addresses() -> Result<Vec<String>, LicenseError> {
+    use std::ffi::CStr;
+    use std::io;
+    use std::mem;
     use std::ptr;
 
     // AF_LINK on macOS
     const AF_LINK: i32 = 18;
+
+    // net/if_media.h — IFM_TYPE(x) ((x) & IFM_NMASK)
+    const IFM_NMASK: i32 = 0x0000_00e0;
+    const IFM_ETHER: i32 = 0x0000_0020;
+    const IFM_IEEE80211: i32 = 0x0000_0080;
+
+    // bsd/sys/sockio.h: _IOWR('i', 56, struct ifmediareq) on 64-bit Darwin
+    const SIOCGIFMEDIA: libc::c_ulong = 0xc028_6938;
+
+    #[repr(C)]
+    struct Ifmediareq {
+        ifm_name: [u8; libc::IFNAMSIZ],
+        ifm_current: i32,
+        ifm_active: i32,
+        ifm_count: i32,
+        ifm_ulist: *mut i32,
+    }
+
+    fn ifm_type(media_word: i32) -> i32 {
+        media_word & IFM_NMASK
+    }
+
+    /// Wired Ethernet or Wi‑Fi; both use `IFT_ETHER` in `sockaddr_dl` but differ in media type.
+    fn is_physical_wired_or_wifi_media(ifname: &str) -> bool {
+        let sock = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
+        if sock < 0 {
+            return false;
+        }
+        let mut req: Ifmediareq = unsafe { mem::zeroed() };
+        let bytes = ifname.as_bytes();
+        let copy_len = bytes.len().min(req.ifm_name.len() - 1);
+        req.ifm_name[..copy_len].copy_from_slice(&bytes[..copy_len]);
+        let r = unsafe {
+            libc::ioctl(
+                sock,
+                SIOCGIFMEDIA as libc::c_ulong,
+                &mut req as *mut Ifmediareq as *mut libc::c_void,
+            )
+        };
+        let _ = unsafe { libc::close(sock) };
+        if r < 0 {
+            return false;
+        }
+        let t = ifm_type(req.ifm_active);
+        t == IFM_ETHER || t == IFM_IEEE80211
+    }
 
     // Minimal sockaddr_dl layout for reading MAC addresses
     #[repr(C)]
@@ -188,6 +269,13 @@ fn get_mac_addresses() -> Result<Vec<String>, LicenseError> {
             if sa.sa_family as i32 == AF_LINK {
                 let sdl = unsafe { &*(ifa.ifa_addr as *const SockaddrDl) };
                 if sdl.sdl_type == IFT_ETHER && sdl.sdl_alen == 6 {
+                    let ifname = unsafe { CStr::from_ptr(ifa.ifa_name) }
+                        .to_string_lossy()
+                        .into_owned();
+                    if !is_physical_wired_or_wifi_media(&ifname) {
+                        cur = ifa.ifa_next;
+                        continue;
+                    }
                     let offset = sdl.sdl_nlen as usize;
                     let mac = &sdl.sdl_data[offset..offset + 6];
                     if mac.iter().any(|&b| b != 0) {
