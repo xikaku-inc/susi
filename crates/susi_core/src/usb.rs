@@ -396,9 +396,189 @@ fn platform_enumerate() -> Result<Vec<UsbDevice>, LicenseError> {
     Ok(devices)
 }
 
+// ---- macOS ----
+
+#[cfg(target_os = "macos")]
+fn platform_enumerate() -> Result<Vec<UsbDevice>, LicenseError> {
+    use std::collections::HashMap;
+    use std::ffi::{CStr, CString};
+    use std::os::raw::{c_char, c_void};
+
+    type CFTypeRef = *const c_void;
+    type CFStringRef = CFTypeRef;
+    type CFAllocatorRef = CFTypeRef;
+    type CFMutableDictionaryRef = *mut c_void;
+    type CFIndex = isize;
+    type CFStringEncoding = u32;
+    type IoObjectT = u32;
+    type IoServiceT = IoObjectT;
+    type IoIteratorT = IoObjectT;
+    type KernReturn = i32;
+
+    const K_CF_STRING_ENCODING_UTF8: CFStringEncoding = 0x0800_0100;
+    const KERN_SUCCESS: KernReturn = 0;
+    const IO_OBJECT_NULL: IoObjectT = 0;
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        static kCFAllocatorDefault: CFAllocatorRef;
+        static kCFBooleanTrue: CFTypeRef;
+        fn CFStringGetCString(s: CFStringRef, buf: *mut c_char, size: CFIndex, enc: CFStringEncoding) -> bool;
+        fn CFStringCreateWithCString(alloc: CFAllocatorRef, c_str: *const c_char, enc: CFStringEncoding) -> CFStringRef;
+        fn CFRelease(cf: CFTypeRef);
+        fn CFDictionarySetValue(dict: CFMutableDictionaryRef, key: CFTypeRef, value: CFTypeRef);
+    }
+
+    #[link(name = "IOKit", kind = "framework")]
+    extern "C" {
+        fn IOServiceMatching(name: *const c_char) -> CFMutableDictionaryRef;
+        fn IOServiceGetMatchingServices(port: u32, matching: CFMutableDictionaryRef, existing: *mut IoIteratorT) -> KernReturn;
+        fn IOIteratorNext(iter: IoIteratorT) -> IoServiceT;
+        fn IOObjectRelease(obj: IoObjectT) -> KernReturn;
+        fn IOObjectRetain(obj: IoObjectT) -> KernReturn;
+        fn IORegistryEntryCreateCFProperty(entry: IoServiceT, key: CFStringRef, alloc: CFAllocatorRef, options: u32) -> CFTypeRef;
+        fn IORegistryEntryGetParentEntry(entry: IoServiceT, plane: *const c_char, parent: *mut IoServiceT) -> KernReturn;
+    }
+
+    unsafe fn cf_str(s: &str) -> CFStringRef {
+        let cs = CString::new(s).unwrap();
+        CFStringCreateWithCString(kCFAllocatorDefault, cs.as_ptr(), K_CF_STRING_ENCODING_UTF8)
+    }
+
+    unsafe fn cf_string_to_std(s: CFStringRef) -> Option<String> {
+        if s.is_null() { return None; }
+        let mut buf = [0i8; 512];
+        if CFStringGetCString(s, buf.as_mut_ptr(), buf.len() as CFIndex, K_CF_STRING_ENCODING_UTF8) {
+            CStr::from_ptr(buf.as_ptr()).to_str().ok().map(str::to_string)
+        } else {
+            None
+        }
+    }
+
+    // Walk up the IOKit service plane to find "USB Serial Number" (iSerialNumber descriptor).
+    // Matches the serial extracted from USBSTOR device ID on Windows.
+    unsafe fn usb_serial_for_service(service: IoServiceT) -> Option<String> {
+        let key = cf_str("USB Serial Number");
+        let mut cur = service;
+        IOObjectRetain(cur);
+        let mut serial = None;
+        for _ in 0..12 {
+            if cur == IO_OBJECT_NULL { break; }
+            let prop = IORegistryEntryCreateCFProperty(cur, key, kCFAllocatorDefault, 0);
+            if !prop.is_null() {
+                serial = cf_string_to_std(prop);
+                CFRelease(prop);
+                IOObjectRelease(cur);
+                break;
+            }
+            let mut parent: IoServiceT = IO_OBJECT_NULL;
+            let kr = IORegistryEntryGetParentEntry(cur, b"IOService\0".as_ptr() as *const c_char, &mut parent);
+            IOObjectRelease(cur);
+            if kr != KERN_SUCCESS { break; }
+            cur = parent;
+        }
+        CFRelease(key);
+        serial
+    }
+
+    // Build /dev/diskNsM -> mount point map via getfsstat
+    let mut mount_map: HashMap<String, String> = HashMap::new();
+    unsafe {
+        let count = libc::getfsstat(std::ptr::null_mut(), 0, libc::MNT_NOWAIT);
+        if count > 0 {
+            let mut stats = vec![std::mem::zeroed::<libc::statfs>(); count as usize];
+            let count2 = libc::getfsstat(
+                stats.as_mut_ptr(),
+                (count as usize * std::mem::size_of::<libc::statfs>()) as libc::c_int,
+                libc::MNT_NOWAIT,
+            );
+            for stat in &stats[..count2.max(0) as usize] {
+                let from = CStr::from_ptr(stat.f_mntfromname.as_ptr()).to_string_lossy().into_owned();
+                let to = CStr::from_ptr(stat.f_mntonname.as_ptr()).to_string_lossy().into_owned();
+                mount_map.insert(from, to);
+            }
+        }
+    }
+
+    let mut devices = Vec::new();
+
+    unsafe {
+        // IOServiceGetMatchingServices consumes one reference to `matching`, so no CFRelease after.
+        let matching = IOServiceMatching(b"IOMedia\0".as_ptr() as *const c_char);
+        if matching.is_null() { return Ok(devices); }
+
+        let removable_key = cf_str("Removable");
+        let whole_key = cf_str("Whole");
+        CFDictionarySetValue(matching, removable_key, kCFBooleanTrue);
+        CFDictionarySetValue(matching, whole_key, kCFBooleanTrue);
+        CFRelease(removable_key);
+        CFRelease(whole_key);
+
+        let mut iter: IoIteratorT = IO_OBJECT_NULL;
+        if IOServiceGetMatchingServices(0, matching, &mut iter) != KERN_SUCCESS {
+            return Ok(devices);
+        }
+
+        let bsd_key = cf_str("BSD Name");
+
+        loop {
+            let media = IOIteratorNext(iter);
+            if media == IO_OBJECT_NULL { break; }
+
+            let bsd_prop = IORegistryEntryCreateCFProperty(media, bsd_key, kCFAllocatorDefault, 0);
+            let bsd_name = cf_string_to_std(bsd_prop);
+            if !bsd_prop.is_null() { CFRelease(bsd_prop); }
+
+            let bsd_name = match bsd_name.filter(|n| !n.is_empty()) {
+                Some(n) => n,
+                None => { IOObjectRelease(media); continue; }
+            };
+
+            let serial = match usb_serial_for_service(media).filter(|s| !s.is_empty()) {
+                Some(s) => s,
+                None => { IOObjectRelease(media); continue; }
+            };
+
+            // Find mount point: try partitions diskNs1..s9, then whole disk
+            let mut mount_point = None;
+            for p in 1u32..=9 {
+                let part = format!("/dev/{}s{}", bsd_name, p);
+                if let Some(mp) = mount_map.get(&part) {
+                    mount_point = Some(mp.clone());
+                    break;
+                }
+            }
+            if mount_point.is_none() {
+                mount_point = mount_map.get(&format!("/dev/{}", bsd_name)).cloned();
+            }
+
+            let mount_path = match mount_point {
+                Some(mp) => mp,
+                None => { IOObjectRelease(media); continue; }
+            };
+
+            // Volume name = last path component (e.g. /Volumes/MY_DRIVE -> MY_DRIVE)
+            let name = mount_path.rsplit('/').next().filter(|s| !s.is_empty())
+                .unwrap_or("USB Drive").to_string();
+
+            devices.push(UsbDevice {
+                serial,
+                mount_path: PathBuf::from(&mount_path),
+                name,
+            });
+            IOObjectRelease(media);
+        }
+
+        CFRelease(bsd_key);
+        IOObjectRelease(iter);
+    }
+
+    Ok(devices)
+}
+
 // ---- Unsupported platforms ----
 
-#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
 fn platform_enumerate() -> Result<Vec<UsbDevice>, LicenseError> {
     Err(LicenseError::UsbError(
         "USB token enumeration not supported on this platform".to_string(),
