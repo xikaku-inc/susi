@@ -104,21 +104,12 @@ label {
     border-radius: var(--radius);
     overflow: hidden;
 }
-
-.stats {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-    gap: 12px;
-    margin-bottom: 20px;
-}
 .stat-card {
     background: var(--bg2);
     border: 1px solid var(--border);
     border-radius: var(--radius);
     padding: 16px;
 }
-.stat-card .value { font-size: 28px; font-weight: 700; }
-.stat-card .label { font-size: 12px; color: var(--text2); text-transform: uppercase; letter-spacing: 0.5px; }
 
 table { width: 100%; border-collapse: collapse; }
 th {
@@ -166,25 +157,26 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
     margin: 1px 2px;
 }
 .feature-checkboxes {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    padding: 8px 10px;
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: var(--radius);
+    overflow: hidden;
 }
-.feature-checkboxes label {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    cursor: pointer;
+.feature-checkboxes table { width: 100%; border-collapse: collapse; }
+.feature-checkboxes td {
+    padding: 6px 10px;
     font-size: 13px;
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+    white-space: nowrap;
 }
-.feature-checkboxes label .feat-desc {
+.feature-checkboxes tr:last-child td { border-bottom: none; }
+.feature-checkboxes tr:hover td { background: rgba(108, 140, 255, 0.04); }
+.feature-checkboxes td:first-child { width: 24px; text-align: center; }
+.feature-checkboxes .feat-id {
     color: var(--text2);
     font-size: 11px;
-    margin-left: auto;
+    font-family: "SF Mono", "Fira Code", "Consolas", monospace;
 }
 
 .key-display {
@@ -386,81 +378,6 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
 </div>
 
 <div class="container">
-    <div id="adminLicenseStats" class="stats">
-        <div class="stat-card">
-            <div class="value" id="statTotal">-</div>
-            <div class="label">Total Licenses</div>
-        </div>
-        <div class="stat-card">
-            <div class="value" id="statActive" style="color: var(--green);">-</div>
-            <div class="label">Active</div>
-        </div>
-        <div class="stat-card">
-            <div class="value" id="statExpired" style="color: var(--yellow);">-</div>
-            <div class="label">Expired</div>
-        </div>
-        <div class="stat-card">
-            <div class="value" id="statRevoked" style="color: var(--red);">-</div>
-            <div class="label">Revoked</div>
-        </div>
-    </div>
-
-    <div id="adminLicenseToolbar" class="toolbar">
-        <input type="text" id="searchInput" placeholder="Search licenses...">
-        <div class="spacer"></div>
-        <button class="secondary" onclick="loadLicenses()">Refresh</button>
-        <button onclick="showCreateModal()">+ New License</button>
-    </div>
-
-    <!-- Detail panel -->
-    <div id="detailPanel" class="detail-panel card">
-        <div class="detail-header">
-            <h3 id="detailTitle">License Details</h3>
-            <div>
-                <button class="small secondary" onclick="exportLicense()">Export</button>
-                <button class="small danger" id="btnRevoke" onclick="revokeLicense()">Revoke</button>
-                <button class="small secondary" onclick="closeDetail()">&times; Close</button>
-            </div>
-        </div>
-        <div class="detail-body">
-            <div class="detail-grid">
-                <div class="detail-field">
-                    <div class="field-label">License Key</div>
-                    <div class="field-value" id="detailKey"></div>
-                </div>
-                <div class="detail-field">
-                    <div class="field-label">Status</div>
-                    <div class="field-value" id="detailStatus"></div>
-                </div>
-                <div class="detail-field">
-                    <div class="field-label">Product</div>
-                    <div class="field-value" id="detailProduct"></div>
-                </div>
-                <div class="detail-field">
-                    <div class="field-label">Customer</div>
-                    <div class="field-value" id="detailCustomer"></div>
-                </div>
-                <div class="detail-field">
-                    <div class="field-label">Created</div>
-                    <div class="field-value" id="detailCreated"></div>
-                </div>
-                <div class="detail-field">
-                    <div class="field-label">Expires</div>
-                    <div class="field-value" id="detailExpires"></div>
-                </div>
-                <div class="detail-field">
-                    <div class="field-label">Features</div>
-                    <div class="field-value" id="detailFeatures"></div>
-                </div>
-                <div class="detail-field">
-                    <div class="field-label">Machines</div>
-                    <div class="field-value" id="detailMachineCount"></div>
-                </div>
-            </div>
-            <div class="detail-section-title">Activated Machines</div>
-            <div id="detailMachines" class="machines-list"></div>
-        </div>
-    </div>
 
     <!-- Workspaces section -->
     <div style="margin-top:32px;margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;">
@@ -531,6 +448,98 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
 
     <div id="adminLicenseTableSection">
     <h2 style="font-size:16px;font-weight:600;margin-top:32px;margin-bottom:16px;">Licenses</h2>
+
+    <div id="adminLicenseToolbar" class="toolbar">
+        <input type="text" id="searchInput" placeholder="Search licenses...">
+        <div class="spacer"></div>
+        <button class="secondary" onclick="loadLicenses()">Refresh</button>
+        <button onclick="showCreateModal()">+ New License</button>
+    </div>
+
+    <!-- Detail panel -->
+    <div id="detailPanel" class="detail-panel card">
+        <div class="detail-header">
+            <h3 id="detailTitle">License Details</h3>
+            <div>
+                <button class="small secondary" id="btnEdit" onclick="startEditLicense()">Edit</button>
+                <button class="small secondary" onclick="exportLicense()">Export</button>
+                <button class="small danger" id="btnRevoke" onclick="revokeLicense()">Revoke</button>
+                <button class="small danger" id="btnDelete" onclick="deleteLicense()">Delete</button>
+                <button class="small secondary" onclick="closeDetail()">&times; Close</button>
+            </div>
+        </div>
+        <!-- View mode -->
+        <div class="detail-body" id="detailView">
+            <div class="detail-grid">
+                <div class="detail-field">
+                    <div class="field-label">License Key</div>
+                    <div class="field-value" id="detailKey"></div>
+                </div>
+                <div class="detail-field">
+                    <div class="field-label">Status</div>
+                    <div class="field-value" id="detailStatus"></div>
+                </div>
+                <div class="detail-field">
+                    <div class="field-label">Product</div>
+                    <div class="field-value" id="detailProduct"></div>
+                </div>
+                <div class="detail-field">
+                    <div class="field-label">Customer</div>
+                    <div class="field-value" id="detailCustomer"></div>
+                </div>
+                <div class="detail-field">
+                    <div class="field-label">Created</div>
+                    <div class="field-value" id="detailCreated"></div>
+                </div>
+                <div class="detail-field">
+                    <div class="field-label">Expires</div>
+                    <div class="field-value" id="detailExpires"></div>
+                </div>
+                <div class="detail-field">
+                    <div class="field-label">Features</div>
+                    <div class="field-value" id="detailFeatures"></div>
+                </div>
+                <div class="detail-field">
+                    <div class="field-label">Max Machines</div>
+                    <div class="field-value" id="detailMachineCount"></div>
+                </div>
+            </div>
+            <div class="detail-section-title">Activated Machines</div>
+            <div id="detailMachines" class="machines-list"></div>
+        </div>
+        <!-- Edit mode -->
+        <div class="detail-body" id="detailEdit" style="display:none;">
+            <div class="detail-grid">
+                <div class="detail-field">
+                    <div class="field-label">Customer</div>
+                    <input type="text" id="editCustomer">
+                </div>
+                <div class="detail-field">
+                    <div class="field-label">Product</div>
+                    <input type="text" id="editProduct">
+                </div>
+                <div class="detail-field">
+                    <div class="field-label">Expires</div>
+                    <div style="display:flex;gap:8px;align-items:center;">
+                        <input type="date" id="editExpires" style="flex:1;">
+                        <label style="font-size:12px;white-space:nowrap;cursor:pointer;"><input type="checkbox" id="editPerpetual" onchange="document.getElementById('editExpires').disabled = this.checked;"> Perpetual</label>
+                    </div>
+                </div>
+                <div class="detail-field">
+                    <div class="field-label">Max Machines (0 = unlimited)</div>
+                    <input type="number" id="editMaxMachines" min="0">
+                </div>
+                <div class="detail-field" style="grid-column:1/-1;">
+                    <div class="field-label">Features</div>
+                    <div id="editFeaturesContainer" class="feature-checkboxes"></div>
+                </div>
+            </div>
+            <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;">
+                <button class="secondary" onclick="cancelEditLicense()">Cancel</button>
+                <button onclick="saveEditLicense()">Save Changes</button>
+            </div>
+        </div>
+    </div>
 
     <!-- License table -->
     <div class="card">
@@ -924,9 +933,8 @@ function enterDashboard() {
 
     const isAdmin = userRole === 'admin';
     document.getElementById('btnUsers').style.display = isAdmin ? '' : 'none';
-    document.getElementById('adminLicenseStats').style.display = isAdmin ? '' : 'none';
     document.getElementById('adminLicenseToolbar').style.display = isAdmin ? '' : 'none';
-    document.getElementById('detailPanel').style.display = 'none';
+    document.getElementById('detailPanel').classList.remove('visible');
     document.getElementById('adminLicenseTableSection').style.display = isAdmin ? '' : 'none';
     document.getElementById('btnCreateWorkspace').style.display = isAdmin ? '' : 'none';
     document.getElementById('btnUploadRelease').style.display = isAdmin ? '' : 'none';
@@ -995,7 +1003,6 @@ async function loadLicenses() {
         licenses = await resp.json();
         status.textContent = 'Connected';
         status.className = 'status ok';
-        renderStats();
         renderTable();
     } catch (e) {
         status.textContent = 'Disconnected';
@@ -1004,16 +1011,6 @@ async function loadLicenses() {
     }
 }
 
-function renderStats() {
-    const total = licenses.length;
-    const active = licenses.filter(l => getStatus(l) === 'active').length;
-    const expired = licenses.filter(l => getStatus(l) === 'expired').length;
-    const revoked = licenses.filter(l => getStatus(l) === 'revoked').length;
-    document.getElementById('statTotal').textContent = total;
-    document.getElementById('statActive').textContent = active;
-    document.getElementById('statExpired').textContent = expired;
-    document.getElementById('statRevoked').textContent = revoked;
-}
 
 function renderTable() {
     const tbody = document.getElementById('licenseTableBody');
@@ -1087,12 +1084,103 @@ function selectLicense(key) {
         machinesEl.innerHTML = '<div style="color:var(--text2);font-size:13px;padding:8px 0;">No machines activated</div>';
     }
 
-    document.getElementById('detailPanel').classList.add('visible');
+    document.getElementById('detailView').style.display = '';
+    document.getElementById('detailEdit').style.display = 'none';
+    document.getElementById('btnEdit').style.display = '';
+    const panel = document.getElementById('detailPanel');
+    panel.classList.add('visible');
+    panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
 function closeDetail() {
     selectedKey = null;
     document.getElementById('detailPanel').classList.remove('visible');
+}
+
+function startEditLicense() {
+    const lic = licenses.find(l => l.license_key === selectedKey);
+    if (!lic) return;
+    document.getElementById('editCustomer').value = lic.customer;
+    document.getElementById('editProduct').value = lic.product;
+    document.getElementById('editMaxMachines').value = lic.max_machines;
+    const isPerpetual = lic.expires === 'perpetual';
+    document.getElementById('editPerpetual').checked = isPerpetual;
+    const expiresInput = document.getElementById('editExpires');
+    expiresInput.disabled = isPerpetual;
+    if (!isPerpetual && lic.expires) {
+        expiresInput.value = lic.expires.split('T')[0];
+    } else {
+        expiresInput.value = '';
+    }
+    const container = document.getElementById('editFeaturesContainer');
+    container.innerHTML = '<table>' + availableFeatures.map(f =>
+        '<tr onclick="this.querySelector(\'input\').click()">' +
+        '<td><input type="checkbox" value="' + esc(f.id) + '"' + (lic.features.includes(f.id) ? ' checked' : '') + ' onclick="event.stopPropagation()"></td>' +
+        '<td>' + esc(f.label) + '</td>' +
+        '<td class="feat-id">' + esc(f.id) + '</td>' +
+        '</tr>'
+    ).join('') + '</table>';
+    document.getElementById('detailView').style.display = 'none';
+    document.getElementById('detailEdit').style.display = '';
+    document.getElementById('btnEdit').style.display = 'none';
+}
+
+function cancelEditLicense() {
+    document.getElementById('detailView').style.display = '';
+    document.getElementById('detailEdit').style.display = 'none';
+    document.getElementById('btnEdit').style.display = '';
+}
+
+async function saveEditLicense() {
+    if (!selectedKey) return;
+    const features = Array.from(document.querySelectorAll('#editFeaturesContainer input[type=checkbox]:checked')).map(cb => cb.value);
+    const isPerpetual = document.getElementById('editPerpetual').checked;
+    const body = {
+        customer: document.getElementById('editCustomer').value.trim(),
+        product: document.getElementById('editProduct').value.trim(),
+        expires: isPerpetual ? 'perpetual' : (document.getElementById('editExpires').value || null),
+        features: features,
+        max_machines: parseInt(document.getElementById('editMaxMachines').value) || 0,
+    };
+    if (!body.customer) { toast('Customer is required', 'error'); return; }
+    try {
+        const resp = await fetch(API + '/licenses/' + encodeURIComponent(selectedKey), {
+            method: 'PUT',
+            headers: authHeaders(),
+            body: JSON.stringify(body),
+        });
+        if (!resp.ok) {
+            const err = await resp.json();
+            toast('Error: ' + err.error, 'error');
+            return;
+        }
+        toast('License updated', 'success');
+        await loadLicenses();
+        selectLicense(selectedKey);
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function deleteLicense() {
+    if (!selectedKey) return;
+    if (!confirm('Permanently delete license ' + selectedKey + '? This cannot be undone.')) return;
+    try {
+        const resp = await fetch(API + '/licenses/' + encodeURIComponent(selectedKey), {
+            method: 'DELETE',
+            headers: authHeaders(),
+        });
+        if (!resp.ok) {
+            const err = await resp.json();
+            toast('Error: ' + err.error, 'error');
+            return;
+        }
+        toast('License deleted', 'success');
+        closeDetail();
+        await loadLicenses();
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
 }
 
 // Create modal
@@ -1140,13 +1228,13 @@ async function loadFeatures() {
         container.innerHTML = '<span style="color:var(--text2);font-size:12px">No features available</span>';
         return;
     }
-    container.innerHTML = availableFeatures.map(f =>
-        '<label title="' + esc(f.description) + '">' +
-        '<input type="checkbox" value="' + esc(f.id) + '"> ' +
-        esc(f.label) +
-        '<span class="feat-desc">' + esc(f.id) + '</span>' +
-        '</label>'
-    ).join('');
+    container.innerHTML = '<table>' + availableFeatures.map(f =>
+        '<tr title="' + esc(f.description) + '" onclick="this.querySelector(\'input\').click()">' +
+        '<td><input type="checkbox" value="' + esc(f.id) + '" onclick="event.stopPropagation()"></td>' +
+        '<td>' + esc(f.label) + '</td>' +
+        '<td class="feat-id">' + esc(f.id) + '</td>' +
+        '</tr>'
+    ).join('') + '</table>';
 }
 
 function getSelectedFeatures() {

@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 
 use crate::error::LicenseError;
@@ -394,6 +394,51 @@ impl LicenseDb {
             .execute(
                 "UPDATE licenses SET revoked = 1 WHERE license_key = ?1",
                 params![license_key],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))?;
+        Ok(rows > 0)
+    }
+
+    pub fn delete_license(&self, license_key: &str) -> Result<bool, LicenseError> {
+        let id: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT id FROM licenses WHERE license_key = ?1",
+                params![license_key],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?;
+        let Some(id) = id else { return Ok(false) };
+        self.conn
+            .execute("DELETE FROM machine_activations WHERE license_id = ?1", params![id])
+            .map_err(|e| LicenseError::Other(format!("DB delete machines: {}", e)))?;
+        let rows = self
+            .conn
+            .execute(
+                "DELETE FROM licenses WHERE license_key = ?1",
+                params![license_key],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB delete: {}", e)))?;
+        Ok(rows > 0)
+    }
+
+    pub fn update_license(
+        &self,
+        license_key: &str,
+        customer: &str,
+        product: &str,
+        expires: Option<&str>,
+        features: &[String],
+        max_machines: u32,
+    ) -> Result<bool, LicenseError> {
+        let features_json = serde_json::to_string(features)?;
+        let expires_str = expires.unwrap_or("");
+        let rows = self
+            .conn
+            .execute(
+                "UPDATE licenses SET customer = ?1, product = ?2, expires = ?3, features = ?4, max_machines = ?5 WHERE license_key = ?6",
+                params![customer, product, expires_str, features_json, max_machines, license_key],
             )
             .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))?;
         Ok(rows > 0)

@@ -193,9 +193,10 @@ impl LicenseClient {
 
     /// Try to refresh the license from the server, falling back to the local file.
     /// This both renews the lease and verifies the license.
-    pub fn verify_and_refresh(&self, path: &Path, license_key: &str) -> LicenseStatus {
+    /// If `friendly_name` is `Some`, use it instead of the system hostname.
+    pub fn verify_and_refresh(&self, path: &Path, license_key: &str, friendly_name: Option<&str>) -> LicenseStatus {
         if let Some(ref server_url) = self.server_url {
-            match self.try_online_activate(server_url, license_key) {
+            match self.try_online_activate(server_url, license_key, friendly_name) {
                 Ok(signed) => {
                     if let Ok(json) = serde_json::to_string_pretty(&signed) {
                         let _ = std::fs::write(path, json);
@@ -244,13 +245,19 @@ impl LicenseClient {
         &self,
         server_url: &str,
         license_key: &str,
+        friendly_name: Option<&str>,
     ) -> Result<SignedLicense, LicenseError> {
         let machine_code = fingerprint::get_machine_code()
             .map_err(|e| LicenseError::Other(format!("Fingerprint error: {}", e)))?;
 
-        let friendly_name = hostname::get()
-            .map(|h| h.to_string_lossy().to_string())
-            .unwrap_or_default();
+        let friendly_name = friendly_name
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                hostname::get()
+                    .map(|h| h.to_string_lossy().to_string())
+                    .unwrap_or_default()
+            });
 
         let url = format!("{}/activate", server_url.trim_end_matches('/'));
         let body = serde_json::json!({

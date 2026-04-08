@@ -118,6 +118,21 @@ fn default_lease_grace() -> u32 {
 }
 
 #[derive(Deserialize)]
+struct UpdateLicenseRequest {
+    #[serde(default)]
+    customer: Option<String>,
+    #[serde(default)]
+    product: Option<String>,
+    /// "YYYY-MM-DD", "perpetual", or null to leave unchanged
+    #[serde(default)]
+    expires: Option<String>,
+    #[serde(default)]
+    features: Option<Vec<String>>,
+    #[serde(default)]
+    max_machines: Option<u32>,
+}
+
+#[derive(Deserialize)]
 struct ExportRequest {
     machine_code: String,
     #[serde(default)]
@@ -775,6 +790,71 @@ async fn handle_revoke_license(
     }
 
     Ok(Json(serde_json::json!({ "status": "revoked" })))
+}
+
+async fn handle_delete_license(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(key): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let claims = validate_jwt(&headers, &state.jwt_secret)?;
+    require_password_changed(&state, &claims.sub)?;
+    require_admin(&state, &claims.sub)?;
+
+    let db = state.db.lock().unwrap();
+    let deleted = db
+        .delete_license(&key)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    if !deleted {
+        return Err(error_response(StatusCode::NOT_FOUND, "License key not found"));
+    }
+
+    Ok(Json(serde_json::json!({ "status": "deleted" })))
+}
+
+async fn handle_update_license(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(key): Path<String>,
+    Json(req): Json<UpdateLicenseRequest>,
+) -> Result<Json<LicenseSummary>, (StatusCode, Json<ErrorResponse>)> {
+    let claims = validate_jwt(&headers, &state.jwt_secret)?;
+    require_password_changed(&state, &claims.sub)?;
+    require_admin(&state, &claims.sub)?;
+
+    let db = state.db.lock().unwrap();
+    let license = db
+        .get_license_by_key(&key)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "License key not found"))?;
+
+    let customer = req.customer.as_deref().unwrap_or(&license.customer);
+    let product = req.product.as_deref().unwrap_or(&license.product);
+    let features = req.features.as_deref().unwrap_or(&license.features);
+    let max_machines = req.max_machines.unwrap_or(license.max_machines);
+
+    let expires_rfc = if let Some(ref exp) = req.expires {
+        if exp == "perpetual" {
+            None
+        } else {
+            let date = NaiveDate::parse_from_str(exp, "%Y-%m-%d")
+                .map_err(|_| error_response(StatusCode::BAD_REQUEST, &format!("Invalid date: {}. Use YYYY-MM-DD.", exp)))?;
+            Some(date.and_hms_opt(23, 59, 59).unwrap().and_utc().to_rfc3339())
+        }
+    } else {
+        license.expires.map(|dt| dt.to_rfc3339())
+    };
+
+    db.update_license(&key, customer, product, expires_rfc.as_deref(), features, max_machines)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    let updated = db
+        .get_license_by_key(&key)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "License not found after update"))?;
+
+    Ok(Json(license_to_summary(&updated)))
 }
 
 async fn handle_export_license(
@@ -1783,7 +1863,7 @@ async fn main() -> Result<()> {
         // Admin endpoints (JWT-protected)
         .route("/api/v1/licenses", get(handle_list_licenses))
         .route("/api/v1/licenses", post(handle_create_license))
-        .route("/api/v1/licenses/{key}", get(handle_get_license))
+        .route("/api/v1/licenses/{key}", get(handle_get_license).put(handle_update_license).delete(handle_delete_license))
         .route("/api/v1/licenses/{key}/revoke", post(handle_revoke_license))
         .route("/api/v1/licenses/{key}/export", post(handle_export_license))
         .route(
