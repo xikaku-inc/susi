@@ -213,7 +213,7 @@ static std::string getHostname()
 #elif defined(__APPLE__)
 static std::string getIOPlatformValue(const char* key)
 {
-    io_registry_entry_t root = IORegistryEntryFromPath(kIOMasterPortDefault, "IOService:/");
+    io_registry_entry_t root = IORegistryEntryFromPath(kIOMainPortDefault, "IOService:/");
     if (!root) return "";
     CFStringRef cfKey = CFStringCreateWithCString(nullptr, key, kCFStringEncodingUTF8);
     CFTypeRef val = IORegistryEntryCreateCFProperty(root, cfKey, kCFAllocatorDefault, 0);
