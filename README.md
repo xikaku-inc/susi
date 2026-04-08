@@ -291,11 +291,12 @@ The `license_data` field is a JSON-serialized `LicensePayload`:
 
 ## Hardware Fingerprinting
 
-Machine identity is computed from:
-- **Network interfaces** — sorted MAC addresses (excluding loopback/virtual)
-- **Hostname**
+Machine identity is computed differently depending on the operating system:
+- Windows: BIOS UUID + CPU processor ID
+- Linux: /etc/machine-id + serial number of root drive
+- macOS: IOPlatformUUID + IOPlatformSerialNumber
 
-Combined and hashed with SHA-256 to produce a stable fingerprint. Print the current machine's fingerprint with:
+These values are combined and hashed with SHA-256 to produce a stable fingerprint. Print the current machine's fingerprint with:
 
 ```bash
 susi-admin fingerprint
