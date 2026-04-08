@@ -37,3 +37,5 @@ class SusiRecipe(ConanFile):
 
     def package_info(self):
         self.cpp_info.libs = ["susi"]
+        if self.settings.os == "Macos":
+            self.cpp_info.frameworks = ["IOKit", "CoreFoundation"]

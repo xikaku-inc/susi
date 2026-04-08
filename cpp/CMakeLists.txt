@@ -34,5 +34,11 @@ if(WIN32)
     target_link_libraries(susi PRIVATE iphlpapi ws2_32 setupapi cfgmgr32)
 endif()
 
+if(APPLE)
+    find_library(IOKIT_LIBRARY IOKit REQUIRED)
+    find_library(COREFOUNDATION_LIBRARY CoreFoundation REQUIRED)
+    target_link_libraries(susi PRIVATE ${IOKIT_LIBRARY} ${COREFOUNDATION_LIBRARY})
+endif()
+
 set_target_properties(susi PROPERTIES PUBLIC_HEADER "include/susi.h")
 install(TARGETS susi)

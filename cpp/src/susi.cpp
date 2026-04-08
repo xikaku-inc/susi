@@ -35,6 +35,11 @@
 #include <dirent.h>
 #include <unistd.h>
 #include <unordered_map>
+#if defined(__APPLE__)
+#include <CoreFoundation/CoreFoundation.h>
+#include <IOKit/IOKitLib.h>
+#include <sys/mount.h>
+#endif
 #endif
 
 using json = nlohmann::json;
@@ -747,7 +752,101 @@ static std::vector<UsbDeviceInfo> enumerateUsbDevices()
     }
     return devices;
 }
-#else
+#elif defined(__APPLE__)
+static std::string cfStringToStd(CFStringRef ref)
+{
+    if (!ref) return {};
+    char buf[512];
+    if (CFStringGetCString(ref, buf, sizeof(buf), kCFStringEncodingUTF8))
+        return buf;
+    return {};
+}
+
+// Walk up the IOKit service plane to find "USB Serial Number" (iSerialNumber descriptor).
+// Matches the serial extracted from USBSTOR device ID on Windows.
+static std::string ioUsbSerialForService(io_service_t service)
+{
+    std::string serial;
+    io_service_t cur = service;
+    IOObjectRetain(cur);
+    for (int depth = 0; depth < 12 && cur != IO_OBJECT_NULL; ++depth) {
+        CFStringRef prop = (CFStringRef)IORegistryEntryCreateCFProperty(
+            cur, CFSTR("USB Serial Number"), kCFAllocatorDefault, 0);
+        if (prop) {
+            serial = cfStringToStd(prop);
+            CFRelease(prop);
+            IOObjectRelease(cur);
+            break;
+        }
+        io_service_t parent = IO_OBJECT_NULL;
+        kern_return_t kr = IORegistryEntryGetParentEntry(cur, kIOServicePlane, &parent);
+        IOObjectRelease(cur);
+        if (kr != KERN_SUCCESS) break;
+        cur = parent;
+    }
+    return serial;
+}
+
+static std::vector<UsbDeviceInfo> enumerateUsbDevices()
+{
+    std::vector<UsbDeviceInfo> devices;
+
+    // Build map: /dev/diskNsM -> mount point
+    std::unordered_map<std::string, std::string> mountMap;
+    int fsCount = getfsstat(nullptr, 0, MNT_NOWAIT);
+    if (fsCount > 0) {
+        std::vector<struct statfs> stats(static_cast<size_t>(fsCount));
+        fsCount = getfsstat(stats.data(), static_cast<int>(fsCount * sizeof(struct statfs)), MNT_NOWAIT);
+        for (int i = 0; i < fsCount; ++i)
+            mountMap[stats[i].f_mntfromname] = stats[i].f_mntonname;
+    }
+
+    // Enumerate whole removable IOMedia entries (one per USB disk, not per partition)
+    CFMutableDictionaryRef matching = IOServiceMatching("IOMedia");
+    CFDictionarySetValue(matching, CFSTR("Removable"), kCFBooleanTrue);
+    CFDictionarySetValue(matching, CFSTR("Whole"), kCFBooleanTrue);
+
+    io_iterator_t iter = IO_OBJECT_NULL;
+    if (IOServiceGetMatchingServices(kIOMasterPortDefault, matching, &iter) != KERN_SUCCESS)
+        return devices;
+
+    io_service_t media;
+    while ((media = IOIteratorNext(iter)) != IO_OBJECT_NULL) {
+        CFStringRef bsdRef = (CFStringRef)IORegistryEntryCreateCFProperty(
+            media, CFSTR("BSD Name"), kCFAllocatorDefault, 0);
+        std::string bsdName = cfStringToStd(bsdRef);
+        if (bsdRef) CFRelease(bsdRef);
+
+        if (bsdName.empty()) { IOObjectRelease(media); continue; }
+
+        std::string serial = ioUsbSerialForService(media);
+        if (serial.empty()) { IOObjectRelease(media); continue; }
+
+        // Find mount point: try partitions diskNs1..s9, then whole disk
+        std::string mountPoint;
+        for (int p = 1; p <= 9 && mountPoint.empty(); ++p) {
+            auto it = mountMap.find("/dev/" + bsdName + "s" + std::to_string(p));
+            if (it != mountMap.end()) mountPoint = it->second;
+        }
+        if (mountPoint.empty()) {
+            auto it = mountMap.find("/dev/" + bsdName);
+            if (it != mountMap.end()) mountPoint = it->second;
+        }
+        if (mountPoint.empty()) { IOObjectRelease(media); continue; }
+
+        // Volume name = last path component of mount point (e.g. /Volumes/MY_DRIVE -> MY_DRIVE)
+        std::string name = mountPoint;
+        auto slash = name.rfind('/');
+        if (slash != std::string::npos) name = name.substr(slash + 1);
+        if (name.empty()) name = "USB Drive";
+
+        devices.push_back({serial, mountPoint, name});
+        IOObjectRelease(media);
+    }
+    IOObjectRelease(iter);
+    return devices;
+}
+#elif defined(__linux__)
 static std::vector<UsbDeviceInfo> enumerateUsbDevices()
 {
     std::vector<UsbDeviceInfo> devices;
@@ -823,6 +922,11 @@ static std::vector<UsbDeviceInfo> enumerateUsbDevices()
     }
     closedir(blockDir);
     return devices;
+}
+#else
+static std::vector<UsbDeviceInfo> enumerateUsbDevices()
+{
+    return {};
 }
 #endif
 
