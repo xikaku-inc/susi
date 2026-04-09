@@ -955,14 +955,21 @@ impl LicenseDb {
         id: i64,
         name: &str,
         description: &str,
+        config_json: Option<&str>,
     ) -> Result<bool, LicenseError> {
-        let affected = self.conn
-            .execute(
+        let affected = if let Some(cj) = config_json {
+            self.conn.execute(
+                "UPDATE config_revisions SET name = ?1, description = ?2, config_json = ?3
+                 WHERE workspace_id = ?4 AND id = ?5",
+                params![name, description, cj, workspace_id, id],
+            )
+        } else {
+            self.conn.execute(
                 "UPDATE config_revisions SET name = ?1, description = ?2
                  WHERE workspace_id = ?3 AND id = ?4",
                 params![name, description, workspace_id, id],
             )
-            .map_err(|e| LicenseError::Other(format!("DB update config: {}", e)))?;
+        }.map_err(|e| LicenseError::Other(format!("DB update config: {}", e)))?;
         Ok(affected > 0)
     }
 

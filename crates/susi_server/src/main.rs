@@ -1395,6 +1395,7 @@ struct UpdateConfigRequest {
     name: String,
     #[serde(default)]
     description: String,
+    config_json: Option<String>,
 }
 
 async fn handle_create_workspace(
@@ -1708,7 +1709,7 @@ async fn handle_update_config(
         return Err(error_response(StatusCode::FORBIDDEN, "Viewers cannot edit configs"));
     }
 
-    let updated = db.update_config_revision(&workspace_id, config_id, &req.name, &req.description)
+    let updated = db.update_config_revision(&workspace_id, config_id, &req.name, &req.description, req.config_json.as_deref())
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
     if !updated {
         return Err(error_response(StatusCode::NOT_FOUND, "Config revision not found"));
