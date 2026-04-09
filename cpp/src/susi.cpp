@@ -14,6 +14,7 @@
 #include <openssl/bio.h>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
+#include <openssl/params.h>
 #include <openssl/pem.h>
 #include <openssl/sha.h>
 
@@ -950,15 +951,20 @@ static bool hkdfSha256(
     size_t offset = 0;
     unsigned char counter = 1;
 
+    EVP_MAC* mac = EVP_MAC_fetch(nullptr, "HMAC", nullptr);
     while (offset < okmLen) {
-        HMAC_CTX* ctx = HMAC_CTX_new();
-        HMAC_Init_ex(ctx, prk, static_cast<int>(prkLen), EVP_sha256(), nullptr);
-        if (tLen > 0) HMAC_Update(ctx, t, tLen);
-        HMAC_Update(ctx, info, infoLen);
-        HMAC_Update(ctx, &counter, 1);
-        unsigned int len = 0;
-        HMAC_Final(ctx, t, &len);
-        HMAC_CTX_free(ctx);
+        EVP_MAC_CTX* ctx = EVP_MAC_CTX_new(mac);
+        OSSL_PARAM params[] = {
+            OSSL_PARAM_construct_utf8_string("digest", const_cast<char*>("SHA256"), 0),
+            OSSL_PARAM_construct_end()
+        };
+        EVP_MAC_init(ctx, prk, prkLen, params);
+        if (tLen > 0) EVP_MAC_update(ctx, t, tLen);
+        EVP_MAC_update(ctx, info, infoLen);
+        EVP_MAC_update(ctx, &counter, 1);
+        size_t len = sizeof(t);
+        EVP_MAC_final(ctx, t, &len, len);
+        EVP_MAC_CTX_free(ctx);
         tLen = len;
 
         size_t copyLen = (std::min)(tLen, okmLen - offset);
@@ -966,6 +972,7 @@ static bool hkdfSha256(
         offset += copyLen;
         counter++;
     }
+    EVP_MAC_free(mac);
     return true;
 }
 
