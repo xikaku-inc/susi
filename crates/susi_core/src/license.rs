@@ -21,6 +21,8 @@ pub struct License {
     pub lease_grace_hours: u32,
     pub machines: Vec<MachineActivation>,
     pub revoked: bool,
+    /// If true, the client binary must have a valid code signature.
+    pub require_signed_binary: bool,
 }
 
 /// A machine activation record.
@@ -51,6 +53,10 @@ pub struct LicensePayload {
     /// time or the license stops being valid.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lease_expires: Option<DateTime<Utc>>,
+    /// If true, the client binary must have a valid code signature. Absent in
+    /// old license files → defaults to false (backward compatible).
+    #[serde(default)]
+    pub require_signed_binary: bool,
 }
 
 /// A signed license file that can be written to disk and verified offline.
@@ -86,6 +92,7 @@ impl License {
             lease_grace_hours: DEFAULT_LEASE_GRACE_HOURS,
             machines: Vec::new(),
             revoked: false,
+            require_signed_binary: true,
         }
     }
 
@@ -109,6 +116,7 @@ impl License {
             features: self.features.clone(),
             machine_codes: self.active_machine_codes(),
             lease_expires,
+            require_signed_binary: self.require_signed_binary,
         }
     }
 
@@ -405,6 +413,7 @@ mod tests {
             features: vec![],
             machine_codes: vec![],
             lease_expires: Some(future),
+            require_signed_binary: false,
         };
         assert!(!payload.is_lease_expired());
 
@@ -429,6 +438,7 @@ mod tests {
             features: vec!["full_fusion".to_string(), "recorder".to_string()],
             machine_codes: vec!["machine1".to_string()],
             lease_expires: None,
+            require_signed_binary: false,
         };
 
         assert!(payload.has_feature("full_fusion"));
@@ -450,6 +460,7 @@ mod tests {
             features: vec![],
             machine_codes: vec![],
             lease_expires: None,
+            require_signed_binary: false,
         };
 
         assert!(payload.is_machine_authorized("any_machine"));

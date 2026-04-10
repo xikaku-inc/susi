@@ -93,6 +93,7 @@ mod tests {
             features: vec!["full_fusion".to_string(), "recorder".to_string()],
             machine_codes: vec!["abc123def456".to_string()],
             lease_expires: None,
+            require_signed_binary: false,
         }
     }
 

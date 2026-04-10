@@ -1,3 +1,4 @@
+pub mod binary_signing;
 pub mod workspace;
 
 use std::path::Path;
@@ -35,6 +36,8 @@ pub enum LicenseStatus {
     InvalidSignature,
     InvalidLicenseKey,
     Revoked,
+    /// The license requires a signed binary but the running binary is unsigned or tampered.
+    UnsignedBinary,
     TokenNotFound,
     FileNotFound(String),
     Error(String),
@@ -186,6 +189,10 @@ impl LicenseClient {
             return LicenseStatus::LeaseExpired {
                 lease_expired_at: payload.lease_expires.unwrap(),
             };
+        }
+
+        if payload.require_signed_binary && !binary_signing::is_binary_signed() {
+            return LicenseStatus::UnsignedBinary;
         }
 
         LicenseStatus::Valid { payload }
@@ -376,6 +383,7 @@ mod tests {
             features: vec!["full_fusion".to_string(), "recorder".to_string()],
             machine_codes: machine_code.into_iter().collect(),
             lease_expires: None,
+            require_signed_binary: false,
         }
     }
 
@@ -414,6 +422,7 @@ mod tests {
             features: vec![],
             machine_codes: vec![],
             lease_expires: None,
+            require_signed_binary: false,
         };
         let signed = sign_license(&private, &payload).unwrap();
 
@@ -493,6 +502,7 @@ mod tests {
             features: vec!["full_fusion".to_string()],
             machine_codes: vec![],
             lease_expires: None,
+            require_signed_binary: false,
         };
         let signed = sign_license(&private, &payload).unwrap();
 

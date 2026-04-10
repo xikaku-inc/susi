@@ -102,6 +102,9 @@ struct CreateLicenseRequest {
     /// Grace period in hours after lease expires. Default: 24.
     #[serde(default = "default_lease_grace")]
     lease_grace_hours: u32,
+    /// Require valid binary code signature. Default: true.
+    #[serde(default = "default_require_signed_binary")]
+    require_signed_binary: bool,
 }
 
 fn default_product() -> String {
@@ -115,6 +118,9 @@ fn default_lease_duration() -> u32 {
 }
 fn default_lease_grace() -> u32 {
     DEFAULT_LEASE_GRACE_HOURS
+}
+fn default_require_signed_binary() -> bool {
+    true
 }
 
 #[derive(Deserialize)]
@@ -130,6 +136,8 @@ struct UpdateLicenseRequest {
     features: Option<Vec<String>>,
     #[serde(default)]
     max_machines: Option<u32>,
+    #[serde(default)]
+    require_signed_binary: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -160,6 +168,7 @@ struct LicenseSummary {
     total_machine_count: usize,
     machines: Vec<MachineSummary>,
     revoked: bool,
+    require_signed_binary: bool,
 }
 
 #[derive(Serialize)]
@@ -201,6 +210,7 @@ fn license_to_summary(lic: &License) -> LicenseSummary {
             })
             .collect(),
         revoked: lic.revoked,
+        require_signed_binary: lic.require_signed_binary,
     }
 }
 
@@ -763,6 +773,7 @@ async fn handle_create_license(
     );
     license.lease_duration_hours = req.lease_duration_hours;
     license.lease_grace_hours = req.lease_grace_hours;
+    license.require_signed_binary = req.require_signed_binary;
 
     let db = state.db.lock().unwrap();
     db.insert_license(&license)
@@ -846,7 +857,8 @@ async fn handle_update_license(
         license.expires.map(|dt| dt.to_rfc3339())
     };
 
-    db.update_license(&key, customer, product, expires_rfc.as_deref(), features, max_machines)
+    let require_signed_binary = req.require_signed_binary.unwrap_or(license.require_signed_binary);
+    db.update_license(&key, customer, product, expires_rfc.as_deref(), features, max_machines, require_signed_binary)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
     let updated = db

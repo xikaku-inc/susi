@@ -13,6 +13,7 @@
 - **Optional activation server** — HTTP server for online activation and management
 - **Web dashboard** — browser-based management UI with multi-user authentication and 2FA
 - **USB hardware tokens** — bind a license to a physical USB stick instead of a machine
+- **Binary signing enforcement** — optionally require the consuming binary to carry a valid code signature, making tampering detectable at license-verification time
 - **Cross-platform** — Linux and Windows support
 - **C++ client library** — drop-in header+source for C++ projects (OpenSSL-based)
 
@@ -89,6 +90,13 @@ susi-admin create \
   --perpetual \
   --features "pro" \
   --lease-duration 0
+
+# Allow unsigned binaries (e.g. development/internal build)
+susi-admin create \
+  --customer "Acme Corp" \
+  --days 365 \
+  --features "pro" \
+  --no-require-signed-binary
 ```
 
 ### 3. Export a signed license file
@@ -255,6 +263,7 @@ All verification methods return a status indicating the result. The following ta
 | License file has been tampered with                                    | `LicenseStatus::InvalidSignature`                               | `LicenseStatus::InvalidSignature`  |
 | License key not recognized                                             | `LicenseStatus::InvalidLicenseKey`                              | `LicenseStatus::InvalidLicenseKey` |
 | License has been revoked                                               | `LicenseStatus::Revoked`                                        | `LicenseStatus::Revoked`           |
+| Binary is not code-signed (requires_signed_binary license flag is set) | `LicenseStatus::UnsignedBinary`                                 | `LicenseStatus::UnsignedBinary`    |
 | No USB token found                                                     | `LicenseStatus::TokenNotFound`                                  | `LicenseStatus::TokenNotFound`     |
 | License file not found on disk                                         | `LicenseStatus::FileNotFound(String)`                           | `LicenseStatus::FileNotFound`      |
 | Other error (parse error, crypto failure, etc.)                        | `LicenseStatus::Error(String)`                                  | `LicenseStatus::Error`             |
@@ -288,6 +297,7 @@ The `license_data` field is a JSON-serialized `LicensePayload`:
 
 - `expires` — `null` for perpetual licenses
 - `lease_expires` — omitted when lease enforcement is disabled (`lease_duration = 0`). When present, the client must renew before this time or the license stops working (after the grace period).
+- `require_signed_binary` — omitted in old license files (defaults to `false`). When `true`, the client checks that the running binary carries a valid code signature before returning `Valid`.
 
 ## Hardware Fingerprinting
 
@@ -374,6 +384,108 @@ The `.susi/license.bin` file on the USB stick contains:
 | 12+N | 16 bytes | AES-GCM authentication tag |
 
 The encryption key is derived as: `HKDF-SHA256(ikm=usb_serial, salt="susi-token-v1", info="license-encryption")`.
+
+## Binary Signing Enforcement
+
+Licenses can require that the consuming binary carries a valid OS-level code signature. If the binary has been tampered with or replaced, the signature check fails and the client returns `LicenseStatus::UnsignedBinary` instead of `Valid`.
+
+The check is performed by the client library at license-verification time using native platform APIs:
+
+| Platform | Mechanism | What passes |
+|---|---|---|
+| Windows | `WinVerifyTrust` (Authenticode) | Binaries signed with a certificate trusted by the machine's certificate store |
+| macOS | `SecStaticCodeCheckValidity` | Binaries with any valid code signature (cryptographic integrity) |
+| Linux | — | Always passes (no standard mechanism) |
+
+### Per-license control
+
+New licenses have `require_signed_binary: true` by default. Use `--no-require-signed-binary` to opt out:
+
+```bash
+# Default: binary signature required
+susi-admin create --customer "Acme Corp" --days 365 --features "pro"
+
+# Opt out: no signature check (e.g. for development builds or air-gapped deployments)
+susi-admin create --customer "Acme Corp" --days 365 --features "pro" \
+  --no-require-signed-binary
+```
+
+Old license files that pre-date this feature have no `require_signed_binary` field; they are treated as `false` (backward compatible).
+
+### Startup enforcement
+
+Beyond checking at license-verification time, you can optionally abort the process at startup (before `main()`) if the binary is not signed.
+
+**Rust** — enable the `require-signed-binary` Cargo feature:
+
+```toml
+[dependencies]
+susi_client = { path = "…", features = ["require-signed-binary"] }
+```
+
+This installs a global constructor that calls `abort()` before `main()` if the binary signature check fails. No call-site code is needed.
+
+**C++** — set the `SUSI_REQUIRE_SIGNED_BINARY` build option:
+
+```bash
+# Via Conan
+conan install . -o susi/*:require_signed_binary=True --build=missing
+
+# Via CMake directly
+cmake -DSUSI_REQUIRE_SIGNED_BINARY=ON <source_dir>
+
+# Via parent CMakeLists.txt (before add_subdirectory)
+set(SUSI_REQUIRE_SIGNED_BINARY ON)
+```
+
+This defines the preprocessor macro `SUSI_REQUIRE_SIGNED_BINARY=1`, which installs a C++ static object whose constructor aborts the process at startup if the binary is unsigned.
+
+### Testing with a self-signed certificate
+
+To test the signed-binary path in development you need a code-signing certificate trusted by the local machine. Helper scripts are provided in `scripts/`:
+
+**Windows**
+
+```powershell
+# One-time setup: create a self-signed CA and add it to the machine trust stores.
+# Requires an elevated PowerShell prompt.
+.\scripts\create-test-codesign-cert.ps1
+
+# Build tests without running, sign the test binary, then run the tests.
+.\scripts\sign-and-test.ps1
+
+# Sign an arbitrary binary
+.\scripts\sign-binary.ps1 -BinaryPath .\target\release\myapp.exe
+
+# Clean up (removes cert from trust stores and deletes the PFX)
+.\scripts\remove-test-codesign-cert.ps1
+```
+
+**macOS**
+
+```bash
+# One-time setup: create a self-signed cert and trust it in the system keychain.
+# Requires sudo for the trust step.
+bash scripts/create-test-codesign-cert.sh
+
+# Build tests without running (cargo prints the path to the test binary)
+cargo test --no-run --test integration
+
+# Sign the test binary
+codesign -s "Susi Test Code Signing" --force /path/to/test/binary
+
+# Run the tests
+cargo test --test integration
+```
+
+### Limitations
+
+The check runs inside the process being verified, on hardware the licensee controls. A sufficiently motivated local administrator can bypass it by:
+
+- Adding a self-signed certificate to the machine's trust store and re-signing a modified binary (Windows)
+- Signing a modified binary with any certificate (macOS, with the current `kSecCSDefaultFlags` / NULL requirement)
+
+The feature meaningfully raises the bar against casual binary patching but is not a hard cryptographic boundary against a determined local admin. Future server-side CA pinning (planned) will require the client to prove its signing certificate traces to the vendor's CA during every activation, closing the self-signed certificate bypass.
 
 ## Activation Server
 

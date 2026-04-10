@@ -28,3 +28,9 @@ jsonwebtoken = "9"
 totp-rs = { version = "5", features = ["qr"] }
 rand = "0.8"
 uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+susi_client = { path = "../susi_client" }
+susi_core = { path = "../susi_core" }
+reqwest = { workspace = true }
+tempfile = "3"

@@ -27,10 +27,13 @@
 #include <winioctl.h>
 #include <setupapi.h>
 #include <cfgmgr32.h>
+#include <softpub.h>
+#include <wintrust.h>
 #pragma comment(lib, "iphlpapi.lib")
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "setupapi.lib")
 #pragma comment(lib, "cfgmgr32.lib")
+#pragma comment(lib, "wintrust.lib")
 #else
 #include <climits>
 #include <dirent.h>
@@ -39,6 +42,8 @@
 #if defined(__APPLE__)
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
+#include <Security/Security.h>
+#include <mach-o/dyld.h>
 #include <sys/mount.h>
 #endif
 #endif
@@ -364,6 +369,92 @@ std::string SusiClient::getPublicKeyPem()
 }
 
 // ---------------------------------------------------------------------------
+// Binary signing verification
+// ---------------------------------------------------------------------------
+static bool isBinarySigned()
+{
+#if defined(_WIN32)
+    wchar_t exePath[MAX_PATH] = {};
+    if (!GetModuleFileNameW(nullptr, exePath, MAX_PATH))
+        return false;
+
+    WINTRUST_FILE_INFO fileInfo = {};
+    fileInfo.cbStruct = sizeof(fileInfo);
+    fileInfo.pcwszFilePath = exePath;
+
+    GUID action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+
+    WINTRUST_DATA data = {};
+    data.cbStruct = sizeof(data);
+    data.dwUIChoice = WTD_UI_NONE;
+    data.fdwRevocationChecks = WTD_REVOKE_NONE;
+    data.dwUnionChoice = WTD_CHOICE_FILE;
+    data.pFile = &fileInfo;
+    data.dwStateAction = WTD_STATEACTION_VERIFY;
+    data.dwProvFlags = WTD_SAFER_FLAG;
+
+    LONG result = WinVerifyTrust(nullptr, &action, &data);
+
+    data.dwStateAction = WTD_STATEACTION_CLOSE;
+    WinVerifyTrust(nullptr, &action, &data);
+
+    return result == ERROR_SUCCESS;
+#elif defined(__APPLE__)
+    char exePath[PATH_MAX] = {};
+    uint32_t size = sizeof(exePath);
+    if (_NSGetExecutablePath(exePath, &size) != 0)
+        return false;
+
+    CFURLRef url = CFURLCreateFromFileSystemRepresentation(
+        nullptr, reinterpret_cast<const UInt8*>(exePath), strlen(exePath), false);
+    if (!url)
+        return false;
+
+    SecStaticCodeRef code = nullptr;
+    OSStatus status = SecStaticCodeCreateWithPath(url, kSecCSDefaultFlags, &code);
+    CFRelease(url);
+    if (status != errSecSuccess || !code)
+        return false;
+
+    status = SecStaticCodeCheckValidity(code, kSecCSDefaultFlags, nullptr);
+    CFRelease(code);
+    return status == errSecSuccess;
+#else
+    return true; // No standard binary signing on Linux
+#endif
+}
+
+// ---------------------------------------------------------------------------
+// Startup enforcement (compile with -DSUSI_REQUIRE_SIGNED_BINARY=1)
+// ---------------------------------------------------------------------------
+// When SUSI_REQUIRE_SIGNED_BINARY is defined at compile time, a static object
+// is instantiated before main() whose constructor aborts the process if the
+// binary is not code-signed.  This ensures an attacker cannot reach any
+// application logic — including the license verification code — with a
+// tampered binary.
+//
+// Enable in CMake:
+//   cmake -DSUSI_REQUIRE_SIGNED_BINARY=ON ...
+// Enable manually:
+//   add_compile_definitions(SUSI_REQUIRE_SIGNED_BINARY=1)
+#ifdef SUSI_REQUIRE_SIGNED_BINARY
+namespace {
+struct SusiSignatureEnforcer {
+    SusiSignatureEnforcer() {
+        if (!isBinarySigned()) {
+            fprintf(stderr,
+                "[susi] FATAL: Binary signature check failed at startup. "
+                "This binary has not been code-signed or has been tampered with.\n");
+            fflush(stderr);
+            abort();
+        }
+    }
+};
+static SusiSignatureEnforcer g_susiSignatureEnforcer;
+}
+#endif
+
+// ---------------------------------------------------------------------------
 // Shared license verify logic
 // ---------------------------------------------------------------------------
 SusiClient::LicenseStatus SusiClient::verifySignedLicenseJson(const std::string& signedLicenseStr, const std::string& activationCode)
@@ -454,6 +545,12 @@ SusiClient::LicenseStatus SusiClient::verifySignedLicenseJson(const std::string&
             SUSI_LOG("Lease expired at %s, in grace period - renew soon!", leaseStr.c_str());
             inGracePeriod = true;
         }
+    }
+
+    // Check binary signing requirement
+    if (payload.value("require_signed_binary", false) && !isBinarySigned()) {
+        SUSI_LOG("License requires a signed binary, but this binary is unsigned or tampered");
+        return LicenseStatus::UnsignedBinary;
     }
 
     // Extract information
