@@ -8,7 +8,8 @@ class SusiRecipe(ConanFile):
     
     settings = "os", "compiler", "build_type", "arch"
     options = {
-        "shared": [True, False],
+        # shared is required by conan but will be ignored (always False)
+        "shared": [False],
         # When True, a global constructor aborts the process at startup if the
         # binary is not code-signed.  Mirrors the Rust require-signed-binary
         # feature.  Passes -DSUSI_REQUIRE_SIGNED_BINARY=ON to CMake.

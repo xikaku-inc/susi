@@ -2,8 +2,8 @@
 //!
 //! These tests spin up the **real** `susi-server` binary (the one produced by
 //! the current `cargo build` invocation via [`env!("CARGO_BIN_EXE_susi-server")`])
-//! and exercise the full client → server → client round-trip using
-//! [`susi_client::LicenseClient`].
+//! and exercise the full client → server → client round-trip using both the
+//! Rust [`susi_client::LicenseClient`] and the C++ `PackageTest` binary.
 //!
 //! # Running the tests
 //!
@@ -53,6 +53,18 @@
 //! # Run
 //! cargo test --test integration
 //! ```
+//!
+//! # C++ integration test
+//!
+//! When `conan` is detected at build time, `build.rs` compiles the C++ test
+//! binary (`cpp/test_package/PackageTest`) and embeds its path in the
+//! compile-time environment variable `SUSI_CPP_TEST_BIN`.
+//! [`test_cpp_client_against_server`] then spawns that binary against the
+//! same live server used by the Rust tests.
+//!
+//! If conan is absent or the C++ build fails, `SUSI_CPP_TEST_BIN` is unset
+//! and the test is **skipped** (reported as `ignored` by the test runner).
+//! The build script emits `cargo:warning` messages explaining what happened.
 //!
 //! # Server harness
 //!
@@ -474,4 +486,71 @@ fn test_update_require_signed_binary() {
     let client = LicenseClient::new(&server.public_key_pem).unwrap();
     let status = client.verify_signed(&signed);
     assert!(status.is_valid(), "expected Valid after update, got: {:?}", status);
+}
+
+// ---------------------------------------------------------------------------
+// C++ client integration test
+// ---------------------------------------------------------------------------
+
+/// Runs the C++ `PackageTest` binary against a live server and verifies the
+/// activate → offline-fallback round-trip from the C++ client's perspective.
+///
+/// # Skipping vs failing
+///
+/// - `conan` **not installed**: test is `ignored`.
+/// - `conan` **installed** but C++ build failed: test **fails** with the
+///   build error from `build.rs` (see `cargo:warning` output for details).
+/// - C++ build **succeeded**: test runs normally.
+///
+/// Run `cargo build` with conan available to enable this test:
+/// ```text
+/// cargo test --test integration test_cpp_client_against_server -- --ignored
+/// ```
+/// or simply run the full suite (ignored tests are included with `--include-ignored`):
+/// ```text
+/// cargo test --test integration -- --include-ignored
+/// ```
+#[cfg_attr(not(susi_conan_available), ignore = "conan not installed")]
+#[test]
+fn test_cpp_client_against_server() {
+    #[cfg(not(susi_cpp_built))]
+    panic!(
+        "conan is installed but C++ build failed: {}",
+        option_env!("SUSI_CPP_BUILD_ERROR").unwrap_or("unknown reason — check cargo:warning output")
+    );
+
+    #[cfg(susi_cpp_built)]
+    {
+        let cpp_bin = env!("SUSI_CPP_TEST_BIN");
+
+        let server = TestServer::start();
+        let token = server.admin_token();
+
+        // Create a license with require_signed_binary=false so the C++ test binary
+        // (which is not code-signed in CI) can verify it successfully.
+        let license_key = server.create_license(&token, false);
+
+        // Write the public key to a temp file so the C++ binary can load it.
+        let pub_key_path = server._dir.path().join("public.pem");
+        std::fs::write(&pub_key_path, &server.public_key_pem).expect("write public key");
+
+        let output = Command::new(cpp_bin)
+            .arg("--server-url").arg(&server.api_url)
+            .arg("--public-key-file").arg(&pub_key_path)
+            .arg("--license-key").arg(&license_key)
+            .output()
+            .expect("spawn C++ test binary");
+
+        // Always print what the binary wrote so failures are diagnosable.
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stdout.is_empty() { print!("{}", stdout); }
+        if !stderr.is_empty() { eprint!("{}", stderr); }
+
+        assert!(
+            output.status.success(),
+            "C++ PackageTest exited with {:?}",
+            output.status.code()
+        );
+    }
 }

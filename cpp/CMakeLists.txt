@@ -30,7 +30,7 @@ endif()
 option(SUSI_REQUIRE_SIGNED_BINARY
     "Abort at startup if the binary is not code-signed" OFF)
 
-    add_library(susi STATIC src/susi.cpp include/susi.h)
+add_library(susi STATIC src/susi.cpp include/susi.h)
 target_include_directories(susi PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(susi PUBLIC cxx_std_17)
 
