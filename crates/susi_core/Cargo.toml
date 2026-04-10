@@ -17,6 +17,7 @@ pkcs8 = { version = "0.10", features = ["pem"] }
 rusqlite = { version = "0.32", features = ["bundled"], optional = true }
 aes-gcm = "0.10"
 hkdf = "0.12"
+machine-uid = "0.5"
 
 [features]
 default = []
@@ -28,10 +29,6 @@ libc = "0.2"
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
     "Win32_Devices_DeviceAndDriverInstallation",
-    "Win32_NetworkManagement_IpHelper",
-    "Win32_NetworkManagement_Ndis",
-    "Win32_Networking_WinSock",
-    "Win32_System_SystemInformation",
     "Win32_Storage_FileSystem",
     "Win32_Security",
     "Win32_System_IO",
