@@ -81,6 +81,7 @@ button.secondary {
 button.secondary:hover { background: var(--border); }
 button.danger { background: var(--red); }
 button.danger:hover { background: #ef4444; }
+button:disabled { opacity: 0.4; cursor: not-allowed; }
 button.small { padding: 4px 10px; font-size: 12px; }
 
 input, select {
@@ -378,6 +379,7 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
     <h1>Susi Server</h1>
     <div class="header-actions">
         <span id="connectionStatus" class="status">Connecting...</span>
+        <button id="btnExportProperties" class="small secondary" onclick="showPropertiesModal()" style="display:none;">Export Properties</button>
         <button id="btnUsers" class="small secondary" onclick="showUsersModal()" style="display:none;">Users</button>
         <button id="btn2FA" class="small secondary" onclick="show2FAModal()" style="display:none;">2FA</button>
         <span id="currentUser" style="display:none;font-size:13px;color:var(--text2);"></span>
@@ -779,6 +781,25 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
     </div>
 </div>
 
+<!-- Export Properties Modal -->
+<div id="propertiesModal" class="modal-overlay" onclick="if(event.target===this)closePropertiesModal()">
+    <div class="modal">
+        <h2>Export Properties File</h2>
+        <p style="font-size:13px;color:var(--text2);margin-bottom:16px;">Configure which licensing methods are allowed for clients. The order defines the priority in which methods are tried.</p>
+        <div id="propertiesMethodList" style="display:flex;flex-direction:column;gap:10px;margin-bottom:16px;">
+        </div>
+        <div style="display:flex;gap:8px;margin-bottom:16px;">
+            <button id="btnAddFile" class="small secondary" onclick="addPropertyMethod('file')" style="min-width:auto;">+ File</button>
+            <button id="btnAddToken" class="small secondary" onclick="addPropertyMethod('token')" style="min-width:auto;">+ Token</button>
+            <button id="btnAddServer" class="small secondary" onclick="addPropertyMethod('server')" style="min-width:auto;">+ Server</button>
+        </div>
+        <div class="form-actions">
+            <button class="secondary" onclick="closePropertiesModal()">Cancel</button>
+            <button onclick="doExportProperties()">Export &amp; Download</button>
+        </div>
+    </div>
+</div>
+
 <script>
 const API = '/api/v1';
 let authToken = '';
@@ -808,6 +829,7 @@ function showLogin() {
     document.getElementById('btnLogout').style.display = 'none';
     document.getElementById('btn2FA').style.display = 'none';
     document.getElementById('btnUsers').style.display = 'none';
+    document.getElementById('btnExportProperties').style.display = 'none';
     document.getElementById('currentUser').style.display = 'none';
     setTimeout(() => document.getElementById('loginUsername').focus(), 50);
 }
@@ -941,6 +963,7 @@ function enterDashboard() {
 
     const isAdmin = userRole === 'admin';
     document.getElementById('btnUsers').style.display = isAdmin ? '' : 'none';
+    document.getElementById('btnExportProperties').style.display = isAdmin ? '' : 'none';
     document.getElementById('adminLicenseToolbar').style.display = isAdmin ? '' : 'none';
     document.getElementById('detailPanel').classList.remove('visible');
     document.getElementById('adminLicenseTableSection').style.display = isAdmin ? '' : 'none';
@@ -1386,6 +1409,110 @@ async function doExport() {
         closeExportModal();
         await loadLicenses();
         selectLicense(key);
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+// Properties export
+let propertiesMethods = [];
+
+function showPropertiesModal() {
+    propertiesMethods = [
+        { type: 'server', url: window.location.origin + '/api/v1' },
+        { type: 'file' },
+        { type: 'token' },
+    ];
+    renderPropertiesMethods();
+    document.getElementById('propertiesModal').classList.add('visible');
+}
+
+function closePropertiesModal() {
+    document.getElementById('propertiesModal').classList.remove('visible');
+}
+
+function renderPropertiesMethods() {
+    const list = document.getElementById('propertiesMethodList');
+    const has = t => propertiesMethods.some(m => m.type === t);
+    document.getElementById('btnAddFile').disabled = has('file');
+    document.getElementById('btnAddToken').disabled = has('token');
+    document.getElementById('btnAddServer').disabled = has('server');
+    if (propertiesMethods.length === 0) {
+        list.innerHTML = '<div style="font-size:13px;color:var(--text2);font-style:italic;">No methods added. Use the buttons below to add methods.</div>';
+        return;
+    }
+    list.innerHTML = propertiesMethods.map((m, i) => {
+        const upBtn = i > 0 ? `<button class="small secondary" onclick="movePropertyMethod(${i},-1)" style="min-width:auto;padding:4px 8px;" title="Move up">\u2191</button>` : '';
+        const downBtn = i < propertiesMethods.length - 1 ? `<button class="small secondary" onclick="movePropertyMethod(${i},1)" style="min-width:auto;padding:4px 8px;" title="Move down">\u2193</button>` : '';
+        const removeBtn = `<button class="small secondary" onclick="removePropertyMethod(${i})" style="min-width:auto;padding:4px 8px;color:var(--red);" title="Remove">\u2715</button>`;
+        let label = m.type.charAt(0).toUpperCase() + m.type.slice(1);
+        let extra = '';
+        if (m.type === 'server') {
+            extra = `<input type="text" value="${m.url || ''}" onchange="propertiesMethods[${i}].url=this.value" placeholder="https://license.example.com" style="flex:1;margin-left:8px;">`;
+        }
+        return `<div style="display:flex;align-items:center;gap:6px;background:var(--bg3);padding:8px 12px;border-radius:var(--radius);border:1px solid var(--border);">
+            <span style="font-size:13px;font-weight:500;min-width:55px;">${label}</span>${extra}
+            <span style="flex:${m.type === 'server' ? '0' : '1'};"></span>
+            ${upBtn}${downBtn}${removeBtn}
+        </div>`;
+    }).join('');
+}
+
+function addPropertyMethod(type) {
+    if (propertiesMethods.some(m => m.type === type)) {
+        toast('Method "' + type + '" is already added', 'error');
+        return;
+    }
+    if (type === 'server') {
+        propertiesMethods.push({ type: 'server', url: window.location.origin + '/api/v1' });
+    } else {
+        propertiesMethods.push({ type });
+    }
+    renderPropertiesMethods();
+}
+
+function removePropertyMethod(i) {
+    propertiesMethods.splice(i, 1);
+    renderPropertiesMethods();
+}
+
+function movePropertyMethod(i, dir) {
+    const j = i + dir;
+    [propertiesMethods[i], propertiesMethods[j]] = [propertiesMethods[j], propertiesMethods[i]];
+    renderPropertiesMethods();
+}
+
+async function doExportProperties() {
+    if (propertiesMethods.length === 0) {
+        toast('Add at least one licensing method', 'error');
+        return;
+    }
+    for (const m of propertiesMethods) {
+        if (m.type === 'server' && !m.url.trim()) {
+            toast('Server URL cannot be empty', 'error');
+            return;
+        }
+    }
+    try {
+        const resp = await fetch(API + '/properties/export', {
+            method: 'POST',
+            headers: authHeaders(),
+            body: JSON.stringify({ methods: propertiesMethods }),
+        });
+        if (!resp.ok) {
+            const err = await resp.json();
+            toast('Error: ' + err.error, 'error');
+            return;
+        }
+        const blob = await resp.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'susi-properties.json';
+        a.click();
+        URL.revokeObjectURL(url);
+        toast('Properties file exported', 'success');
+        closePropertiesModal();
     } catch (e) {
         toast('Failed: ' + e.message, 'error');
     }

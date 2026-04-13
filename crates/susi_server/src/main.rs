@@ -15,6 +15,7 @@ use clap::Parser;
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use rand::Rng;
 use susi_core::crypto::{private_key_from_pem, sign_license};
+use susi_core::properties::{sign_properties, LicenseMethod, LicenseProperties};
 use susi_core::db::LicenseDb;
 use susi_core::{License, DEFAULT_LEASE_DURATION_HOURS, DEFAULT_LEASE_GRACE_HOURS};
 use rsa::RsaPrivateKey;
@@ -137,6 +138,19 @@ struct ExportRequest {
     machine_code: String,
     #[serde(default)]
     friendly_name: String,
+}
+
+#[derive(Deserialize)]
+struct PropertiesExportRequest {
+    methods: Vec<PropertiesMethodEntry>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum PropertiesMethodEntry {
+    File,
+    Token,
+    Server { url: String },
 }
 
 #[derive(Serialize)]
@@ -918,6 +932,45 @@ async fn handle_export_license(
             (
                 header::CONTENT_DISPOSITION,
                 "attachment; filename=\"license.json\"",
+            ),
+        ],
+        json,
+    ))
+}
+
+async fn handle_export_properties(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<PropertiesExportRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let claims = validate_jwt(&headers, &state.jwt_secret)?;
+    require_password_changed(&state, &claims.sub)?;
+    require_admin(&state, &claims.sub)?;
+
+    if req.methods.is_empty() {
+        return Err(error_response(StatusCode::BAD_REQUEST, "At least one method is required"));
+    }
+
+    let methods: Vec<LicenseMethod> = req.methods.into_iter().map(|m| match m {
+        PropertiesMethodEntry::File => LicenseMethod::File,
+        PropertiesMethodEntry::Token => LicenseMethod::Token,
+        PropertiesMethodEntry::Server { url } => LicenseMethod::Server { url },
+    }).collect();
+
+    let properties = LicenseProperties { methods };
+    let signed = sign_properties(&state.private_key, &properties)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    let json = serde_json::to_string_pretty(&signed)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    Ok((
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"susi-properties.json\"",
             ),
         ],
         json,
@@ -1882,6 +1935,8 @@ async fn main() -> Result<()> {
                 .layer(DefaultBodyLimit::max(500 * 1024 * 1024))
         )
         .route("/api/v1/releases/{tag}", axum::routing::delete(handle_delete_release))
+        // Properties export (JWT protected, admin only)
+        .route("/api/v1/properties/export", post(handle_export_properties))
         // Workspace endpoints (JWT protected)
         .route("/api/v1/workspaces", get(handle_list_workspaces).post(handle_create_workspace))
         .route("/api/v1/workspaces/{id}", get(handle_get_workspace).put(handle_update_workspace).delete(handle_delete_workspace))
