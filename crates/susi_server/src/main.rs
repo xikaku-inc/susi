@@ -38,6 +38,14 @@ struct Cli {
     /// Directory for persistent data (keys, database, release assets)
     #[arg(long, default_value = "/data")]
     data_dir: String,
+
+    /// Path to PEM file containing the trusted code-signing CA certificate.
+    /// When set, every activate and verify request must include a signing
+    /// certificate chain that terminates at this CA, or it is rejected with
+    /// HTTP 403.  Only the immediate issuer of the leaf cert needs to match
+    /// (single-level pinning).
+    #[arg(long)]
+    trusted_signing_ca: Option<String>,
 }
 
 struct AppState {
@@ -45,6 +53,8 @@ struct AppState {
     private_key: RsaPrivateKey,
     jwt_secret: [u8; 32],
     data_dir: String,
+    /// DER bytes of the trusted code-signing CA cert, if configured.
+    trusted_signing_ca: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -64,12 +74,19 @@ struct ActivateRequest {
     machine_code: String,
     #[serde(default)]
     friendly_name: String,
+    /// DER-encoded certificate chain, base64-encoded, leaf cert first.
+    /// Sent by the client when the binary is code-signed.
+    #[serde(default)]
+    signing_cert_chain: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
 struct VerifyRequest {
     license_key: String,
     machine_code: String,
+    /// DER-encoded certificate chain, base64-encoded, leaf cert first.
+    #[serde(default)]
+    signing_cert_chain: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -102,6 +119,9 @@ struct CreateLicenseRequest {
     /// Grace period in hours after lease expires. Default: 24.
     #[serde(default = "default_lease_grace")]
     lease_grace_hours: u32,
+    /// Require valid binary code signature. Default: true.
+    #[serde(default = "default_require_signed_binary")]
+    require_signed_binary: bool,
 }
 
 fn default_product() -> String {
@@ -115,6 +135,9 @@ fn default_lease_duration() -> u32 {
 }
 fn default_lease_grace() -> u32 {
     DEFAULT_LEASE_GRACE_HOURS
+}
+fn default_require_signed_binary() -> bool {
+    true
 }
 
 #[derive(Deserialize)]
@@ -130,6 +153,8 @@ struct UpdateLicenseRequest {
     features: Option<Vec<String>>,
     #[serde(default)]
     max_machines: Option<u32>,
+    #[serde(default)]
+    require_signed_binary: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -160,6 +185,7 @@ struct LicenseSummary {
     total_machine_count: usize,
     machines: Vec<MachineSummary>,
     revoked: bool,
+    require_signed_binary: bool,
 }
 
 #[derive(Serialize)]
@@ -201,6 +227,7 @@ fn license_to_summary(lic: &License) -> LicenseSummary {
             })
             .collect(),
         revoked: lic.revoked,
+        require_signed_binary: lic.require_signed_binary,
     }
 }
 
@@ -509,6 +536,151 @@ async fn handle_disable_2fa(
 }
 
 // ---------------------------------------------------------------------------
+// CA pinning helpers
+// ---------------------------------------------------------------------------
+
+/// Decode the first PEM block in `text` to raw DER bytes.
+fn pem_to_der(text: &str) -> anyhow::Result<Vec<u8>> {
+    let b64: String = text.lines()
+        .filter(|l| !l.starts_with("-----"))
+        .collect::<Vec<_>>()
+        .join("");
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .decode(b64.trim())
+        .context("base64 decode of PEM body failed")
+}
+
+/// Decode a `signing_cert_chain` request field (base64-encoded DER strings)
+/// into raw DER bytes. Returns a 403 error response if the field is missing
+/// or contains invalid base64.
+fn decode_cert_chain(
+    chain: Option<&[String]>,
+) -> Result<Vec<Vec<u8>>, (StatusCode, Json<ErrorResponse>)> {
+    let strings = match chain {
+        Some(v) if !v.is_empty() => v,
+        _ => return Err(error_response(
+            StatusCode::FORBIDDEN,
+            "Binary signing certificate chain required by server policy but not provided",
+        )),
+    };
+    use base64::Engine;
+    let mut result = Vec::with_capacity(strings.len());
+    for b64 in strings {
+        let der = base64::engine::general_purpose::STANDARD.decode(b64)
+            .map_err(|_| error_response(
+                StatusCode::FORBIDDEN,
+                "Invalid base64 in signing certificate chain",
+            ))?;
+        result.push(der);
+    }
+    Ok(result)
+}
+
+/// Return `true` if at least one cert in `chain_der` was signed by the public
+/// key in `ca_der`.  Accepts any ordering of certs in the chain.
+///
+/// Supports RSA (PKCS#1v15 with SHA-256 or SHA-384 or SHA-512) and ECDSA
+/// (P-256 or P-384 with SHA-256 or SHA-384) signing algorithms, which covers
+/// the algorithms used by all major commercial code-signing CAs.
+fn verify_chain_to_ca(chain_der: &[Vec<u8>], ca_der: &[u8]) -> bool {
+    use x509_cert::Certificate;
+    use x509_cert::der::{Decode, Encode};
+
+    // OIDs for common signature algorithms
+    const SHA256_WITH_RSA:     &str = "1.2.840.113549.1.1.11";
+    const SHA384_WITH_RSA:     &str = "1.2.840.113549.1.1.12";
+    const SHA512_WITH_RSA:     &str = "1.2.840.113549.1.1.13";
+    const ECDSA_WITH_SHA256:   &str = "1.2.840.10045.4.3.2";
+    const ECDSA_WITH_SHA384:   &str = "1.2.840.10045.4.3.3";
+
+    let ca_cert = match Certificate::from_der(ca_der) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let ca_spki_der = match ca_cert.tbs_certificate.subject_public_key_info.to_der() {
+        Ok(d) => d,
+        Err(_) => return false,
+    };
+
+    for cert_der in chain_der {
+        let cert = match Certificate::from_der(cert_der) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let tbs_raw = match cert.tbs_certificate.to_der() {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        let sig_bytes = cert.signature.raw_bytes();
+        let alg_oid = cert.signature_algorithm.oid.to_string();
+
+        let verified = match alg_oid.as_str() {
+            SHA256_WITH_RSA | SHA384_WITH_RSA | SHA512_WITH_RSA => {
+                verify_rsa(&ca_spki_der, &tbs_raw, sig_bytes, &alg_oid)
+            }
+            ECDSA_WITH_SHA256 | ECDSA_WITH_SHA384 => {
+                verify_ecdsa(&ca_spki_der, &tbs_raw, sig_bytes, &alg_oid)
+            }
+            _ => false,
+        };
+
+        if verified { return true; }
+    }
+    false
+}
+
+fn verify_rsa(ca_spki_der: &[u8], tbs: &[u8], sig: &[u8], alg_oid: &str) -> bool {
+    use rsa::RsaPublicKey;
+    use rsa::pkcs1v15::VerifyingKey;
+    use rsa::signature::Verifier;
+    use pkcs8::DecodePublicKey;
+
+    const SHA256_WITH_RSA: &str = "1.2.840.113549.1.1.11";
+    const SHA384_WITH_RSA: &str = "1.2.840.113549.1.1.12";
+
+    let ca_pub = match RsaPublicKey::from_public_key_der(ca_spki_der) {
+        Ok(k) => k,
+        Err(_) => return false,
+    };
+    let sig_obj = match rsa::pkcs1v15::Signature::try_from(sig) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    match alg_oid {
+        SHA256_WITH_RSA => VerifyingKey::<rsa::sha2::Sha256>::new(ca_pub).verify(tbs, &sig_obj).is_ok(),
+        SHA384_WITH_RSA => VerifyingKey::<rsa::sha2::Sha384>::new(ca_pub).verify(tbs, &sig_obj).is_ok(),
+        _               => VerifyingKey::<rsa::sha2::Sha512>::new(ca_pub).verify(tbs, &sig_obj).is_ok(),
+    }
+}
+
+fn verify_ecdsa(ca_spki_der: &[u8], tbs: &[u8], sig: &[u8], alg_oid: &str) -> bool {
+    // Use ring for ECDSA verification — it is already in the dependency graph
+    // via rcgen.
+    use ring::signature::{self, UnparsedPublicKey};
+
+    const ECDSA_WITH_SHA256: &str = "1.2.840.10045.4.3.2";
+
+    // ring needs the raw public key bits from the SPKI, not the full SPKI DER.
+    // We extract the SubjectPublicKey bit-string from the SPKI using x509-cert.
+    use x509_cert::der::Decode;
+    use spki::SubjectPublicKeyInfoRef;
+    let spki = match SubjectPublicKeyInfoRef::from_der(ca_spki_der) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let pub_key_bytes = spki.subject_public_key.raw_bytes();
+
+    let alg = if alg_oid == ECDSA_WITH_SHA256 {
+        &signature::ECDSA_P256_SHA256_ASN1
+    } else {
+        &signature::ECDSA_P384_SHA384_ASN1
+    };
+
+    UnparsedPublicKey::new(alg, pub_key_bytes).verify(tbs, sig).is_ok()
+}
+
+// ---------------------------------------------------------------------------
 // Public endpoints (client-facing)
 // ---------------------------------------------------------------------------
 
@@ -537,6 +709,16 @@ async fn handle_activate(
 
     if license.is_expired() {
         return Err(error_response(StatusCode::FORBIDDEN, "License has expired"));
+    }
+
+    if let Some(ca_der) = &state.trusted_signing_ca {
+        let chain = decode_cert_chain(req.signing_cert_chain.as_deref())?;
+        if !verify_chain_to_ca(&chain, ca_der) {
+            return Err(error_response(
+                StatusCode::FORBIDDEN,
+                "Binary signing certificate chain does not terminate at the trusted CA",
+            ));
+        }
     }
 
     if !license.is_machine_activated(&req.machine_code) && !license.can_add_machine() {
@@ -585,6 +767,16 @@ async fn handle_verify(
 
     if license.is_expired() {
         return Err(error_response(StatusCode::FORBIDDEN, "License has expired"));
+    }
+
+    if let Some(ca_der) = &state.trusted_signing_ca {
+        let chain = decode_cert_chain(req.signing_cert_chain.as_deref())?;
+        if !verify_chain_to_ca(&chain, ca_der) {
+            return Err(error_response(
+                StatusCode::FORBIDDEN,
+                "Binary signing certificate chain does not terminate at the trusted CA",
+            ));
+        }
     }
 
     if !license.is_machine_activated(&req.machine_code) {
@@ -763,6 +955,7 @@ async fn handle_create_license(
     );
     license.lease_duration_hours = req.lease_duration_hours;
     license.lease_grace_hours = req.lease_grace_hours;
+    license.require_signed_binary = req.require_signed_binary;
 
     let db = state.db.lock().unwrap();
     db.insert_license(&license)
@@ -846,7 +1039,8 @@ async fn handle_update_license(
         license.expires.map(|dt| dt.to_rfc3339())
     };
 
-    db.update_license(&key, customer, product, expires_rfc.as_deref(), features, max_machines)
+    let require_signed_binary = req.require_signed_binary.unwrap_or(license.require_signed_binary);
+    db.update_license(&key, customer, product, expires_rfc.as_deref(), features, max_machines, require_signed_binary)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
     let updated = db
@@ -1829,11 +2023,22 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(&releases_dir)
         .with_context(|| format!("Failed to create releases dir at {}", releases_dir.display()))?;
 
+    let trusted_signing_ca = match cli.trusted_signing_ca {
+        None => None,
+        Some(ref path) => {
+            let pem_text = std::fs::read_to_string(path)
+                .with_context(|| format!("Failed to read trusted CA cert from {}", path))?;
+            Some(pem_to_der(&pem_text)
+                .with_context(|| format!("Failed to decode PEM CA cert from {}", path))?)
+        }
+    };
+
     let state = Arc::new(AppState {
         db: Mutex::new(db),
         private_key,
         jwt_secret,
         data_dir: cli.data_dir,
+        trusted_signing_ca,
     });
 
     let app = Router::new()

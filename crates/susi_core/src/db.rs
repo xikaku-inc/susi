@@ -41,7 +41,8 @@ impl LicenseDb {
                 max_machines INTEGER NOT NULL DEFAULT 0,
                 revoked INTEGER NOT NULL DEFAULT 0,
                 lease_duration_hours INTEGER NOT NULL DEFAULT 168,
-                lease_grace_hours INTEGER NOT NULL DEFAULT 24
+                lease_grace_hours INTEGER NOT NULL DEFAULT 24,
+                require_signed_binary INTEGER NOT NULL DEFAULT 1
             );
 
             CREATE TABLE IF NOT EXISTS machine_activations (
@@ -133,7 +134,8 @@ impl LicenseDb {
         let _ = self.conn.execute_batch(
             "ALTER TABLE licenses ADD COLUMN lease_duration_hours INTEGER NOT NULL DEFAULT 168;
              ALTER TABLE licenses ADD COLUMN lease_grace_hours INTEGER NOT NULL DEFAULT 24;
-             ALTER TABLE machine_activations ADD COLUMN lease_expires_at TEXT NOT NULL DEFAULT '';"
+             ALTER TABLE machine_activations ADD COLUMN lease_expires_at TEXT NOT NULL DEFAULT '';
+             ALTER TABLE licenses ADD COLUMN require_signed_binary INTEGER NOT NULL DEFAULT 1;"
         );
         // Add workspace_id to releases for per-workspace scoping
         let _ = self.conn.execute_batch(
@@ -189,8 +191,8 @@ impl LicenseDb {
             .unwrap_or_default();
         self.conn
             .execute(
-                "INSERT INTO licenses (id, product, customer, license_key, created, expires, features, max_machines, revoked, lease_duration_hours, lease_grace_hours)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                "INSERT INTO licenses (id, product, customer, license_key, created, expires, features, max_machines, revoked, lease_duration_hours, lease_grace_hours, require_signed_binary)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     license.id,
                     license.product,
@@ -203,6 +205,7 @@ impl LicenseDb {
                     license.revoked as i32,
                     license.lease_duration_hours,
                     license.lease_grace_hours,
+                    license.require_signed_binary as i32,
                 ],
             )
             .map_err(|e| LicenseError::Other(format!("DB insert: {}", e)))?;
@@ -213,7 +216,7 @@ impl LicenseDb {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, product, customer, license_key, created, expires, features, max_machines, revoked, lease_duration_hours, lease_grace_hours
+                "SELECT id, product, customer, license_key, created, expires, features, max_machines, revoked, lease_duration_hours, lease_grace_hours, require_signed_binary
              FROM licenses WHERE license_key = ?1",
             )
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
@@ -289,6 +292,10 @@ impl LicenseDb {
             machines: Vec::new(),
             revoked: row
                 .get::<_, i32>(8)
+                .map_err(|e| LicenseError::Other(format!("DB get: {}", e)))?
+                != 0,
+            require_signed_binary: row
+                .get::<_, i32>(11)
                 .map_err(|e| LicenseError::Other(format!("DB get: {}", e)))?
                 != 0,
         };
@@ -432,14 +439,15 @@ impl LicenseDb {
         expires: Option<&str>,
         features: &[String],
         max_machines: u32,
+        require_signed_binary: bool,
     ) -> Result<bool, LicenseError> {
         let features_json = serde_json::to_string(features)?;
         let expires_str = expires.unwrap_or("");
         let rows = self
             .conn
             .execute(
-                "UPDATE licenses SET customer = ?1, product = ?2, expires = ?3, features = ?4, max_machines = ?5 WHERE license_key = ?6",
-                params![customer, product, expires_str, features_json, max_machines, license_key],
+                "UPDATE licenses SET customer = ?1, product = ?2, expires = ?3, features = ?4, max_machines = ?5, require_signed_binary = ?6 WHERE license_key = ?7",
+                params![customer, product, expires_str, features_json, max_machines, require_signed_binary as i32, license_key],
             )
             .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))?;
         Ok(rows > 0)
@@ -1114,7 +1122,7 @@ impl LicenseDb {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, product, customer, license_key, created, expires, features, max_machines, revoked, lease_duration_hours, lease_grace_hours
+                "SELECT id, product, customer, license_key, created, expires, features, max_machines, revoked, lease_duration_hours, lease_grace_hours, require_signed_binary
              FROM licenses ORDER BY created DESC",
             )
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
@@ -1133,6 +1141,7 @@ impl LicenseDb {
                     row.get::<_, i32>(8)?,
                     row.get::<_, u32>(9)?,
                     row.get::<_, u32>(10)?,
+                    row.get::<_, i32>(11)?,
                 ))
             })
             .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?;
@@ -1151,6 +1160,7 @@ impl LicenseDb {
                 revoked,
                 lease_duration_hours,
                 lease_grace_hours,
+                require_signed_binary,
             ) = row.map_err(|e| LicenseError::Other(format!("DB row: {}", e)))?;
 
             let features: Vec<String> = serde_json::from_str(&features_json).unwrap_or_default();
@@ -1185,6 +1195,7 @@ impl LicenseDb {
                 lease_grace_hours,
                 machines,
                 revoked: revoked != 0,
+                require_signed_binary: require_signed_binary != 0,
             });
         }
 

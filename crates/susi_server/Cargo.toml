@@ -23,8 +23,19 @@ tower-http = { version = "0.6", features = ["cors"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 rsa = { version = "0.9", features = ["pem"] }
 pkcs8 = { version = "0.10", features = ["pem"] }
+x509-cert = { version = "0.2", default-features = false }
+spki = "0.7"
+ring = "0.17"
+base64 = "0.22"
 argon2 = "0.5"
 jsonwebtoken = "9"
 totp-rs = { version = "5", features = ["qr"] }
 rand = "0.8"
 uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+susi_client = { path = "../susi_client" }
+susi_core = { path = "../susi_core" }
+reqwest = { workspace = true }
+tempfile = "3"
+rcgen = "0.13"

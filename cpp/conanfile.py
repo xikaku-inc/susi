@@ -7,8 +7,15 @@ class SusiRecipe(ConanFile):
     package_type = "library"
     
     settings = "os", "compiler", "build_type", "arch"
-    options = {"shared": [True, False]}
-    default_options = {"shared": False}
+    options = {
+        # shared is required by conan but will be ignored (always False)
+        "shared": [False],
+        # When True, a global constructor aborts the process at startup if the
+        # binary is not code-signed.  Mirrors the Rust require-signed-binary
+        # feature.  Passes -DSUSI_REQUIRE_SIGNED_BINARY=ON to CMake.
+        "require_signed_binary": [True, False],
+    }
+    default_options = {"shared": False, "require_signed_binary": False}
 
     exports_sources = "CMakeLists.txt", "src/*", "include/*"
 
@@ -24,6 +31,7 @@ class SusiRecipe(ConanFile):
         deps = CMakeDeps(self)
         deps.generate()
         tc = CMakeToolchain(self)
+        tc.variables["SUSI_REQUIRE_SIGNED_BINARY"] = self.options.require_signed_binary
         tc.generate()
 
     def build(self):
@@ -37,5 +45,7 @@ class SusiRecipe(ConanFile):
 
     def package_info(self):
         self.cpp_info.libs = ["susi"]
+        if self.options.require_signed_binary:
+            self.cpp_info.defines = ["SUSI_REQUIRE_SIGNED_BINARY=1"]
         if self.settings.os == "Macos":
-            self.cpp_info.frameworks = ["IOKit", "CoreFoundation"]
+            self.cpp_info.frameworks = ["IOKit", "CoreFoundation", "Security"]

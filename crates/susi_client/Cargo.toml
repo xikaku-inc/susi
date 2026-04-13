@@ -3,6 +3,12 @@ name = "susi_client"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+# When enabled, a process-startup constructor aborts if the binary is not
+# code-signed. Link your application with this feature to enforce integrity
+# at runtime independent of any license file check.
+require-signed-binary = ["dep:ctor"]
+
 [dependencies]
 susi_core = { path = "../susi_core" }
 serde = { workspace = true }
@@ -11,9 +17,11 @@ chrono = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
 reqwest = { version = "0.12", features = ["blocking", "json"] }
+base64 = "0.22"
 hostname = "0.4"
 rsa = { version = "0.9", features = ["pem"] }
 pkcs8 = { version = "0.10", features = ["pem"] }
+ctor = { version = "0.2", optional = true }
 
 [dev-dependencies]
 approx = { workspace = true }

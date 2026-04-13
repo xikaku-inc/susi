@@ -27,10 +27,14 @@
 #include <winioctl.h>
 #include <setupapi.h>
 #include <cfgmgr32.h>
+#include <softpub.h>
+#include <wintrust.h>
 #pragma comment(lib, "iphlpapi.lib")
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "setupapi.lib")
 #pragma comment(lib, "cfgmgr32.lib")
+#pragma comment(lib, "wintrust.lib")
+#pragma comment(lib, "crypt32.lib")
 #else
 #include <climits>
 #include <dirent.h>
@@ -39,6 +43,8 @@
 #if defined(__APPLE__)
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
+#include <Security/Security.h>
+#include <mach-o/dyld.h>
 #include <sys/mount.h>
 #endif
 #endif
@@ -67,6 +73,21 @@ static std::vector<unsigned char> base64Decode(const std::string& encoded)
     if (len < 0) return {};
     out.resize(static_cast<size_t>(len));
     return out;
+}
+
+static std::string base64Encode(const unsigned char* data, size_t len)
+{
+    BIO* b64 = BIO_new(BIO_f_base64());
+    BIO_set_flags(b64, BIO_FLAGS_BASE64_NO_NL);
+    BIO* bmem = BIO_new(BIO_s_mem());
+    b64 = BIO_push(b64, bmem);
+    BIO_write(b64, data, static_cast<int>(len));
+    BIO_flush(b64);
+    BUF_MEM* bptr = nullptr;
+    BIO_get_mem_ptr(b64, &bptr);
+    std::string result(bptr->data, bptr->length);
+    BIO_free_all(b64);
+    return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -364,6 +385,176 @@ std::string SusiClient::getPublicKeyPem()
 }
 
 // ---------------------------------------------------------------------------
+// Certificate chain extraction from binary code signature
+// ---------------------------------------------------------------------------
+static std::vector<std::vector<uint8_t>> getSigningCertChain()
+{
+    std::vector<std::vector<uint8_t>> chain;
+
+#if defined(_WIN32)
+    wchar_t exePath[MAX_PATH] = {};
+    if (!GetModuleFileNameW(nullptr, exePath, MAX_PATH))
+        return chain;
+
+    HCERTSTORE hStore = nullptr;
+    HCRYPTMSG  hMsg   = nullptr;
+    DWORD contentType = 0, formatType = 0, encodingType = 0;
+
+    BOOL ok = CryptQueryObject(
+        CERT_QUERY_OBJECT_FILE,
+        exePath,
+        CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED_EMBED,
+        CERT_QUERY_FORMAT_FLAG_ALL,
+        0,
+        &encodingType, &contentType, &formatType,
+        &hStore, &hMsg, nullptr
+    );
+
+    if (!ok || !hStore) {
+        if (hMsg) CryptMsgClose(hMsg);
+        return chain;
+    }
+
+    PCCERT_CONTEXT pCtx = nullptr;
+    while ((pCtx = CertEnumCertificatesInStore(hStore, pCtx)) != nullptr) {
+        chain.emplace_back(
+            pCtx->pbCertEncoded,
+            pCtx->pbCertEncoded + pCtx->cbCertEncoded
+        );
+    }
+
+    if (hMsg) CryptMsgClose(hMsg);
+    CertCloseStore(hStore, CERT_CLOSE_STORE_FORCE_FLAG);
+
+#elif defined(__APPLE__)
+    char exePath[PATH_MAX] = {};
+    uint32_t size = sizeof(exePath);
+    if (_NSGetExecutablePath(exePath, &size) != 0)
+        return chain;
+
+    CFURLRef url = CFURLCreateFromFileSystemRepresentation(
+        nullptr, reinterpret_cast<const UInt8*>(exePath), strlen(exePath), false);
+    if (!url) return chain;
+
+    SecStaticCodeRef code = nullptr;
+    OSStatus status = SecStaticCodeCreateWithPath(url, kSecCSDefaultFlags, &code);
+    CFRelease(url);
+    if (status != errSecSuccess || !code) return chain;
+
+    CFDictionaryRef info = nullptr;
+    status = SecCodeCopySigningInformation(code, kSecCSSigningInformation, &info);
+    CFRelease(code);
+    if (status != errSecSuccess || !info) return chain;
+
+    auto certsVal = CFDictionaryGetValue(info, kSecCodeInfoCertificates);
+    if (certsVal) {
+        auto certs = reinterpret_cast<CFArrayRef>(certsVal);
+        CFIndex count = CFArrayGetCount(certs);
+        for (CFIndex i = 0; i < count; ++i) {
+            auto cert = reinterpret_cast<SecCertificateRef>(
+                const_cast<void*>(CFArrayGetValueAtIndex(certs, i)));
+            CFDataRef data = SecCertificateCopyData(cert);
+            if (data) {
+                const uint8_t* ptr = CFDataGetBytePtr(data);
+                CFIndex len = CFDataGetLength(data);
+                chain.emplace_back(ptr, ptr + len);
+                CFRelease(data);
+            }
+        }
+    }
+    CFRelease(info);
+#endif
+
+    return chain;
+}
+
+// ---------------------------------------------------------------------------
+// Binary signing verification
+// ---------------------------------------------------------------------------
+static bool isBinarySigned()
+{
+#if defined(_WIN32)
+    wchar_t exePath[MAX_PATH] = {};
+    if (!GetModuleFileNameW(nullptr, exePath, MAX_PATH))
+        return false;
+
+    WINTRUST_FILE_INFO fileInfo = {};
+    fileInfo.cbStruct = sizeof(fileInfo);
+    fileInfo.pcwszFilePath = exePath;
+
+    GUID action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+
+    WINTRUST_DATA data = {};
+    data.cbStruct = sizeof(data);
+    data.dwUIChoice = WTD_UI_NONE;
+    data.fdwRevocationChecks = WTD_REVOKE_NONE;
+    data.dwUnionChoice = WTD_CHOICE_FILE;
+    data.pFile = &fileInfo;
+    data.dwStateAction = WTD_STATEACTION_VERIFY;
+    data.dwProvFlags = WTD_SAFER_FLAG;
+
+    LONG result = WinVerifyTrust(nullptr, &action, &data);
+
+    data.dwStateAction = WTD_STATEACTION_CLOSE;
+    WinVerifyTrust(nullptr, &action, &data);
+
+    return result == ERROR_SUCCESS;
+#elif defined(__APPLE__)
+    char exePath[PATH_MAX] = {};
+    uint32_t size = sizeof(exePath);
+    if (_NSGetExecutablePath(exePath, &size) != 0)
+        return false;
+
+    CFURLRef url = CFURLCreateFromFileSystemRepresentation(
+        nullptr, reinterpret_cast<const UInt8*>(exePath), strlen(exePath), false);
+    if (!url)
+        return false;
+
+    SecStaticCodeRef code = nullptr;
+    OSStatus status = SecStaticCodeCreateWithPath(url, kSecCSDefaultFlags, &code);
+    CFRelease(url);
+    if (status != errSecSuccess || !code)
+        return false;
+
+    status = SecStaticCodeCheckValidity(code, kSecCSDefaultFlags, nullptr);
+    CFRelease(code);
+    return status == errSecSuccess;
+#else
+    return true; // No standard binary signing on Linux
+#endif
+}
+
+// ---------------------------------------------------------------------------
+// Startup enforcement (compile with -DSUSI_REQUIRE_SIGNED_BINARY=1)
+// ---------------------------------------------------------------------------
+// When SUSI_REQUIRE_SIGNED_BINARY is defined at compile time, a static object
+// is instantiated before main() whose constructor aborts the process if the
+// binary is not code-signed.  This ensures an attacker cannot reach any
+// application logic — including the license verification code — with a
+// tampered binary.
+//
+// Enable in CMake:
+//   cmake -DSUSI_REQUIRE_SIGNED_BINARY=ON ...
+// Enable manually:
+//   add_compile_definitions(SUSI_REQUIRE_SIGNED_BINARY=1)
+#ifdef SUSI_REQUIRE_SIGNED_BINARY
+namespace {
+struct SusiSignatureEnforcer {
+    SusiSignatureEnforcer() {
+        if (!isBinarySigned()) {
+            fprintf(stderr,
+                "[susi] FATAL: Binary signature check failed at startup. "
+                "This binary has not been code-signed or has been tampered with.\n");
+            fflush(stderr);
+            abort();
+        }
+    }
+};
+static SusiSignatureEnforcer g_susiSignatureEnforcer;
+}
+#endif
+
+// ---------------------------------------------------------------------------
 // Shared license verify logic
 // ---------------------------------------------------------------------------
 SusiClient::LicenseStatus SusiClient::verifySignedLicenseJson(const std::string& signedLicenseStr, const std::string& activationCode)
@@ -456,6 +647,12 @@ SusiClient::LicenseStatus SusiClient::verifySignedLicenseJson(const std::string&
         }
     }
 
+    // Check binary signing requirement
+    if (payload.value("require_signed_binary", false) && !isBinarySigned()) {
+        SUSI_LOG("License requires a signed binary, but this binary is unsigned or tampered");
+        return LicenseStatus::UnsignedBinary;
+    }
+
     // Extract information
     if (payload.contains("features") && payload.at("features").is_array()) {
         for (const auto& f : payload.at("features")) {
@@ -533,6 +730,14 @@ SusiClient::LicenseStatus SusiClient::checkLicenseAndRefresh(const std::filesyst
         body["license_key"] = licenseKey;
         body["machine_code"] = getMachineCode();
         body["friendly_name"] = getHostname();
+
+        auto certChain = getSigningCertChain();
+        if (!certChain.empty()) {
+            json chainArr = json::array();
+            for (const auto& der : certChain)
+                chainArr.push_back(base64Encode(der.data(), der.size()));
+            body["signing_cert_chain"] = chainArr;
+        }
 
         std::string response;
         long httpCode = httpPost(url, body.dump(), response);

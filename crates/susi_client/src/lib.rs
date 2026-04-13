@@ -1,3 +1,4 @@
+pub mod binary_signing;
 pub mod workspace;
 
 use std::path::Path;
@@ -35,6 +36,8 @@ pub enum LicenseStatus {
     InvalidSignature,
     InvalidLicenseKey,
     Revoked,
+    /// The license requires a signed binary but the running binary is unsigned or tampered.
+    UnsignedBinary,
     TokenNotFound,
     FileNotFound(String),
     Error(String),
@@ -188,6 +191,10 @@ impl LicenseClient {
             };
         }
 
+        if payload.require_signed_binary && !binary_signing::is_binary_signed() {
+            return LicenseStatus::UnsignedBinary;
+        }
+
         LicenseStatus::Valid { payload }
     }
 
@@ -260,11 +267,19 @@ impl LicenseClient {
             });
 
         let url = format!("{}/activate", server_url.trim_end_matches('/'));
-        let body = serde_json::json!({
+        let chain = binary_signing::extract_signing_cert_chain();
+        let mut body = serde_json::json!({
             "license_key": license_key,
             "machine_code": machine_code,
             "friendly_name": friendly_name,
         });
+        if !chain.is_empty() {
+            use base64::Engine;
+            let chain_b64: Vec<String> = chain.iter()
+                .map(|der| base64::engine::general_purpose::STANDARD.encode(der))
+                .collect();
+            body["signing_cert_chain"] = serde_json::json!(chain_b64);
+        }
 
         let response = reqwest::blocking::Client::new()
             .post(&url)
@@ -376,6 +391,7 @@ mod tests {
             features: vec!["full_fusion".to_string(), "recorder".to_string()],
             machine_codes: machine_code.into_iter().collect(),
             lease_expires: None,
+            require_signed_binary: false,
         }
     }
 
@@ -414,6 +430,7 @@ mod tests {
             features: vec![],
             machine_codes: vec![],
             lease_expires: None,
+            require_signed_binary: false,
         };
         let signed = sign_license(&private, &payload).unwrap();
 
@@ -493,6 +510,7 @@ mod tests {
             features: vec!["full_fusion".to_string()],
             machine_codes: vec![],
             lease_expires: None,
+            require_signed_binary: false,
         };
         let signed = sign_license(&private, &payload).unwrap();
 
