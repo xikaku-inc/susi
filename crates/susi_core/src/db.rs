@@ -360,6 +360,7 @@ impl LicenseDb {
                 "INSERT INTO machine_activations (license_id, machine_code, friendly_name, activated_at, lease_expires_at)
              VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(license_id, machine_code) DO UPDATE SET
+                friendly_name = excluded.friendly_name,
                 activated_at = excluded.activated_at,
                 lease_expires_at = excluded.lease_expires_at",
                 params![
@@ -1437,6 +1438,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(retrieved.machines.len(), 1);
+        assert_eq!(retrieved.machines[0].friendly_name, "M1 again");
     }
 
     // -----------------------------------------------------------------------
