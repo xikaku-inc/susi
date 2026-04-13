@@ -17,7 +17,6 @@ pkcs8 = { version = "0.10", features = ["pem"] }
 rusqlite = { version = "0.32", features = ["bundled"], optional = true }
 aes-gcm = "0.10"
 hkdf = "0.12"
-machine-uid = "0.5"
 
 [features]
 default = []
@@ -27,6 +26,7 @@ db = ["rusqlite"]
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
+wmi = "0.18"
 windows = { version = "0.58", features = [
     "Win32_Devices_DeviceAndDriverInstallation",
     "Win32_Storage_FileSystem",

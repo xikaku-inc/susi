@@ -29,11 +29,12 @@ target_link_libraries(susi PRIVATE nlohmann_json::nlohmann_json)
 find_package(CURL REQUIRED)
 target_link_libraries(susi PRIVATE CURL::libcurl)
 
-# Windows network libraries
+# Windows: WMI (fingerprint) + device enumeration
 if(WIN32)
-    target_link_libraries(susi PRIVATE iphlpapi ws2_32 setupapi cfgmgr32)
+    target_link_libraries(susi PRIVATE wbemuuid ole32 oleaut32 setupapi cfgmgr32)
 endif()
 
+# macOS: IOKit + CoreFoundation (fingerprint)
 if(APPLE)
     find_library(IOKIT_LIBRARY IOKit REQUIRED)
     find_library(COREFOUNDATION_LIBRARY CoreFoundation REQUIRED)

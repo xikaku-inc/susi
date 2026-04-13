@@ -7,6 +7,7 @@
 #include <fstream>
 #include <mutex>
 #include <sstream>
+#include <string>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -21,18 +22,19 @@
 #include <curl/curl.h>
 
 #ifdef _WIN32
-#include <winsock2.h>
-#include <iphlpapi.h>
 #include <windows.h>
 #include <winioctl.h>
 #include <setupapi.h>
 #include <cfgmgr32.h>
-#pragma comment(lib, "iphlpapi.lib")
-#pragma comment(lib, "ws2_32.lib")
+#include <wbemidl.h>
+#pragma comment(lib, "wbemuuid.lib")
+#pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "oleaut32.lib")
 #pragma comment(lib, "setupapi.lib")
 #pragma comment(lib, "cfgmgr32.lib")
 #else
-#include <climits>
+#include <cstdint>
+#include <cstring>
 #include <dirent.h>
 #include <unistd.h>
 #include <unordered_map>
@@ -118,48 +120,79 @@ static bool verifySignature(
 // ---------------------------------------------------------------------------
 // Hardware fingerprinting (must match susi_core::fingerprint)
 // ---------------------------------------------------------------------------
-#ifdef _WIN32
-static std::vector<std::string> getMacAddresses()
+static std::string normalizeId(const std::string& s)
 {
-    std::vector<std::string> macs;
-
-    ULONG bufLen = 15000;
-    std::vector<unsigned char> buffer;
-
-    for (;;) {
-        buffer.resize(bufLen);
-        ULONG ret = GetAdaptersAddresses(
-            AF_UNSPEC,
-            GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST,
-            nullptr,
-            reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buffer.data()),
-            &bufLen);
-
-        if (ret == ERROR_SUCCESS) break;
-        if (ret == ERROR_BUFFER_OVERFLOW) continue;
-        return macs;
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) {
+        if (c != '-')
+            out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
     }
+    return out;
+}
 
-    auto* adapter = reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buffer.data());
-    while (adapter) {
-        if (adapter->PhysicalAddressLength == 6) {
-            bool allZero = true;
-            for (DWORD i = 0; i < 6; ++i) {
-                if (adapter->PhysicalAddress[i] != 0) {
-                    allZero = false;
-                    break;
-                }
-            }
-            if (!allZero) {
-                macs.push_back(hexEncode(adapter->PhysicalAddress, 6));
+#ifdef _WIN32
+// On Windows the machine code consists of the BIOS UUID and the CPU processor ID.
+static std::string getMachineCode()
+{
+    std::string biosUuid, processorId;
+
+    HRESULT hrCom = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    const bool comInitByUs = (hrCom == S_OK);
+    if (SUCCEEDED(hrCom) || hrCom == RPC_E_CHANGED_MODE) {
+        IWbemLocator* pLoc = nullptr;
+        if (SUCCEEDED(CoCreateInstance(CLSID_WbemLocator, nullptr, CLSCTX_INPROC_SERVER,
+                IID_IWbemLocator, reinterpret_cast<void**>(&pLoc)))) {
+            IWbemServices* pSvc = nullptr;
+            BSTR ns = SysAllocString(L"ROOT\\CIMV2");
+            HRESULT hres = pLoc->ConnectServer(ns, nullptr, nullptr, nullptr, 0, nullptr, nullptr, &pSvc);
+            SysFreeString(ns);
+            pLoc->Release();
+            if (SUCCEEDED(hres)) {
+                CoSetProxyBlanket(pSvc, RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE, nullptr,
+                    RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE, nullptr, EOAC_NONE);
+
+                auto queryFirst = [pSvc](const wchar_t* query, const wchar_t* prop) -> std::string {
+                    IEnumWbemClassObject* pEnum = nullptr;
+                    BSTR wql = SysAllocString(L"WQL");
+                    BSTR q = SysAllocString(query);
+                    HRESULT h = pSvc->ExecQuery(wql, q,
+                        WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, nullptr, &pEnum);
+                    SysFreeString(q);
+                    SysFreeString(wql);
+                    if (FAILED(h) || !pEnum) return std::string{};
+                    std::string result;
+                    IWbemClassObject* pObj = nullptr;
+                    ULONG returned = 0;
+                    if (pEnum->Next(WBEM_INFINITE, 1, &pObj, &returned) == WBEM_S_NO_ERROR && pObj) {
+                        VARIANT vt;
+                        VariantInit(&vt);
+                        if (SUCCEEDED(pObj->Get(prop, 0, &vt, nullptr, nullptr)) && vt.vt == VT_BSTR && vt.bstrVal) {
+                            int len = WideCharToMultiByte(CP_UTF8, 0, vt.bstrVal, -1, nullptr, 0, nullptr, nullptr);
+                            if (len > 1) {
+                                result.resize(static_cast<size_t>(len - 1));
+                                WideCharToMultiByte(CP_UTF8, 0, vt.bstrVal, -1, result.data(), len, nullptr, nullptr);
+                            }
+                        }
+                        VariantClear(&vt);
+                        pObj->Release();
+                    }
+                    pEnum->Release();
+                    return result;
+                };
+
+                biosUuid = queryFirst(L"SELECT UUID FROM Win32_ComputerSystemProduct", L"UUID");
+                processorId = queryFirst(L"SELECT ProcessorId FROM Win32_Processor", L"ProcessorId");
+                pSvc->Release();
             }
         }
-        adapter = adapter->Next;
+        if (comInitByUs) CoUninitialize();
     }
 
-    std::sort(macs.begin(), macs.end());
-    macs.erase(std::unique(macs.begin(), macs.end()), macs.end());
-    return macs;
+    std::string combined = normalizeId(biosUuid) + "|" + normalizeId(processorId);
+    unsigned char hash[SHA256_DIGEST_LENGTH];
+    SHA256(reinterpret_cast<const unsigned char*>(combined.data()), combined.size(), hash);
+    return hexEncode(hash, SHA256_DIGEST_LENGTH);
 }
 
 static std::string getHostname()
@@ -177,44 +210,123 @@ static std::string getHostname()
     WideCharToMultiByte(CP_UTF8, 0, buf.data(), static_cast<int>(size), result.data(), needed, nullptr, nullptr);
     return result;
 }
-#else
-static std::vector<std::string> getMacAddresses()
+#elif defined(__APPLE__)
+static std::string getIOPlatformValue(const char* key)
 {
-    std::vector<std::string> macs;
+    io_registry_entry_t root = IORegistryEntryFromPath(kIOMainPortDefault, "IOService:/");
+    if (!root) return "";
+    CFStringRef cfKey = CFStringCreateWithCString(nullptr, key, kCFStringEncodingUTF8);
+    CFTypeRef val = IORegistryEntryCreateCFProperty(root, cfKey, kCFAllocatorDefault, 0);
+    CFRelease(cfKey);
+    IOObjectRelease(root);
+    if (!val) return "";
+    std::string result;
+    if (CFGetTypeID(val) == CFStringGetTypeID()) {
+        auto str = static_cast<CFStringRef>(val);
+        const char* cstr = CFStringGetCStringPtr(str, kCFStringEncodingUTF8);
+        if (cstr) {
+            result = cstr;
+        } else {
+            char buf[256] = {};
+            if (CFStringGetCString(str, buf, sizeof(buf), kCFStringEncodingUTF8))
+                result = buf;
+        }
+    }
+    CFRelease(val);
+    return result;
+}
 
-    DIR* dir = opendir("/sys/class/net");
-    if (!dir) return macs;
+// On macOS the machine code consists of the IOPlatformUUID and the IOPlatformSerialNumber.
+static std::string getMachineCode()
+{
+    std::string uuid = getIOPlatformValue("IOPlatformUUID");
+    std::string serial = getIOPlatformValue("IOPlatformSerialNumber");
+    std::string combined = normalizeId(uuid) + "|" + normalizeId(serial);
+    unsigned char hash[SHA256_DIGEST_LENGTH];
+    SHA256(reinterpret_cast<const unsigned char*>(combined.data()), combined.size(), hash);
+    return hexEncode(hash, SHA256_DIGEST_LENGTH);
+}
 
-    struct dirent* entry;
-    while ((entry = readdir(dir)) != nullptr) {
-        std::string name = entry->d_name;
-        if (name == "lo" || name == "." || name == "..") continue;
+static std::string getHostname()
+{
+    char buf[256] = {};
+    if (gethostname(buf, sizeof(buf)) == 0) return std::string(buf);
+    return "";
+}
+#elif defined(__linux__)
+static std::string getRootDiskSerial()
+{
+    // Find device mounted at "/" from /proc/mounts
+    std::string rootDev;
+    {
+        std::ifstream f("/proc/mounts");
+        std::string line;
+        while (std::getline(f, line)) {
+            std::istringstream iss(line);
+            std::string dev, mount;
+            if ((iss >> dev >> mount) && mount == "/") {
+                rootDev = dev;
+                break;
+            }
+        }
+    }
+    if (rootDev.size() <= 5 || rootDev.compare(0, 5, "/dev/") != 0) return "";
 
-        std::string path = "/sys/class/net/" + name + "/address";
+    std::string disk = rootDev.substr(5); // e.g. "sda1", "nvme0n1p1"
+
+    // NVMe/eMMC: strip trailing "p<digits>" → "nvme0n1p1" → "nvme0n1"
+    bool stripped = false;
+    {
+        const auto p = disk.rfind('p');
+        if (p != std::string::npos && p > 0) {
+            const auto suffix = disk.substr(p + 1);
+            if (!suffix.empty() && std::all_of(suffix.begin(), suffix.end(),
+                    [](unsigned char c) { return std::isdigit(c); })) {
+                disk = disk.substr(0, p);
+                stripped = true;
+            }
+        }
+    }
+    // SATA/SCSI: strip trailing digits → "sda1" → "sda"
+    if (!stripped) {
+        while (!disk.empty() && std::isdigit(static_cast<unsigned char>(disk.back())))
+            disk.pop_back();
+    }
+
+    for (const std::string& path : {
+        "/sys/block/" + disk + "/device/serial",
+        "/sys/block/" + disk + "/serial"
+    }) {
         std::ifstream f(path);
         if (!f.is_open()) continue;
-
-        std::string mac;
-        std::getline(f, mac);
-
-        while (!mac.empty() && (mac.back() == '\n' || mac.back() == '\r' || mac.back() == ' '))
-            mac.pop_back();
-
-        std::transform(mac.begin(), mac.end(), mac.begin(), ::tolower);
-
-        if (mac.empty() || mac == "00:00:00:00:00:00") continue;
-
-        std::string normalized;
-        for (char c : mac) {
-            if (c != ':') normalized.push_back(c);
-        }
-        macs.push_back(normalized);
+        std::string serial;
+        std::getline(f, serial);
+        while (!serial.empty() && (serial.back() == '\n' || serial.back() == '\r' || serial.back() == ' '))
+            serial.pop_back();
+        if (!serial.empty()) return serial;
     }
-    closedir(dir);
+    return "";
+}
 
-    std::sort(macs.begin(), macs.end());
-    macs.erase(std::unique(macs.begin(), macs.end()), macs.end());
-    return macs;
+// On linux the machine code consists of the contents of /etc/machine-id and the root disk serial number.
+static std::string getMachineCode()
+{
+    std::string machineId;
+    {
+        std::ifstream f("/etc/machine-id");
+        if (f.is_open()) {
+            std::getline(f, machineId);
+            while (!machineId.empty() && (machineId.back() == '\n' || machineId.back() == '\r' || machineId.back() == ' '))
+                machineId.pop_back();
+        }
+    }
+
+    std::string diskSerial = getRootDiskSerial();
+
+    std::string combined = normalizeId(machineId) + "|" + normalizeId(diskSerial);
+    unsigned char hash[SHA256_DIGEST_LENGTH];
+    SHA256(reinterpret_cast<const unsigned char*>(combined.data()), combined.size(), hash);
+    return hexEncode(hash, SHA256_DIGEST_LENGTH);
 }
 
 static std::string getHostname()
@@ -234,26 +346,19 @@ static std::string getHostname()
     }
     return "";
 }
-#endif
-
+#else
 static std::string getMachineCode()
 {
-    auto macs = getMacAddresses();
-    std::string hostname = getHostname();
-
-    std::sort(macs.begin(), macs.end());
-    macs.push_back(hostname);
-
-    std::string combined;
-    for (size_t i = 0; i < macs.size(); ++i) {
-        if (i > 0) combined += "|";
-        combined += macs[i];
-    }
-
-    unsigned char hash[SHA256_DIGEST_LENGTH];
-    SHA256(reinterpret_cast<const unsigned char*>(combined.data()), combined.size(), hash);
-    return hexEncode(hash, SHA256_DIGEST_LENGTH);
+    return "";
 }
+
+static std::string getHostname()
+{
+    char buf[256] = {};
+    if (gethostname(buf, sizeof(buf)) == 0) return std::string(buf);
+    return "";
+}
+#endif
 
 // ---------------------------------------------------------------------------
 // ISO 8601 date parsing (enough for RFC 3339 timestamps from our licenses)
@@ -808,7 +913,7 @@ static std::vector<UsbDeviceInfo> enumerateUsbDevices()
     CFDictionarySetValue(matching, CFSTR("Whole"), kCFBooleanTrue);
 
     io_iterator_t iter = IO_OBJECT_NULL;
-    if (IOServiceGetMatchingServices(kIOMasterPortDefault, matching, &iter) != KERN_SUCCESS)
+    if (IOServiceGetMatchingServices(kIOMainPortDefault, matching, &iter) != KERN_SUCCESS)
         return devices;
 
     io_service_t media;
