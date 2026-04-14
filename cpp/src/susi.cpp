@@ -512,6 +512,13 @@ SusiClient::SusiClient(std::string publicKey, std::filesystem::path propertiesPa
         return;
     }
 
+    if (!props.contains("server_url") || !props.at("server_url").is_string()
+        || props.at("server_url").get<std::string>().empty()) {
+        SUSI_LOG("License properties file is not formatted correctly");
+        return;
+    }
+    m_serverUrl = props.at("server_url").get<std::string>();
+
     int countFile = 0;
     int countToken = 0;
     int countServer = 0;
@@ -524,7 +531,6 @@ SusiClient::SusiClient(std::string publicKey, std::filesystem::path propertiesPa
         }
         std::string type = m.at("type").get<std::string>();
 
-        LicenseStatus status = LicenseStatus::Error;
         if (type == "file") {
             m_allowedLicenseMethods.push_back(LicenseMethod::File);
             countFile++;
@@ -532,14 +538,6 @@ SusiClient::SusiClient(std::string publicKey, std::filesystem::path propertiesPa
             m_allowedLicenseMethods.push_back(LicenseMethod::Token);
             countToken++;
         } else if (type == "server") {
-            if (!m.contains("url") || !m.at("url").is_string()){
-                SUSI_LOG("License properties file is not formatted correctly");
-                m_allowedLicenseMethods.clear();
-                return;
-            }
-            std::string url = m.at("url").get<std::string>();
-
-            m_serverUrl = url;
             m_allowedLicenseMethods.push_back(LicenseMethod::Server);
             countServer++;
         } else {

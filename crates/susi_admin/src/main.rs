@@ -145,9 +145,9 @@ enum Commands {
         /// Ordered comma-separated list of methods: file, token, server
         #[arg(long, required = true)]
         methods: String,
-        /// License server URL (required when `server` is in --methods)
-        #[arg(long)]
-        server_url: Option<String>,
+        /// License server URL
+        #[arg(long, required = true)]
+        server_url: String,
         /// Output file for the signed properties json
         #[arg(long, default_value = "susi-properties.json")]
         output: String,
@@ -204,7 +204,7 @@ fn main() -> Result<()> {
             server_url,
             output,
             private_key,
-        } => cmd_properties(&methods, server_url, &output, &private_key),
+        } => cmd_properties(&methods, &server_url, &output, &private_key),
     }
 }
 
@@ -599,54 +599,45 @@ fn truncate(s: &str, max: usize) -> String {
 
 fn cmd_properties(
     methods_str: &str,
-    server_url: Option<String>,
+    server_url: &str,
     output: &str,
     private_key_path: &str,
 ) -> Result<()> {
-    let methods = parse_methods(methods_str, server_url.as_deref())?;
+    let methods = parse_methods(methods_str)?;
 
     let priv_pem = std::fs::read_to_string(private_key_path)
         .with_context(|| format!("Failed to read private key from {}", private_key_path))?;
     let private_key = private_key_from_pem(&priv_pem)?;
 
-    let properties = LicenseProperties { methods };
+    let properties = LicenseProperties {
+        server_url: server_url.to_string(),
+        methods,
+    };
     let signed_properties = sign_properties(&private_key, &properties)?;
 
     std::fs::write(output, serde_json::to_string_pretty(&signed_properties)?)
         .with_context(|| format!("Failed to write properties file to {}", output))?;
 
-    println!(
-        "Signed license properties written to: {}",
-        output
-    );
+    println!("Signed license properties written to: {}", output);
+    println!("  Server URL: {}", server_url);
     println!("  Methods:");
     for m in &properties.methods {
         match m {
             LicenseMethod::File => println!("    - file"),
             LicenseMethod::Token => println!("    - token"),
-            LicenseMethod::Server { url } => {
-                println!("    - server: url={}", url);
-            }
+            LicenseMethod::Server => println!("    - server"),
         }
     }
     Ok(())
 }
 
-fn parse_methods(
-    methods_str: &str,
-    server_url: Option<&str>,
-) -> Result<Vec<LicenseMethod>> {
+fn parse_methods(methods_str: &str) -> Result<Vec<LicenseMethod>> {
     let mut methods = Vec::new();
     for raw in methods_str.split(',').map(str::trim).filter(|s| !s.is_empty()) {
         let method = match raw.to_ascii_lowercase().as_str() {
             "file" => LicenseMethod::File,
             "token" => LicenseMethod::Token,
-            "server" => {
-                let url = server_url.ok_or_else(|| {
-                    anyhow::anyhow!("--server-url is required when 'server' is in --methods")
-                })?;
-                LicenseMethod::Server { url: url.to_string() }
-            }
+            "server" => LicenseMethod::Server,
             other => bail!(
                 "Unknown licensing method '{}' (expected file, token, or server)",
                 other
@@ -673,29 +664,23 @@ mod tests {
 
     #[test]
     fn test_parse_methods_all_three_in_order() {
-        let methods = parse_methods("server,file,token", Some("https://ls.example.com")).unwrap();
+        let methods = parse_methods("server,file,token").unwrap();
         assert_eq!(methods.len(), 3);
-        assert!(matches!(&methods[0], LicenseMethod::Server { url } if url == "https://ls.example.com"));
+        assert!(matches!(&methods[0], LicenseMethod::Server));
         assert!(matches!(&methods[1], LicenseMethod::File));
         assert!(matches!(&methods[2], LicenseMethod::Token));
     }
 
     #[test]
-    fn test_parse_methods_server_requires_url() {
-        let err = parse_methods("server", None).unwrap_err();
-        assert!(err.to_string().contains("server-url"));
-    }
-
-    #[test]
     fn test_parse_methods_rejects_unknown() {
-        let err = parse_methods("file,bogus", None).unwrap_err();
+        let err = parse_methods("file,bogus").unwrap_err();
         assert!(err.to_string().contains("Unknown licensing method"));
     }
 
     #[test]
     fn test_parse_methods_rejects_empty() {
-        assert!(parse_methods("", None).is_err());
-        assert!(parse_methods("  , ,", None).is_err());
+        assert!(parse_methods("").is_err());
+        assert!(parse_methods("  , ,").is_err());
     }
 
     #[test]
@@ -705,7 +690,7 @@ mod tests {
         let out_path = tmp("susi-properties.json");
         std::fs::write(&priv_pem_path, private_key_to_pem(&private).unwrap()).unwrap();
 
-        cmd_properties("file,token", None, out_path.to_str().unwrap(), priv_pem_path.to_str().unwrap()).unwrap();
+        cmd_properties("file,token", "https://ls.example.com", out_path.to_str().unwrap(), priv_pem_path.to_str().unwrap()).unwrap();
 
         let content = std::fs::read_to_string(&out_path).unwrap();
         let signed: susi_core::properties::SignedLicenseProperties = serde_json::from_str(&content).unwrap();

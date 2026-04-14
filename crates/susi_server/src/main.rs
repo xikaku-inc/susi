@@ -142,6 +142,7 @@ struct ExportRequest {
 
 #[derive(Deserialize)]
 struct PropertiesExportRequest {
+    server_url: String,
     methods: Vec<PropertiesMethodEntry>,
 }
 
@@ -150,7 +151,7 @@ struct PropertiesExportRequest {
 enum PropertiesMethodEntry {
     File,
     Token,
-    Server { url: String },
+    Server,
 }
 
 #[derive(Serialize)]
@@ -954,10 +955,14 @@ async fn handle_export_properties(
     let methods: Vec<LicenseMethod> = req.methods.into_iter().map(|m| match m {
         PropertiesMethodEntry::File => LicenseMethod::File,
         PropertiesMethodEntry::Token => LicenseMethod::Token,
-        PropertiesMethodEntry::Server { url } => LicenseMethod::Server { url },
+        PropertiesMethodEntry::Server => LicenseMethod::Server,
     }).collect();
 
-    let properties = LicenseProperties { methods };
+    if req.server_url.is_empty() {
+        return Err(error_response(StatusCode::BAD_REQUEST, "server_url is required"));
+    }
+
+    let properties = LicenseProperties { server_url: req.server_url, methods };
     let signed = sign_properties(&state.private_key, &properties)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 

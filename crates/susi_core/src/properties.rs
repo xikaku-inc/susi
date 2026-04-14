@@ -15,11 +15,9 @@ use crate::error::LicenseError;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LicenseMethod {
-    File, 
+    File,
     Token,
-    Server {
-        url: String
-    },
+    Server,
 }
 
 /// Client-side licensing properties. Specifies which licensing methods
@@ -29,7 +27,8 @@ pub enum LicenseMethod {
 /// verified.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LicenseProperties {
-    pub methods: Vec<LicenseMethod>
+    pub server_url: String,
+    pub methods: Vec<LicenseMethod>,
 }
 
 /// A signed license properties that can be written to disk
@@ -73,6 +72,13 @@ pub fn verify_properties(
         .map_err(|_| LicenseError::InvalidSignature)?;
 
     let payload: LicenseProperties = serde_json::from_str(&signed.properties_data)?;
+
+    if payload.methods.is_empty() {
+        return Err(LicenseError::InvalidProperties("At least one license method must be specified".to_string()));
+    } else if (1..payload.methods.len()).any(|i| payload.methods[i..].contains(&payload.methods[i - 1])) {
+        return Err(LicenseError::InvalidProperties("Duplicate license methods are not allowed".to_string()));
+    }
+
     Ok(payload)
 }
 
@@ -83,8 +89,9 @@ mod tests {
 
     fn sample_properties() -> LicenseProperties {
         LicenseProperties {
+            server_url: "https://license.example.com".to_string(),
             methods: vec![
-                LicenseMethod::Server { url: "https://license.example.com".to_string() },
+                LicenseMethod::Server,
                 LicenseMethod::File,
                 LicenseMethod::Token,
             ],
@@ -154,11 +161,18 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_methods_roundtrips() {
+    fn test_empty_methods_is_rejected() {
         let (priv_key, pub_key) = generate_keypair(2048).unwrap();
-        let props = LicenseProperties { methods: vec![] };
+        let props = LicenseProperties { server_url: "https://license.example.com".to_string(), methods: vec![] };
         let signed = sign_properties(&priv_key, &props).unwrap();
-        let verified = verify_properties(&pub_key, &signed).unwrap();
-        assert_eq!(verified.methods.len(), 0);
+        assert!(verify_properties(&pub_key, &signed).is_err());
+    }
+
+    #[test]
+    fn test_duplicate_methods_is_rejected() {
+        let (priv_key, pub_key) = generate_keypair(2048).unwrap();
+        let props = LicenseProperties { server_url: "https://license.example.com".to_string(), methods: vec![LicenseMethod::File, LicenseMethod::Token, LicenseMethod::File] };
+        let signed = sign_properties(&priv_key, &props).unwrap();
+        assert!(verify_properties(&pub_key, &signed).is_err());
     }
 }

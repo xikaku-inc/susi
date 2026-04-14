@@ -786,6 +786,10 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
     <div class="modal">
         <h2>Export Properties File</h2>
         <p style="font-size:13px;color:var(--text2);margin-bottom:16px;">Configure which licensing methods are allowed for clients. The order defines the priority in which methods are tried.</p>
+        <div id="propertiesServerUrlRow" style="margin-bottom:16px;">
+            <label style="font-size:13px;font-weight:500;display:block;margin-bottom:4px;">Server URL</label>
+            <input type="text" id="propertiesServerUrl" placeholder="https://license.example.com/api/v1" style="width:100%;">
+        </div>
         <div id="propertiesMethodList" style="display:flex;flex-direction:column;gap:10px;margin-bottom:16px;">
         </div>
         <div style="display:flex;gap:8px;margin-bottom:16px;">
@@ -1419,10 +1423,11 @@ let propertiesMethods = [];
 
 function showPropertiesModal() {
     propertiesMethods = [
-        { type: 'server', url: window.location.origin + '/api/v1' },
+        { type: 'server' },
         { type: 'file' },
         { type: 'token' },
     ];
+    document.getElementById('propertiesServerUrl').value = window.location.origin + '/api/v1';
     renderPropertiesMethods();
     document.getElementById('propertiesModal').classList.add('visible');
 }
@@ -1446,13 +1451,9 @@ function renderPropertiesMethods() {
         const downBtn = i < propertiesMethods.length - 1 ? `<button class="small secondary" onclick="movePropertyMethod(${i},1)" style="min-width:auto;padding:4px 8px;" title="Move down">\u2193</button>` : '';
         const removeBtn = `<button class="small secondary" onclick="removePropertyMethod(${i})" style="min-width:auto;padding:4px 8px;color:var(--red);" title="Remove">\u2715</button>`;
         let label = m.type.charAt(0).toUpperCase() + m.type.slice(1);
-        let extra = '';
-        if (m.type === 'server') {
-            extra = `<input type="text" value="${m.url || ''}" onchange="propertiesMethods[${i}].url=this.value" placeholder="https://license.example.com" style="flex:1;margin-left:8px;">`;
-        }
         return `<div style="display:flex;align-items:center;gap:6px;background:var(--bg3);padding:8px 12px;border-radius:var(--radius);border:1px solid var(--border);">
-            <span style="font-size:13px;font-weight:500;min-width:55px;">${label}</span>${extra}
-            <span style="flex:${m.type === 'server' ? '0' : '1'};"></span>
+            <span style="font-size:13px;font-weight:500;min-width:55px;">${label}</span>
+            <span style="flex:1;"></span>
             ${upBtn}${downBtn}${removeBtn}
         </div>`;
     }).join('');
@@ -1463,11 +1464,7 @@ function addPropertyMethod(type) {
         toast('Method "' + type + '" is already added', 'error');
         return;
     }
-    if (type === 'server') {
-        propertiesMethods.push({ type: 'server', url: window.location.origin + '/api/v1' });
-    } else {
-        propertiesMethods.push({ type });
-    }
+    propertiesMethods.push({ type });
     renderPropertiesMethods();
 }
 
@@ -1487,17 +1484,17 @@ async function doExportProperties() {
         toast('Add at least one licensing method', 'error');
         return;
     }
-    for (const m of propertiesMethods) {
-        if (m.type === 'server' && !m.url.trim()) {
-            toast('Server URL cannot be empty', 'error');
-            return;
-        }
+    const serverUrl = document.getElementById('propertiesServerUrl').value.trim();
+    if (!serverUrl) {
+        toast('Server URL is required', 'error');
+        return;
     }
+    const body = { server_url: serverUrl, methods: propertiesMethods };
     try {
         const resp = await fetch(API + '/properties/export', {
             method: 'POST',
             headers: authHeaders(),
-            body: JSON.stringify({ methods: propertiesMethods }),
+            body: JSON.stringify(body),
         });
         if (!resp.ok) {
             const err = await resp.json();
