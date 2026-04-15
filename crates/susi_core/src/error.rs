@@ -50,6 +50,9 @@ pub enum LicenseError {
     #[error("Token decryption failed: {0}")]
     TokenDecryptionFailed(String),
 
+    #[error("Invalid license properties: {0}")]
+    InvalidProperties(String),
+
     #[error("{0}")]
     Other(String),
 }

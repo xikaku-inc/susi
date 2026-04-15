@@ -561,6 +561,77 @@ Lease parameters are set per-license at creation time, so different customers ca
 
 Set `--lease-duration 0` when creating a license to disable lease enforcement entirely. Machine activations become permanent (the original behavior), suitable for trusted customers or air-gapped environments.
 
+## License Properties File
+
+A **license properties file** (`susi-properties.json`) lets you, as the software vendor, control which licensing methods your application allows and also which server URL is used for online verification. This allows you to change the licensing method, without changing any code or making a new release.
+
+### Create a properties file
+
+```bash
+# Allow only file-based licenses
+susi-admin properties \
+  --methods file \
+  --server-url https://license.example.com/api/v1 \
+  --private-key ./keys/private.pem
+
+# Allow server activation first, fall back to file
+susi-admin properties \
+  --methods server,file \
+  --server-url https://license.example.com/api/v1 \
+  --private-key ./keys/private.pem
+
+# All three methods: server → file → USB token
+susi-admin properties \
+  --methods server,file,token \
+  --server-url https://license.example.com/api/v1 \
+  --output susi-properties.json \
+  --private-key ./keys/private.pem
+```
+
+`--server-url` is always required. Available methods: `file`, `token`, `server`. The order in `--methods` is preserved and can be used by the implementing application to try verification in this specific order.
+
+### Use a properties file in Rust
+
+```rust
+use susi_client::LicenseClient;
+use std::path::Path;
+
+let client = LicenseClient::from_properties(
+    include_str!("public.pem"),
+    Path::new("susi-properties.json"),
+).unwrap();
+
+// Only methods listed in the properties file are permitted.
+// Calling verify_file() when "file" is not in the properties
+// returns LicenseStatus::LicenseMethodNotAllowed.
+let status = client.verify_and_refresh(
+    Path::new("license.json"),
+    "XXXXX-XXXXX-XXXXX-XXXXX",
+);
+```
+
+### Use a properties file in C++
+
+```cpp
+// Pass the properties file path as the second constructor argument
+SusiClient susi("your-public-key", "susi-properties.json");
+
+// Only methods listed in the properties file are tried.
+// Calling checkLicense() when "file" is not permitted returns LicenseStatus::Error.
+auto status = susi.checkLicenseAndRefresh("license.json", "XXXXX-XXXXX-XXXXX-XXXXX");
+```
+
+### Properties file format
+
+```json
+{
+  "properties_data": "{\"server_url\":\"https://license.example.com/api/v1\",\"methods\":[{\"type\":\"server\"},{\"type\":\"file\"}]}",
+  "signature": "Base64-encoded RSA-SHA256 signature of properties_data"
+}
+```
+
+The signature is verified against your embedded public key on startup. If the file is missing, tampered with, or signed with a different key, the client refuses to load it.
+
 ## Managing Licenses
 
 ```bash

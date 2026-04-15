@@ -21,6 +21,11 @@ public:
         FileNotFound,
         Error,
     };
+    enum class LicenseMethod {
+        File,
+        Token,
+        Server
+    };
 private:
     bool m_isValid = false;
     std::vector<std::string> m_features;
@@ -30,12 +35,18 @@ private:
     int64_t m_graceHours = 24;
     std::string m_publicKey;
     std::string m_serverUrl;
-
+    std::vector<LicenseMethod> m_allowedLicenseMethods;
 public:
-    SusiClient(std::string publicKey) : m_publicKey(std::move(publicKey)) {}
+    SusiClient(std::string publicKey) : m_publicKey(std::move(publicKey)) {
+        m_allowedLicenseMethods = { LicenseMethod::Token, LicenseMethod::File };
+    }
     /// Create a client with an activation server URL (e.g. "https://license.example.com/api/v1").
     SusiClient(std::string publicKey, std::string serverUrl)
-        : m_publicKey(std::move(publicKey)), m_serverUrl(std::move(serverUrl)) {}
+        : m_publicKey(std::move(publicKey)), m_serverUrl(std::move(serverUrl)) {
+        m_allowedLicenseMethods = { LicenseMethod::Server, LicenseMethod::Token, LicenseMethod::File };
+    }
+    /// Create a client from a properties file
+    SusiClient(std::string publicKey, std::filesystem::path propertiesPath);
 
     std::string getPublicKeyPem();
 
@@ -45,7 +56,7 @@ public:
     LicenseStatus checkLicenseToken();
     /// Contact the activation server to refresh the lease, then verify the license.
     /// Falls back to the cached local file if the server is unreachable.
-    LicenseStatus checkLicenseAndRefresh(const std::filesystem::path& licensePath, const std::string& licenseKey);
+    LicenseStatus checkLicenseAndRefresh(const std::filesystem::path& licenseCachePath, const std::string& licenseKey, const std::string& friendlyName = "");
 
     bool isValid() const { return m_isValid; }
 
@@ -67,6 +78,8 @@ public:
     bool isLeaseExpired() const;
 
     void setGraceHours(int64_t hours) { m_graceHours = hours; }
+
+    const std::vector<LicenseMethod>& allowedLicenseMethods() const { return m_allowedLicenseMethods; }
 private:
     /// Verifies the signature of the signed license JSON string and returns the license status.
     /// If activation code is not provided, the local machine code is used.

@@ -5,10 +5,14 @@ pub mod error;
 pub mod features;
 pub mod fingerprint;
 pub mod license;
+pub mod properties;
 pub mod token;
 pub mod usb;
 
 pub use crypto::{generate_keypair, sign_license, verify_license};
+pub use properties::{
+    sign_properties, verify_properties, LicenseMethod, LicenseProperties,
+};
 pub use error::LicenseError;
 pub use fingerprint::get_machine_code;
 pub use license::{

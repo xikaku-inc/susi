@@ -451,6 +451,110 @@ static long httpPost(const std::string& url, const std::string& body, std::strin
     return httpCode;
 }
 
+SusiClient::SusiClient(std::string publicKey, std::filesystem::path propertiesPath) : m_publicKey(std::move(publicKey))
+{
+    // 1. Read the properties file.
+    std::ifstream f(propertiesPath);
+    if (!f.is_open()) {
+        SUSI_LOG("License properties file not found: %s", propertiesPath.string().c_str());
+        return;
+    }
+    std::string contents((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+
+    // 2. Parse the outer SignedLicenseProperties envelope.
+    json signedProps;
+    try {
+        signedProps = json::parse(contents);
+    } catch (const json::exception& e) {
+        SUSI_LOG("License properties file is not formatted correctly");
+        return;
+    }
+    if (!signedProps.contains("properties_data") || !signedProps.contains("signature")) {
+        SUSI_LOG("License properties file is not formatted correctly");
+        return;
+    }
+    std::string propsData;
+    std::string sigB64;
+    try {
+        propsData = signedProps.at("properties_data").get<std::string>();
+        sigB64 = signedProps.at("signature").get<std::string>();
+    } catch (const json::exception& e) {
+        SUSI_LOG("License properties file is not formatted correctly");
+        return;
+    }
+
+    // 3. Verify the RSA-SHA256 signature.
+    auto sigBytes = base64Decode(sigB64);
+    if (sigBytes.empty()) {
+        SUSI_LOG("License properties file is not formatted correctly");
+        return;
+    }
+    if (!verifySignature(getPublicKeyPem(), propsData, sigBytes)) {
+        SUSI_LOG("License properties signature verification failed");
+        return;
+    }
+
+    // 4. Parse the properties payload.
+    json props;
+    try {
+        props = json::parse(propsData);
+    } catch (const json::exception& e) {
+        SUSI_LOG("License properties file is not formatted correctly");
+        return;
+    }
+    if (!props.contains("methods") || !props.at("methods").is_array()) {
+        SUSI_LOG("License properties file is not formatted correctly");
+        return;
+    }
+    const auto& methods = props.at("methods");
+    if (methods.empty()) {
+        SUSI_LOG("License properties file is not formatted correctly");
+        return;
+    }
+
+    if (!props.contains("server_url") || !props.at("server_url").is_string()
+        || props.at("server_url").get<std::string>().empty()) {
+        SUSI_LOG("License properties file is not formatted correctly");
+        return;
+    }
+    m_serverUrl = props.at("server_url").get<std::string>();
+
+    int countFile = 0;
+    int countToken = 0;
+    int countServer = 0;
+
+    for (const auto& m : methods) {
+        if (!m.is_object() || !m.contains("type") || !m.at("type").is_string()) {
+            SUSI_LOG("License properties file is not formatted correctly");
+            m_allowedLicenseMethods.clear();
+            return;
+        }
+        std::string type = m.at("type").get<std::string>();
+
+        if (type == "file") {
+            m_allowedLicenseMethods.push_back(LicenseMethod::File);
+            countFile++;
+        } else if (type == "token") {
+            m_allowedLicenseMethods.push_back(LicenseMethod::Token);
+            countToken++;
+        } else if (type == "server") {
+            m_allowedLicenseMethods.push_back(LicenseMethod::Server);
+            countServer++;
+        } else {
+            SUSI_LOG("License properties file is not formatted correctly");
+            m_allowedLicenseMethods.clear();
+            return;
+        }
+    }
+
+    if(countFile + countServer + countToken == 0
+        || countFile > 1
+        || countServer > 1
+        || countToken > 1){
+        SUSI_LOG("License properties file is not formatted correctly");
+        m_allowedLicenseMethods.clear();
+    }
+}
 
 std::string SusiClient::getPublicKeyPem()
 {
@@ -606,6 +710,12 @@ SusiClient::LicenseStatus SusiClient::checkLicense(const std::filesystem::path& 
     m_customer.clear();
     m_leaseExpiresEpoch = 0;
 
+    if(std::find(m_allowedLicenseMethods.begin(), m_allowedLicenseMethods.end(), LicenseMethod::File) == m_allowedLicenseMethods.end()){
+        SUSI_LOG("File-based license check is not allowed by properties.");
+        m_isValid = false;
+        return LicenseStatus::Error;
+    }
+
     std::ifstream licenseFile(licensePath);
     if (!licenseFile.is_open()) {
         SUSI_LOG("License file not found: %s", licensePath.string().c_str());
@@ -622,12 +732,18 @@ SusiClient::LicenseStatus SusiClient::checkLicense(const std::filesystem::path& 
 // ---------------------------------------------------------------------------
 // Online license check
 // ---------------------------------------------------------------------------
-SusiClient::LicenseStatus SusiClient::checkLicenseAndRefresh(const std::filesystem::path& licensePath, const std::string& licenseKey)
+SusiClient::LicenseStatus SusiClient::checkLicenseAndRefresh(const std::filesystem::path& licenseCachePath, const std::string& licenseKey, const std::string& friendlyName)
 {
     m_features.clear();
     m_product.clear();
     m_customer.clear();
     m_leaseExpiresEpoch = 0;
+
+    if(std::find(m_allowedLicenseMethods.begin(), m_allowedLicenseMethods.end(), LicenseMethod::Server) == m_allowedLicenseMethods.end()){
+        SUSI_LOG("Server license check is not allowed by properties.");
+        m_isValid = false;
+        return LicenseStatus::Error;
+    }
 
     if (!m_serverUrl.empty()) {
         std::string url = m_serverUrl;
@@ -637,7 +753,7 @@ SusiClient::LicenseStatus SusiClient::checkLicenseAndRefresh(const std::filesyst
         json body;
         body["license_key"] = licenseKey;
         body["machine_code"] = getMachineCode();
-        body["friendly_name"] = getHostname();
+        body["friendly_name"] = friendlyName.empty() ? getHostname() : friendlyName;
 
         std::string response;
         long httpCode = httpPost(url, body.dump(), response);
@@ -646,7 +762,7 @@ SusiClient::LicenseStatus SusiClient::checkLicenseAndRefresh(const std::filesyst
             m_isValid = (status == LicenseStatus::Valid || status == LicenseStatus::ValidGracePeriod);
 
             if (m_isValid) {
-                std::ofstream f(licensePath);
+                std::ofstream f(licenseCachePath);
                 if (f.is_open()) {
                     f << response;
                 }
@@ -654,7 +770,7 @@ SusiClient::LicenseStatus SusiClient::checkLicenseAndRefresh(const std::filesyst
 
             return status;
         } else if (httpCode == 403) {
-            std::filesystem::remove(licensePath);
+            std::filesystem::remove(licenseCachePath);
             m_isValid = false;
 
             if (response.find("revoked") != std::string::npos){
@@ -672,7 +788,7 @@ SusiClient::LicenseStatus SusiClient::checkLicenseAndRefresh(const std::filesyst
             }
         } else if (httpCode == 404) {
             SUSI_LOG("License not found on server (HTTP 404) - removing cached file");
-            std::filesystem::remove(licensePath);
+            std::filesystem::remove(licenseCachePath);
             m_isValid = false;
             return LicenseStatus::InvalidLicenseKey;
         } else {
@@ -683,9 +799,9 @@ SusiClient::LicenseStatus SusiClient::checkLicenseAndRefresh(const std::filesyst
     }
 
     // Fall back to local file
-    std::ifstream licenseFile(licensePath);
+    std::ifstream licenseFile(licenseCachePath);
     if (!licenseFile.is_open()) {
-        SUSI_LOG("Cached license file cannot be found: %s", licensePath.string().c_str());
+        SUSI_LOG("Cached license file cannot be found: %s", licenseCachePath.string().c_str());
         m_isValid = false;
         return LicenseStatus::FileNotFound;
     }
@@ -1136,6 +1252,12 @@ SusiClient::LicenseStatus SusiClient::checkLicenseToken()
     m_product.clear();
     m_customer.clear();
     m_leaseExpiresEpoch = 0;
+
+    if(std::find(m_allowedLicenseMethods.begin(), m_allowedLicenseMethods.end(), LicenseMethod::Token) == m_allowedLicenseMethods.end()){
+        SUSI_LOG("Token-based license check is not allowed by properties.");
+        m_isValid = false;
+        return LicenseStatus::Error;
+    }
 
     auto devices = enumerateUsbDevices();
     if (devices.empty()) {

@@ -1,6 +1,7 @@
 use anyhow::{bail, Context, Result};
 use chrono::{Duration, NaiveDate, Utc};
 use clap::{Parser, Subcommand};
+use susi_core::properties::{sign_properties, LicenseMethod, LicenseProperties};
 use susi_core::crypto::{
     generate_keypair, private_key_from_pem, private_key_to_pem, public_key_to_pem, sign_license,
 };
@@ -137,6 +138,23 @@ enum Commands {
 
     /// Print the hardware fingerprint of this machine
     Fingerprint,
+
+    /// Create and sign a client licensing properties file.
+    #[command(arg_required_else_help = true)]
+    Properties {
+        /// Ordered comma-separated list of methods: file, token, server
+        #[arg(long, required = true)]
+        methods: String,
+        /// License server URL
+        #[arg(long, required = true)]
+        server_url: String,
+        /// Output file for the signed properties json
+        #[arg(long, default_value = "susi-properties.json")]
+        output: String,
+        /// Path to private key PEM file
+        #[arg(long, default_value = "private.pem")]
+        private_key: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -181,6 +199,12 @@ fn main() -> Result<()> {
             usb_serial,
         } => cmd_export_token(&key, &private_key, &db, &name, usb_serial),
         Commands::Fingerprint => cmd_fingerprint(),
+        Commands::Properties {
+            methods,
+            server_url,
+            output,
+            private_key,
+        } => cmd_properties(&methods, &server_url, &output, &private_key),
     }
 }
 
@@ -570,5 +594,112 @@ fn truncate(s: &str, max: usize) -> String {
         format!("{}...", &s[..max - 1])
     } else {
         s.to_string()
+    }
+}
+
+fn cmd_properties(
+    methods_str: &str,
+    server_url: &str,
+    output: &str,
+    private_key_path: &str,
+) -> Result<()> {
+    let methods = parse_methods(methods_str)?;
+
+    let priv_pem = std::fs::read_to_string(private_key_path)
+        .with_context(|| format!("Failed to read private key from {}", private_key_path))?;
+    let private_key = private_key_from_pem(&priv_pem)?;
+
+    let properties = LicenseProperties {
+        server_url: server_url.to_string(),
+        methods,
+    };
+    let signed_properties = sign_properties(&private_key, &properties)?;
+
+    std::fs::write(output, serde_json::to_string_pretty(&signed_properties)?)
+        .with_context(|| format!("Failed to write properties file to {}", output))?;
+
+    println!("Signed license properties written to: {}", output);
+    println!("  Server URL: {}", server_url);
+    println!("  Methods:");
+    for m in &properties.methods {
+        match m {
+            LicenseMethod::File => println!("    - file"),
+            LicenseMethod::Token => println!("    - token"),
+            LicenseMethod::Server => println!("    - server"),
+        }
+    }
+    Ok(())
+}
+
+fn parse_methods(methods_str: &str) -> Result<Vec<LicenseMethod>> {
+    let mut methods = Vec::new();
+    for raw in methods_str.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let method = match raw.to_ascii_lowercase().as_str() {
+            "file" => LicenseMethod::File,
+            "token" => LicenseMethod::Token,
+            "server" => LicenseMethod::Server,
+            other => bail!(
+                "Unknown licensing method '{}' (expected file, token, or server)",
+                other
+            ),
+        };
+        methods.push(method);
+    }
+    if methods.is_empty() {
+        bail!("--methods must contain at least one licensing method");
+    }
+    Ok(methods)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use susi_core::properties::verify_properties;
+
+    fn tmp(name: &str) -> std::path::PathBuf {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        std::env::temp_dir().join(format!("admin_{}_{}_{}", name, std::process::id(), nanos))
+    }
+
+    #[test]
+    fn test_parse_methods_all_three_in_order() {
+        let methods = parse_methods("server,file,token").unwrap();
+        assert_eq!(methods.len(), 3);
+        assert!(matches!(&methods[0], LicenseMethod::Server));
+        assert!(matches!(&methods[1], LicenseMethod::File));
+        assert!(matches!(&methods[2], LicenseMethod::Token));
+    }
+
+    #[test]
+    fn test_parse_methods_rejects_unknown() {
+        let err = parse_methods("file,bogus").unwrap_err();
+        assert!(err.to_string().contains("Unknown licensing method"));
+    }
+
+    #[test]
+    fn test_parse_methods_rejects_empty() {
+        assert!(parse_methods("").is_err());
+        assert!(parse_methods("  , ,").is_err());
+    }
+
+    #[test]
+    fn test_cmd_properties_end_to_end() {
+        let (private, public) = generate_keypair(2048).unwrap();
+        let priv_pem_path = tmp("priv.pem");
+        let out_path = tmp("susi-properties.json");
+        std::fs::write(&priv_pem_path, private_key_to_pem(&private).unwrap()).unwrap();
+
+        cmd_properties("file,token", "https://ls.example.com", out_path.to_str().unwrap(), priv_pem_path.to_str().unwrap()).unwrap();
+
+        let content = std::fs::read_to_string(&out_path).unwrap();
+        let signed: susi_core::properties::SignedLicenseProperties = serde_json::from_str(&content).unwrap();
+        let props = verify_properties(&public, &signed).unwrap();
+        assert_eq!(props.methods.len(), 2);
+        assert!(matches!(&props.methods[0], LicenseMethod::File));
+        assert!(matches!(&props.methods[1], LicenseMethod::Token));
+
+        let _ = std::fs::remove_file(&priv_pem_path);
+        let _ = std::fs::remove_file(&out_path);
     }
 }
