@@ -431,6 +431,11 @@ This installs a global constructor that calls `abort()` before `main()` if the b
 # Via Conan
 conan install . -o susi/*:require_signed_binary=True --build=missing
 
+# Via conanfile.py
+default_options = {
+  "susi/*:require_signed_binary": True
+}
+
 # Via CMake directly
 cmake -DSUSI_REQUIRE_SIGNED_BINARY=ON <source_dir>
 
