@@ -61,7 +61,8 @@ openssl pkcs12 -export \
     -out     "$WORKDIR/cert.p12" \
     -inkey   "$WORKDIR/key.pem" \
     -in      "$WORKDIR/cert.pem" \
-    -passout "pass:$P12_PASS"
+    -passout "pass:$P12_PASS" \
+    -legacy
 
 # ---- Import into keychain -----------------------------------------------
 security import "$WORKDIR/cert.p12" \

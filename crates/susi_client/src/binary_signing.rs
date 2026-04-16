@@ -151,8 +151,6 @@ mod macos {
     struct __CFURL(u8);
     type CFURLRef = *const __CFURL;
 
-    type CFURLPathStyle = i64;
-
     extern "C" {
         fn SecStaticCodeCreateWithPath(
             path: CFURLRef,
