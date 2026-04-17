@@ -121,7 +121,32 @@ impl LicenseDb {
                 FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
                 UNIQUE(workspace_id, version)
             );
-            CREATE INDEX IF NOT EXISTS idx_config_revisions_workspace ON config_revisions(workspace_id);",
+            CREATE INDEX IF NOT EXISTS idx_config_revisions_workspace ON config_revisions(workspace_id);
+
+            CREATE TABLE IF NOT EXISTS doc_pages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                release_id INTEGER NOT NULL,
+                slug TEXT NOT NULL,
+                title TEXT NOT NULL,
+                body_md TEXT NOT NULL DEFAULT '',
+                parent_slug TEXT,
+                ord INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (release_id) REFERENCES releases(id) ON DELETE CASCADE,
+                UNIQUE(release_id, slug)
+            );
+            CREATE INDEX IF NOT EXISTS idx_doc_pages_release ON doc_pages(release_id);
+            CREATE INDEX IF NOT EXISTS idx_doc_pages_parent ON doc_pages(release_id, parent_slug);
+
+            CREATE TABLE IF NOT EXISTS doc_assets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                release_id INTEGER NOT NULL,
+                file_name TEXT NOT NULL,
+                file_size INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY (release_id) REFERENCES releases(id) ON DELETE CASCADE,
+                UNIQUE(release_id, file_name)
+            );
+            CREATE INDEX IF NOT EXISTS idx_doc_assets_release ON doc_assets(release_id);",
             )
             .map_err(|e| LicenseError::Other(format!("DB init: {}", e)))?;
         self.migrate()?;
@@ -1190,6 +1215,251 @@ impl LicenseDb {
 
         Ok(licenses)
     }
+
+    // -----------------------------------------------------------------------
+    // Documentation pages (per-release knowledge base)
+    // -----------------------------------------------------------------------
+
+    /// Insert or replace a page within a release. Returns the page id.
+    pub fn upsert_doc_page(
+        &self,
+        release_id: i64,
+        slug: &str,
+        title: &str,
+        body_md: &str,
+        parent_slug: Option<&str>,
+        ord: i64,
+    ) -> Result<i64, LicenseError> {
+        let now = Utc::now().to_rfc3339();
+        self.conn
+            .execute(
+                "INSERT INTO doc_pages (release_id, slug, title, body_md, parent_slug, ord, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(release_id, slug) DO UPDATE SET
+                   title = excluded.title,
+                   body_md = excluded.body_md,
+                   parent_slug = excluded.parent_slug,
+                   ord = excluded.ord,
+                   updated_at = excluded.updated_at",
+                params![release_id, slug, title, body_md, parent_slug, ord, now],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB upsert doc page: {}", e)))?;
+        let id = self.conn
+            .query_row(
+                "SELECT id FROM doc_pages WHERE release_id = ?1 AND slug = ?2",
+                params![release_id, slug],
+                |r| r.get::<_, i64>(0),
+            )
+            .map_err(|e| LicenseError::Other(format!("DB lookup doc page: {}", e)))?;
+        Ok(id)
+    }
+
+    /// List all pages of a release as (slug, title, parent_slug, ord, updated_at).
+    pub fn list_doc_pages(
+        &self,
+        release_id: i64,
+    ) -> Result<Vec<(String, String, Option<String>, i64, String)>, LicenseError> {
+        let mut stmt = self.conn
+            .prepare(
+                "SELECT slug, title, parent_slug, ord, updated_at FROM doc_pages
+                 WHERE release_id = ?1 ORDER BY parent_slug NULLS FIRST, ord, title",
+            )
+            .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
+        let rows = stmt
+            .query_map(params![release_id], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, String>(4)?,
+                ))
+            })
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    /// Fetch a single page (title, body_md, parent_slug, ord, updated_at).
+    pub fn get_doc_page(
+        &self,
+        release_id: i64,
+        slug: &str,
+    ) -> Result<Option<(String, String, Option<String>, i64, String)>, LicenseError> {
+        match self.conn.query_row(
+            "SELECT title, body_md, parent_slug, ord, updated_at FROM doc_pages
+             WHERE release_id = ?1 AND slug = ?2",
+            params![release_id, slug],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, String>(4)?,
+                ))
+            },
+        ) {
+            Ok(row) => Ok(Some(row)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(LicenseError::Other(format!("DB query: {}", e))),
+        }
+    }
+
+    pub fn delete_doc_page(&self, release_id: i64, slug: &str) -> Result<bool, LicenseError> {
+        let n = self.conn
+            .execute(
+                "DELETE FROM doc_pages WHERE release_id = ?1 AND slug = ?2",
+                params![release_id, slug],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB delete: {}", e)))?;
+        Ok(n > 0)
+    }
+
+    /// Rename a page's slug atomically. Cascades to any child pages whose
+    /// `parent_slug` pointed at the old value. Returns Ok(false) if the source
+    /// page doesn't exist; Err on UNIQUE conflict (target slug already taken).
+    pub fn rename_doc_page(
+        &mut self,
+        release_id: i64,
+        old_slug: &str,
+        new_slug: &str,
+    ) -> Result<bool, LicenseError> {
+        if old_slug == new_slug {
+            return Ok(true);
+        }
+        let tx = self.conn.transaction()
+            .map_err(|e| LicenseError::Other(format!("DB tx: {}", e)))?;
+        let n = tx.execute(
+            "UPDATE doc_pages SET slug = ?1 WHERE release_id = ?2 AND slug = ?3",
+            params![new_slug, release_id, old_slug],
+        ).map_err(|e| LicenseError::Other(format!("DB rename: {}", e)))?;
+        if n == 0 {
+            return Ok(false);
+        }
+        tx.execute(
+            "UPDATE doc_pages SET parent_slug = ?1 WHERE release_id = ?2 AND parent_slug = ?3",
+            params![new_slug, release_id, old_slug],
+        ).map_err(|e| LicenseError::Other(format!("DB rename cascade: {}", e)))?;
+        tx.commit().map_err(|e| LicenseError::Other(format!("DB tx commit: {}", e)))?;
+        Ok(true)
+    }
+
+    /// Replace all pages of a release in one transaction (used by bulk import).
+    /// Upsert a batch of pages within a single transaction. Pages not present
+    /// in the batch are left untouched, so hand-authored pages survive a
+    /// pipeline-driven bulk import.
+    pub fn upsert_doc_pages(
+        &mut self,
+        release_id: i64,
+        pages: &[(String, String, String, Option<String>, i64)],
+    ) -> Result<usize, LicenseError> {
+        let now = Utc::now().to_rfc3339();
+        let tx = self.conn.transaction()
+            .map_err(|e| LicenseError::Other(format!("DB tx: {}", e)))?;
+        for (slug, title, body_md, parent_slug, ord) in pages {
+            tx.execute(
+                "INSERT INTO doc_pages (release_id, slug, title, body_md, parent_slug, ord, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(release_id, slug) DO UPDATE SET
+                   title = excluded.title,
+                   body_md = excluded.body_md,
+                   parent_slug = excluded.parent_slug,
+                   ord = excluded.ord,
+                   updated_at = excluded.updated_at",
+                params![release_id, slug, title, body_md, parent_slug.as_deref(), ord, now],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB upsert page {}: {}", slug, e)))?;
+        }
+        tx.commit()
+            .map_err(|e| LicenseError::Other(format!("DB commit: {}", e)))?;
+        Ok(pages.len())
+    }
+
+    pub fn upsert_doc_asset(
+        &self,
+        release_id: i64,
+        file_name: &str,
+        file_size: u64,
+    ) -> Result<(), LicenseError> {
+        self.conn
+            .execute(
+                "INSERT INTO doc_assets (release_id, file_name, file_size) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(release_id, file_name) DO UPDATE SET file_size = excluded.file_size",
+                params![release_id, file_name, file_size as i64],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB upsert asset: {}", e)))?;
+        Ok(())
+    }
+
+    pub fn list_doc_assets(
+        &self,
+        release_id: i64,
+    ) -> Result<Vec<(String, u64)>, LicenseError> {
+        let mut stmt = self.conn
+            .prepare("SELECT file_name, file_size FROM doc_assets WHERE release_id = ?1 ORDER BY file_name")
+            .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
+        let rows = stmt
+            .query_map(params![release_id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64))
+            })
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    pub fn delete_doc_asset(&self, release_id: i64, file_name: &str) -> Result<bool, LicenseError> {
+        let n = self.conn
+            .execute(
+                "DELETE FROM doc_assets WHERE release_id = ?1 AND file_name = ?2",
+                params![release_id, file_name],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB delete: {}", e)))?;
+        Ok(n > 0)
+    }
+
+    /// Releases that contain at least one doc page (newest first).
+    /// Returns (id, tag, name, created_at, page_count).
+    pub fn list_doc_releases(&self) -> Result<Vec<(i64, String, String, String, i64)>, LicenseError> {
+        let mut stmt = self.conn
+            .prepare(
+                "SELECT r.id, r.tag, r.name, r.created_at, COUNT(p.id)
+                 FROM releases r
+                 INNER JOIN doc_pages p ON p.release_id = r.id
+                 GROUP BY r.id
+                 ORDER BY r.id DESC",
+            )
+            .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, i64>(4)?,
+                ))
+            })
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    /// Ensure a release row exists for the given tag — used by bulk doc import
+    /// when the docs ship before the binary release. Returns the release id.
+    pub fn ensure_release(
+        &self,
+        tag: &str,
+        name: &str,
+    ) -> Result<i64, LicenseError> {
+        if let Some(id) = self.get_release_by_tag(tag)? {
+            return Ok(id);
+        }
+        self.insert_release(tag, name, "", false, None)
+    }
 }
 
 #[cfg(test)]
@@ -1580,6 +1850,66 @@ mod tests {
         let latest = db.get_latest_config_revision("ws-1").unwrap().unwrap();
         assert_eq!(latest.1, r#"{"v":2}"#); // config_json
         assert_eq!(latest.2, "v2"); // name
+    }
+
+    #[test]
+    fn test_doc_pages_crud_and_bulk_replace() {
+        let mut db = test_db();
+        let rid = db.insert_release("v1.0", "FusionHub 1.0", "", false, None).unwrap();
+
+        // Single upsert
+        db.upsert_doc_page(rid, "imu", "IMU Source", "# IMU", Some("sources"), 1).unwrap();
+        let page = db.get_doc_page(rid, "imu").unwrap().unwrap();
+        assert_eq!(page.0, "IMU Source");
+        assert_eq!(page.1, "# IMU");
+        assert_eq!(page.2.as_deref(), Some("sources"));
+
+        // Update via upsert
+        db.upsert_doc_page(rid, "imu", "IMU Source v2", "# v2", Some("sources"), 2).unwrap();
+        let page = db.get_doc_page(rid, "imu").unwrap().unwrap();
+        assert_eq!(page.0, "IMU Source v2");
+        assert_eq!(page.3, 2);
+
+        // List
+        db.upsert_doc_page(rid, "sources", "Sources", "Index", None, 0).unwrap();
+        let pages = db.list_doc_pages(rid).unwrap();
+        assert_eq!(pages.len(), 2);
+
+        // Bulk replace — should wipe prior pages
+        let new_pages = vec![
+            ("a".to_string(), "A".to_string(), "body a".to_string(), None, 0),
+            ("b".to_string(), "B".to_string(), "body b".to_string(), Some("a".to_string()), 1),
+        ];
+        let n = db.replace_doc_pages(rid, &new_pages).unwrap();
+        assert_eq!(n, 2);
+        let pages = db.list_doc_pages(rid).unwrap();
+        assert_eq!(pages.len(), 2);
+        assert!(db.get_doc_page(rid, "imu").unwrap().is_none());
+
+        // Cascade delete with release
+        assert!(db.delete_release("v1.0").unwrap());
+        assert!(db.get_doc_page(rid, "a").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_doc_releases_filters_to_releases_with_pages() {
+        let db = test_db();
+        let r1 = db.insert_release("v1.0", "with docs", "", false, None).unwrap();
+        let _r2 = db.insert_release("v1.1", "no docs", "", false, None).unwrap();
+        db.upsert_doc_page(r1, "intro", "Intro", "...", None, 0).unwrap();
+
+        let releases = db.list_doc_releases().unwrap();
+        assert_eq!(releases.len(), 1);
+        assert_eq!(releases[0].1, "v1.0");
+        assert_eq!(releases[0].4, 1); // page count
+    }
+
+    #[test]
+    fn test_ensure_release_is_idempotent() {
+        let db = test_db();
+        let id1 = db.ensure_release("v2.0", "FusionHub 2.0").unwrap();
+        let id2 = db.ensure_release("v2.0", "different name").unwrap();
+        assert_eq!(id1, id2);
     }
 
     #[test]

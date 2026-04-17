@@ -4,6 +4,16 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Susi Server</title>
+<script>
+// Apply theme before paint to avoid a flash of the wrong colour scheme.
+(function () {
+    const t = localStorage.getItem('susi_theme') || 'system';
+    if (t === 'light') document.documentElement.setAttribute('data-theme', 'light');
+    else if (t === 'system' && window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) {
+        document.documentElement.setAttribute('data-theme', 'light');
+    }
+})();
+</script>
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='46 46 420 420'%3E%3Cdefs%3E%3ClinearGradient id='core' x1='30%25' y1='0%25' x2='100%25' y2='100%25'%3E%3Cstop offset='0%25' style='stop-color:%2364d8ff'/%3E%3Cstop offset='100%25' style='stop-color:%239b6dff'/%3E%3C/linearGradient%3E%3C/defs%3E%3Ccircle cx='256' cy='256' r='210' fill='url(%23core)' opacity='0.95'/%3E%3Ccircle cx='244' cy='244' r='85' fill='%23a0e8ff' opacity='0.55'/%3E%3C/svg%3E">
 <style>
 :root {
@@ -19,6 +29,19 @@
     --red: #f87171;
     --yellow: #fbbf24;
     --radius: 8px;
+}
+:root[data-theme="light"] {
+    --bg: #ffffff;
+    --bg2: #f4f5f8;
+    --bg3: #e7eaf0;
+    --border: #d4d8e0;
+    --text: #1a1d27;
+    --text2: #5c6470;
+    --accent: #2563eb;
+    --accent-hover: #1d4ed8;
+    --green: #16a34a;
+    --red: #dc2626;
+    --yellow: #d97706;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
 /* Scrollbar styling */
@@ -363,6 +386,38 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
 
 /* Header buttons */
 .header-actions { display: flex; gap: 8px; align-items: center; }
+.header-left { display: flex; align-items: center; gap: 24px; }
+.header-left .brand {
+    color: inherit; text-decoration: none;
+    font-size: 15px; font-weight: 600;
+}
+.top-nav { display: flex; gap: 4px; align-items: center; }
+.top-nav a {
+    padding: 6px 12px;
+    border-radius: var(--radius);
+    color: var(--text2);
+    text-decoration: none;
+    font-size: 13px;
+    font-weight: 500;
+    border: 1px solid transparent;
+}
+.top-nav a:hover { background: var(--bg2); color: var(--text1); }
+.top-nav a.active {
+    color: var(--accent);
+    background: rgba(106,169,255,0.10);
+}
+
+.dash-page { display: none; }
+.dash-page.active { display: block; }
+
+/* Anonymous-landing card shown on / when not logged in */
+.anon-landing {
+    text-align: center;
+    padding: 60px 24px;
+    color: var(--text2);
+}
+.anon-landing h2 { color: var(--text1); margin: 0 0 8px; font-size: 18px; }
+.anon-landing p { font-size: 13px; max-width: 440px; margin: 0 auto 18px; }
 
 @media (max-width: 768px) {
     .container { padding: 12px; }
@@ -375,19 +430,37 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
 <body>
 
 <div class="header">
-    <h1>Susi Server</h1>
+    <div class="header-left">
+        <a href="/" class="brand">Susi Server</a>
+        <nav class="top-nav" id="topNav"></nav>
+    </div>
     <div class="header-actions">
         <span id="connectionStatus" class="status">Connecting...</span>
+        <span id="currentUser" style="display:none;font-size:13px;color:var(--text2);"></span>
+        <button id="btnTheme" class="small secondary" onclick="cycleTheme()" title="Toggle theme">🌓</button>
         <button id="btnUsers" class="small secondary" onclick="showUsersModal()" style="display:none;">Users</button>
         <button id="btn2FA" class="small secondary" onclick="show2FAModal()" style="display:none;">2FA</button>
-        <span id="currentUser" style="display:none;font-size:13px;color:var(--text2);"></span>
         <button id="btnLogout" class="small secondary" onclick="logout()" style="display:none;">Logout</button>
+        <button id="btnLogin" class="small secondary" onclick="showLogin()" style="display:none;">Login</button>
     </div>
 </div>
 
 <div class="container">
 
-    <!-- Workspaces section -->
+<!-- Anonymous landing page (only shown when not logged in and on home route) -->
+<div id="page-home" class="dash-page">
+    <div class="anon-landing">
+        <h2>Susi Server</h2>
+        <p>Public documentation is available without a login. To manage licenses, workspaces, releases, or users, please sign in.</p>
+        <div style="display:flex;gap:8px;justify-content:center;">
+            <a href="/docs" class="small secondary" style="text-decoration:none;padding:8px 16px;border:1px solid var(--border);border-radius:var(--radius);color:var(--text1);font-size:13px;">Browse Documentation</a>
+            <button onclick="showLogin()" style="padding:8px 16px;font-size:13px;">Sign In</button>
+        </div>
+    </div>
+</div>
+
+<!-- Workspaces page -->
+<div id="page-workspaces" class="dash-page">
     <div style="margin-top:32px;margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;">
         <h2 style="font-size:16px;font-weight:600;">Workspaces</h2>
         <button id="btnCreateWorkspace" onclick="showCreateWorkspaceModal()">+ New Workspace</button>
@@ -442,8 +515,10 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
             </div>
         </div>
     </div>
+</div><!-- /page-workspaces -->
 
-    <!-- Releases section -->
+<!-- Releases page -->
+<div id="page-releases" class="dash-page">
     <div id="adminReleasesSection" style="margin-top:32px;">
         <div style="margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;">
             <h2 style="font-size:16px;font-weight:600;">Software Releases</h2>
@@ -453,7 +528,10 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
             <div id="releasesContainer" style="padding:16px;color:var(--text2);font-size:13px;">Loading...</div>
         </div>
     </div>
+</div><!-- /page-releases -->
 
+<!-- Licenses page -->
+<div id="page-licenses" class="dash-page">
     <div id="adminLicenseTableSection">
     <h2 style="font-size:16px;font-weight:600;margin-top:32px;margin-bottom:16px;">Licenses</h2>
 
@@ -569,7 +647,9 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
         </table>
     </div>
     </div>
-</div>
+</div><!-- /page-licenses -->
+
+</div><!-- /container -->
 
 <!-- Create License Modal -->
 <div id="createModal" class="modal-overlay" onclick="if(event.target===this)closeCreateModal()">
@@ -788,14 +868,95 @@ let licenses = [];
 let selectedKey = null;
 let totpEnabled = false;
 
+// Theme: 'dark' | 'light' | 'system' — persisted in localStorage.
+function applyTheme(t) {
+    const root = document.documentElement;
+    if (t === 'system') {
+        root.removeAttribute('data-theme');
+        const prefersLight = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches;
+        if (prefersLight) root.setAttribute('data-theme', 'light');
+    } else {
+        root.setAttribute('data-theme', t);
+    }
+    const btn = document.getElementById('btnTheme');
+    if (btn) btn.textContent = t === 'dark' ? '🌙' : t === 'light' ? '☀️' : '🌓';
+    if (btn) btn.title = 'Theme: ' + t + ' (click to cycle)';
+}
+function cycleTheme() {
+    const cur = localStorage.getItem('susi_theme') || 'system';
+    const next = cur === 'dark' ? 'light' : cur === 'light' ? 'system' : 'dark';
+    localStorage.setItem('susi_theme', next);
+    applyTheme(next);
+}
+applyTheme(localStorage.getItem('susi_theme') || 'system');
+if (window.matchMedia) {
+    window.matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => {
+        if ((localStorage.getItem('susi_theme') || 'system') === 'system') {
+            applyTheme('system');
+        }
+    });
+}
+
 (function init() {
     authToken = localStorage.getItem('auth_token') || '';
+    window.addEventListener('hashchange', route);
     if (!authToken) {
-        showLogin();
+        renderNav();
+        route();
     } else {
         checkAuthStatus();
     }
 })();
+
+/// Decide which dash-page to show based on the hash route + auth state.
+function route() {
+    const hash = location.hash.replace(/^#\/?/, '').split('/')[0] || '';
+    let target = hash;
+    const allowedAnon = new Set(['', 'home']);
+    if (!authToken && !allowedAnon.has(target)) {
+        // Protected page requested by anonymous user — show login.
+        showLogin();
+        return;
+    }
+    if (!authToken) target = 'home';
+    if (authToken && (target === '' || target === 'home')) {
+        // Logged-in user landing on / — pick the first available section.
+        target = (userRole === 'admin') ? 'releases' : 'workspaces';
+        if (location.hash !== '#/' + target) location.hash = '#/' + target;
+    }
+    showPage(target);
+}
+
+function showPage(name) {
+    document.querySelectorAll('.dash-page').forEach(p => p.classList.remove('active'));
+    const page = document.getElementById('page-' + name);
+    if (page) page.classList.add('active');
+    renderNav();
+    document.querySelectorAll('#topNav a').forEach(a => {
+        a.classList.toggle('active', a.dataset.page === name);
+    });
+}
+
+function renderNav() {
+    const nav = document.getElementById('topNav');
+    if (!nav) return;
+    const isAdmin = userRole === 'admin';
+    const items = [
+        { page: 'docs', label: 'Documentation', href: '/docs', show: true },
+        { page: 'workspaces', label: 'Workspaces', href: '#/workspaces', show: !!authToken },
+        { page: 'releases', label: 'Releases', href: '#/releases', show: !!authToken && isAdmin },
+        { page: 'licenses', label: 'Licenses', href: '#/licenses', show: !!authToken && isAdmin },
+    ];
+    nav.innerHTML = items.filter(i => i.show).map(i =>
+        '<a href="' + i.href + '" data-page="' + i.page + '">' + i.label + '</a>'
+    ).join('');
+    // Login/logout button visibility
+    document.getElementById('btnLogin').style.display = authToken ? 'none' : '';
+    document.getElementById('btnLogout').style.display = authToken ? '' : 'none';
+    document.getElementById('currentUser').style.display = authToken ? '' : 'none';
+    document.getElementById('btn2FA').style.display = authToken ? '' : 'none';
+    document.getElementById('btnUsers').style.display = (authToken && isAdmin) ? '' : 'none';
+}
 
 function showLogin() {
     document.getElementById('loginOverlay').classList.add('visible');
@@ -805,10 +966,6 @@ function showLogin() {
     document.getElementById('loginTotp').value = '';
     document.getElementById('loginTotpRow').style.display = 'none';
     document.getElementById('loginError').classList.remove('visible');
-    document.getElementById('btnLogout').style.display = 'none';
-    document.getElementById('btn2FA').style.display = 'none';
-    document.getElementById('btnUsers').style.display = 'none';
-    document.getElementById('currentUser').style.display = 'none';
     setTimeout(() => document.getElementById('loginUsername').focus(), 50);
 }
 
@@ -913,7 +1070,8 @@ async function checkAuthStatus() {
         if (resp.status === 401) {
             authToken = '';
             localStorage.removeItem('auth_token');
-            showLogin();
+            renderNav();
+            route();
             return;
         }
         const data = await resp.json();
@@ -926,24 +1084,20 @@ async function checkAuthStatus() {
             enterDashboard();
         }
     } catch (e) {
-        showLogin();
+        renderNav();
+        route();
     }
 }
 
 function enterDashboard() {
     document.getElementById('loginOverlay').classList.remove('visible');
     document.getElementById('changePasswordOverlay').classList.remove('visible');
-    document.getElementById('btnLogout').style.display = '';
-    document.getElementById('btn2FA').style.display = '';
     const userEl = document.getElementById('currentUser');
     userEl.textContent = currentUsername;
-    userEl.style.display = '';
 
     const isAdmin = userRole === 'admin';
-    document.getElementById('btnUsers').style.display = isAdmin ? '' : 'none';
     document.getElementById('adminLicenseToolbar').style.display = isAdmin ? '' : 'none';
     document.getElementById('detailPanel').classList.remove('visible');
-    document.getElementById('adminLicenseTableSection').style.display = isAdmin ? '' : 'none';
     document.getElementById('btnCreateWorkspace').style.display = isAdmin ? '' : 'none';
     document.getElementById('btnUploadRelease').style.display = isAdmin ? '' : 'none';
 
@@ -953,6 +1107,7 @@ function enterDashboard() {
     }
     loadReleases();
     loadWorkspaces();
+    route(); // pick the right page based on hash + role
 }
 
 function logout() {
@@ -964,7 +1119,10 @@ function logout() {
     selectedKey = null;
     document.getElementById('licenseTableBody').innerHTML = '<tr><td colspan="7" class="empty-state"><p>Loading...</p></td></tr>';
     closeDetail();
-    showLogin();
+    document.getElementById('loginOverlay').classList.remove('visible');
+    location.hash = '';
+    renderNav();
+    route();
 }
 
 function authHeaders() {

@@ -1,3 +1,5 @@
+mod docs;
+
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
@@ -1787,6 +1789,55 @@ async fn handle_dashboard() -> Html<&'static str> {
     Html(include_str!("dashboard.html"))
 }
 
+/// Load the JWT secret from disk, or generate and persist one on first boot.
+/// Persisting it across restarts means dashboard sessions survive deploys.
+fn load_or_create_jwt_secret(data_dir: &str) -> Result<[u8; 32]> {
+    let path = std::path::Path::new(data_dir).join("jwt_secret.bin");
+    if path.exists() {
+        let bytes = std::fs::read(&path)
+            .with_context(|| format!("Failed to read JWT secret at {}", path.display()))?;
+        if bytes.len() == 32 {
+            let mut secret = [0u8; 32];
+            secret.copy_from_slice(&bytes);
+            log::info!("Loaded JWT secret from {}", path.display());
+            return Ok(secret);
+        }
+        log::warn!("JWT secret at {} has wrong length ({} bytes); regenerating", path.display(), bytes.len());
+    }
+    let secret: [u8; 32] = rand::random();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    std::fs::write(&path, secret)
+        .with_context(|| format!("Failed to write JWT secret to {}", path.display()))?;
+    // Best-effort lock down permissions on Unix; Windows ignores the mode.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    log::info!("Generated new JWT secret and saved to {}", path.display());
+    Ok(secret)
+}
+
+async fn handle_docs_page() -> Html<&'static str> {
+    Html(include_str!("docs.html"))
+}
+
+async fn handle_easymde_js() -> impl IntoResponse {
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, "application/javascript; charset=utf-8".parse().unwrap());
+    headers.insert(header::CACHE_CONTROL, "public, max-age=604800".parse().unwrap());
+    (headers, include_str!("vendor/easymde.min.js"))
+}
+
+async fn handle_easymde_css() -> impl IntoResponse {
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, "text/css; charset=utf-8".parse().unwrap());
+    headers.insert(header::CACHE_CONTROL, "public, max-age=604800".parse().unwrap());
+    (headers, include_str!("vendor/easymde.min.css"))
+}
+
 async fn handle_health() -> &'static str {
     "OK"
 }
@@ -1822,12 +1873,16 @@ async fn main() -> Result<()> {
         log::warn!("=== Default admin password is active. Change it at the dashboard! ===");
     }
 
-    let jwt_secret: [u8; 32] = rand::random();
+    let jwt_secret = load_or_create_jwt_secret(&cli.data_dir)
+        .context("Failed to load or create JWT secret")?;
 
     // Ensure releases asset directory exists
     let releases_dir = std::path::Path::new(&cli.data_dir).join("releases");
     std::fs::create_dir_all(&releases_dir)
         .with_context(|| format!("Failed to create releases dir at {}", releases_dir.display()))?;
+    let docs_dir = std::path::Path::new(&cli.data_dir).join("docs");
+    std::fs::create_dir_all(&docs_dir)
+        .with_context(|| format!("Failed to create docs dir at {}", docs_dir.display()))?;
 
     let state = Arc::new(AppState {
         db: Mutex::new(db),
@@ -1839,6 +1894,10 @@ async fn main() -> Result<()> {
     let app = Router::new()
         // Dashboard
         .route("/", get(handle_dashboard))
+        // Public documentation viewer + vendored editor assets
+        .route("/docs", get(handle_docs_page))
+        .route("/docs/easymde.js", get(handle_easymde_js))
+        .route("/docs/easymde.css", get(handle_easymde_css))
         // Health
         .route("/health", get(handle_health))
         // Available license features
@@ -1892,6 +1951,31 @@ async fn main() -> Result<()> {
         .route("/api/v1/workspaces/{id}/configs/latest", get(handle_get_latest_config))
         .route("/api/v1/workspaces/{id}/configs/{config_id}", get(handle_get_config).put(handle_update_config).delete(handle_delete_config))
         .route("/api/v1/workspaces/{id}/releases", get(handle_workspace_releases))
+        // Docs — public read endpoints
+        .route("/api/v1/docs/releases", get(docs::handle_list_doc_releases))
+        .route("/api/v1/docs/releases/latest", get(docs::handle_latest_doc_release))
+        .route("/api/v1/docs/{tag}/pages", get(docs::handle_list_doc_pages))
+        .route("/api/v1/docs/{tag}/pages/{slug}", get(docs::handle_get_doc_page))
+        .route(
+            "/api/v1/docs/{tag}/assets/{file}",
+            get(docs::handle_get_doc_asset).delete(docs::handle_delete_doc_asset),
+        )
+        // Docs — admin write endpoints (JWT). Bulk import + asset upload get the larger body limit.
+        .merge(
+            Router::new()
+                .route("/api/v1/docs/{tag}/import", post(docs::handle_bulk_import_docs))
+                .route("/api/v1/docs/{tag}/assets", post(docs::handle_upload_doc_asset))
+                .layer(DefaultBodyLimit::max(100 * 1024 * 1024))
+        )
+        .route(
+            "/api/v1/docs/{tag}/pages/{slug}",
+            axum::routing::put(docs::handle_upsert_doc_page)
+                .delete(docs::handle_delete_doc_page),
+        )
+        .route(
+            "/api/v1/docs/{tag}/pages/{slug}/rename",
+            post(docs::handle_rename_doc_page),
+        )
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&cli.listen)
