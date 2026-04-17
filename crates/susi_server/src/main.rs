@@ -1283,17 +1283,24 @@ async fn handle_upload_release(
         return Err(error_response(StatusCode::BAD_REQUEST, "No files uploaded"));
     }
 
-    // Save to database
+    // Upsert release metadata — re-running a release (e.g. a CI retry) must
+    // reuse the existing release_id so doc_pages and assets hanging off this
+    // release survive. Previously the handler rejected existing tags with 409
+    // and the caller was forced to DELETE first, which cascaded and wiped
+    // hand-authored documentation pages.
     let release_id = {
         let db = state.db.lock().unwrap();
-        if db.get_release_by_tag(&tag)
+        match db.get_release_by_tag(&tag)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
-            .is_some()
         {
-            return Err(error_response(StatusCode::CONFLICT, &format!("Release {} already exists", tag)));
+            Some(existing_id) => {
+                db.update_release_metadata(existing_id, &name, &body, prerelease, workspace_id.as_deref())
+                    .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+                existing_id
+            }
+            None => db.insert_release(&tag, &name, &body, prerelease, workspace_id.as_deref())
+                .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?,
         }
-        db.insert_release(&tag, &name, &body, prerelease, workspace_id.as_deref())
-            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
     };
 
     // Save files to disk

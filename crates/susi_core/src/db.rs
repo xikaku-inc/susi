@@ -1043,10 +1043,30 @@ impl LicenseDb {
     ) -> Result<(), LicenseError> {
         self.conn
             .execute(
-                "INSERT INTO release_assets (release_id, file_name, file_size) VALUES (?1, ?2, ?3)",
+                "INSERT INTO release_assets (release_id, file_name, file_size) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(release_id, file_name) DO UPDATE SET file_size = excluded.file_size",
                 params![release_id, file_name, file_size as i64],
             )
             .map_err(|e| LicenseError::Other(format!("DB insert asset: {}", e)))?;
+        Ok(())
+    }
+
+    /// Update metadata of an existing release without touching its id (so
+    /// FKs from doc_pages / release_assets remain intact).
+    pub fn update_release_metadata(
+        &self,
+        release_id: i64,
+        name: &str,
+        body: &str,
+        prerelease: bool,
+        workspace_id: Option<&str>,
+    ) -> Result<(), LicenseError> {
+        self.conn
+            .execute(
+                "UPDATE releases SET name = ?1, body = ?2, prerelease = ?3, workspace_id = ?4 WHERE id = ?5",
+                params![name, body, prerelease as i32, workspace_id, release_id],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB update release: {}", e)))?;
         Ok(())
     }
 
