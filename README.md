@@ -694,34 +694,65 @@ VOLUME_DIR=$(docker volume inspect susi-data --format '{{.Mountpoint}}')
 sudo cp $VOLUME_DIR/licenses.db ~/licenses-backup-$(date +%F).db
 ```
 
-### 8. Optional: HTTPS with a custom domain
+### 8. HTTPS reverse proxy (required for production)
 
-1. In Lightsail → **Networking** → attach a **static IP** to your instance
-2. Point a DNS record (e.g. `license.yourdomain.com`) to that static IP
-3. Set up nginx as a reverse proxy with Let's Encrypt:
+The containers bind to `127.0.0.1:3100` (prod) and `127.0.0.1:3101` (staging) —
+they are *not* reachable from the public internet. All external traffic must
+go through the on-host nginx reverse proxy over TLS. This protects credentials
+and JWTs that would otherwise cross the network in plaintext, and gives the
+in-process rate limiter a real client IP via `X-Forwarded-For`.
+
+1. In Lightsail → **Networking** → attach a **static IP** to your instance.
+2. Create DNS A-records for both hostnames pointing at that static IP, e.g.
+   `susi.lp-research.com` and `staging.susi.lp-research.com`.
+3. Install nginx + certbot and configure one vhost per environment:
 
 ```bash
 sudo apt-get install -y nginx certbot python3-certbot-nginx
 
 sudo tee /etc/nginx/sites-available/susi <<'EOF'
+# Production
 server {
     listen 80;
-    server_name license.yourdomain.com;
+    server_name susi.lp-research.com;
 
     location / {
         proxy_pass http://127.0.0.1:3100;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+
+# Staging
+server {
+    listen 80;
+    server_name staging.susi.lp-research.com;
+
+    location / {
+        proxy_pass http://127.0.0.1:3101;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
     }
 }
 EOF
 
 sudo ln -s /etc/nginx/sites-available/susi /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl reload nginx
-sudo certbot --nginx -d license.yourdomain.com
+sudo certbot --nginx -d susi.lp-research.com -d staging.susi.lp-research.com
 ```
 
-Then open port **443** and close port **3100** from public access in your Lightsail firewall.
+4. Lightsail firewall: open **22, 80, 443**; **close 3100 and 3101** if they
+   were previously open. The docker-compose loopback binding already makes
+   the ports unreachable externally, but the firewall is belt-and-braces.
+
+`X-Forwarded-For` is required — the Rust login rate-limiter reads it to
+identify the real client when the TCP peer is loopback (nginx). Without it,
+every request looks like it's coming from `127.0.0.1` and the per-IP limit
+becomes a per-box limit.
 
 ### Quick reference
 

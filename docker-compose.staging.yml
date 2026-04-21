@@ -3,8 +3,10 @@ services:
     build: .
     container_name: susi-server-staging
     restart: unless-stopped
+    # Bind to loopback only — nginx on the same host proxies
+    # staging.susi.lp-research.com (TLS) here; 3101 is never public.
     ports:
-      - "3101:3100"
+      - "127.0.0.1:3101:3100"
     environment:
       - SUSI_ADMIN_KEY=${SUSI_ADMIN_KEY:?Set SUSI_ADMIN_KEY in .env}
       - RUST_LOG=info
