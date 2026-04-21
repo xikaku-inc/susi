@@ -9,6 +9,17 @@ use susi_core::{
 };
 use rsa::RsaPublicKey;
 
+/// Run an async future to completion on a fresh current-thread tokio runtime.
+/// Used by the blocking API wrappers. Must NOT be called from inside a tokio
+/// runtime — in that case, call the `_async` variant directly.
+pub(crate) fn blocking_run<F: std::future::Future>(fut: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("Failed to build tokio runtime for blocking susi_client call")
+        .block_on(fut)
+}
+
 /// Result of a license verification.
 #[derive(Debug)]
 pub enum LicenseStatus {
@@ -123,7 +134,12 @@ impl LicenseClient {
 
     /// Verify a signed license file on disk.
     pub fn verify_file(&self, path: &Path) -> LicenseStatus {
-        let content = match std::fs::read_to_string(path) {
+        blocking_run(self.verify_file_async(path))
+    }
+
+    /// Async variant of [`verify_file`].
+    pub async fn verify_file_async(&self, path: &Path) -> LicenseStatus {
+        let content = match tokio::fs::read_to_string(path).await {
             Ok(c) => c,
             Err(e) => return LicenseStatus::FileNotFound(format!("{}: {}", path.display(), e)),
         };
@@ -195,17 +211,22 @@ impl LicenseClient {
     /// This both renews the lease and verifies the license.
     /// If `friendly_name` is `Some`, use it instead of the system hostname.
     pub fn verify_and_refresh(&self, path: &Path, license_key: &str, friendly_name: Option<&str>) -> LicenseStatus {
+        blocking_run(self.verify_and_refresh_async(path, license_key, friendly_name))
+    }
+
+    /// Async variant of [`verify_and_refresh`].
+    pub async fn verify_and_refresh_async(&self, path: &Path, license_key: &str, friendly_name: Option<&str>) -> LicenseStatus {
         if let Some(ref server_url) = self.server_url {
-            match self.try_online_activate(server_url, license_key, friendly_name) {
+            match self.try_online_activate_async(server_url, license_key, friendly_name).await {
                 Ok(signed) => {
                     if let Ok(json) = serde_json::to_string_pretty(&signed) {
-                        let _ = std::fs::write(path, json);
+                        let _ = tokio::fs::write(path, json).await;
                     }
                     return self.verify_signed(&signed);
                 }
                 Err(LicenseError::Revoked) => {
                     log::warn!("License revoked by server - removing cached file");
-                    if let Err(e) = std::fs::remove_file(path) {
+                    if let Err(e) = tokio::fs::remove_file(path).await {
                         if e.kind() != std::io::ErrorKind::NotFound {
                             log::error!("Failed to remove cached license file: {}", e);
                         }
@@ -214,7 +235,7 @@ impl LicenseClient {
                 }
                 Err(LicenseError::NotFound) => {
                     log::warn!("License not found on server - removing cached file");
-                    if let Err(e) = std::fs::remove_file(path) {
+                    if let Err(e) = tokio::fs::remove_file(path).await {
                         if e.kind() != std::io::ErrorKind::NotFound {
                             log::error!("Failed to remove cached license file: {}", e);
                         }
@@ -237,11 +258,10 @@ impl LicenseClient {
             return LicenseStatus::Error(format!("Online license check failed, cached license file cannot be found: {}", path.display()));
         }
 
-        // Fall back to local file
-        self.verify_file(path)
+        self.verify_file_async(path).await
     }
 
-    fn try_online_activate(
+    async fn try_online_activate_async(
         &self,
         server_url: &str,
         license_key: &str,
@@ -266,23 +286,26 @@ impl LicenseClient {
             "friendly_name": friendly_name,
         });
 
-        let response = reqwest::blocking::Client::new()
+        let response = reqwest::Client::new()
             .post(&url)
             .json(&body)
             .timeout(std::time::Duration::from_secs(10))
             .send()
+            .await
             .map_err(|e| LicenseError::Other(format!("HTTP request failed: {}", e)))?;
 
         let status = response.status().as_u16();
         if (200..300).contains(&status) {
             return response
                 .json::<SignedLicense>()
+                .await
                 .map_err(|e| LicenseError::Other(format!("Invalid server response: {}", e)));
         }
 
         #[derive(serde::Deserialize)]
         struct ErrorBody { error: String }
         let msg = response.json::<ErrorBody>()
+            .await
             .map(|b| b.error)
             .unwrap_or_default();
 
@@ -567,5 +590,88 @@ mod tests {
         assert!(!status.has_feature("anything"));
         assert!(status.features().is_empty());
         assert!(status.expires().is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Async smoke tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_verify_file_async_roundtrip() {
+        let (_, pub_pem, private) = make_keypair_pems();
+        let client = LicenseClient::new(&pub_pem).unwrap();
+        let payload = make_valid_payload(None);
+        let signed = sign_license(&private, &payload).unwrap();
+
+        let tmp = std::env::temp_dir().join("test_license_verify_async.json");
+        let json = serde_json::to_string_pretty(&signed).unwrap();
+        tokio::fs::write(&tmp, &json).await.unwrap();
+
+        let status = client.verify_file_async(&tmp).await;
+        assert!(status.is_valid());
+        assert_eq!(status.features(), vec!["full_fusion", "recorder"]);
+
+        let _ = tokio::fs::remove_file(&tmp).await;
+    }
+
+    #[tokio::test]
+    async fn test_verify_file_async_not_found() {
+        let (_, pub_pem, _) = make_keypair_pems();
+        let client = LicenseClient::new(&pub_pem).unwrap();
+        let status = client.verify_file_async(Path::new("/nonexistent/license.json")).await;
+        assert!(matches!(status, LicenseStatus::FileNotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn test_verify_and_refresh_async_no_server_falls_back_to_file() {
+        let (_, pub_pem, private) = make_keypair_pems();
+        let client = LicenseClient::new(&pub_pem).unwrap(); // no server_url set
+        let payload = make_valid_payload(None);
+        let signed = sign_license(&private, &payload).unwrap();
+
+        let tmp = std::env::temp_dir().join("test_license_refresh_async.json");
+        let json = serde_json::to_string_pretty(&signed).unwrap();
+        tokio::fs::write(&tmp, &json).await.unwrap();
+
+        let status = client.verify_and_refresh_async(&tmp, "AAAA-BBBB-CCCC-DDDD", None).await;
+        assert!(status.is_valid());
+
+        let _ = tokio::fs::remove_file(&tmp).await;
+    }
+
+    #[tokio::test]
+    async fn test_try_online_activate_async_network_error() {
+        let (_, pub_pem, _) = make_keypair_pems();
+        let client = LicenseClient::new(&pub_pem).unwrap();
+        // 127.0.0.1:1 is reserved, TCP connect fails fast.
+        let result = client
+            .try_online_activate_async("http://127.0.0.1:1", "AAAA-BBBB-CCCC-DDDD", None)
+            .await;
+        assert!(matches!(result, Err(LicenseError::Other(_))));
+    }
+
+    #[tokio::test]
+    async fn test_sync_verify_file_from_async_context() {
+        // The sync wrapper uses its own current-thread runtime inside block_on.
+        // Calling it from an async context via spawn_blocking must not panic —
+        // this is exactly the failure mode this refactor is meant to fix when
+        // callers migrate to the _async variants, but existing sync callers
+        // wrapped in spawn_blocking must still work.
+        let (_, pub_pem, private) = make_keypair_pems();
+        let client = std::sync::Arc::new(LicenseClient::new(&pub_pem).unwrap());
+        let payload = make_valid_payload(None);
+        let signed = sign_license(&private, &payload).unwrap();
+
+        let tmp = std::env::temp_dir().join("test_license_sync_from_async.json");
+        let json = serde_json::to_string_pretty(&signed).unwrap();
+        tokio::fs::write(&tmp, &json).await.unwrap();
+
+        let tmp_clone = tmp.clone();
+        let status = tokio::task::spawn_blocking(move || client.verify_file(&tmp_clone))
+            .await
+            .unwrap();
+        assert!(status.is_valid());
+
+        let _ = tokio::fs::remove_file(&tmp).await;
     }
 }
