@@ -1079,6 +1079,9 @@ async fn handle_regenerate_backup_codes(
 // Public endpoints (client-facing)
 // ---------------------------------------------------------------------------
 
+/// How long an admin-initiated machine removal blocks silent self-reactivation.
+const TOMBSTONE_TTL_HOURS: i64 = 24;
+
 fn compute_lease_expires(license: &License) -> Option<DateTime<Utc>> {
     if license.lease_duration_hours == 0 {
         None
@@ -1104,6 +1107,23 @@ async fn handle_activate(
 
     if license.is_expired() {
         return Err(error_response(StatusCode::FORBIDDEN, "License has expired"));
+    }
+
+    // Block auto-reactivation if this machine was removed by an admin within
+    // the tombstone window. Without this, a running client re-adds itself on
+    // the next startup and the admin's removal effectively never sticks.
+    if let Some(expires_at) = db
+        .machine_tombstone_expires_at(&license.id, &req.machine_code)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+    {
+        let remaining = (expires_at - Utc::now()).num_minutes().max(0);
+        return Err(error_response(
+            StatusCode::FORBIDDEN,
+            &format!(
+                "Machine was removed by an administrator; re-activation is blocked for {} more minutes",
+                remaining
+            ),
+        ));
     }
 
     if !license.is_machine_activated(&req.machine_code) && !license.can_add_machine() {
@@ -1509,7 +1529,39 @@ async fn handle_deactivate_machine(
     db.remove_machine_activation(&license.id, &machine_code)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
-    Ok(Json(serde_json::json!({ "status": "deactivated" })))
+    // Admin removals are "sticky": the client can't silently re-add itself
+    // for a while. Client-initiated /deactivate does NOT tombstone, so a user
+    // who intentionally resets their own install can immediately re-activate.
+    db.add_machine_tombstone(&license.id, &machine_code, TOMBSTONE_TTL_HOURS)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    Ok(Json(serde_json::json!({
+        "status": "deactivated",
+        "tombstone_hours": TOMBSTONE_TTL_HOURS,
+    })))
+}
+
+/// Admin escape hatch: clear a tombstone so the machine can re-activate
+/// immediately after an accidental removal.
+async fn handle_clear_machine_tombstone(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((key, machine_code)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    require_password_changed(&state, &principal)?;
+    require_admin(&state, &principal)?;
+
+    let db = state.db.lock().unwrap();
+    let license = db
+        .get_license_by_key(&key)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "License key not found"))?;
+
+    db.clear_machine_tombstone(&license.id, &machine_code)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    Ok(Json(serde_json::json!({ "status": "cleared" })))
 }
 
 // ---------------------------------------------------------------------------
@@ -2783,6 +2835,10 @@ async fn main() -> Result<()> {
         .route(
             "/api/v1/licenses/{key}/machines/{machine_code}",
             axum::routing::delete(handle_deactivate_machine),
+        )
+        .route(
+            "/api/v1/licenses/{key}/machines/{machine_code}/tombstone",
+            axum::routing::delete(handle_clear_machine_tombstone),
         )
         // Releases — client endpoints (license-key protected)
         .route("/api/v1/updates/releases", get(handle_get_releases))

@@ -92,8 +92,18 @@ impl LicenseDb {
                 UNIQUE(license_id, machine_code)
             );
 
+            CREATE TABLE IF NOT EXISTS machine_tombstones (
+                license_id TEXT NOT NULL,
+                machine_code TEXT NOT NULL,
+                removed_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                PRIMARY KEY (license_id, machine_code),
+                FOREIGN KEY (license_id) REFERENCES licenses(id) ON DELETE CASCADE
+            );
+
             CREATE INDEX IF NOT EXISTS idx_license_key ON licenses(license_key);
             CREATE INDEX IF NOT EXISTS idx_activations_license ON machine_activations(license_id);
+            CREATE INDEX IF NOT EXISTS idx_tombstones_expiry ON machine_tombstones(expires_at);
 
             CREATE TABLE IF NOT EXISTS releases (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -507,6 +517,78 @@ impl LicenseDb {
                 params![license_id, machine_code],
             )
             .map_err(|e| LicenseError::Other(format!("DB delete: {}", e)))?;
+        Ok(())
+    }
+
+    /// Record a tombstone so the given machine cannot silently self-reactivate
+    /// for `ttl_hours` after an admin removal. An existing tombstone is
+    /// overwritten (the expiry refreshes).
+    pub fn add_machine_tombstone(
+        &self,
+        license_id: &str,
+        machine_code: &str,
+        ttl_hours: i64,
+    ) -> Result<(), LicenseError> {
+        let now = Utc::now();
+        let expires = now + Duration::hours(ttl_hours.max(0));
+        self.conn
+            .execute(
+                "INSERT INTO machine_tombstones (license_id, machine_code, removed_at, expires_at)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(license_id, machine_code) DO UPDATE SET
+                    removed_at = excluded.removed_at,
+                    expires_at = excluded.expires_at",
+                params![
+                    license_id,
+                    machine_code,
+                    now.to_rfc3339(),
+                    expires.to_rfc3339(),
+                ],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB tombstone insert: {}", e)))?;
+        Ok(())
+    }
+
+    /// Return the tombstone expiry if the machine is currently tombstoned.
+    /// Expired tombstones are pruned opportunistically and return `None`.
+    pub fn machine_tombstone_expires_at(
+        &self,
+        license_id: &str,
+        machine_code: &str,
+    ) -> Result<Option<DateTime<Utc>>, LicenseError> {
+        let now = Utc::now();
+        self.conn
+            .execute(
+                "DELETE FROM machine_tombstones WHERE expires_at < ?1",
+                params![now.to_rfc3339()],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB tombstone prune: {}", e)))?;
+
+        let expires: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT expires_at FROM machine_tombstones WHERE license_id = ?1 AND machine_code = ?2",
+                params![license_id, machine_code],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| LicenseError::Other(format!("DB tombstone query: {}", e)))?;
+
+        Ok(expires.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc))))
+    }
+
+    /// Drop a tombstone, e.g. when an admin re-adds the machine.
+    pub fn clear_machine_tombstone(
+        &self,
+        license_id: &str,
+        machine_code: &str,
+    ) -> Result<(), LicenseError> {
+        self.conn
+            .execute(
+                "DELETE FROM machine_tombstones WHERE license_id = ?1 AND machine_code = ?2",
+                params![license_id, machine_code],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB tombstone delete: {}", e)))?;
         Ok(())
     }
 
@@ -2360,6 +2442,233 @@ mod tests {
             .unwrap();
         assert_eq!(retrieved.machines.len(), 1);
         assert_eq!(retrieved.machines[0].machine_code, "machine2");
+    }
+
+    #[test]
+    fn test_machine_tombstone_lifecycle() {
+        let db = test_db();
+        let license = License::new(
+            "FusionHub".to_string(),
+            "Test".to_string(),
+            Some(Utc::now() + Duration::days(30)),
+            vec![],
+            2,
+        );
+        db.insert_license(&license).unwrap();
+
+        // Nothing tombstoned initially
+        assert!(db
+            .machine_tombstone_expires_at(&license.id, "mX")
+            .unwrap()
+            .is_none());
+
+        // Add tombstone — present with a future expiry
+        db.add_machine_tombstone(&license.id, "mX", 24).unwrap();
+        let exp = db
+            .machine_tombstone_expires_at(&license.id, "mX")
+            .unwrap()
+            .expect("tombstone should be active");
+        assert!(exp > Utc::now());
+
+        // Clearing removes it
+        db.clear_machine_tombstone(&license.id, "mX").unwrap();
+        assert!(db
+            .machine_tombstone_expires_at(&license.id, "mX")
+            .unwrap()
+            .is_none());
+    }
+
+    // --- Regression tests for "removed machine keeps coming back" bug ---
+    //
+    // Prior to the tombstone mechanism, a running client would call /activate
+    // on every startup and immediately reclaim the slot an admin had just
+    // removed. These tests replay the full sequence at the DB layer (which is
+    // what the server's handle_activate / handle_deactivate_machine handlers
+    // drive) so future refactors cannot silently break the invariant.
+
+    /// Mirrors the relevant slice of `handle_activate`: tombstone check comes
+    /// before the activation upsert. Returns Ok when the client would be
+    /// allowed to activate, Err when the server would reject it.
+    fn sim_client_activate(
+        db: &LicenseDb,
+        license_id: &str,
+        machine_code: &str,
+        friendly_name: &str,
+    ) -> Result<(), String> {
+        if let Some(exp) = db
+            .machine_tombstone_expires_at(license_id, machine_code)
+            .map_err(|e| e.to_string())?
+        {
+            return Err(format!("tombstoned until {}", exp));
+        }
+        db.add_machine_activation(license_id, machine_code, friendly_name, None)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Mirrors `handle_deactivate_machine` (admin path): remove + tombstone.
+    fn sim_admin_remove(db: &LicenseDb, license_id: &str, machine_code: &str) {
+        db.remove_machine_activation(license_id, machine_code).unwrap();
+        db.add_machine_tombstone(license_id, machine_code, 24).unwrap();
+    }
+
+    /// Mirrors `handle_deactivate` (public client path): remove only, NO tombstone.
+    fn sim_client_self_deactivate(db: &LicenseDb, license_id: &str, machine_code: &str) {
+        db.remove_machine_activation(license_id, machine_code).unwrap();
+    }
+
+    #[test]
+    fn regression_admin_remove_blocks_silent_reactivation() {
+        let db = test_db();
+        let license = License::new(
+            "FusionHub".to_string(),
+            "Test".to_string(),
+            Some(Utc::now() + Duration::days(30)),
+            vec![],
+            3,
+        );
+        db.insert_license(&license).unwrap();
+
+        // Client activates on startup.
+        sim_client_activate(&db, &license.id, "mc-laptop", "nico-lpLaptop").unwrap();
+        assert_eq!(
+            db.get_license_by_key(&license.license_key).unwrap().unwrap().machines.len(),
+            1
+        );
+
+        // Admin removes the machine via the admin UI.
+        sim_admin_remove(&db, &license.id, "mc-laptop");
+        assert_eq!(
+            db.get_license_by_key(&license.license_key).unwrap().unwrap().machines.len(),
+            0
+        );
+
+        // Client restarts and tries to activate again. This MUST be blocked —
+        // otherwise the admin's removal is effectively a no-op, which is the
+        // exact bug we are guarding against.
+        let err = sim_client_activate(&db, &license.id, "mc-laptop", "nico-lpLaptop").unwrap_err();
+        assert!(err.contains("tombstoned"), "expected tombstone rejection, got: {}", err);
+        assert_eq!(
+            db.get_license_by_key(&license.license_key).unwrap().unwrap().machines.len(),
+            0,
+            "machine must NOT reappear after admin removal"
+        );
+    }
+
+    #[test]
+    fn regression_client_self_deactivate_does_not_tombstone() {
+        // A user who hits "Remove THIS machine" in their own FusionHub UI is
+        // explicitly resetting the install — they must be able to re-activate
+        // immediately. Only *admin* removal is sticky.
+        let db = test_db();
+        let license = License::new(
+            "FusionHub".to_string(),
+            "Test".to_string(),
+            Some(Utc::now() + Duration::days(30)),
+            vec![],
+            1,
+        );
+        db.insert_license(&license).unwrap();
+
+        sim_client_activate(&db, &license.id, "mc-1", "laptop").unwrap();
+        sim_client_self_deactivate(&db, &license.id, "mc-1");
+        // No tombstone should have been written.
+        assert!(db.machine_tombstone_expires_at(&license.id, "mc-1").unwrap().is_none());
+        // Re-activate must succeed right away.
+        sim_client_activate(&db, &license.id, "mc-1", "laptop").unwrap();
+        assert_eq!(
+            db.get_license_by_key(&license.license_key).unwrap().unwrap().machines.len(),
+            1
+        );
+    }
+
+    #[test]
+    fn regression_admin_clear_tombstone_unblocks_reactivation() {
+        // Escape hatch: if an admin removes a machine by mistake, they can
+        // clear the tombstone so the client re-activates on its next try.
+        let db = test_db();
+        let license = License::new(
+            "FusionHub".to_string(),
+            "Test".to_string(),
+            Some(Utc::now() + Duration::days(30)),
+            vec![],
+            1,
+        );
+        db.insert_license(&license).unwrap();
+
+        sim_client_activate(&db, &license.id, "mc-oops", "laptop").unwrap();
+        sim_admin_remove(&db, &license.id, "mc-oops");
+        assert!(sim_client_activate(&db, &license.id, "mc-oops", "laptop").is_err());
+
+        db.clear_machine_tombstone(&license.id, "mc-oops").unwrap();
+        sim_client_activate(&db, &license.id, "mc-oops", "laptop").unwrap();
+        assert_eq!(
+            db.get_license_by_key(&license.license_key).unwrap().unwrap().machines.len(),
+            1
+        );
+    }
+
+    #[test]
+    fn regression_stable_fingerprint_never_creates_duplicate_slots() {
+        // The root cause of the ghost-slot buildup was the *same* machine
+        // producing *different* fingerprints across restarts. With a stable
+        // fingerprint, repeated activations of the same machine_code must
+        // upsert into a single slot, never accumulate. (Locks in the
+        // `UNIQUE(license_id, machine_code)` + ON CONFLICT behavior.)
+        let db = test_db();
+        let license = License::new(
+            "FusionHub".to_string(),
+            "Test".to_string(),
+            Some(Utc::now() + Duration::days(30)),
+            vec![],
+            5,
+        );
+        db.insert_license(&license).unwrap();
+
+        for i in 0..10 {
+            let name = format!("run-{}", i);
+            sim_client_activate(&db, &license.id, "stable-mc", &name).unwrap();
+        }
+        let retrieved = db.get_license_by_key(&license.license_key).unwrap().unwrap();
+        assert_eq!(retrieved.machines.len(), 1, "stable fingerprint must map to one slot");
+        // Latest friendly name wins (upsert semantics).
+        assert_eq!(retrieved.machines[0].friendly_name, "run-9");
+    }
+
+    #[test]
+    fn test_machine_tombstone_auto_prunes_expired() {
+        let db = test_db();
+        let license = License::new(
+            "FusionHub".to_string(),
+            "Test".to_string(),
+            Some(Utc::now() + Duration::days(30)),
+            vec![],
+            1,
+        );
+        db.insert_license(&license).unwrap();
+
+        // Insert an already-expired tombstone directly
+        let past = (Utc::now() - Duration::hours(1)).to_rfc3339();
+        db.conn
+            .execute(
+                "INSERT INTO machine_tombstones (license_id, machine_code, removed_at, expires_at) VALUES (?1, ?2, ?3, ?3)",
+                params![&license.id, "stale", &past],
+            )
+            .unwrap();
+
+        // Querying should both report None and prune the row
+        assert!(db
+            .machine_tombstone_expires_at(&license.id, "stale")
+            .unwrap()
+            .is_none());
+        let count: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM machine_tombstones WHERE license_id = ?1",
+                params![&license.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
     }
 
     #[test]

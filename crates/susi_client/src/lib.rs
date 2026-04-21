@@ -1,6 +1,6 @@
 pub mod workspace;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use susi_core::{
@@ -107,6 +107,10 @@ pub struct LicenseClient {
     server_url: Option<String>,
     /// Grace period in hours after lease expiry. Default: 24.
     grace_hours: i64,
+    /// Optional on-disk cache for the machine fingerprint. When set, once the
+    /// fingerprint has been computed successfully it is reused on subsequent
+    /// runs even if the underlying hardware ID lookup later fails transiently.
+    machine_code_cache: Option<PathBuf>,
 }
 
 impl LicenseClient {
@@ -117,6 +121,7 @@ impl LicenseClient {
             public_key,
             server_url: None,
             grace_hours: susi_core::DEFAULT_LEASE_GRACE_HOURS as i64,
+            machine_code_cache: None,
         })
     }
 
@@ -130,6 +135,25 @@ impl LicenseClient {
     /// Set the grace period (hours) for lease expiry.
     pub fn set_grace_hours(&mut self, hours: i64) {
         self.grace_hours = hours;
+    }
+
+    /// Set a path where the computed machine fingerprint is cached. See
+    /// [`susi_core::fingerprint::get_or_cache_machine_code`].
+    pub fn set_machine_code_cache<P: Into<PathBuf>>(&mut self, path: P) {
+        self.machine_code_cache = Some(path.into());
+    }
+
+    /// Builder helper around [`Self::set_machine_code_cache`].
+    pub fn with_machine_code_cache<P: Into<PathBuf>>(mut self, path: P) -> Self {
+        self.set_machine_code_cache(path);
+        self
+    }
+
+    fn current_machine_code(&self) -> Result<String, LicenseError> {
+        match &self.machine_code_cache {
+            Some(p) => fingerprint::get_or_cache_machine_code(p),
+            None => fingerprint::get_machine_code(),
+        }
     }
 
     /// Verify a signed license file on disk.
@@ -155,7 +179,7 @@ impl LicenseClient {
      /// Verify a SignedLicense object (e.g. received from server or loaded from disk).
      /// Use local machine code for machine check.
     pub fn verify_signed(&self, signed: &SignedLicense) -> LicenseStatus {
-        match fingerprint::get_machine_code() {
+        match self.current_machine_code() {
             Ok(local_code) => {
                 return self.verify_signed_with_activation_code(signed, &local_code);
             }
@@ -267,7 +291,7 @@ impl LicenseClient {
         license_key: &str,
         friendly_name: Option<&str>,
     ) -> Result<SignedLicense, LicenseError> {
-        let machine_code = fingerprint::get_machine_code()
+        let machine_code = self.current_machine_code()
             .map_err(|e| LicenseError::Other(format!("Fingerprint error: {}", e)))?;
 
         let friendly_name = friendly_name
