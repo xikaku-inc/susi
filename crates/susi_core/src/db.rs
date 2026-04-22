@@ -197,6 +197,23 @@ impl LicenseDb {
             );
             CREATE INDEX IF NOT EXISTS idx_doc_assets_release ON doc_assets(release_id);
 
+            CREATE TABLE IF NOT EXISTS website_pages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                slug TEXT NOT NULL UNIQUE,
+                title TEXT NOT NULL,
+                body_md TEXT NOT NULL DEFAULT '',
+                parent_slug TEXT,
+                ord INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_website_pages_parent ON website_pages(parent_slug);
+
+            CREATE TABLE IF NOT EXISTS website_assets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_name TEXT NOT NULL UNIQUE,
+                file_size INTEGER NOT NULL DEFAULT 0
+            );
+
             CREATE TABLE IF NOT EXISTS known_devices (
                 username TEXT NOT NULL,
                 fingerprint TEXT NOT NULL,
@@ -2209,6 +2226,166 @@ impl LicenseDb {
             copied.push(name);
         }
         Ok(copied)
+    }
+
+    // -----------------------------------------------------------------------
+    // Website pages / assets (single-site public page store, no releases)
+    // -----------------------------------------------------------------------
+
+    pub fn upsert_website_page(
+        &self,
+        slug: &str,
+        title: &str,
+        body_md: &str,
+        parent_slug: Option<&str>,
+        ord: i64,
+    ) -> Result<i64, LicenseError> {
+        let now = Utc::now().to_rfc3339();
+        self.conn
+            .execute(
+                "INSERT INTO website_pages (slug, title, body_md, parent_slug, ord, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(slug) DO UPDATE SET
+                   title = excluded.title,
+                   body_md = excluded.body_md,
+                   parent_slug = excluded.parent_slug,
+                   ord = excluded.ord,
+                   updated_at = excluded.updated_at",
+                params![slug, title, body_md, parent_slug, ord, now],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB upsert website page: {}", e)))?;
+        let id = self.conn
+            .query_row(
+                "SELECT id FROM website_pages WHERE slug = ?1",
+                params![slug],
+                |r| r.get::<_, i64>(0),
+            )
+            .map_err(|e| LicenseError::Other(format!("DB lookup website page: {}", e)))?;
+        Ok(id)
+    }
+
+    pub fn list_website_pages(
+        &self,
+    ) -> Result<Vec<(String, String, Option<String>, i64, String)>, LicenseError> {
+        let mut stmt = self.conn
+            .prepare(
+                "SELECT slug, title, parent_slug, ord, updated_at FROM website_pages
+                 ORDER BY parent_slug NULLS FIRST, ord, title",
+            )
+            .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, String>(4)?,
+                ))
+            })
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    pub fn get_website_page(
+        &self,
+        slug: &str,
+    ) -> Result<Option<(String, String, Option<String>, i64, String)>, LicenseError> {
+        match self.conn.query_row(
+            "SELECT title, body_md, parent_slug, ord, updated_at FROM website_pages
+             WHERE slug = ?1",
+            params![slug],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, String>(4)?,
+                ))
+            },
+        ) {
+            Ok(row) => Ok(Some(row)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(LicenseError::Other(format!("DB query: {}", e))),
+        }
+    }
+
+    pub fn delete_website_page(&self, slug: &str) -> Result<bool, LicenseError> {
+        let n = self.conn
+            .execute(
+                "DELETE FROM website_pages WHERE slug = ?1",
+                params![slug],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB delete: {}", e)))?;
+        Ok(n > 0)
+    }
+
+    /// Rename a website page slug, cascading `parent_slug` references.
+    /// Returns Ok(false) if the source slug doesn't exist; Err on UNIQUE conflict.
+    pub fn rename_website_page(
+        &mut self,
+        old_slug: &str,
+        new_slug: &str,
+    ) -> Result<bool, LicenseError> {
+        if old_slug == new_slug {
+            return Ok(true);
+        }
+        let tx = self.conn.transaction()
+            .map_err(|e| LicenseError::Other(format!("DB tx: {}", e)))?;
+        let n = tx.execute(
+            "UPDATE website_pages SET slug = ?1 WHERE slug = ?2",
+            params![new_slug, old_slug],
+        ).map_err(|e| LicenseError::Other(format!("DB rename: {}", e)))?;
+        if n == 0 {
+            return Ok(false);
+        }
+        tx.execute(
+            "UPDATE website_pages SET parent_slug = ?1 WHERE parent_slug = ?2",
+            params![new_slug, old_slug],
+        ).map_err(|e| LicenseError::Other(format!("DB rename cascade: {}", e)))?;
+        tx.commit().map_err(|e| LicenseError::Other(format!("DB tx commit: {}", e)))?;
+        Ok(true)
+    }
+
+    pub fn upsert_website_asset(
+        &self,
+        file_name: &str,
+        file_size: u64,
+    ) -> Result<(), LicenseError> {
+        self.conn
+            .execute(
+                "INSERT INTO website_assets (file_name, file_size)
+                 VALUES (?1, ?2)
+                 ON CONFLICT(file_name) DO UPDATE SET file_size = excluded.file_size",
+                params![file_name, file_size as i64],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB upsert website asset: {}", e)))?;
+        Ok(())
+    }
+
+    pub fn list_website_assets(&self) -> Result<Vec<(String, i64)>, LicenseError> {
+        let mut stmt = self.conn
+            .prepare("SELECT file_name, file_size FROM website_assets ORDER BY file_name")
+            .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    pub fn delete_website_asset(&self, file_name: &str) -> Result<bool, LicenseError> {
+        let n = self.conn
+            .execute(
+                "DELETE FROM website_assets WHERE file_name = ?1",
+                params![file_name],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB delete website asset: {}", e)))?;
+        Ok(n > 0)
     }
 }
 

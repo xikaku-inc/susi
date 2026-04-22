@@ -1,4 +1,5 @@
 mod docs;
+mod website;
 mod email;
 
 use std::collections::HashMap;
@@ -2679,6 +2680,10 @@ async fn handle_docs_page() -> Html<&'static str> {
     Html(include_str!("docs.html"))
 }
 
+async fn handle_website_page() -> Html<&'static str> {
+    Html(include_str!("website.html"))
+}
+
 async fn handle_easymde_js() -> impl IntoResponse {
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, "application/javascript; charset=utf-8".parse().unwrap());
@@ -2793,6 +2798,8 @@ async fn main() -> Result<()> {
         .route("/docs", get(handle_docs_page))
         .route("/docs/easymde.js", get(handle_easymde_js))
         .route("/docs/easymde.css", get(handle_easymde_css))
+        // Public Xikaku website (same EasyMDE assets reused from /docs)
+        .route("/site", get(handle_website_page))
         // Health
         .route("/health", get(handle_health))
         // Available license features
@@ -2885,6 +2892,29 @@ async fn main() -> Result<()> {
         .route(
             "/api/v1/docs/{tag}/pages/{slug}/rename",
             post(docs::handle_rename_doc_page),
+        )
+        // Website — public read
+        .route("/api/v1/website/pages", get(website::handle_list_pages))
+        .route("/api/v1/website/pages/{slug}", get(website::handle_get_page))
+        .route("/api/v1/website/assets/{file}", get(website::handle_get_asset))
+        // Website — admin write (asset upload gets the larger body limit)
+        .merge(
+            Router::new()
+                .route("/api/v1/website/assets", post(website::handle_upload_asset))
+                .layer(DefaultBodyLimit::max(100 * 1024 * 1024))
+        )
+        .route(
+            "/api/v1/website/pages/{slug}",
+            axum::routing::put(website::handle_upsert_page)
+                .delete(website::handle_delete_page),
+        )
+        .route(
+            "/api/v1/website/pages/{slug}/rename",
+            post(website::handle_rename_page),
+        )
+        .route(
+            "/api/v1/website/assets/{file}",
+            axum::routing::delete(website::handle_delete_asset),
         )
         .with_state(state);
 
