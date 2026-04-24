@@ -1,0 +1,13 @@
+[package]
+name = "susi_helper"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "susi-helper"
+path = "src/main.rs"
+
+[dependencies]
+susi_core = { path = "../susi_core" }
+anyhow = { workspace = true }
+clap = { workspace = true }

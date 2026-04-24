@@ -51,6 +51,7 @@
 | `susi_client` | Library | Lightweight verification library to embed in your application |
 | `susi_admin` | Binary | CLI tool for key generation, license creation, and management |
 | `susi_server` | Binary | HTTP activation server with SQLite backend |
+| `susi_helper` | Binary | End-user utility for retrieving machine fingerprints and USB serial numbers |
 | `cpp/` | C++ Library | Standalone verification client for C++ applications |
 
 ## Quick Start
@@ -299,8 +300,10 @@ Machine identity is computed differently depending on the operating system:
 These values are combined and hashed with SHA-256 to produce a stable fingerprint. Print the current machine's fingerprint with:
 
 ```bash
-susi-admin fingerprint
+susi-helper fingerprint
 ```
+
+> Admins can also use `susi-admin fingerprint`, but `susi-helper` is the lightweight tool intended for end users.
 
 ## USB Hardware Tokens
 
@@ -375,6 +378,29 @@ The `.susi/license.bin` file on the USB stick contains:
 | 12+N | 16 bytes | AES-GCM authentication tag |
 
 The encryption key is derived as: `HKDF-SHA256(ikm=usb_serial, salt="susi-token-v1", info="license-encryption")`.
+
+## susi-helper
+
+`susi-helper` is a small end-user utility that helps customers provide the information needed to activate a license. It requires no database or private key — it is safe to ship to end users alongside your product.
+
+```bash
+# Print the hardware fingerprint of the current machine
+# (paste this into the dashboard's "Machine Code" field when exporting a license)
+susi-helper fingerprint
+
+# List all connected USB drives and their serial numbers
+# (use the serial shown here when exporting a USB token license)
+susi-helper list-usb-serials
+```
+
+Example output of `list-usb-serials`:
+
+```
+NAME              SERIAL
+----------------  ------------
+My USB Drive      ABC123DEF456
+Backup Stick      XYZ789000000
+```
 
 ## Activation Server
 
@@ -776,6 +802,7 @@ cargo build --workspace --release
 Binaries are output to `target/release/`:
 - `susi-admin` — CLI management tool
 - `susi-server` — HTTP activation server
+- `susi-helper` — end-user utility for fingerprinting and USB serial lookup
 
 ## Testing
 

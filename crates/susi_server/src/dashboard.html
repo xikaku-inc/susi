@@ -713,14 +713,29 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
 <!-- Export Modal -->
 <div id="exportModal" class="modal-overlay" onclick="if(event.target===this)closeExportModal()">
     <div class="modal">
-        <h2>Export Signed License File</h2>
+        <h2>Export License</h2>
         <div class="form-row">
             <label>License Key</label>
             <input type="text" id="exportKey" readonly>
         </div>
         <div class="form-row">
+            <label>Export Type</label>
+            <div style="display:flex;background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:3px;gap:3px;width:100%">
+                <label id="exportTypeFileLabel" style="flex:1;text-align:center;padding:6px 18px;border-radius:4px;cursor:pointer;font-size:13px;font-weight:500;transition:background .15s,color .15s;background:var(--accent);color:#fff">
+                    <input type="radio" name="exportType" value="file" checked onchange="onExportTypeChange()" style="display:none"> License File
+                </label>
+                <label id="exportTypeTokenLabel" style="flex:1;text-align:center;padding:6px 18px;border-radius:4px;cursor:pointer;font-size:13px;font-weight:500;transition:background .15s,color .15s;background:transparent;color:var(--text2)">
+                    <input type="radio" name="exportType" value="token" onchange="onExportTypeChange()" style="display:none"> USB Token
+                </label>
+            </div>
+        </div>
+        <div id="exportFileRow" class="form-row">
             <label>Machine Code (SHA256 fingerprint)</label>
             <input type="text" id="exportMachineCode" placeholder="Paste machine fingerprint here">
+        </div>
+        <div id="exportTokenRow" class="form-row" style="display:none">
+            <label>USB Serial Number</label>
+            <input type="text" id="exportUsbSerial" placeholder="Paste usb serial number here">
         </div>
         <div class="form-row">
             <label>Friendly Name</label>
@@ -1784,7 +1799,10 @@ function exportLicense() {
     if (!selectedKey) return;
     document.getElementById('exportKey').value = selectedKey;
     document.getElementById('exportMachineCode').value = '';
+    document.getElementById('exportUsbSerial').value = '';
     document.getElementById('exportFriendlyName').value = '';
+    document.querySelector('input[name="exportType"][value="file"]').checked = true;
+    onExportTypeChange();
     document.getElementById('exportModal').classList.add('visible');
     document.getElementById('exportMachineCode').focus();
 }
@@ -1793,18 +1811,43 @@ function closeExportModal() {
     document.getElementById('exportModal').classList.remove('visible');
 }
 
+function onExportTypeChange() {
+    const isToken = document.querySelector('input[name="exportType"]:checked').value === 'token';
+    document.getElementById('exportFileRow').style.display = isToken ? 'none' : '';
+    document.getElementById('exportTokenRow').style.display = isToken ? '' : 'none';
+    const fileLabel = document.getElementById('exportTypeFileLabel');
+    const tokenLabel = document.getElementById('exportTypeTokenLabel');
+    fileLabel.style.background = isToken ? 'transparent' : 'var(--accent)';
+    fileLabel.style.color = isToken ? 'var(--text2)' : '#fff';
+    tokenLabel.style.background = isToken ? 'var(--accent)' : 'transparent';
+    tokenLabel.style.color = isToken ? '#fff' : 'var(--text2)';
+}
+
 async function doExport() {
     const key = document.getElementById('exportKey').value;
-    const machineCode = document.getElementById('exportMachineCode').value.trim();
     const friendlyName = document.getElementById('exportFriendlyName').value.trim();
+    const isToken = document.querySelector('input[name="exportType"]:checked').value === 'token';
 
-    if (!machineCode) { toast('Machine code is required', 'error'); return; }
+    let endpoint, body, filename;
+    if (isToken) {
+        const usbSerial = document.getElementById('exportUsbSerial').value.trim();
+        if (!usbSerial) { toast('USB serial number is required', 'error'); return; }
+        endpoint = '/licenses/' + encodeURIComponent(key) + '/export-token';
+        body = JSON.stringify({ usb_serial: usbSerial, friendly_name: friendlyName });
+        filename = 'license.bin';
+    } else {
+        const machineCode = document.getElementById('exportMachineCode').value.trim();
+        if (!machineCode) { toast('Machine code is required', 'error'); return; }
+        endpoint = '/licenses/' + encodeURIComponent(key) + '/export';
+        body = JSON.stringify({ machine_code: machineCode, friendly_name: friendlyName });
+        filename = 'license.json';
+    }
 
     try {
-        const resp = await fetch(API + '/licenses/' + encodeURIComponent(key) + '/export', {
+        const resp = await fetch(API + endpoint, {
             method: 'POST',
             headers: authHeaders(),
-            body: JSON.stringify({ machine_code: machineCode, friendly_name: friendlyName }),
+            body,
         });
         if (!resp.ok) {
             const err = await resp.json();
@@ -1815,11 +1858,11 @@ async function doExport() {
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = 'license.json';
+        a.download = filename;
         a.click();
         URL.revokeObjectURL(url);
 
-        toast('License file exported', 'success');
+        toast(isToken ? 'USB token file exported' : 'License file exported', 'success');
         closeExportModal();
         await loadLicenses();
         selectLicense(key);

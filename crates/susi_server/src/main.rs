@@ -249,6 +249,13 @@ struct ExportRequest {
     friendly_name: String,
 }
 
+#[derive(Deserialize)]
+struct ExportTokenRequest {
+    usb_serial: String,
+    #[serde(default)]
+    friendly_name: String,
+}
+
 #[derive(Serialize)]
 struct ErrorResponse {
     error: String,
@@ -1509,6 +1516,83 @@ async fn handle_export_license(
             ),
         ],
         json,
+    ))
+}
+
+async fn handle_export_token(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(key): Path<String>,
+    Json(req): Json<ExportTokenRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    require_password_changed(&state, &principal)?;
+    require_admin(&state, &principal)?;
+
+    let usb_serial = req.usb_serial.trim().to_string();
+    if usb_serial.is_empty() {
+        return Err(error_response(StatusCode::BAD_REQUEST, "USB serial is required"));
+    }
+
+    let db = state.db.lock().unwrap();
+    let license = db
+        .get_license_by_key(&key)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "License key not found"))?;
+
+    if license.revoked {
+        return Err(error_response(StatusCode::FORBIDDEN, "License has been revoked"));
+    }
+    if license.is_expired() {
+        return Err(error_response(StatusCode::FORBIDDEN, "License has expired"));
+    }
+
+    let activation_code = format!("usb:{}", usb_serial);
+
+    if !license.is_machine_activated(&activation_code) && !license.can_add_machine() {
+        return Err(error_response(
+            StatusCode::FORBIDDEN,
+            &format!("Machine limit reached (max {})", license.max_machines),
+        ));
+    }
+
+    let name = if req.friendly_name.is_empty() {
+        format!("USB Token: {}", usb_serial)
+    } else {
+        req.friendly_name.clone()
+    };
+
+    db.add_machine_activation(&license.id, &activation_code, &name, None)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    let payload = susi_core::LicensePayload {
+        id: license.id.clone(),
+        product: license.product.clone(),
+        customer: license.customer.clone(),
+        license_key: license.license_key.clone(),
+        created: license.created,
+        expires: license.expires,
+        features: license.features.clone(),
+        machine_codes: vec![activation_code],
+        lease_expires: None,
+    };
+
+    let signed = sign_license(&state.private_key, &payload)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    let blob = susi_core::encrypt_token(&signed, &usb_serial)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    Ok((
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/octet-stream"),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"license.bin\"",
+            ),
+        ],
+        blob,
     ))
 }
 
@@ -2839,6 +2923,7 @@ async fn main() -> Result<()> {
         .route("/api/v1/licenses/{key}", get(handle_get_license).put(handle_update_license).delete(handle_delete_license))
         .route("/api/v1/licenses/{key}/revoke", post(handle_revoke_license))
         .route("/api/v1/licenses/{key}/export", post(handle_export_license))
+        .route("/api/v1/licenses/{key}/export-token", post(handle_export_token))
         .route(
             "/api/v1/licenses/{key}/machines/{machine_code}",
             axum::routing::delete(handle_deactivate_machine),

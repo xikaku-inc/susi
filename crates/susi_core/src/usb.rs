@@ -219,7 +219,9 @@ fn platform_enumerate() -> Result<Vec<UsbDevice>, LicenseError> {
             Err(_) => continue,
         };
 
-        let mut ext_buf = [0u8; 512];
+        #[repr(C, align(4))]
+        struct AlignedBuf([u8; 512]);
+        let mut ext_buf = AlignedBuf([0u8; 512]);
         let mut br = 0u32;
         let ext_ok = unsafe {
             DeviceIoControl(
@@ -227,8 +229,8 @@ fn platform_enumerate() -> Result<Vec<UsbDevice>, LicenseError> {
                 IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
                 None,
                 0,
-                Some(ext_buf.as_mut_ptr() as *mut c_void),
-                ext_buf.len() as u32,
+                Some(ext_buf.0.as_mut_ptr() as *mut c_void),
+                ext_buf.0.len() as u32,
                 Some(&mut br),
                 None,
             )
@@ -240,11 +242,15 @@ fn platform_enumerate() -> Result<Vec<UsbDevice>, LicenseError> {
             continue;
         }
 
-        let vde = unsafe { &*(ext_buf.as_ptr() as *const VOLUME_DISK_EXTENTS) };
-        if vde.NumberOfDiskExtents < 1 {
+        let (num_extents, disk_number) = unsafe {
+            let vde = ext_buf.0.as_ptr() as *const VOLUME_DISK_EXTENTS;
+            let n = std::ptr::read_unaligned(std::ptr::addr_of!((*vde).NumberOfDiskExtents));
+            let d = std::ptr::read_unaligned(std::ptr::addr_of!((*vde).Extents[0].DiskNumber));
+            (n, d)
+        };
+        if num_extents < 1 {
             continue;
         }
-        let disk_number = vde.Extents[0].DiskNumber;
 
         let Some(serial) = (unsafe { usb_instance_serial_for_disk_number(disk_number) }) else {
             continue;
