@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Xikaku</title>
+<!--SEO_HEAD-->
 <script>
 // Apply theme before paint to avoid a flash of the wrong colour scheme.
 (function () {
@@ -627,7 +627,7 @@ function renderInline(s) {
     });
     out = out.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, text, url) => {
         const safe = url.startsWith('http') || url.startsWith('#') || url.startsWith('/')
-            ? url : '#/' + url;
+            ? url : '/site/' + url;
         return '<a href="' + safe + '">' + text + '</a>';
     });
     out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
@@ -828,7 +828,8 @@ function renderSidebar() {
 
 function renderSidebarItem(p, isHead) {
     const cls = (p.slug === currentSlug ? 'active' : '') + (isHead ? ' section-head' : '');
-    return '<a class="' + cls + '" href="#/' + escHtml(p.slug) + '">' + escHtml(p.title) + '</a>';
+    return '<a class="' + cls + '" href="/site/' + encodeURIComponent(p.slug) + '">'
+        + escHtml(p.title) + '</a>';
 }
 
 function renderEmptyState(msg) {
@@ -972,6 +973,7 @@ function renderEditor() {
     const parent = currentPage.parent_slug || '';
     const ord = currentPage.ord || 0;
     const body = currentPage.body_md || '';
+    const metaDesc = currentPage.meta_description || '';
     const parentOptions = buildParentOptions(parent, currentSlug);
     c.innerHTML =
         '<div class="edit-meta-row">' +
@@ -979,6 +981,12 @@ function renderEditor() {
             '<label>Slug</label><input id="editSlug" type="text" style="width:160px;">' +
             '<label>Parent</label><select id="editParent" style="min-width:200px;">' + parentOptions + '</select>' +
             '<label>Order</label><input id="editOrd" type="number" style="width:80px;">' +
+        '</div>' +
+        '<div class="edit-meta-row" style="margin-top:8px;">' +
+            '<label title="Overrides the auto-derived description for SEO / AI crawlers. Leave empty to auto-derive from body.">SEO description</label>' +
+            '<input id="editMetaDesc" type="text" maxlength="300" '
+                + 'placeholder="Shown as meta description and in AI/search snippets — keep under ~160 chars. Blank = auto-derive." '
+                + 'style="flex:1;min-width:200px;">' +
         '</div>' +
         '<textarea id="editBody"></textarea>' +
         '<div class="edit-actions">' +
@@ -992,6 +1000,7 @@ function renderEditor() {
     document.getElementById('editTitle').value = title;
     document.getElementById('editSlug').value = currentSlug;
     document.getElementById('editOrd').value = ord;
+    document.getElementById('editMetaDesc').value = metaDesc;
     initEasyMDE(body);
 }
 
@@ -1131,6 +1140,8 @@ async function savePage() {
     const parent = document.getElementById('editParent').value.trim();
     const ord = parseInt(document.getElementById('editOrd').value, 10) || 0;
     const body_md = easymde ? easymde.value() : document.getElementById('editBody').value;
+    const metaDescEl = document.getElementById('editMetaDesc');
+    const meta_description = metaDescEl ? metaDescEl.value.trim() : '';
     const newSlug = document.getElementById('editSlug').value.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '-');
     if (!title) { toast('Title is required', 'error'); return; }
     if (!newSlug) { toast('Slug is required', 'error'); return; }
@@ -1154,7 +1165,7 @@ async function savePage() {
     const resp = await fetch(API + '/website/pages/' + encodeURIComponent(targetSlug), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken() },
-        body: JSON.stringify({ title, body_md, parent_slug: parent || null, ord }),
+        body: JSON.stringify({ title, body_md, parent_slug: parent || null, ord, meta_description }),
     });
     if (resp.status === 401) { handleSessionExpired(body_md); return; }
     if (!resp.ok) {
@@ -1166,7 +1177,7 @@ async function savePage() {
     editMode = false;
     await loadIndex();
     if (targetSlug !== currentSlug) {
-        location.hash = '#/' + targetSlug;
+        navigateTo(targetSlug);
     } else {
         await loadPage(currentSlug);
     }
@@ -1213,8 +1224,7 @@ async function deletePage() {
     toast('Deleted', 'success');
     currentSlug = null; currentPage = null;
     await loadIndex();
-    location.hash = '';
-    route();
+    navigateTo(null);
 }
 
 async function newPage() {
@@ -1231,16 +1241,44 @@ async function newPage() {
     });
     if (!resp.ok) { toast('Create failed', 'error'); return; }
     await loadIndex();
-    location.hash = '#/' + cleanSlug;
+    navigateTo(cleanSlug);
 }
 
 // ---------------------------------------------------------------------------
 // Routing
 // ---------------------------------------------------------------------------
 
-async function route() {
+// Path-based routing with legacy hash backcompat. Canonical URLs are
+// /site/{slug}; if a visitor lands on /site#/foo we transparently upgrade to
+// /site/foo via replaceState so crawlers and shared links resolve cleanly.
+function slugFromLocation() {
+    const path = location.pathname || '';
+    const m = path.match(/^\/site\/([^\/\?#]+)/);
+    if (m) return decodeURIComponent(m[1]);
     const hash = location.hash.replace(/^#\/?/, '');
-    const slug = decodeURIComponent(hash.split('/').filter(Boolean)[0] || '');
+    return decodeURIComponent(hash.split('/').filter(Boolean)[0] || '');
+}
+
+function navigateTo(slug) {
+    const target = slug ? '/site/' + encodeURIComponent(slug) : '/site';
+    if (location.pathname + location.search !== target) {
+        history.pushState({}, '', target);
+    }
+    if (location.hash) {
+        history.replaceState({}, '', target);
+    }
+    route();
+}
+
+async function route() {
+    const slug = slugFromLocation();
+    // Upgrade legacy hash URLs (#/foo) to the canonical path form so bookmarks
+    // and share-links come out as /site/foo. Crawlers don't follow fragments
+    // but users still get a clean URL in the address bar.
+    if (location.hash) {
+        const clean = slug ? '/site/' + encodeURIComponent(slug) : '/site';
+        history.replaceState({}, '', clean + location.search);
+    }
     await loadIndex();
     if (pages.length === 0) { renderNoPages(); return; }
     if (slug) {
@@ -1249,11 +1287,26 @@ async function route() {
         // Default: first top-level page by ord
         const sorted = [...pages].sort((a, b) => a.ord - b.ord || a.title.localeCompare(b.title));
         const first = sorted.find(p => !p.parent_slug) || sorted[0];
-        location.hash = '#/' + first.slug;
+        history.replaceState({}, '', '/site/' + encodeURIComponent(first.slug));
+        await loadPage(first.slug);
     }
 }
 
+window.addEventListener('popstate', route);
 window.addEventListener('hashchange', route);
+
+// Intercept intra-site link clicks for SPA navigation.
+// Lets Ctrl/Cmd/middle-click still open in a new tab (server renders them fine).
+document.addEventListener('click', (e) => {
+    const a = e.target.closest && e.target.closest('a[href^="/site/"]');
+    if (!a) return;
+    if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+    const href = a.getAttribute('href');
+    const m = href.match(/^\/site\/([^\/\?#]+)/);
+    if (!m) return;
+    e.preventDefault();
+    navigateTo(decodeURIComponent(m[1]));
+});
 
 // ---------------------------------------------------------------------------
 // History modal

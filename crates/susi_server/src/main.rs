@@ -2705,9 +2705,6 @@ async fn handle_docs_page() -> Html<&'static str> {
     Html(include_str!("docs.html"))
 }
 
-async fn handle_website_page() -> Html<&'static str> {
-    Html(include_str!("website.html"))
-}
 
 async fn handle_easymde_js() -> impl IntoResponse {
     let mut headers = HeaderMap::new();
@@ -2823,8 +2820,15 @@ async fn main() -> Result<()> {
         .route("/docs", get(handle_docs_page))
         .route("/docs/easymde.js", get(handle_easymde_js))
         .route("/docs/easymde.css", get(handle_easymde_css))
-        // Public Xikaku website (same EasyMDE assets reused from /docs)
-        .route("/site", get(handle_website_page))
+        // Public Xikaku website (same EasyMDE assets reused from /docs).
+        // Both `/site` and `/site/{slug}` render the same SPA shell with
+        // per-page SEO head (title, description, OG, JSON-LD) injected.
+        .route("/site", get(website::handle_website_render_root))
+        .route("/site/{slug}", get(website::handle_website_render_slug))
+        // SEO / AI-crawler endpoints
+        .route("/robots.txt", get(website::handle_robots_txt))
+        .route("/sitemap.xml", get(website::handle_sitemap_xml))
+        .route("/llms.txt", get(website::handle_llms_txt))
         // Health
         .route("/health", get(handle_health))
         // Available license features

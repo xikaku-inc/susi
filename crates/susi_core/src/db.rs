@@ -204,7 +204,8 @@ impl LicenseDb {
                 body_md TEXT NOT NULL DEFAULT '',
                 parent_slug TEXT,
                 ord INTEGER NOT NULL DEFAULT 0,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                meta_description TEXT NOT NULL DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS idx_website_pages_parent ON website_pages(parent_slug);
 
@@ -309,6 +310,11 @@ impl LicenseDb {
         // Add email column to users (nullable — admin sets it per user)
         let _ = self.conn.execute_batch(
             "ALTER TABLE users ADD COLUMN email TEXT;"
+        );
+
+        // SEO: per-page meta description override (empty = auto-derive from body_md)
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE website_pages ADD COLUMN meta_description TEXT NOT NULL DEFAULT '';"
         );
 
         // Migrate single-admin table to multi-user table
@@ -2270,6 +2276,7 @@ impl LicenseDb {
         body_md: &str,
         parent_slug: Option<&str>,
         ord: i64,
+        meta_description: &str,
         author: Option<&str>,
     ) -> Result<i64, LicenseError> {
         let now = Utc::now().to_rfc3339();
@@ -2306,15 +2313,16 @@ impl LicenseDb {
         }
 
         tx.execute(
-            "INSERT INTO website_pages (slug, title, body_md, parent_slug, ord, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO website_pages (slug, title, body_md, parent_slug, ord, updated_at, meta_description)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(slug) DO UPDATE SET
                title = excluded.title,
                body_md = excluded.body_md,
                parent_slug = excluded.parent_slug,
                ord = excluded.ord,
-               updated_at = excluded.updated_at",
-            params![slug, title, body_md, parent_slug, ord, now],
+               updated_at = excluded.updated_at,
+               meta_description = excluded.meta_description",
+            params![slug, title, body_md, parent_slug, ord, now, meta_description],
         )
         .map_err(|e| LicenseError::Other(format!("DB upsert website page: {}", e)))?;
         let id = tx
@@ -2463,10 +2471,10 @@ impl LicenseDb {
 
     pub fn list_website_pages(
         &self,
-    ) -> Result<Vec<(String, String, Option<String>, i64, String)>, LicenseError> {
+    ) -> Result<Vec<(String, String, Option<String>, i64, String, String)>, LicenseError> {
         let mut stmt = self.conn
             .prepare(
-                "SELECT slug, title, parent_slug, ord, updated_at FROM website_pages
+                "SELECT slug, title, parent_slug, ord, updated_at, meta_description FROM website_pages
                  ORDER BY parent_slug NULLS FIRST, ord, title",
             )
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
@@ -2478,6 +2486,7 @@ impl LicenseDb {
                     r.get::<_, Option<String>>(2)?,
                     r.get::<_, i64>(3)?,
                     r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
                 ))
             })
             .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
@@ -2489,9 +2498,9 @@ impl LicenseDb {
     pub fn get_website_page(
         &self,
         slug: &str,
-    ) -> Result<Option<(String, String, Option<String>, i64, String)>, LicenseError> {
+    ) -> Result<Option<(String, String, Option<String>, i64, String, String)>, LicenseError> {
         match self.conn.query_row(
-            "SELECT title, body_md, parent_slug, ord, updated_at FROM website_pages
+            "SELECT title, body_md, parent_slug, ord, updated_at, meta_description FROM website_pages
              WHERE slug = ?1",
             params![slug],
             |r| {
@@ -2501,6 +2510,7 @@ impl LicenseDb {
                     r.get::<_, Option<String>>(2)?,
                     r.get::<_, i64>(3)?,
                     r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
                 ))
             },
         ) {
