@@ -3061,6 +3061,13 @@ async fn main() -> Result<()> {
         .route("/api/v1/shop/admin/orders/{id}", get(shop::handle_admin_get_order))
         .route("/api/v1/shop/admin/orders/{id}/ship", post(shop::handle_admin_mark_shipped))
         .route("/api/v1/shop/admin/orders/{id}/notes", axum::routing::put(shop::handle_admin_update_order_notes))
+        // Shop settings (JWT) — admin notification recipients, customer email
+        // toggles, support contact, etc.
+        .route(
+            "/api/v1/shop/admin/settings",
+            get(shop::handle_admin_get_settings)
+                .put(shop::handle_admin_put_settings),
+        )
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&cli.listen)

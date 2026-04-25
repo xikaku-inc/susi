@@ -426,23 +426,285 @@ pub async fn handle_stripe_webhook(
             Vec::new()
         };
 
+        // ----- Admin notification (one or more recipients) -----
+        let admin_recipients = effective_admin_recipients(&state);
         if let Some(svc) = &state.email {
-            if !state.shop_notify_addr.is_empty() {
+            if !admin_recipients.is_empty() {
                 let summary = format_order_summary(&event, &line_items, order_id);
                 let subject = format!("[Xikaku] New order — {}", summary.0);
-                let to = state.shop_notify_addr.clone();
-                let svc = svc.clone();
                 let body = summary.1;
-                tokio::spawn(async move {
-                    if let Err(e) = svc.send_order_notification(&to, &subject, &body).await {
-                        log::error!("Failed to send order-notification email: {}", e);
-                    }
-                });
+                for to in admin_recipients {
+                    let svc = svc.clone();
+                    let to = to.clone();
+                    let subject = subject.clone();
+                    let body = body.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = svc.send_order_notification(&to, &subject, &body).await {
+                            log::error!("Failed to send admin notification to {}: {}", to, e);
+                        }
+                    });
+                }
+            }
+        }
+
+        // ----- Customer order confirmation -----
+        if customer_email_enabled(&state) {
+            let customer_email = event
+                .pointer("/data/object/customer_details/email")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if let Some(svc) = state.email.clone() {
+                if !customer_email.is_empty() {
+                    let (subject, text, html) =
+                        build_customer_confirmation(&state, &event, &line_items, order_id);
+                    tokio::spawn(async move {
+                        if let Err(e) = svc.send_html(&customer_email, &subject, &text, &html).await {
+                            log::error!("Failed to send customer confirmation to {}: {}", customer_email, e);
+                        }
+                    });
+                }
             }
         }
     }
 
     Ok(Json(json!({ "received": true })))
+}
+
+// ---------------------------------------------------------------------------
+// Settings — well-known keys and lookup helpers
+// ---------------------------------------------------------------------------
+
+const SETTING_NOTIFY_EMAILS: &str = "notification_emails";
+const SETTING_CUSTOMER_EMAIL_ENABLED: &str = "customer_email_enabled";
+const SETTING_CUSTOMER_THANK_YOU: &str = "customer_thank_you_html";
+const SETTING_SUPPORT_CONTACT: &str = "support_contact";
+
+/// Comma-or-whitespace-split a recipients string, trim, and dedupe.
+fn split_recipients(s: &str) -> Vec<String> {
+    let mut out: Vec<String> = s
+        .split(|c: char| c == ',' || c == ';' || c.is_whitespace())
+        .filter_map(|t| {
+            let t = t.trim();
+            if t.is_empty() || !t.contains('@') { None } else { Some(t.to_string()) }
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Resolve admin recipients: DB-stored setting wins; falls back to the
+/// SUSI_SHOP_NOTIFY_ADDR env var (kept for back-compat with the bootstrap
+/// install that hasn't visited the Settings tab yet).
+fn effective_admin_recipients(state: &AppState) -> Vec<String> {
+    let from_db = {
+        let db = state.db.lock().unwrap();
+        db.get_shop_setting(SETTING_NOTIFY_EMAILS).ok().flatten().unwrap_or_default()
+    };
+    let mut list = split_recipients(&from_db);
+    if list.is_empty() && !state.shop_notify_addr.is_empty() {
+        list = split_recipients(&state.shop_notify_addr);
+    }
+    list
+}
+
+fn customer_email_enabled(state: &AppState) -> bool {
+    let v = {
+        let db = state.db.lock().unwrap();
+        db.get_shop_setting(SETTING_CUSTOMER_EMAIL_ENABLED).ok().flatten()
+    };
+    // Default ON when unset — most shops want customer confirmations.
+    match v.as_deref() {
+        Some("0") | Some("false") | Some("off") => false,
+        _ => true,
+    }
+}
+
+fn get_setting_str(state: &AppState, key: &str) -> String {
+    let db = state.db.lock().unwrap();
+    db.get_shop_setting(key).ok().flatten().unwrap_or_default()
+}
+
+fn build_customer_confirmation(
+    state: &AppState,
+    event: &Value,
+    line_items: &[Value],
+    order_id: Option<i64>,
+) -> (String, String, String) {
+    let obj = event.pointer("/data/object").cloned().unwrap_or(Value::Null);
+    let name = obj.pointer("/customer_details/name").and_then(|v| v.as_str()).unwrap_or("");
+    let amount_total = obj.get("amount_total").and_then(|v| v.as_i64()).unwrap_or(0);
+    let amount_subtotal = obj.get("amount_subtotal").and_then(|v| v.as_i64()).unwrap_or(0);
+    let currency = obj.get("currency").and_then(|v| v.as_str()).unwrap_or("usd");
+    let total_details = obj.get("total_details").cloned().unwrap_or(Value::Null);
+    let amount_shipping = total_details.get("amount_shipping").and_then(|v| v.as_i64()).unwrap_or(0);
+    let amount_tax = total_details.get("amount_tax").and_then(|v| v.as_i64()).unwrap_or(0);
+
+    let order_label = order_id.map(|i| format!("#{}", i)).unwrap_or_else(|| "—".into());
+
+    let support = get_setting_str(state, SETTING_SUPPORT_CONTACT);
+    let extra_html = get_setting_str(state, SETTING_CUSTOMER_THANK_YOU);
+
+    let subject = format!("Thanks for your order — Xikaku {}", order_label);
+
+    // -------- Plain text --------
+    let mut text = String::new();
+    text.push_str(&format!("Hi {},\n\n",
+        if name.is_empty() { "there" } else { name }));
+    text.push_str(&format!("Thank you for your order! Order {} has been received and we're getting it ready.\n\n", order_label));
+
+    text.push_str("Items\n");
+    if line_items.is_empty() {
+        text.push_str("  (line items unavailable)\n");
+    } else {
+        for li in line_items {
+            let qty = li.get("quantity").and_then(|v| v.as_i64()).unwrap_or(1);
+            let desc = li.get("description").and_then(|v| v.as_str()).unwrap_or("(item)");
+            let amt = li.get("amount_total").and_then(|v| v.as_i64()).unwrap_or(0);
+            text.push_str(&format!("  {} × {}  —  {}\n", qty, desc, fmt_money(amt, currency)));
+        }
+    }
+    text.push_str("\n");
+    text.push_str(&format!("Subtotal:  {}\n", fmt_money(amount_subtotal, currency)));
+    text.push_str(&format!("Shipping:  {}\n", fmt_money(amount_shipping, currency)));
+    text.push_str(&format!("Tax:       {}\n", fmt_money(amount_tax, currency)));
+    text.push_str(&format!("Total:     {}\n\n", fmt_money(amount_total, currency)));
+
+    // Ship-to confirmation in the customer email — reassures them the address
+    // we'll ship to is what they entered.
+    if let Some(s) = obj.get("shipping_details").or_else(|| obj.get("customer_details")) {
+        text.push_str("Ship to\n");
+        let ship_name = s.get("name").and_then(|v| v.as_str()).unwrap_or(name);
+        let a = s.get("address").cloned().unwrap_or(Value::Null);
+        text.push_str(&format!("  {}\n", ship_name));
+        for k in &["line1", "line2"] {
+            if let Some(v) = a.get(*k).and_then(|v| v.as_str()) {
+                if !v.is_empty() { text.push_str(&format!("  {}\n", v)); }
+            }
+        }
+        let city = a.get("city").and_then(|v| v.as_str()).unwrap_or("");
+        let state_ = a.get("state").and_then(|v| v.as_str()).unwrap_or("");
+        let postal = a.get("postal_code").and_then(|v| v.as_str()).unwrap_or("");
+        let csz: Vec<&str> = [city, state_, postal].iter().copied().filter(|s| !s.is_empty()).collect();
+        if !csz.is_empty() { text.push_str(&format!("  {}\n", csz.join(", "))); }
+        if let Some(c) = a.get("country").and_then(|v| v.as_str()) {
+            if !c.is_empty() { text.push_str(&format!("  {}\n", c)); }
+        }
+        text.push_str("\n");
+    }
+
+    text.push_str("We'll send another email with your tracking number once your order ships from our Los Angeles office.\n\n");
+    if !support.is_empty() {
+        text.push_str(&format!("Questions? Reach us at {}.\n\n", support));
+    }
+    text.push_str("— The Xikaku team (LP-Research Inc.)\n");
+
+    // -------- HTML --------
+    let mut item_rows = String::new();
+    for li in line_items {
+        let qty = li.get("quantity").and_then(|v| v.as_i64()).unwrap_or(1);
+        let desc = li.get("description").and_then(|v| v.as_str()).unwrap_or("(item)");
+        let amt = li.get("amount_total").and_then(|v| v.as_i64()).unwrap_or(0);
+        let cur = li.get("currency").and_then(|v| v.as_str()).unwrap_or(currency);
+        item_rows.push_str(&format!(
+            "<tr>\
+              <td style=\"padding:8px 0;color:#5c6470;width:50px;\">{} ×</td>\
+              <td style=\"padding:8px 0;\">{}</td>\
+              <td style=\"padding:8px 0;text-align:right;font-variant-numeric:tabular-nums;\">{}</td>\
+            </tr>",
+            qty, html_escape_local(desc), html_escape_local(&fmt_money(amt, cur)),
+        ));
+    }
+
+    let ship_block = obj
+        .get("shipping_details")
+        .or_else(|| obj.get("customer_details"))
+        .map(|s| {
+            let ship_name = s.get("name").and_then(|v| v.as_str()).unwrap_or(name);
+            let a = s.get("address").cloned().unwrap_or(Value::Null);
+            let mut parts: Vec<String> = vec![html_escape_local(ship_name)];
+            for k in &["line1", "line2"] {
+                if let Some(v) = a.get(*k).and_then(|v| v.as_str()) {
+                    if !v.is_empty() { parts.push(html_escape_local(v)); }
+                }
+            }
+            let city = a.get("city").and_then(|v| v.as_str()).unwrap_or("");
+            let state_ = a.get("state").and_then(|v| v.as_str()).unwrap_or("");
+            let postal = a.get("postal_code").and_then(|v| v.as_str()).unwrap_or("");
+            let csz: Vec<&str> = [city, state_, postal].iter().copied().filter(|s| !s.is_empty()).collect();
+            if !csz.is_empty() { parts.push(html_escape_local(&csz.join(", "))); }
+            if let Some(c) = a.get("country").and_then(|v| v.as_str()) {
+                if !c.is_empty() { parts.push(html_escape_local(c)); }
+            }
+            parts.join("<br>")
+        })
+        .unwrap_or_default();
+
+    let support_block = if support.is_empty() { String::new() } else {
+        format!(
+            "<p style=\"color:#5c6470;font-size:13px;margin-top:24px;\">Questions? Reach us at <a href=\"mailto:{s}\" style=\"color:#2d6fdc;\">{s}</a>.</p>",
+            s = html_escape_local(&support),
+        )
+    };
+
+    // Admin-supplied custom thank-you copy. Inserted as raw HTML — admin is
+    // a trusted role so we don't need to sanitize, but we wrap it in a
+    // styled block so it slots into the layout cleanly.
+    let extra_block = if extra_html.trim().is_empty() { String::new() } else {
+        format!(
+            "<div style=\"background:#eef4ff;border-left:3px solid #2d6fdc;padding:12px 16px;margin:18px 0;color:#1a1d23;font-size:13px;line-height:1.55;\">{}</div>",
+            extra_html,
+        )
+    };
+
+    let html = format!(
+        "<!doctype html><html><body style=\"margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f5f6f8;color:#1a1d23;\">\
+         <div style=\"max-width:600px;margin:0 auto;padding:32px 24px;\">\
+           <h1 style=\"font-size:22px;margin:0 0 6px;\">Thank you for your order</h1>\
+           <p style=\"color:#5c6470;margin:0 0 20px;\">Order {order} · {date}</p>\
+           <p>Hi {name_html},</p>\
+           <p>Thanks for your purchase from Xikaku — we've received your order and are getting it ready.</p>\
+           {extra_block}\
+           <h2 style=\"font-size:14px;margin:28px 0 8px;\">Items</h2>\
+           <table style=\"width:100%;border-collapse:collapse;background:#fff;border:1px solid #d8dbe1;border-radius:8px;\">\
+             <tbody style=\"display:table;width:100%;padding:6px 16px;\">{rows}</tbody>\
+           </table>\
+           <table style=\"width:100%;margin-top:14px;font-size:13px;\">\
+             <tr><td style=\"color:#5c6470;\">Subtotal</td><td style=\"text-align:right;\">{subtotal}</td></tr>\
+             <tr><td style=\"color:#5c6470;\">Shipping</td><td style=\"text-align:right;\">{shipping}</td></tr>\
+             <tr><td style=\"color:#5c6470;\">Tax</td><td style=\"text-align:right;\">{tax}</td></tr>\
+             <tr><td style=\"font-weight:600;padding-top:6px;border-top:1px solid #d8dbe1;\">Total</td><td style=\"font-weight:600;text-align:right;padding-top:6px;border-top:1px solid #d8dbe1;\">{total}</td></tr>\
+           </table>\
+           {ship_section}\
+           <div style=\"background:#f5f6f8;border:1px solid #d8dbe1;border-radius:8px;padding:14px 16px;margin-top:24px;font-size:13px;color:#5c6470;\">\
+             We're processing your order now. You'll get a second email with your tracking number once it ships from our Los Angeles office.\
+           </div>\
+           {support_block}\
+           <p style=\"color:#5c6470;font-size:12px;margin-top:32px;\">— The Xikaku team (LP-Research Inc.)</p>\
+         </div></body></html>",
+        order = order_label,
+        date = chrono::Utc::now().format("%Y-%m-%d"),
+        name_html = html_escape_local(if name.is_empty() { "there" } else { name }),
+        extra_block = extra_block,
+        rows = if item_rows.is_empty() { "<tr><td style=\"padding:8px 0;color:#5c6470;\">(item details unavailable)</td></tr>".into() } else { item_rows },
+        subtotal = html_escape_local(&fmt_money(amount_subtotal, currency)),
+        shipping = html_escape_local(&fmt_money(amount_shipping, currency)),
+        tax = html_escape_local(&fmt_money(amount_tax, currency)),
+        total = html_escape_local(&fmt_money(amount_total, currency)),
+        ship_section = if ship_block.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "<h2 style=\"font-size:14px;margin:28px 0 8px;\">Ship to</h2>\
+                 <div style=\"background:#fff;border:1px solid #d8dbe1;border-radius:8px;padding:14px 16px;\">{}</div>",
+                ship_block,
+            )
+        },
+        support_block = support_block,
+    );
+
+    (subject, text, html)
 }
 
 /// Pull line items from the Stripe API (the webhook payload doesn't include
@@ -1093,6 +1355,89 @@ fn html_escape_local(s: &str) -> String {
         }
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// Settings admin (JWT)
+// ---------------------------------------------------------------------------
+
+const KNOWN_SETTING_KEYS: &[&str] = &[
+    SETTING_NOTIFY_EMAILS,
+    SETTING_CUSTOMER_EMAIL_ENABLED,
+    SETTING_CUSTOMER_THANK_YOU,
+    SETTING_SUPPORT_CONTACT,
+];
+
+pub async fn handle_admin_get_settings(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
+    let p = validate_principal(&headers, &state)?;
+    require_password_changed(&state, &p)?;
+    require_admin(&state, &p)?;
+    let pairs = {
+        let db = state.db.lock().unwrap();
+        db.list_shop_settings().map_err(db_err)?
+    };
+    let mut out = serde_json::Map::new();
+    for k in KNOWN_SETTING_KEYS {
+        out.insert((*k).to_string(), Value::String(String::new()));
+    }
+    for (k, v) in pairs {
+        out.insert(k, Value::String(v));
+    }
+    // Also surface the env-var fallback so the UI can hint at the
+    // bootstrap default when notification_emails is unset.
+    out.insert(
+        "notification_emails_fallback".into(),
+        Value::String(state.shop_notify_addr.clone()),
+    );
+    Ok(Json(Value::Object(out)))
+}
+
+#[derive(Deserialize)]
+pub struct UpdateSettingsRequest {
+    #[serde(flatten)]
+    pub fields: std::collections::HashMap<String, String>,
+}
+
+pub async fn handle_admin_put_settings(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<UpdateSettingsRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
+    let p = validate_principal(&headers, &state)?;
+    require_password_changed(&state, &p)?;
+    require_admin(&state, &p)?;
+
+    // Normalize known fields before storing.
+    for (k, v) in &req.fields {
+        if !KNOWN_SETTING_KEYS.contains(&k.as_str()) {
+            return Err(error_response(StatusCode::BAD_REQUEST, &format!("Unknown setting: {}", k)));
+        }
+        let normalized = match k.as_str() {
+            SETTING_NOTIFY_EMAILS => {
+                // Validate each address contains '@' but otherwise leave intact;
+                // join with comma+space for canonical storage.
+                let parts = split_recipients(v);
+                if !v.trim().is_empty() && parts.is_empty() {
+                    return Err(error_response(StatusCode::BAD_REQUEST, "No valid email addresses found"));
+                }
+                parts.join(", ")
+            }
+            SETTING_CUSTOMER_EMAIL_ENABLED => {
+                match v.as_str() {
+                    "1" | "0" | "true" | "false" | "" => v.clone(),
+                    _ => return Err(error_response(StatusCode::BAD_REQUEST, "customer_email_enabled must be 0 or 1")),
+                }
+            }
+            SETTING_SUPPORT_CONTACT => v.trim().to_string(),
+            _ => v.clone(),
+        };
+        let db = state.db.lock().unwrap();
+        db.set_shop_setting(k, &normalized).map_err(db_err)?;
+    }
+    Ok(Json(json!({ "status": "OK" })))
 }
 
 // ---------------------------------------------------------------------------
