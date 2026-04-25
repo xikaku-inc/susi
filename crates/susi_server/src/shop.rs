@@ -313,12 +313,17 @@ pub async fn handle_create_checkout_session(
         }
     }
 
-    // Enable shipping address collection only if we have rates.
-    if !applicable.is_empty() {
-        let countries = allowed_countries_for_checkout(&applicable);
-        for (i, c) in countries.iter().enumerate() {
-            push_form(&mut form, &["shipping_address_collection", "allowed_countries", &i.to_string()], c.clone());
-        }
+    // Always enable shipping address collection so the customer can enter
+    // a delivery address that's distinct from billing. When the merchant
+    // has configured rates, use their regions; otherwise fall back to a
+    // common-countries list so checkout still works during initial setup.
+    let countries = if applicable.is_empty() {
+        COMMON_SHIPPING_COUNTRIES.iter().map(|c| (*c).to_string()).collect()
+    } else {
+        allowed_countries_for_checkout(&applicable)
+    };
+    for (i, c) in countries.iter().enumerate() {
+        push_form(&mut form, &["shipping_address_collection", "allowed_countries", &i.to_string()], c.clone());
     }
 
     // Call Stripe.
