@@ -1,7 +1,22 @@
 use anyhow::{Context, Result};
-use lettre::message::{header::ContentType, Mailbox};
+use lettre::message::{header::ContentType, Attachment, Mailbox, MultiPart, SinglePart};
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
+
+/// One inline image embedded in the HTML body via `cid:<id>`. The `id` must
+/// match the `cid:` reference in the HTML (and contain no angle brackets).
+pub struct InlineImage {
+    pub content_id: String,
+    pub mime_type: String,
+    pub bytes: Vec<u8>,
+}
+
+/// An attachment shown in the email's attachments list (e.g. invoice PDF).
+pub struct EmailAttachment {
+    pub file_name: String,
+    pub mime_type: String,
+    pub bytes: Vec<u8>,
+}
 
 #[derive(Clone)]
 pub struct EmailConfig {
@@ -115,29 +130,6 @@ impl EmailService {
         Ok(())
     }
 
-    pub async fn send_order_notification(
-        &self,
-        to_addr: &str,
-        subject: &str,
-        text: &str,
-    ) -> Result<()> {
-        let to: Mailbox = to_addr
-            .parse()
-            .with_context(|| format!("Invalid recipient address: {}", to_addr))?;
-        let email = Message::builder()
-            .from(self.cfg.from.clone())
-            .to(to)
-            .subject(subject.to_string())
-            .singlepart(
-                lettre::message::SinglePart::builder()
-                    .header(ContentType::TEXT_PLAIN)
-                    .body(text.to_string()),
-            )
-            .context("Failed to build order-notification email")?;
-        self.transport.send(email).await.context("SMTP send failed")?;
-        Ok(())
-    }
-
     /// Send a multipart/alternative email with both plain-text and HTML
     /// bodies. Use for customer-facing transactional mails (shipped
     /// notifications, etc.) where HTML formatting is expected.
@@ -148,27 +140,81 @@ impl EmailService {
         text: &str,
         html: &str,
     ) -> Result<()> {
+        self.send_html_rich(to_addr, subject, text, html, &[], &[]).await
+    }
+
+    /// Send an HTML email with optional inline images (referenced from the
+    /// HTML via `cid:<content_id>`) and optional file attachments.
+    ///
+    /// MIME structure follows RFC 2046:
+    /// ```text
+    /// multipart/mixed                 (only if attachments)
+    ///   multipart/alternative
+    ///     text/plain
+    ///     multipart/related           (only if inline_images)
+    ///       text/html
+    ///       inline image…
+    ///   attachment…
+    /// ```
+    pub async fn send_html_rich(
+        &self,
+        to_addr: &str,
+        subject: &str,
+        text: &str,
+        html: &str,
+        inline_images: &[InlineImage],
+        attachments: &[EmailAttachment],
+    ) -> Result<()> {
         let to: Mailbox = to_addr
             .parse()
             .with_context(|| format!("Invalid recipient address: {}", to_addr))?;
-        let email = Message::builder()
+
+        // ---- Body assembly: text + html (+ inline images) ----
+        let text_part = SinglePart::builder()
+            .header(ContentType::TEXT_PLAIN)
+            .body(text.to_string());
+        let html_part = SinglePart::builder()
+            .header(ContentType::TEXT_HTML)
+            .body(html.to_string());
+
+        let body_part: MultiPart = if inline_images.is_empty() {
+            MultiPart::alternative()
+                .singlepart(text_part)
+                .singlepart(html_part)
+        } else {
+            let mut related = MultiPart::related().singlepart(html_part);
+            for img in inline_images {
+                let ct = ContentType::parse(&img.mime_type)
+                    .with_context(|| format!("Invalid mime type: {}", img.mime_type))?;
+                related = related.singlepart(
+                    Attachment::new_inline(img.content_id.clone()).body(img.bytes.clone(), ct),
+                );
+            }
+            MultiPart::alternative()
+                .singlepart(text_part)
+                .multipart(related)
+        };
+
+        let builder = Message::builder()
             .from(self.cfg.from.clone())
             .to(to)
-            .subject(subject.to_string())
-            .multipart(
-                lettre::message::MultiPart::alternative()
-                    .singlepart(
-                        lettre::message::SinglePart::builder()
-                            .header(ContentType::TEXT_PLAIN)
-                            .body(text.to_string()),
-                    )
-                    .singlepart(
-                        lettre::message::SinglePart::builder()
-                            .header(ContentType::TEXT_HTML)
-                            .body(html.to_string()),
-                    ),
-            )
-            .context("Failed to build HTML email")?;
+            .subject(subject.to_string());
+
+        let email = if attachments.is_empty() {
+            builder.multipart(body_part)
+        } else {
+            // Wrap everything in multipart/mixed and append attachments.
+            let mut mixed = MultiPart::mixed().multipart(body_part);
+            for a in attachments {
+                let ct = ContentType::parse(&a.mime_type)
+                    .with_context(|| format!("Invalid mime type: {}", a.mime_type))?;
+                mixed = mixed.singlepart(
+                    Attachment::new(a.file_name.clone()).body(a.bytes.clone(), ct),
+                );
+            }
+            builder.multipart(mixed)
+        }.context("Failed to build email")?;
+
         self.transport.send(email).await.context("SMTP send failed")?;
         Ok(())
     }

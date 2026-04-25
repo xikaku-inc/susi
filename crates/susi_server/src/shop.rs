@@ -23,7 +23,22 @@ use serde_json::{json, Value};
 use sha2::Sha256;
 use susi_core::error::LicenseError;
 
+use crate::email::{EmailAttachment, InlineImage};
 use crate::{error_response, require_admin, require_password_changed, validate_principal, AppState, ErrorResponse};
+
+/// Brand logo embedded in the binary so it ships with every customer email
+/// without depending on remote-image fetches (most clients block those).
+/// Wide horizontal logo; constrain via CSS height in the HTML.
+const LOGO_PNG: &[u8] = include_bytes!("assets/xikaku-logo.png");
+const LOGO_CID: &str = "xikaku-logo";
+
+fn logo_inline_image() -> InlineImage {
+    InlineImage {
+        content_id: LOGO_CID.into(),
+        mime_type: "image/png".into(),
+        bytes: LOGO_PNG.to_vec(),
+    }
+}
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -253,7 +268,21 @@ pub async fn handle_create_checkout_session(
     form.push(("cancel_url".into(), cancel));
 
     form.push(("automatic_tax[enabled]".into(), "true".into()));
-    form.push(("billing_address_collection".into(), "auto".into()));
+    // Always collect a billing address so receipts / invoices have one,
+    // and so we can show it separately from the shipping address.
+    form.push(("billing_address_collection".into(), "required".into()));
+    // Tell Stripe to generate a hosted invoice + PDF for every paid session.
+    // The webhook event then references the invoice id, which we fetch and
+    // attach to the customer email.
+    form.push(("invoice_creation[enabled]".into(), "true".into()));
+    form.push((
+        "invoice_creation[invoice_data][description]".into(),
+        "Thanks for your order from Xikaku.".into(),
+    ));
+    form.push((
+        "invoice_creation[invoice_data][footer]".into(),
+        "LP-Research Inc. — Tokyo, Japan. Questions? support@lp-research.com".into(),
+    ));
 
     for (i, (sku, title, price_cents, currency, tax_code, qty)) in resolved.iter().enumerate() {
         let idx = i.to_string();
@@ -415,15 +444,49 @@ pub async fn handle_stripe_webhook(
         // from the admin UI without a round-trip to Stripe for every list.
         let order_id = persist_order_from_event(&state, &event).await;
 
-        // Fetch line items via Stripe API (not included in webhook payload).
+        // Fetch line items + invoice PDF in parallel — both via Stripe API,
+        // both best-effort (we still send emails even if one is unavailable).
         let session_id = event
             .pointer("/data/object/id")
             .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let line_items = if !session_id.is_empty() {
-            fetch_line_items(&state, session_id).await
+            .unwrap_or("")
+            .to_string();
+        let invoice_id = event
+            .pointer("/data/object/invoice")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let (line_items, pdf_bytes, invoice_number) = {
+            let li_fut = async {
+                if session_id.is_empty() { Vec::new() } else { fetch_line_items(&state, &session_id).await }
+            };
+            let pdf_fut = async {
+                if invoice_id.is_empty() { (Vec::new(), String::new()) } else {
+                    let inv = fetch_invoice(&state, &invoice_id).await;
+                    let pdf_url = inv.get("invoice_pdf").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let number = inv.get("number").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let bytes = if pdf_url.is_empty() { Vec::new() } else { download_pdf(&state, &pdf_url).await };
+                    (bytes, number)
+                }
+            };
+            let (li, (pdf, num)) = tokio::join!(li_fut, pdf_fut);
+            (li, pdf, num)
+        };
+
+        let pdf_attachment: Option<EmailAttachment> = if pdf_bytes.is_empty() {
+            None
         } else {
-            Vec::new()
+            let fname = if invoice_number.is_empty() {
+                format!("invoice-xikaku-{}.pdf", order_id.map(|i| i.to_string()).unwrap_or_else(|| "order".into()))
+            } else {
+                format!("invoice-{}.pdf", invoice_number)
+            };
+            Some(EmailAttachment {
+                file_name: fname,
+                mime_type: "application/pdf".into(),
+                bytes: pdf_bytes,
+            })
         };
 
         // ----- Admin notification (one or more recipients) -----
@@ -438,8 +501,16 @@ pub async fn handle_stripe_webhook(
                     let to = to.clone();
                     let subject = subject.clone();
                     let body = body.clone();
+                    let attach = pdf_attachment.as_ref().map(|a| EmailAttachment {
+                        file_name: a.file_name.clone(),
+                        mime_type: a.mime_type.clone(),
+                        bytes: a.bytes.clone(),
+                    });
                     tokio::spawn(async move {
-                        if let Err(e) = svc.send_order_notification(&to, &subject, &body).await {
+                        let attachments: Vec<EmailAttachment> = attach.into_iter().collect();
+                        // Plain-text body served as both alternatives; admins see attachments.
+                        let res = svc.send_html_rich(&to, &subject, &body, &body, &[], &attachments).await;
+                        if let Err(e) = res {
                             log::error!("Failed to send admin notification to {}: {}", to, e);
                         }
                     });
@@ -458,8 +529,11 @@ pub async fn handle_stripe_webhook(
                 if !customer_email.is_empty() {
                     let (subject, text, html) =
                         build_customer_confirmation(&state, &event, &line_items, order_id);
+                    let inline = vec![logo_inline_image()];
+                    let attachments: Vec<EmailAttachment> = pdf_attachment.into_iter().collect();
                     tokio::spawn(async move {
-                        if let Err(e) = svc.send_html(&customer_email, &subject, &text, &html).await {
+                        let res = svc.send_html_rich(&customer_email, &subject, &text, &html, &inline, &attachments).await;
+                        if let Err(e) = res {
                             log::error!("Failed to send customer confirmation to {}: {}", customer_email, e);
                         }
                     });
@@ -573,27 +647,25 @@ fn build_customer_confirmation(
 
     // Ship-to confirmation in the customer email — reassures them the address
     // we'll ship to is what they entered.
-    if let Some(s) = obj.get("shipping_details").or_else(|| obj.get("customer_details")) {
+    let ship_text = address_block_text(obj.get("shipping_details"), name);
+    let bill_text = address_block_text(obj.get("customer_details"), name);
+    if !ship_text.is_empty() && !bill_text.is_empty() && ship_text != bill_text {
         text.push_str("Ship to\n");
-        let ship_name = s.get("name").and_then(|v| v.as_str()).unwrap_or(name);
-        let a = s.get("address").cloned().unwrap_or(Value::Null);
-        text.push_str(&format!("  {}\n", ship_name));
-        for k in &["line1", "line2"] {
-            if let Some(v) = a.get(*k).and_then(|v| v.as_str()) {
-                if !v.is_empty() { text.push_str(&format!("  {}\n", v)); }
-            }
-        }
-        let city = a.get("city").and_then(|v| v.as_str()).unwrap_or("");
-        let state_ = a.get("state").and_then(|v| v.as_str()).unwrap_or("");
-        let postal = a.get("postal_code").and_then(|v| v.as_str()).unwrap_or("");
-        let csz: Vec<&str> = [city, state_, postal].iter().copied().filter(|s| !s.is_empty()).collect();
-        if !csz.is_empty() { text.push_str(&format!("  {}\n", csz.join(", "))); }
-        if let Some(c) = a.get("country").and_then(|v| v.as_str()) {
-            if !c.is_empty() { text.push_str(&format!("  {}\n", c)); }
-        }
+        text.push_str(&indent2(&ship_text));
+        text.push_str("\nBill to\n");
+        text.push_str(&indent2(&bill_text));
+        text.push_str("\n");
+    } else if !ship_text.is_empty() {
+        text.push_str("Ship to & bill to\n");
+        text.push_str(&indent2(&ship_text));
+        text.push_str("\n");
+    } else if !bill_text.is_empty() {
+        text.push_str("Bill to\n");
+        text.push_str(&indent2(&bill_text));
         text.push_str("\n");
     }
 
+    text.push_str("A PDF invoice is attached for your records.\n\n");
     text.push_str("We'll send another email with your tracking number once your order ships from our Los Angeles office.\n\n");
     if !support.is_empty() {
         text.push_str(&format!("Questions? Reach us at {}.\n\n", support));
@@ -617,29 +689,11 @@ fn build_customer_confirmation(
         ));
     }
 
-    let ship_block = obj
-        .get("shipping_details")
-        .or_else(|| obj.get("customer_details"))
-        .map(|s| {
-            let ship_name = s.get("name").and_then(|v| v.as_str()).unwrap_or(name);
-            let a = s.get("address").cloned().unwrap_or(Value::Null);
-            let mut parts: Vec<String> = vec![html_escape_local(ship_name)];
-            for k in &["line1", "line2"] {
-                if let Some(v) = a.get(*k).and_then(|v| v.as_str()) {
-                    if !v.is_empty() { parts.push(html_escape_local(v)); }
-                }
-            }
-            let city = a.get("city").and_then(|v| v.as_str()).unwrap_or("");
-            let state_ = a.get("state").and_then(|v| v.as_str()).unwrap_or("");
-            let postal = a.get("postal_code").and_then(|v| v.as_str()).unwrap_or("");
-            let csz: Vec<&str> = [city, state_, postal].iter().copied().filter(|s| !s.is_empty()).collect();
-            if !csz.is_empty() { parts.push(html_escape_local(&csz.join(", "))); }
-            if let Some(c) = a.get("country").and_then(|v| v.as_str()) {
-                if !c.is_empty() { parts.push(html_escape_local(c)); }
-            }
-            parts.join("<br>")
-        })
-        .unwrap_or_default();
+    // Build separate ship-to and bill-to blocks. Show both when they differ;
+    // collapse to a single "Ship to & bill to" block when they match.
+    let ship_html = address_block_html(obj.get("shipping_details"), name);
+    let bill_html = address_block_html(obj.get("customer_details"), name);
+    let addresses_match = ship_html == bill_html;
 
     let support_block = if support.is_empty() { String::new() } else {
         format!(
@@ -658,9 +712,46 @@ fn build_customer_confirmation(
         )
     };
 
+    // Address sections — single block when shipping == billing, split when they differ.
+    let address_section = if ship_html.is_empty() && bill_html.is_empty() {
+        String::new()
+    } else if addresses_match || bill_html.is_empty() {
+        format!(
+            "<h2 style=\"font-size:14px;margin:28px 0 8px;\">Ship to &amp; bill to</h2>\
+             <div style=\"background:#fff;border:1px solid #d8dbe1;border-radius:8px;padding:14px 16px;\">{}</div>",
+            ship_html,
+        )
+    } else if ship_html.is_empty() {
+        format!(
+            "<h2 style=\"font-size:14px;margin:28px 0 8px;\">Bill to</h2>\
+             <div style=\"background:#fff;border:1px solid #d8dbe1;border-radius:8px;padding:14px 16px;\">{}</div>",
+            bill_html,
+        )
+    } else {
+        format!(
+            "<table style=\"width:100%;border-collapse:separate;border-spacing:12px 0;margin-top:20px;\">\
+               <tr>\
+                 <td style=\"width:50%;vertical-align:top;\">\
+                   <h2 style=\"font-size:14px;margin:0 0 8px;\">Ship to</h2>\
+                   <div style=\"background:#fff;border:1px solid #d8dbe1;border-radius:8px;padding:14px 16px;\">{ship}</div>\
+                 </td>\
+                 <td style=\"width:50%;vertical-align:top;\">\
+                   <h2 style=\"font-size:14px;margin:0 0 8px;\">Bill to</h2>\
+                   <div style=\"background:#fff;border:1px solid #d8dbe1;border-radius:8px;padding:14px 16px;\">{bill}</div>\
+                 </td>\
+               </tr>\
+             </table>",
+            ship = ship_html,
+            bill = bill_html,
+        )
+    };
+
     let html = format!(
         "<!doctype html><html><body style=\"margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f5f6f8;color:#1a1d23;\">\
          <div style=\"max-width:600px;margin:0 auto;padding:32px 24px;\">\
+           <div style=\"text-align:left;margin-bottom:24px;\">\
+             <img src=\"cid:{logo_cid}\" alt=\"Xikaku\" style=\"height:36px;display:inline-block;\">\
+           </div>\
            <h1 style=\"font-size:22px;margin:0 0 6px;\">Thank you for your order</h1>\
            <p style=\"color:#5c6470;margin:0 0 20px;\">Order {order} · {date}</p>\
            <p>Hi {name_html},</p>\
@@ -676,13 +767,15 @@ fn build_customer_confirmation(
              <tr><td style=\"color:#5c6470;\">Tax</td><td style=\"text-align:right;\">{tax}</td></tr>\
              <tr><td style=\"font-weight:600;padding-top:6px;border-top:1px solid #d8dbe1;\">Total</td><td style=\"font-weight:600;text-align:right;padding-top:6px;border-top:1px solid #d8dbe1;\">{total}</td></tr>\
            </table>\
-           {ship_section}\
+           {address_section}\
            <div style=\"background:#f5f6f8;border:1px solid #d8dbe1;border-radius:8px;padding:14px 16px;margin-top:24px;font-size:13px;color:#5c6470;\">\
              We're processing your order now. You'll get a second email with your tracking number once it ships from our Los Angeles office.\
            </div>\
+           <p style=\"color:#5c6470;font-size:12px;margin-top:18px;\">A PDF invoice is attached to this email for your records.</p>\
            {support_block}\
            <p style=\"color:#5c6470;font-size:12px;margin-top:32px;\">— The Xikaku team (LP-Research Inc.)</p>\
          </div></body></html>",
+        logo_cid = LOGO_CID,
         order = order_label,
         date = chrono::Utc::now().format("%Y-%m-%d"),
         name_html = html_escape_local(if name.is_empty() { "there" } else { name }),
@@ -692,19 +785,104 @@ fn build_customer_confirmation(
         shipping = html_escape_local(&fmt_money(amount_shipping, currency)),
         tax = html_escape_local(&fmt_money(amount_tax, currency)),
         total = html_escape_local(&fmt_money(amount_total, currency)),
-        ship_section = if ship_block.is_empty() {
-            String::new()
-        } else {
-            format!(
-                "<h2 style=\"font-size:14px;margin:28px 0 8px;\">Ship to</h2>\
-                 <div style=\"background:#fff;border:1px solid #d8dbe1;border-radius:8px;padding:14px 16px;\">{}</div>",
-                ship_block,
-            )
-        },
+        address_section = address_section,
         support_block = support_block,
     );
 
     (subject, text, html)
+}
+
+/// Plain-text equivalent of `address_block_html`, joining lines with `\n`.
+fn address_block_text(details: Option<&Value>, fallback_name: &str) -> String {
+    let Some(s) = details else { return String::new() };
+    let a = s.get("address").cloned().unwrap_or(Value::Null);
+    if a.is_null() { return String::new() }
+    let line1 = a.get("line1").and_then(|v| v.as_str()).unwrap_or("");
+    if line1.is_empty() { return String::new() }
+    let ship_name = s.get("name").and_then(|v| v.as_str()).unwrap_or(fallback_name);
+    let mut parts: Vec<String> = Vec::new();
+    if !ship_name.is_empty() { parts.push(ship_name.to_string()); }
+    parts.push(line1.to_string());
+    if let Some(v) = a.get("line2").and_then(|v| v.as_str()) {
+        if !v.is_empty() { parts.push(v.to_string()); }
+    }
+    let city = a.get("city").and_then(|v| v.as_str()).unwrap_or("");
+    let state_ = a.get("state").and_then(|v| v.as_str()).unwrap_or("");
+    let postal = a.get("postal_code").and_then(|v| v.as_str()).unwrap_or("");
+    let csz: Vec<&str> = [city, state_, postal].iter().copied().filter(|s| !s.is_empty()).collect();
+    if !csz.is_empty() { parts.push(csz.join(", ")); }
+    if let Some(c) = a.get("country").and_then(|v| v.as_str()) {
+        if !c.is_empty() { parts.push(c.to_string()); }
+    }
+    parts.join("\n")
+}
+
+fn indent2(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 16);
+    for line in s.lines() {
+        out.push_str("  ");
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// Build an HTML address block from a Stripe `customer_details` /
+/// `shipping_details` object. Returns "" when the address is empty / absent.
+fn address_block_html(details: Option<&Value>, fallback_name: &str) -> String {
+    let Some(s) = details else { return String::new() };
+    let a = s.get("address").cloned().unwrap_or(Value::Null);
+    if a.is_null() { return String::new() }
+    let line1 = a.get("line1").and_then(|v| v.as_str()).unwrap_or("");
+    if line1.is_empty() { return String::new() } // Skip when there's no real street address.
+    let ship_name = s.get("name").and_then(|v| v.as_str()).unwrap_or(fallback_name);
+    let mut parts: Vec<String> = Vec::new();
+    if !ship_name.is_empty() { parts.push(html_escape_local(ship_name)); }
+    parts.push(html_escape_local(line1));
+    if let Some(v) = a.get("line2").and_then(|v| v.as_str()) {
+        if !v.is_empty() { parts.push(html_escape_local(v)); }
+    }
+    let city = a.get("city").and_then(|v| v.as_str()).unwrap_or("");
+    let state_ = a.get("state").and_then(|v| v.as_str()).unwrap_or("");
+    let postal = a.get("postal_code").and_then(|v| v.as_str()).unwrap_or("");
+    let csz: Vec<&str> = [city, state_, postal].iter().copied().filter(|s| !s.is_empty()).collect();
+    if !csz.is_empty() { parts.push(html_escape_local(&csz.join(", "))); }
+    if let Some(c) = a.get("country").and_then(|v| v.as_str()) {
+        if !c.is_empty() { parts.push(html_escape_local(c)); }
+    }
+    parts.join("<br>")
+}
+
+/// Fetch a Stripe Invoice object so we can extract its hosted PDF URL.
+/// Returns Value::Null on any error so callers can degrade gracefully.
+async fn fetch_invoice(state: &AppState, invoice_id: &str) -> Value {
+    if state.stripe_secret_key.is_empty() || invoice_id.is_empty() {
+        return Value::Null;
+    }
+    let url = format!("{}/invoices/{}", STRIPE_API_BASE, invoice_id);
+    match state.http.get(url).basic_auth(&state.stripe_secret_key, Some("")).send().await {
+        Ok(resp) if resp.status().is_success() => match resp.text().await {
+            Ok(b) => serde_json::from_str(&b).unwrap_or(Value::Null),
+            Err(e) => { log::warn!("invoice fetch read body: {}", e); Value::Null }
+        },
+        Ok(resp) => { log::warn!("invoice fetch HTTP {}", resp.status()); Value::Null }
+        Err(e) => { log::warn!("invoice fetch: {}", e); Value::Null }
+    }
+}
+
+/// Download the hosted invoice PDF bytes. The URL is obtained from the
+/// Invoice object's `invoice_pdf` field; it requires no auth (the URL is
+/// signed). Empty Vec on any error.
+async fn download_pdf(state: &AppState, pdf_url: &str) -> Vec<u8> {
+    if pdf_url.is_empty() { return Vec::new(); }
+    match state.http.get(pdf_url).send().await {
+        Ok(resp) if resp.status().is_success() => match resp.bytes().await {
+            Ok(b) => b.to_vec(),
+            Err(e) => { log::warn!("pdf download read body: {}", e); Vec::new() }
+        },
+        Ok(resp) => { log::warn!("pdf download HTTP {}", resp.status()); Vec::new() }
+        Err(e) => { log::warn!("pdf download: {}", e); Vec::new() }
+    }
 }
 
 /// Pull line items from the Stripe API (the webhook payload doesn't include
@@ -792,29 +970,26 @@ fn format_order_summary(event: &Value, line_items: &[Value], order_id: Option<i6
         out.push_str(&format!("Phone:     {}\n", phone));
     }
 
-    // Shipping address — most important for the operator. Use shipping_details
-    // when present, else fall back to billing.
-    out.push_str("\n--- Ship to ---\n");
-    let addr_src = obj.get("shipping_details").or_else(|| obj.get("customer_details"));
-    if let Some(s) = addr_src {
-        let ship_name = s.get("name").and_then(|v| v.as_str()).unwrap_or(name);
-        let a = s.get("address").cloned().unwrap_or(Value::Null);
-        out.push_str(&format!("{}\n", ship_name));
-        for k in &["line1", "line2"] {
-            if let Some(v) = a.get(*k).and_then(|v| v.as_str()) {
-                if !v.is_empty() { out.push_str(&format!("{}\n", v)); }
-            }
-        }
-        let city = a.get("city").and_then(|v| v.as_str()).unwrap_or("");
-        let state_ = a.get("state").and_then(|v| v.as_str()).unwrap_or("");
-        let postal = a.get("postal_code").and_then(|v| v.as_str()).unwrap_or("");
-        let csz: Vec<&str> = [city, state_, postal].iter().copied().filter(|s| !s.is_empty()).collect();
-        if !csz.is_empty() { out.push_str(&format!("{}\n", csz.join(", "))); }
-        if let Some(c) = a.get("country").and_then(|v| v.as_str()) {
-            if !c.is_empty() { out.push_str(&format!("{}\n", c)); }
-        }
+    // Address blocks — split when shipping and billing differ so the
+    // operator can spot a mismatched billing address before shipping.
+    let ship_text = address_block_text(obj.get("shipping_details"), name);
+    let bill_text = address_block_text(obj.get("customer_details"), name);
+    if !ship_text.is_empty() && !bill_text.is_empty() && ship_text != bill_text {
+        out.push_str("\n--- Ship to ---\n");
+        out.push_str(&ship_text);
+        out.push_str("\n\n--- Bill to ---\n");
+        out.push_str(&bill_text);
+        out.push('\n');
+    } else if !ship_text.is_empty() {
+        out.push_str("\n--- Ship to ---\n");
+        out.push_str(&ship_text);
+        out.push('\n');
+    } else if !bill_text.is_empty() {
+        out.push_str("\n--- Bill to ---\n");
+        out.push_str(&bill_text);
+        out.push('\n');
     } else {
-        out.push_str("(no shipping address)\n");
+        out.push_str("\n(no address on session)\n");
     }
 
     out.push_str("\n--- Items ---\n");
