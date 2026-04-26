@@ -24,6 +24,7 @@ use sha2::Sha256;
 use susi_core::error::LicenseError;
 
 use crate::email::{EmailAttachment, InlineImage};
+use crate::invoice_pdf;
 use crate::{error_response, require_admin, require_password_changed, validate_principal, AppState, ErrorResponse};
 
 /// Brand logo embedded in the binary so it ships with every customer email
@@ -462,21 +463,33 @@ pub async fn handle_stripe_webhook(
             .unwrap_or("")
             .to_string();
 
-        let (line_items, pdf_bytes, invoice_number) = {
+        let (line_items, invoice_obj, invoice_number) = {
             let li_fut = async {
                 if session_id.is_empty() { Vec::new() } else { fetch_line_items(&state, &session_id).await }
             };
-            let pdf_fut = async {
-                if invoice_id.is_empty() { (Vec::new(), String::new()) } else {
+            let inv_fut = async {
+                if invoice_id.is_empty() {
+                    (Value::Null, String::new())
+                } else {
+                    // We need the Stripe invoice for its number + creation
+                    // timestamp, but we render the PDF ourselves below — see
+                    // invoice_pdf::generate for why.
                     let inv = fetch_invoice(&state, &invoice_id).await;
-                    let pdf_url = inv.get("invoice_pdf").and_then(|v| v.as_str()).unwrap_or("").to_string();
                     let number = inv.get("number").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    let bytes = if pdf_url.is_empty() { Vec::new() } else { download_pdf(&state, &pdf_url).await };
-                    (bytes, number)
+                    (inv, number)
                 }
             };
-            let (li, (pdf, num)) = tokio::join!(li_fut, pdf_fut);
-            (li, pdf, num)
+            let (li, (inv, num)) = tokio::join!(li_fut, inv_fut);
+            (li, inv, num)
+        };
+
+        // Render our own paid-invoice PDF. Stripe's PDF for Checkout-paid
+        // invoices is rendered once at finalization (status=open) and never
+        // refreshed, so it always carries a "Pay online" CTA — useless for
+        // a post-payment receipt.
+        let pdf_bytes = match invoice_pdf::generate(&event, &line_items, &invoice_obj, order_id) {
+            Ok(b) => b,
+            Err(e) => { log::error!("invoice PDF generation failed: {}", e); Vec::new() }
         };
 
         let pdf_attachment: Option<EmailAttachment> = if pdf_bytes.is_empty() {
@@ -513,8 +526,13 @@ pub async fn handle_stripe_webhook(
                     });
                     tokio::spawn(async move {
                         let attachments: Vec<EmailAttachment> = attach.into_iter().collect();
-                        // Plain-text body served as both alternatives; admins see attachments.
-                        let res = svc.send_html_rich(&to, &subject, &body, &body, &[], &attachments).await;
+                        // Wrap the plain text in <pre> so the HTML alternative
+                        // preserves newlines and the column alignment.
+                        let html = format!(
+                            "<pre style=\"font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;white-space:pre-wrap;margin:0;\">{}</pre>",
+                            html_escape_local(&body),
+                        );
+                        let res = svc.send_html_rich(&to, &subject, &body, &html, &[], &attachments, Some("Xikaku Shop")).await;
                         if let Err(e) = res {
                             log::error!("Failed to send admin notification to {}: {}", to, e);
                         }
@@ -537,7 +555,7 @@ pub async fn handle_stripe_webhook(
                     let inline = vec![logo_inline_image()];
                     let attachments: Vec<EmailAttachment> = pdf_attachment.into_iter().collect();
                     tokio::spawn(async move {
-                        let res = svc.send_html_rich(&customer_email, &subject, &text, &html, &inline, &attachments).await;
+                        let res = svc.send_html_rich(&customer_email, &subject, &text, &html, &inline, &attachments, Some("Xikaku Shop")).await;
                         if let Err(e) = res {
                             log::error!("Failed to send customer confirmation to {}: {}", customer_email, e);
                         }
@@ -675,7 +693,7 @@ fn build_customer_confirmation(
     if !support.is_empty() {
         text.push_str(&format!("Questions? Reach us at {}.\n\n", support));
     }
-    text.push_str("— The Xikaku team (LP-Research Inc.)\n");
+    text.push_str("— The Xikaku team\n");
 
     // -------- HTML --------
     let mut item_rows = String::new();
@@ -723,13 +741,13 @@ fn build_customer_confirmation(
     } else if addresses_match || bill_html.is_empty() {
         format!(
             "<h2 style=\"font-size:14px;margin:28px 0 8px;\">Ship to &amp; bill to</h2>\
-             <div style=\"background:#fff;border:1px solid #d8dbe1;border-radius:8px;padding:14px 16px;\">{}</div>",
+             <div style=\"font-size:13px;line-height:1.55;\">{}</div>",
             ship_html,
         )
     } else if ship_html.is_empty() {
         format!(
             "<h2 style=\"font-size:14px;margin:28px 0 8px;\">Bill to</h2>\
-             <div style=\"background:#fff;border:1px solid #d8dbe1;border-radius:8px;padding:14px 16px;\">{}</div>",
+             <div style=\"font-size:13px;line-height:1.55;\">{}</div>",
             bill_html,
         )
     } else {
@@ -738,11 +756,11 @@ fn build_customer_confirmation(
                <tr>\
                  <td style=\"width:50%;vertical-align:top;\">\
                    <h2 style=\"font-size:14px;margin:0 0 8px;\">Ship to</h2>\
-                   <div style=\"background:#fff;border:1px solid #d8dbe1;border-radius:8px;padding:14px 16px;\">{ship}</div>\
+                   <div style=\"font-size:13px;line-height:1.55;\">{ship}</div>\
                  </td>\
                  <td style=\"width:50%;vertical-align:top;\">\
                    <h2 style=\"font-size:14px;margin:0 0 8px;\">Bill to</h2>\
-                   <div style=\"background:#fff;border:1px solid #d8dbe1;border-radius:8px;padding:14px 16px;\">{bill}</div>\
+                   <div style=\"font-size:13px;line-height:1.55;\">{bill}</div>\
                  </td>\
                </tr>\
              </table>",
@@ -752,7 +770,7 @@ fn build_customer_confirmation(
     };
 
     let html = format!(
-        "<!doctype html><html><body style=\"margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f5f6f8;color:#1a1d23;\">\
+        "<!doctype html><html><body style=\"margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#ffffff;color:#1a1d23;\">\
          <div style=\"max-width:600px;margin:0 auto;padding:32px 24px;\">\
            <div style=\"text-align:left;margin-bottom:24px;\">\
              <img src=\"cid:{logo_cid}\" alt=\"Xikaku\" style=\"height:36px;display:inline-block;\">\
@@ -763,8 +781,8 @@ fn build_customer_confirmation(
            <p>Thanks for your purchase from Xikaku — we've received your order and are getting it ready.</p>\
            {extra_block}\
            <h2 style=\"font-size:14px;margin:28px 0 8px;\">Items</h2>\
-           <table style=\"width:100%;border-collapse:collapse;background:#fff;border:1px solid #d8dbe1;border-radius:8px;\">\
-             <tbody style=\"display:table;width:100%;padding:6px 16px;\">{rows}</tbody>\
+           <table style=\"width:100%;border-collapse:collapse;\">\
+             <tbody>{rows}</tbody>\
            </table>\
            <table style=\"width:100%;margin-top:14px;font-size:13px;\">\
              <tr><td style=\"color:#5c6470;\">Subtotal</td><td style=\"text-align:right;\">{subtotal}</td></tr>\
@@ -773,12 +791,12 @@ fn build_customer_confirmation(
              <tr><td style=\"font-weight:600;padding-top:6px;border-top:1px solid #d8dbe1;\">Total</td><td style=\"font-weight:600;text-align:right;padding-top:6px;border-top:1px solid #d8dbe1;\">{total}</td></tr>\
            </table>\
            {address_section}\
-           <div style=\"background:#f5f6f8;border:1px solid #d8dbe1;border-radius:8px;padding:14px 16px;margin-top:24px;font-size:13px;color:#5c6470;\">\
+           <p style=\"margin-top:24px;font-size:13px;color:#5c6470;\">\
              We're processing your order now. You'll get a second email with your tracking number once it ships from our Los Angeles office.\
-           </div>\
+           </p>\
            <p style=\"color:#5c6470;font-size:12px;margin-top:18px;\">A PDF invoice is attached to this email for your records.</p>\
            {support_block}\
-           <p style=\"color:#5c6470;font-size:12px;margin-top:32px;\">— The Xikaku team (LP-Research Inc.)</p>\
+           <p style=\"color:#5c6470;font-size:12px;margin-top:32px;\">— The Xikaku team</p>\
          </div></body></html>",
         logo_cid = LOGO_CID,
         order = order_label,
@@ -872,21 +890,6 @@ async fn fetch_invoice(state: &AppState, invoice_id: &str) -> Value {
         },
         Ok(resp) => { log::warn!("invoice fetch HTTP {}", resp.status()); Value::Null }
         Err(e) => { log::warn!("invoice fetch: {}", e); Value::Null }
-    }
-}
-
-/// Download the hosted invoice PDF bytes. The URL is obtained from the
-/// Invoice object's `invoice_pdf` field; it requires no auth (the URL is
-/// signed). Empty Vec on any error.
-async fn download_pdf(state: &AppState, pdf_url: &str) -> Vec<u8> {
-    if pdf_url.is_empty() { return Vec::new(); }
-    match state.http.get(pdf_url).send().await {
-        Ok(resp) if resp.status().is_success() => match resp.bytes().await {
-            Ok(b) => b.to_vec(),
-            Err(e) => { log::warn!("pdf download read body: {}", e); Vec::new() }
-        },
-        Ok(resp) => { log::warn!("pdf download HTTP {}", resp.status()); Vec::new() }
-        Err(e) => { log::warn!("pdf download: {}", e); Vec::new() }
     }
 }
 
@@ -1413,7 +1416,7 @@ pub async fn handle_admin_mark_shipped(
                 let body = build_shipped_email(&order);
                 let subject = format!("Your Xikaku order #{} has shipped", order.0);
                 tokio::spawn(async move {
-                    if let Err(e) = svc.send_html(&email, &subject, &body.0, &body.1).await {
+                    if let Err(e) = svc.send_html_as("Xikaku Shop", &email, &subject, &body.0, &body.1).await {
                         log::error!("Failed to send shipped email to {}: {}", email, e);
                     }
                 });
@@ -1471,7 +1474,7 @@ fn build_shipped_email(
             }
         }
     }
-    text.push_str("\nThanks for buying from Xikaku!\n— The Xikaku team (LP-Research Inc.)\n");
+    text.push_str("\nThanks for buying from Xikaku!\n— The Xikaku team\n");
 
     let track_btn = match &url {
         Some(u) => format!(
@@ -1493,17 +1496,17 @@ fn build_shipped_email(
     }
 
     let html = format!(
-        "<!doctype html><html><body style=\"margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f5f6f8;color:#1a1d23;\">\
+        "<!doctype html><html><body style=\"margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#ffffff;color:#1a1d23;\">\
          <div style=\"max-width:560px;margin:0 auto;padding:32px 24px;\">\
            <h1 style=\"font-size:22px;margin:0 0 8px;\">Your order has shipped</h1>\
            <p style=\"color:#5c6470;margin:0 0 20px;\">Order #{id}</p>\
-           <table style=\"width:100%;border-collapse:collapse;background:#fff;border:1px solid #d8dbe1;border-radius:8px;padding:18px;\">\
-             <tr><td style=\"padding:6px 0;color:#5c6470;width:120px;\">Carrier:</td><td style=\"padding:6px 0;font-weight:600;\">{carrier_html}</td></tr>\
-             <tr><td style=\"padding:6px 0;color:#5c6470;\">Tracking:</td><td style=\"padding:6px 0;font-family:monospace;\">{tracking_html}</td></tr>\
+           <table style=\"width:100%;border-collapse:collapse;font-size:13px;\">\
+             <tr><td style=\"padding:4px 0;color:#5c6470;width:120px;\">Carrier:</td><td style=\"padding:4px 0;font-weight:600;\">{carrier_html}</td></tr>\
+             <tr><td style=\"padding:4px 0;color:#5c6470;\">Tracking:</td><td style=\"padding:4px 0;font-family:monospace;\">{tracking_html}</td></tr>\
            </table>\
            {track_btn}\
            {items_block}\
-           <p style=\"color:#5c6470;font-size:13px;margin-top:32px;\">Thanks for buying from Xikaku!<br>— The Xikaku team (LP-Research Inc.)</p>\
+           <p style=\"color:#5c6470;font-size:13px;margin-top:32px;\">Thanks for buying from Xikaku!<br>— The Xikaku team</p>\
          </div></body></html>",
         id = id,
         carrier_html = html_escape_local(carrier),
@@ -1514,7 +1517,7 @@ fn build_shipped_email(
         } else {
             format!(
                 "<h3 style=\"font-size:14px;margin:24px 0 8px;\">Items shipped</h3>\
-                 <table style=\"width:100%;border-collapse:collapse;background:#fff;border:1px solid #d8dbe1;border-radius:8px;padding:18px;\">{}</table>",
+                 <table style=\"width:100%;border-collapse:collapse;font-size:13px;\">{}</table>",
                 item_rows,
             )
         },

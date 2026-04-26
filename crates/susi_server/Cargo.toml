@@ -34,3 +34,4 @@ lettre = { version = "0.11", default-features = false, features = ["tokio1-rustl
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 hmac = "0.12"
 url = "2"
+printpdf = { version = "0.7", default-features = false, features = ["embedded_images"] }

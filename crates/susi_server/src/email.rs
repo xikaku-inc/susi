@@ -133,14 +133,18 @@ impl EmailService {
     /// Send a multipart/alternative email with both plain-text and HTML
     /// bodies. Use for customer-facing transactional mails (shipped
     /// notifications, etc.) where HTML formatting is expected.
-    pub async fn send_html(
+    /// Send a multipart/alternative email overriding the From display name
+    /// (address part stays the configured one). Used by the shop flow so
+    /// order emails appear from "Xikaku Shop" instead of "Susi".
+    pub async fn send_html_as(
         &self,
+        from_name: &str,
         to_addr: &str,
         subject: &str,
         text: &str,
         html: &str,
     ) -> Result<()> {
-        self.send_html_rich(to_addr, subject, text, html, &[], &[]).await
+        self.send_html_rich(to_addr, subject, text, html, &[], &[], Some(from_name)).await
     }
 
     /// Send an HTML email with optional inline images (referenced from the
@@ -164,6 +168,7 @@ impl EmailService {
         html: &str,
         inline_images: &[InlineImage],
         attachments: &[EmailAttachment],
+        from_name_override: Option<&str>,
     ) -> Result<()> {
         let to: Mailbox = to_addr
             .parse()
@@ -195,8 +200,12 @@ impl EmailService {
                 .multipart(related)
         };
 
+        let from = match from_name_override {
+            Some(name) => Mailbox::new(Some(name.to_string()), self.cfg.from.email.clone()),
+            None => self.cfg.from.clone(),
+        };
         let builder = Message::builder()
-            .from(self.cfg.from.clone())
+            .from(from)
             .to(to)
             .subject(subject.to_string());
 

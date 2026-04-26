@@ -2,6 +2,7 @@ mod docs;
 mod website;
 mod email;
 mod shop;
+mod invoice_pdf;
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
