@@ -862,7 +862,7 @@ function renderSidebar() {
     const sb = document.getElementById('sidebar');
     const layout = document.getElementById('layout');
     // Treat /shop as a non-empty sidebar context too — even when there are
-    // no pages we still want to show Shop/Docs links.
+    // no pages we still want to show the Shop link.
     const onShop = currentSlug === '__shop__';
     if (pages.length <= 1 && !onShop) {
         sb.innerHTML = '';
@@ -902,11 +902,8 @@ function renderSidebar() {
             items.forEach(it => html += renderSidebarItem(it, false));
         }
     }
-    // Static external sections at the bottom: Shop + Docs.
-    html += '<div style="height:1px;background:var(--border);margin:14px 16px 8px;"></div>';
     const shopActive = currentSlug === '__shop__' ? ' active' : '';
     html += '<a class="section-head' + shopActive + '" href="/shop">Shop</a>';
-    html += '<a class="section-head" href="/docs">Docs</a>';
     sb.innerHTML = html;
 }
 
