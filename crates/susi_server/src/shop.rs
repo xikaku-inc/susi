@@ -9,11 +9,12 @@
 //! Stripe Checkout with `automatic_tax: true`. Stripe collects address +
 //! payment, computes tax, and redirects to success_url / cancel_url.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::{
     body::Bytes,
-    extract::{Path, State},
+    extract::{ConnectInfo, Path, State},
     http::{HeaderMap, StatusCode},
     Json,
 };
@@ -25,7 +26,10 @@ use susi_core::error::LicenseError;
 
 use crate::email::{EmailAttachment, InlineImage};
 use crate::invoice_pdf;
-use crate::{error_response, require_admin, require_password_changed, validate_principal, AppState, ErrorResponse};
+use crate::{
+    check_checkout_rate_limit, check_webhook_rate_limit, client_ip, error_response, require_admin,
+    require_password_changed, validate_principal, AppState, ErrorResponse,
+};
 
 /// Brand logo embedded in the binary so it ships with every customer email
 /// without depending on remote-image fetches (most clients block those).
@@ -194,8 +198,12 @@ fn push_form(form: &mut Vec<(String, String)>, path: &[&str], value: impl Into<S
 
 pub async fn handle_create_checkout_session(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(req): Json<CheckoutRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
+    let ip = client_ip(peer, &headers);
+    check_checkout_rate_limit(&state, ip)?;
     shop_configured(&state)?;
 
     if req.items.is_empty() {
@@ -438,9 +446,12 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 pub async fn handle_stripe_webhook(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
+    let ip = client_ip(peer, &headers);
+    check_webhook_rate_limit(&state, ip)?;
     if state.stripe_webhook_secret.is_empty() {
         return Err(error_response(StatusCode::SERVICE_UNAVAILABLE, "Webhook not configured"));
     }

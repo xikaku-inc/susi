@@ -117,6 +117,8 @@ struct AppState {
     jwt_secret: [u8; 32],
     data_dir: String,
     login_attempts: Mutex<HashMap<IpAddr, Vec<Instant>>>,
+    checkout_attempts: Mutex<HashMap<IpAddr, Vec<Instant>>>,
+    webhook_attempts: Mutex<HashMap<IpAddr, Vec<Instant>>>,
     email: Option<EmailService>,
     magic_link_base_url: String,
     stripe_secret_key: String,
@@ -136,41 +138,96 @@ const MAGIC_LINK_TTL_MINUTES: i64 = 15;
 const LOGIN_WINDOW: StdDuration = StdDuration::from_secs(60);
 const LOGIN_MAX_ATTEMPTS: usize = 10;
 
-fn check_login_rate_limit(
-    state: &AppState,
+// Shop checkout creates a Stripe Checkout Session per call (outbound API
+// cost + DB lock). Cap per-IP burst so a script can't run our Stripe quota
+// down or starve the SQLite connection.
+const CHECKOUT_WINDOW: StdDuration = StdDuration::from_secs(60);
+const CHECKOUT_MAX_ATTEMPTS: usize = 10;
+
+// Generous limit on the Stripe webhook endpoint: legitimate Stripe delivery
+// burst-fires retries from a small IP set, so we keep the cap loose. The
+// signature check is the real gate — this is just defense in depth against
+// spam from a single source.
+const WEBHOOK_WINDOW: StdDuration = StdDuration::from_secs(60);
+const WEBHOOK_MAX_ATTEMPTS: usize = 300;
+
+fn check_ip_rate_limit(
+    map_lock: &Mutex<HashMap<IpAddr, Vec<Instant>>>,
     ip: IpAddr,
+    window: StdDuration,
+    max_attempts: usize,
+    label: &str,
+    user_message: &str,
 ) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
-    let mut map = state.login_attempts.lock().unwrap();
+    let mut map = map_lock.lock().unwrap();
     let now = Instant::now();
     let entry = map.entry(ip).or_default();
-    entry.retain(|t| now.duration_since(*t) < LOGIN_WINDOW);
-    if entry.len() >= LOGIN_MAX_ATTEMPTS {
-        log::warn!("Login rate limit exceeded for {}", ip);
-        return Err(error_response(
-            StatusCode::TOO_MANY_REQUESTS,
-            "Too many login attempts, try again later",
-        ));
+    entry.retain(|t| now.duration_since(*t) < window);
+    if entry.len() >= max_attempts {
+        log::warn!("{} rate limit exceeded for {}", label, ip);
+        return Err(error_response(StatusCode::TOO_MANY_REQUESTS, user_message));
     }
     entry.push(now);
-    // Opportunistic cleanup so the map does not grow unbounded.
     if map.len() > 4096 {
         map.retain(|_, v| {
-            v.retain(|t| now.duration_since(*t) < LOGIN_WINDOW);
+            v.retain(|t| now.duration_since(*t) < window);
             !v.is_empty()
         });
     }
     Ok(())
 }
 
+fn check_login_rate_limit(
+    state: &AppState,
+    ip: IpAddr,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    check_ip_rate_limit(
+        &state.login_attempts,
+        ip,
+        LOGIN_WINDOW,
+        LOGIN_MAX_ATTEMPTS,
+        "Login",
+        "Too many login attempts, try again later",
+    )
+}
+
+fn check_checkout_rate_limit(
+    state: &AppState,
+    ip: IpAddr,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    check_ip_rate_limit(
+        &state.checkout_attempts,
+        ip,
+        CHECKOUT_WINDOW,
+        CHECKOUT_MAX_ATTEMPTS,
+        "Checkout",
+        "Too many checkout requests, try again in a minute",
+    )
+}
+
+fn check_webhook_rate_limit(
+    state: &AppState,
+    ip: IpAddr,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    check_ip_rate_limit(
+        &state.webhook_attempts,
+        ip,
+        WEBHOOK_WINDOW,
+        WEBHOOK_MAX_ATTEMPTS,
+        "Webhook",
+        "Too many webhook requests",
+    )
+}
+
 // Extract the originating client IP. When the Rust server is fronted by a
-// trusted reverse proxy (nginx) the TCP peer is 127.0.0.1; in that case we
-// consult X-Forwarded-For / X-Real-IP. For requests that arrive directly we
-// use the TCP peer and ignore the forwarded headers (they would be attacker
-// controlled).
+// trusted reverse proxy (nginx on the host, or Docker's bridge gateway) the
+// TCP peer is loopback or RFC1918-private; in that case we consult
+// X-Forwarded-For / X-Real-IP. For requests that arrive directly from the
+// public internet we use the TCP peer and ignore the forwarded headers
+// (they would be attacker-controlled).
 fn client_ip(peer: SocketAddr, headers: &HeaderMap) -> IpAddr {
     let peer_ip = peer.ip();
-    let from_loopback = peer_ip.is_loopback();
-    if from_loopback {
+    if is_trusted_proxy_peer(peer_ip) {
         if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
             if let Some(first) = xff.split(',').next() {
                 if let Ok(ip) = first.trim().parse::<IpAddr>() {
@@ -185,6 +242,19 @@ fn client_ip(peer: SocketAddr, headers: &HeaderMap) -> IpAddr {
         }
     }
     peer_ip
+}
+
+fn is_trusted_proxy_peer(ip: IpAddr) -> bool {
+    if ip.is_loopback() {
+        return true;
+    }
+    match ip {
+        IpAddr::V4(v4) => v4.is_private(),
+        // For IPv6 only loopback is treated as trusted; the unique-local /
+        // link-local stable APIs aren't on stable Rust yet, and Docker bridges
+        // are IPv4 in our deployment.
+        IpAddr::V6(_) => false,
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -2862,6 +2932,8 @@ async fn main() -> Result<()> {
         jwt_secret,
         data_dir: cli.data_dir,
         login_attempts: Mutex::new(HashMap::new()),
+        checkout_attempts: Mutex::new(HashMap::new()),
+        webhook_attempts: Mutex::new(HashMap::new()),
         email: email_service,
         magic_link_base_url: cli.magic_link_base_url.clone(),
         stripe_secret_key: cli.stripe_secret_key,
