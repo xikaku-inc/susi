@@ -105,7 +105,10 @@ pub fn generate(
         col_x[0], col_y_top, COMPANY_NAME, &company);
     draw_address_column(&l, &bold, &regular, &dark, &muted,
         col_x[1], col_y_top, "Bill to", &bill_to);
-    if !ship_to.is_empty() && ship_to != bill_to {
+    // Always render the Ship-to column when shipping details are present, even
+    // if the address is identical to the billing address. Keeps the invoice
+    // layout consistent and lets the customer / accountant verify both.
+    if !ship_to.is_empty() {
         draw_address_column(&l, &bold, &regular, &dark, &muted,
             col_x[2], col_y_top, "Ship to", &ship_to);
     }

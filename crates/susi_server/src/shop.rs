@@ -704,20 +704,16 @@ fn build_customer_confirmation(
     text.push_str(&format!("Total:     {}\n\n", fmt_money(amount_total, currency)));
 
     // Ship-to confirmation in the customer email — reassures them the address
-    // we'll ship to is what they entered.
+    // we'll ship to is what they entered. Always show ship-to and bill-to as
+    // separate blocks (even when they match) so the customer can see both.
     let ship_text = address_block_text(obj.get("shipping_details"), name);
     let bill_text = address_block_text(obj.get("customer_details"), name);
-    if !ship_text.is_empty() && !bill_text.is_empty() && ship_text != bill_text {
+    if !ship_text.is_empty() {
         text.push_str("Ship to\n");
         text.push_str(&indent2(&ship_text));
-        text.push_str("\nBill to\n");
-        text.push_str(&indent2(&bill_text));
         text.push_str("\n");
-    } else if !ship_text.is_empty() {
-        text.push_str("Ship to & bill to\n");
-        text.push_str(&indent2(&ship_text));
-        text.push_str("\n");
-    } else if !bill_text.is_empty() {
+    }
+    if !bill_text.is_empty() {
         text.push_str("Bill to\n");
         text.push_str(&indent2(&bill_text));
         text.push_str("\n");
@@ -747,11 +743,11 @@ fn build_customer_confirmation(
         ));
     }
 
-    // Build separate ship-to and bill-to blocks. Show both when they differ;
-    // collapse to a single "Ship to & bill to" block when they match.
+    // Always render ship-to and bill-to as separate blocks, even when they
+    // match — keeps the email layout consistent and lets the customer verify
+    // both addresses at a glance.
     let ship_html = address_block_html(obj.get("shipping_details"), name);
     let bill_html = address_block_html(obj.get("customer_details"), name);
-    let addresses_match = ship_html == bill_html;
 
     let support_block = if support.is_empty() { String::new() } else {
         format!(
@@ -772,12 +768,13 @@ fn build_customer_confirmation(
         )
     };
 
-    // Address sections — single block when shipping == billing, split when they differ.
+    // Address sections — always two columns when both are present so the
+    // customer sees ship-to and bill-to side by side, even when identical.
     let address_section = if ship_html.is_empty() && bill_html.is_empty() {
         String::new()
-    } else if addresses_match || bill_html.is_empty() {
+    } else if bill_html.is_empty() {
         format!(
-            "<h2 style=\"font-size:14px;margin:28px 0 8px;\">Ship to &amp; bill to</h2>\
+            "<h2 style=\"font-size:14px;margin:28px 0 8px;\">Ship to</h2>\
              <div style=\"font-size:13px;line-height:1.55;\">{}</div>",
             ship_html,
         )
@@ -1017,26 +1014,23 @@ fn format_order_summary(event: &Value, line_items: &[Value], order_id: Option<i6
         out.push_str(&format!("Phone:     {}\n", phone));
     }
 
-    // Address blocks — split when shipping and billing differ so the
-    // operator can spot a mismatched billing address before shipping.
+    // Always render ship-to and bill-to as separate sections so the operator
+    // sees both — even when they match — and can spot a mismatch instantly.
     let ship_text = address_block_text(obj.get("shipping_details"), name);
     let bill_text = address_block_text(obj.get("customer_details"), name);
-    if !ship_text.is_empty() && !bill_text.is_empty() && ship_text != bill_text {
-        out.push_str("\n--- Ship to ---\n");
-        out.push_str(&ship_text);
-        out.push_str("\n\n--- Bill to ---\n");
-        out.push_str(&bill_text);
-        out.push('\n');
-    } else if !ship_text.is_empty() {
-        out.push_str("\n--- Ship to ---\n");
-        out.push_str(&ship_text);
-        out.push('\n');
-    } else if !bill_text.is_empty() {
-        out.push_str("\n--- Bill to ---\n");
-        out.push_str(&bill_text);
-        out.push('\n');
-    } else {
+    if ship_text.is_empty() && bill_text.is_empty() {
         out.push_str("\n(no address on session)\n");
+    } else {
+        if !ship_text.is_empty() {
+            out.push_str("\n--- Ship to ---\n");
+            out.push_str(&ship_text);
+            out.push('\n');
+        }
+        if !bill_text.is_empty() {
+            out.push_str("\n--- Bill to ---\n");
+            out.push_str(&bill_text);
+            out.push('\n');
+        }
     }
 
     out.push_str("\n--- Items ---\n");
