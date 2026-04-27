@@ -751,13 +751,15 @@ fn build_customer_confirmation(
         )
     };
 
-    // Admin-supplied custom thank-you copy. Inserted as raw HTML — admin is
-    // a trusted role so we don't need to sanitize, but we wrap it in a
-    // styled block so it slots into the layout cleanly.
+    // Admin-supplied custom thank-you copy. Sanitized through `ammonia` so a
+    // compromised admin (or stolen API token) can't inject scripts, tracking
+    // pixels, or javascript: links into a customer email that ships from our
+    // domain. ammonia's default allowlist permits formatting + safe links.
     let extra_block = if extra_html.trim().is_empty() { String::new() } else {
+        let safe = ammonia::clean(&extra_html);
         format!(
             "<div style=\"background:#eef4ff;border-left:3px solid #2d6fdc;padding:12px 16px;margin:18px 0;color:#1a1d23;font-size:13px;line-height:1.55;\">{}</div>",
-            extra_html,
+            safe,
         )
     };
 
@@ -1142,6 +1144,14 @@ pub async fn handle_upsert_product(
     }
     {
         let db = state.db.lock().unwrap();
+        if let Some(asset) = req.image_asset.as_deref() {
+            if !asset.is_empty() && !db.website_asset_exists(asset).map_err(db_err)? {
+                return Err(error_response(
+                    StatusCode::BAD_REQUEST,
+                    &format!("Unknown image_asset: {}", asset),
+                ));
+            }
+        }
         db.upsert_product(
             &sku,
             &req.title,

@@ -2634,6 +2634,21 @@ impl LicenseDb {
         Ok(())
     }
 
+    /// Returns true if a website asset with the given file name is recorded.
+    /// Used by shop product upsert to validate `image_asset` references a
+    /// real upload before saving.
+    pub fn website_asset_exists(&self, file_name: &str) -> Result<bool, LicenseError> {
+        match self.conn.query_row(
+            "SELECT 1 FROM website_assets WHERE file_name = ?1",
+            params![file_name],
+            |_| Ok(()),
+        ) {
+            Ok(_) => Ok(true),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+            Err(e) => Err(LicenseError::Other(format!("DB asset exists: {}", e))),
+        }
+    }
+
     pub fn list_website_assets(&self) -> Result<Vec<(String, i64)>, LicenseError> {
         let mut stmt = self.conn
             .prepare("SELECT file_name, file_size FROM website_assets ORDER BY file_name")
