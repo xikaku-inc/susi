@@ -153,8 +153,7 @@ fn rate_applies(regions: &[String], country: &str) -> bool {
 
 /// Collect the union of allowed countries across all active rates. Stripe
 /// requires 2-letter ISO codes; if a rate declares `*`, we expand it to the
-/// supported country list (the Checkout "all" shortcut isn't an option —
-/// Stripe requires an explicit list). We keep this small and pragmatic.
+/// supported country list. Shop currently ships to US and Canada only.
 fn allowed_countries_for_checkout(rates: &[(i64, String, i64, String, Option<i64>, Option<i64>, String, bool, i64)]) -> Vec<String> {
     let mut set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut wildcard = false;
@@ -162,25 +161,19 @@ fn allowed_countries_for_checkout(rates: &[(i64, String, i64, String, Option<i64
         let regions: Vec<String> = serde_json::from_str(&r.6).unwrap_or_default();
         for reg in regions {
             if reg == "*" { wildcard = true; }
-            else { set.insert(reg.to_uppercase()); }
+            else {
+                let up = reg.to_uppercase();
+                if SUPPORTED_SHIPPING_COUNTRIES.contains(&up.as_str()) { set.insert(up); }
+            }
         }
     }
     if wildcard {
-        // Stripe accepts up to 250 ISO-3166-1 alpha-2 codes. The full list is
-        // too large to hardcode here; seller should add specific regions in
-        // the admin UI if they want to limit shipping. This fallback covers
-        // the common commerce destinations — extend as needed.
-        for c in COMMON_SHIPPING_COUNTRIES { set.insert((*c).into()); }
+        for c in SUPPORTED_SHIPPING_COUNTRIES { set.insert((*c).into()); }
     }
     set.into_iter().collect()
 }
 
-const COMMON_SHIPPING_COUNTRIES: &[&str] = &[
-    "US", "CA", "GB", "IE", "FR", "DE", "IT", "ES", "NL", "BE", "LU", "AT", "CH",
-    "DK", "SE", "NO", "FI", "IS", "PT", "PL", "CZ", "HU", "GR", "JP", "KR", "CN",
-    "TW", "HK", "SG", "MY", "TH", "VN", "ID", "PH", "AU", "NZ", "IN", "AE", "SA",
-    "IL", "TR", "ZA", "BR", "MX", "AR", "CL", "CO",
-];
+const SUPPORTED_SHIPPING_COUNTRIES: &[&str] = &["US", "CA"];
 
 /// Push a (key, value) pair onto a form builder using Stripe's bracket syntax.
 /// e.g. `push(&mut form, &["line_items", "0", "price_data", "currency"], "usd")`
@@ -319,7 +312,7 @@ pub async fn handle_create_checkout_session(
     // has configured rates, use their regions; otherwise fall back to a
     // common-countries list so checkout still works during initial setup.
     let countries = if applicable.is_empty() {
-        COMMON_SHIPPING_COUNTRIES.iter().map(|c| (*c).to_string()).collect()
+        SUPPORTED_SHIPPING_COUNTRIES.iter().map(|c| (*c).to_string()).collect()
     } else {
         allowed_countries_for_checkout(&applicable)
     };
@@ -1194,8 +1187,13 @@ fn validate_rate_body(r: &ShippingRateRequest) -> Result<String, (StatusCode, Js
         return Err(error_response(StatusCode::BAD_REQUEST, "Amount cannot be negative"));
     }
     for reg in &r.regions {
-        if reg != "*" && !(reg.len() == 2 && reg.chars().all(|c| c.is_ascii_alphabetic())) {
+        if reg == "*" { continue; }
+        if !(reg.len() == 2 && reg.chars().all(|c| c.is_ascii_alphabetic())) {
             return Err(error_response(StatusCode::BAD_REQUEST, &format!("Invalid region code: {}", reg)));
+        }
+        let up = reg.to_uppercase();
+        if !SUPPORTED_SHIPPING_COUNTRIES.contains(&up.as_str()) {
+            return Err(error_response(StatusCode::BAD_REQUEST, &format!("Unsupported region: {} (only US and CA are supported)", reg)));
         }
     }
     let normalized: Vec<String> = r.regions.iter()

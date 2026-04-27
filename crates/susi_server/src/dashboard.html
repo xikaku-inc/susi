@@ -745,7 +745,7 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
         </table>
     </div>
     <p style="margin-top:16px;font-size:12px;color:var(--text2);">
-        Tip: use <code>*</code> as a region for "worldwide". Admin fields map directly to Stripe's <code>shipping_options</code>.
+        Tip: shop ships to US and CA only. Use <code>*</code> for both, or <code>US</code> / <code>CA</code> for a single-country rate. Admin fields map directly to Stripe's <code>shipping_options</code>.
     </p>
 
     <div style="margin-top:40px;margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
@@ -865,7 +865,7 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
             <div><label>Currency</label><input type="text" id="rateCurrency" value="usd" maxlength="3"></div>
         </div>
         <div class="form-row">
-            <label>Regions (comma-separated ISO-2; * = worldwide)</label>
+            <label>Regions (US, CA, or * for both)</label>
             <input type="text" id="rateRegions" value="*" placeholder="US, CA">
         </div>
         <div class="form-row" style="display:grid;grid-template-columns:1fr 1fr 100px;gap:12px;">
@@ -3300,7 +3300,10 @@ async function saveRate() {
     errEl.style.display = 'none';
     const regionsRaw = document.getElementById('rateRegions').value;
     const regions = regionsRaw.split(',').map(s => s.trim()).filter(s => s.length > 0);
-    if (!regions.length) { errEl.textContent = 'At least one region required (use * for worldwide)'; errEl.style.display = ''; return; }
+    if (!regions.length) { errEl.textContent = 'At least one region required (US, CA, or * for both)'; errEl.style.display = ''; return; }
+    const allowed = new Set(['US', 'CA', '*']);
+    const bad = regions.find(r => !allowed.has(r.toUpperCase()));
+    if (bad) { errEl.textContent = 'Unsupported region "' + bad + '" — only US, CA, or * are allowed'; errEl.style.display = ''; return; }
     const minDays = document.getElementById('rateMinDays').value;
     const maxDays = document.getElementById('rateMaxDays').value;
     const body = {
