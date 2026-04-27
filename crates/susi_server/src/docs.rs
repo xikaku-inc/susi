@@ -75,40 +75,35 @@ fn db_err(e: LicenseError) -> (StatusCode, Json<ErrorResponse>) {
     error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string())
 }
 
-/// Ensure the release row for `tag` exists and, if it was just created, seed
-/// it with `origin='user'` doc pages + assets from the most recent prior
-/// release. Physical asset files are copied on disk alongside the DB rows.
-/// Returns the release id. Safe to call from any doc-write entry point.
-fn ensure_release_with_seed(
+/// Seed a release that was just created with `origin='user'` doc pages +
+/// assets from the most recent prior release. Physical asset files are copied
+/// on disk alongside the DB rows. Idempotent: `INSERT OR IGNORE` makes a
+/// second call a no-op. Call from any code path that creates a release row
+/// (binary-asset upload, docs editor, docs bulk import) so user docs always
+/// carry forward.
+pub(crate) fn seed_user_docs_into_release(
     state: &AppState,
-    tag: &str,
-    name: &str,
-) -> Result<i64, (StatusCode, Json<ErrorResponse>)> {
-    // Step 1: create the release row (under the lock) and remember the source
-    // we'll copy from, so the disk-copy step below can drop the lock.
-    let (dst_id, src_tag, asset_names) = {
+    dst_id: i64,
+    dst_tag: &str,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    let (src_tag, asset_names) = {
         let mut db = state.db.lock().unwrap();
-        let (dst_id, newly_created) = db.ensure_release_created(tag, name).map_err(db_err)?;
-        if !newly_created {
-            return Ok(dst_id);
-        }
         let prior = db.latest_prior_release_with_user_docs(dst_id).map_err(db_err)?;
         let Some((src_id, src_tag)) = prior else {
-            return Ok(dst_id);
+            return Ok(());
         };
         let n = db.copy_user_doc_pages(src_id, dst_id).map_err(db_err)?;
         let asset_names = db.copy_user_doc_asset_rows(src_id, dst_id).map_err(db_err)?;
         log::info!(
             "Seeded release {} from {}: {} user page(s), {} user asset(s)",
-            tag, src_tag, n, asset_names.len()
+            dst_tag, src_tag, n, asset_names.len()
         );
-        (dst_id, src_tag, asset_names)
+        (src_tag, asset_names)
     };
 
-    // Step 2: copy asset files on disk outside the DB lock.
     if !asset_names.is_empty() {
         let src_dir = assets_dir(state, &src_tag);
-        let dst_dir = assets_dir(state, tag);
+        let dst_dir = assets_dir(state, dst_tag);
         if let Err(e) = std::fs::create_dir_all(&dst_dir) {
             log::warn!("Could not create asset dir {}: {}", dst_dir.display(), e);
         } else {
@@ -123,6 +118,24 @@ fn ensure_release_with_seed(
                 }
             }
         }
+    }
+    Ok(())
+}
+
+/// Ensure the release row for `tag` exists and, if it was just created, seed
+/// it with hand-authored content from the most recent prior release. Returns
+/// the release id. Safe to call from any doc-write entry point.
+fn ensure_release_with_seed(
+    state: &AppState,
+    tag: &str,
+    name: &str,
+) -> Result<i64, (StatusCode, Json<ErrorResponse>)> {
+    let (dst_id, newly_created) = {
+        let db = state.db.lock().unwrap();
+        db.ensure_release_created(tag, name).map_err(db_err)?
+    };
+    if newly_created {
+        seed_user_docs_into_release(state, dst_id, tag)?;
     }
     Ok(dst_id)
 }

@@ -2262,7 +2262,7 @@ async fn handle_upload_release(
     // release survive. Previously the handler rejected existing tags with 409
     // and the caller was forced to DELETE first, which cascaded and wiped
     // hand-authored documentation pages.
-    let release_id = {
+    let (release_id, newly_created) = {
         let db = state.db.lock().unwrap();
         match db.get_release_by_tag(&tag)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
@@ -2270,12 +2270,23 @@ async fn handle_upload_release(
             Some(existing_id) => {
                 db.update_release_metadata(existing_id, &name, &body, prerelease, workspace_id.as_deref())
                     .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
-                existing_id
+                (existing_id, false)
             }
-            None => db.insert_release(&tag, &name, &body, prerelease, workspace_id.as_deref())
-                .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?,
+            None => {
+                let id = db.insert_release(&tag, &name, &body, prerelease, workspace_id.as_deref())
+                    .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+                (id, true)
+            }
         }
     };
+
+    // Carry hand-authored doc pages forward when this is the first time the
+    // release tag is seen. The CI release pipeline calls /api/v1/releases
+    // (binaries) before /api/v1/docs/.../import, so the docs handler's own
+    // seed step would otherwise see an existing release row and skip seeding.
+    if newly_created {
+        docs::seed_user_docs_into_release(&state, release_id, &tag)?;
+    }
 
     // Save files to disk
     let tag_dir = releases_dir(&state).join(&tag);
