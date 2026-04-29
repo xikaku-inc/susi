@@ -229,7 +229,7 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
 }
 .feature-checkboxes tr:last-child td { border-bottom: none; }
 .feature-checkboxes tr:hover td { background: rgba(108, 140, 255, 0.04); }
-.feature-checkboxes td:first-child { width: 24px; text-align: center; }
+.feature-checkboxes td:first-child { width: 32px; text-align: center; }
 .feature-checkboxes .feat-id {
     color: var(--text2);
     font-size: 11px;
@@ -257,16 +257,21 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
     padding-top: 80px;
 }
 .modal-overlay.visible { display: flex; }
+body:has(.modal-overlay.visible) { overflow: hidden; }
 .modal {
     background: var(--bg2);
     border: 1px solid var(--border);
     border-radius: 12px;
     width: 100%;
     max-width: 520px;
+    max-height: calc(100vh - 120px);
     padding: 24px;
     box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+    display: flex;
+    flex-direction: column;
 }
-.modal h2 { font-size: 16px; margin-bottom: 16px; }
+.modal h2 { font-size: 16px; margin-bottom: 16px; flex-shrink: 0; }
+.modal-body { flex: 1; overflow-y: auto; min-height: 0; padding-right: 12px; }
 .modal .form-row {
     margin-bottom: 12px;
 }
@@ -279,7 +284,46 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
     gap: 8px;
     justify-content: flex-end;
     margin-top: 20px;
+    flex-shrink: 0;
 }
+
+.advanced-options {
+    margin-bottom: 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+}
+.advanced-options summary {
+    padding: 8px 12px;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text2);
+    user-select: none;
+    list-style: none;
+}
+.advanced-options summary::-webkit-details-marker { display: none; }
+.advanced-options summary::before { content: '▶ '; font-size: 10px; }
+.advanced-options[open] summary::before { content: '▼ '; }
+.advanced-options .advanced-body {
+    padding: 8px 12px 12px;
+    border-top: 1px solid var(--border);
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+}
+.advanced-options .adv-field label {
+    display: block;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text2);
+    margin-bottom: 4px;
+}
+.advanced-options .adv-field input { width: 100%; }
 
 .toast {
     position: fixed;
@@ -337,6 +381,10 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
     padding-bottom: 4px;
     border-bottom: 1px solid var(--border);
 }
+.detail-advanced summary { cursor: pointer; user-select: none; list-style: none; }
+.detail-advanced summary::-webkit-details-marker { display: none; }
+.detail-advanced summary::after { content: ' ▶'; font-size: 9px; }
+.detail-advanced[open] summary::after { content: ' ▼'; }
 
 /* Tabs styled like the top-nav menu items: pill hover with rounded corners,
    accent-tinted active state. No underline. */
@@ -834,6 +882,19 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
                     <div class="field-value" id="detailMachineCount"></div>
                 </div>
             </div>
+            <details class="detail-advanced">
+                <summary class="detail-section-title">Advanced Options</summary>
+                <div class="detail-grid" style="margin-top:8px;">
+                    <div class="detail-field">
+                        <div class="field-label">Lease Duration (hours)</div>
+                        <div class="field-value" id="detailLeaseDuration"></div>
+                    </div>
+                    <div class="detail-field">
+                        <div class="field-label">Grace Period (hours)</div>
+                        <div class="field-value" id="detailLeaseGrace"></div>
+                    </div>
+                </div>
+            </details>
             <div class="detail-section-title">Activated Machines</div>
             <div id="detailMachines" class="machines-list"></div>
         </div>
@@ -1056,33 +1117,35 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
 </div><!-- /page-website -->
 
 <!-- Order detail modal -->
-<div id="orderModal" class="modal-overlay" onclick="if(event.target===this)closeOrderModal()">
+<div id="orderModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeOrderModal()">
     <div class="modal" style="max-width:700px;">
         <h2 id="orderModalTitle">Order</h2>
-        <div id="orderModalBody" style="font-size:13px;"></div>
-        <div id="orderModalShipForm" style="display:none;margin-top:18px;border-top:1px solid var(--border);padding-top:14px;">
-            <h3 style="margin:0 0 12px;font-size:14px;">Mark as shipped</h3>
-            <div class="form-row" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
-                <div><label>Carrier</label>
-                    <select id="orderShipCarrier">
-                        <option value="USPS">USPS</option>
-                        <option value="UPS">UPS</option>
-                        <option value="FedEx">FedEx</option>
-                        <option value="DHL">DHL</option>
-                        <option value="EMS">EMS / Japan Post</option>
-                        <option value="Other">Other</option>
-                    </select>
+        <div class="modal-body">
+            <div id="orderModalBody" style="font-size:13px;"></div>
+            <div id="orderModalShipForm" style="display:none;margin-top:18px;border-top:1px solid var(--border);padding-top:14px;">
+                <h3 style="margin:0 0 12px;font-size:14px;">Mark as shipped</h3>
+                <div class="form-row" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+                    <div><label>Carrier</label>
+                        <select id="orderShipCarrier">
+                            <option value="USPS">USPS</option>
+                            <option value="UPS">UPS</option>
+                            <option value="FedEx">FedEx</option>
+                            <option value="DHL">DHL</option>
+                            <option value="EMS">EMS / Japan Post</option>
+                            <option value="Other">Other</option>
+                        </select>
+                    </div>
+                    <div><label>Tracking number</label>
+                        <input type="text" id="orderShipTracking" placeholder="9400 1112 0000 …">
+                    </div>
                 </div>
-                <div><label>Tracking number</label>
-                    <input type="text" id="orderShipTracking" placeholder="9400 1112 0000 …">
+                <div class="form-row">
+                    <label style="display:flex;align-items:center;gap:6px;">
+                        <input type="checkbox" id="orderShipNotify" checked> Send tracking email to customer
+                    </label>
                 </div>
+                <div id="orderShipError" style="background:rgba(248,113,113,0.15);border:1px solid var(--red);color:var(--red);padding:8px 12px;border-radius:var(--radius);font-size:12px;display:none;margin-top:8px;"></div>
             </div>
-            <div class="form-row">
-                <label style="display:flex;align-items:center;gap:6px;">
-                    <input type="checkbox" id="orderShipNotify" checked> Send tracking email to customer
-                </label>
-            </div>
-            <div id="orderShipError" style="background:rgba(248,113,113,0.15);border:1px solid var(--red);color:var(--red);padding:8px 12px;border-radius:var(--radius);font-size:12px;display:none;margin-top:8px;"></div>
         </div>
         <div class="form-actions">
             <button class="secondary" onclick="closeOrderModal()">Close</button>
@@ -1092,23 +1155,25 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
 </div>
 
 <!-- New Website Page Modal -->
-<div id="websitePageModal" class="modal-overlay" onclick="if(event.target===this)closeWebsitePageModal()">
+<div id="websitePageModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeWebsitePageModal()">
     <div class="modal">
         <h2>New Page</h2>
-        <div class="form-row">
-            <label>Slug</label>
-            <input type="text" id="websitePageSlug" placeholder="my-new-page">
-            <p style="font-size:11px;color:var(--text2);margin:4px 0 0;">Lowercase letters, digits, and hyphens. Will be reachable at <code>/{slug}</code>.</p>
+        <div class="modal-body">
+            <div class="form-row">
+                <label>Slug</label>
+                <input type="text" id="websitePageSlug" placeholder="my-new-page">
+                <p style="font-size:11px;color:var(--text2);margin:4px 0 0;">Lowercase letters, digits, and hyphens. Will be reachable at <code>/{slug}</code>.</p>
+            </div>
+            <div class="form-row">
+                <label>Title</label>
+                <input type="text" id="websitePageTitle" placeholder="My New Page">
+            </div>
+            <div class="form-row" style="display:grid;grid-template-columns:1fr 100px;gap:12px;">
+                <div><label>Parent slug (optional)</label><input type="text" id="websitePageParent" placeholder="(top-level)"></div>
+                <div><label>Ord</label><input type="number" id="websitePageOrd" value="0"></div>
+            </div>
+            <div id="websitePageError" style="background:rgba(248,113,113,0.15);border:1px solid var(--red);color:var(--red);padding:10px 14px;border-radius:var(--radius);margin-top:12px;font-size:12px;display:none;"></div>
         </div>
-        <div class="form-row">
-            <label>Title</label>
-            <input type="text" id="websitePageTitle" placeholder="My New Page">
-        </div>
-        <div class="form-row" style="display:grid;grid-template-columns:1fr 100px;gap:12px;">
-            <div><label>Parent slug (optional)</label><input type="text" id="websitePageParent" placeholder="(top-level)"></div>
-            <div><label>Ord</label><input type="number" id="websitePageOrd" value="0"></div>
-        </div>
-        <div id="websitePageError" style="background:rgba(248,113,113,0.15);border:1px solid var(--red);color:var(--red);padding:10px 14px;border-radius:var(--radius);margin-top:12px;font-size:12px;display:none;"></div>
         <div class="form-actions">
             <button class="secondary" onclick="closeWebsitePageModal()">Cancel</button>
             <button class="primary" onclick="createWebsitePage()">Create + Open editor</button>
@@ -1117,35 +1182,37 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
 </div>
 
 <!-- Product Modal -->
-<div id="productModal" class="modal-overlay" onclick="if(event.target===this)closeProductModal()">
+<div id="productModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeProductModal()">
     <div class="modal">
         <h2 id="productModalTitle">New Product</h2>
-        <div class="form-row">
-            <label>SKU</label>
-            <input type="text" id="productSku" placeholder="imu-mini">
+        <div class="modal-body">
+            <div class="form-row">
+                <label>SKU</label>
+                <input type="text" id="productSku" placeholder="imu-mini">
+            </div>
+            <div class="form-row">
+                <label>Title</label>
+                <input type="text" id="productTitle" placeholder="IMU Mini">
+            </div>
+            <div class="form-row">
+                <label>Description (Markdown)</label>
+                <textarea id="productDesc" rows="4" style="width:100%;"></textarea>
+            </div>
+            <div class="form-row" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+                <div><label>Price (cents)</label><input type="number" id="productPrice" min="0" value="0"></div>
+                <div><label>Currency</label><input type="text" id="productCurrency" value="usd" maxlength="3"></div>
+            </div>
+            <div class="form-row">
+                <label>Image asset (website asset filename)</label>
+                <input type="text" id="productImage" placeholder="sensor.png — upload via Website assets first">
+            </div>
+            <div class="form-row" style="display:grid;grid-template-columns:1fr 120px 100px;gap:12px;">
+                <div><label>Tax code</label><input type="text" id="productTaxCode" value="txcd_99999999"></div>
+                <div><label>Ord</label><input type="number" id="productOrd" value="0"></div>
+                <div style="display:flex;align-items:flex-end;"><label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="productActive" checked> Active</label></div>
+            </div>
+            <div id="productError" style="background:rgba(248,113,113,0.15);border:1px solid var(--red);color:var(--red);padding:10px 14px;border-radius:var(--radius);margin-top:12px;font-size:12px;" style="display:none;"></div>
         </div>
-        <div class="form-row">
-            <label>Title</label>
-            <input type="text" id="productTitle" placeholder="IMU Mini">
-        </div>
-        <div class="form-row">
-            <label>Description (Markdown)</label>
-            <textarea id="productDesc" rows="4" style="width:100%;"></textarea>
-        </div>
-        <div class="form-row" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
-            <div><label>Price (cents)</label><input type="number" id="productPrice" min="0" value="0"></div>
-            <div><label>Currency</label><input type="text" id="productCurrency" value="usd" maxlength="3"></div>
-        </div>
-        <div class="form-row">
-            <label>Image asset (website asset filename)</label>
-            <input type="text" id="productImage" placeholder="sensor.png — upload via Website assets first">
-        </div>
-        <div class="form-row" style="display:grid;grid-template-columns:1fr 120px 100px;gap:12px;">
-            <div><label>Tax code</label><input type="text" id="productTaxCode" value="txcd_99999999"></div>
-            <div><label>Ord</label><input type="number" id="productOrd" value="0"></div>
-            <div style="display:flex;align-items:flex-end;"><label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="productActive" checked> Active</label></div>
-        </div>
-        <div id="productError" style="background:rgba(248,113,113,0.15);border:1px solid var(--red);color:var(--red);padding:10px 14px;border-radius:var(--radius);margin-top:12px;font-size:12px;" style="display:none;"></div>
         <div class="form-actions">
             <button class="secondary" onclick="closeProductModal()">Cancel</button>
             <button class="primary" onclick="saveProduct()">Save</button>
@@ -1154,30 +1221,32 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
 </div>
 
 <!-- Shipping Rate Modal -->
-<div id="rateModal" class="modal-overlay" onclick="if(event.target===this)closeRateModal()">
+<div id="rateModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeRateModal()">
     <div class="modal">
         <h2 id="rateModalTitle">New Shipping Rate</h2>
-        <div class="form-row">
-            <label>Label</label>
-            <input type="text" id="rateLabel" placeholder="US Standard">
+        <div class="modal-body">
+            <div class="form-row">
+                <label>Label</label>
+                <input type="text" id="rateLabel" placeholder="US Standard">
+            </div>
+            <div class="form-row" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+                <div><label>Amount (cents)</label><input type="number" id="rateAmount" min="0" value="0"></div>
+                <div><label>Currency</label><input type="text" id="rateCurrency" value="usd" maxlength="3"></div>
+            </div>
+            <div class="form-row">
+                <label>Regions (US, CA, or * for both)</label>
+                <input type="text" id="rateRegions" value="*" placeholder="US, CA">
+            </div>
+            <div class="form-row" style="display:grid;grid-template-columns:1fr 1fr 100px;gap:12px;">
+                <div><label>Delivery min (days)</label><input type="number" id="rateMinDays" min="0"></div>
+                <div><label>Delivery max (days)</label><input type="number" id="rateMaxDays" min="0"></div>
+                <div><label>Ord</label><input type="number" id="rateOrd" value="0"></div>
+            </div>
+            <div class="form-row">
+                <label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="rateActive" checked> Active</label>
+            </div>
+            <div id="rateError" style="background:rgba(248,113,113,0.15);border:1px solid var(--red);color:var(--red);padding:10px 14px;border-radius:var(--radius);margin-top:12px;font-size:12px;" style="display:none;"></div>
         </div>
-        <div class="form-row" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
-            <div><label>Amount (cents)</label><input type="number" id="rateAmount" min="0" value="0"></div>
-            <div><label>Currency</label><input type="text" id="rateCurrency" value="usd" maxlength="3"></div>
-        </div>
-        <div class="form-row">
-            <label>Regions (US, CA, or * for both)</label>
-            <input type="text" id="rateRegions" value="*" placeholder="US, CA">
-        </div>
-        <div class="form-row" style="display:grid;grid-template-columns:1fr 1fr 100px;gap:12px;">
-            <div><label>Delivery min (days)</label><input type="number" id="rateMinDays" min="0"></div>
-            <div><label>Delivery max (days)</label><input type="number" id="rateMaxDays" min="0"></div>
-            <div><label>Ord</label><input type="number" id="rateOrd" value="0"></div>
-        </div>
-        <div class="form-row">
-            <label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="rateActive" checked> Active</label>
-        </div>
-        <div id="rateError" style="background:rgba(248,113,113,0.15);border:1px solid var(--red);color:var(--red);padding:10px 14px;border-radius:var(--radius);margin-top:12px;font-size:12px;" style="display:none;"></div>
         <div class="form-actions">
             <button class="secondary" onclick="closeRateModal()">Cancel</button>
             <button class="primary" onclick="saveRate()">Save</button>
@@ -1188,38 +1257,53 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
 </div><!-- /container -->
 
 <!-- Create License Modal -->
-<div id="createModal" class="modal-overlay" onclick="if(event.target===this)closeCreateModal()">
+<div id="createModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeCreateModal()">
     <div class="modal">
         <h2>Create New License</h2>
-        <div class="form-row">
-            <label>Customer</label>
-            <input type="text" id="createCustomer" placeholder="Company name">
-        </div>
-        <div class="form-row">
-            <label>Product</label>
-            <input type="text" id="createProduct" value="FusionHub">
-        </div>
-        <div class="form-row">
-            <label>Expiry</label>
-            <select id="createExpiryType" onchange="updateExpiryFields()">
-                <option value="days">Days from now</option>
-                <option value="date">Specific date</option>
-                <option value="perpetual">Perpetual</option>
-            </select>
-        </div>
-        <div class="form-row" id="createExpiryValueRow">
-            <label id="createExpiryValueLabel">Days</label>
-            <input type="text" id="createExpiryValue" value="365">
-        </div>
-        <div class="form-row">
-            <label>Features</label>
-            <div id="createFeaturesContainer" class="feature-checkboxes">
-                <span style="color:var(--text2);font-size:12px">Loading features...</span>
+        <div class="modal-body">
+            <div class="form-row">
+                <label>Customer</label>
+                <input type="text" id="createCustomer" placeholder="Company name">
             </div>
-        </div>
-        <div class="form-row">
-            <label>Max Machines (0 = unlimited)</label>
-            <input type="number" id="createMaxMachines" value="1" min="0">
+            <div class="form-row">
+                <label>Product</label>
+                <input type="text" id="createProduct" value="FusionHub">
+            </div>
+            <div class="form-row">
+                <label>Expiry</label>
+                <select id="createExpiryType" onchange="updateExpiryFields()">
+                    <option value="days">Days from now</option>
+                    <option value="date">Specific date</option>
+                    <option value="perpetual">Perpetual</option>
+                </select>
+            </div>
+            <div class="form-row" id="createExpiryValueRow">
+                <label id="createExpiryValueLabel">Days</label>
+                <input type="text" id="createExpiryValue" placeholder="365">
+            </div>
+            <div class="form-row">
+                <label>Features</label>
+                <div id="createFeaturesContainer" class="feature-checkboxes">
+                    <span style="color:var(--text2);font-size:12px">Loading features...</span>
+                </div>
+            </div>
+            <div class="form-row">
+                <label>Max Machines (0 = unlimited)</label>
+                <input type="number" id="createMaxMachines" placeholder="1" min="0">
+            </div>
+            <details class="advanced-options">
+                <summary>Advanced Options</summary>
+                <div class="advanced-body">
+                    <div class="adv-field">
+                        <label>Lease Duration<br>(hours, 0 = disable lease)</label>
+                        <input type="number" id="createLeaseDuration" placeholder="168" min="0">
+                    </div>
+                    <div class="adv-field">
+                        <label>Grace Period<br>(hours)</label>
+                        <input type="number" id="createLeaseGrace" placeholder="24" min="0">
+                    </div>
+                </div>
+            </details>
         </div>
         <div class="form-actions">
             <button class="secondary" onclick="closeCreateModal()">Cancel</button>
@@ -1229,20 +1313,22 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
 </div>
 
 <!-- Export Modal -->
-<div id="exportModal" class="modal-overlay" onclick="if(event.target===this)closeExportModal()">
+<div id="exportModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeExportModal()">
     <div class="modal">
         <h2>Export Signed License File</h2>
-        <div class="form-row">
-            <label>License Key</label>
-            <input type="text" id="exportKey" readonly>
-        </div>
-        <div class="form-row">
-            <label>Machine Code (SHA256 fingerprint)</label>
-            <input type="text" id="exportMachineCode" placeholder="Paste machine fingerprint here">
-        </div>
-        <div class="form-row">
-            <label>Friendly Name</label>
-            <input type="text" id="exportFriendlyName" placeholder="e.g. Vehicle-ECU-1">
+        <div class="modal-body">
+            <div class="form-row">
+                <label>License Key</label>
+                <input type="text" id="exportKey" readonly>
+            </div>
+            <div class="form-row">
+                <label>Machine Code (SHA256 fingerprint)</label>
+                <input type="text" id="exportMachineCode" placeholder="Paste machine fingerprint here">
+            </div>
+            <div class="form-row">
+                <label>Friendly Name</label>
+                <input type="text" id="exportFriendlyName" placeholder="e.g. Vehicle-ECU-1">
+            </div>
         </div>
         <div class="form-actions">
             <button class="secondary" onclick="closeExportModal()">Cancel</button>
@@ -1252,45 +1338,47 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
 </div>
 
 <!-- Upload Release Modal -->
-<div id="uploadReleaseModal" class="modal-overlay" onclick="if(event.target===this)closeUploadReleaseModal()">
+<div id="uploadReleaseModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeUploadReleaseModal()">
     <div class="modal">
         <h2>Upload Release</h2>
-        <div class="form-row">
-            <label>Version Tag</label>
-            <input type="text" id="releaseTag" placeholder="e.g. v1.3.0">
-        </div>
-        <div class="form-row">
-            <label>Release Name (optional)</label>
-            <input type="text" id="releaseName" placeholder="e.g. FusionHub v1.3.0">
-        </div>
-        <div class="form-row">
-            <label>Release Notes (Markdown)</label>
-            <textarea id="releaseBody" rows="6" style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:var(--radius);font-size:13px;font-family:inherit;width:100%;resize:vertical;" placeholder="## Changes&#10;- Fixed something&#10;- Added feature"></textarea>
-        </div>
-        <div class="form-row">
-            <label class="checkbox" style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:var(--text2);">
-                <input type="checkbox" id="releasePrerelease" style="accent-color:var(--accent);width:16px;height:16px;">
-                Pre-release
-            </label>
-        </div>
-        <div class="form-row">
-            <label>Scope</label>
-            <select id="releaseWorkspace" style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:var(--radius);font-size:13px;width:100%;">
-                <option value="">Global (all workspaces)</option>
-            </select>
-        </div>
-        <div class="form-row">
-            <label>Asset File (zip)</label>
-            <input type="file" id="releaseFile" multiple style="font-size:13px;color:var(--text);">
-        </div>
-        <div id="uploadProgress" style="display:none;margin-bottom:12px;">
-            <div style="background:var(--bg);border-radius:4px;height:22px;overflow:hidden;">
-                <div id="uploadProgressBar" style="height:100%;background:var(--accent);transition:width 0.3s;width:0%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;color:#fff;"></div>
+        <div class="modal-body">
+            <div class="form-row">
+                <label>Version Tag</label>
+                <input type="text" id="releaseTag" placeholder="e.g. v1.3.0">
             </div>
-        </div>
-        <div class="form-actions">
-            <button class="secondary" onclick="closeUploadReleaseModal()">Cancel</button>
-            <button id="uploadBtn" onclick="uploadRelease()">Upload</button>
+            <div class="form-row">
+                <label>Release Name (optional)</label>
+                <input type="text" id="releaseName" placeholder="e.g. FusionHub v1.3.0">
+            </div>
+            <div class="form-row">
+                <label>Release Notes (Markdown)</label>
+                <textarea id="releaseBody" rows="6" style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:var(--radius);font-size:13px;font-family:inherit;width:100%;resize:vertical;" placeholder="## Changes&#10;- Fixed something&#10;- Added feature"></textarea>
+            </div>
+            <div class="form-row">
+                <label class="checkbox" style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:var(--text2);">
+                    <input type="checkbox" id="releasePrerelease" style="accent-color:var(--accent);width:16px;height:16px;">
+                    Pre-release
+                </label>
+            </div>
+            <div class="form-row">
+                <label>Scope</label>
+                <select id="releaseWorkspace" style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:var(--radius);font-size:13px;width:100%;">
+                    <option value="">Global (all workspaces)</option>
+                </select>
+            </div>
+            <div class="form-row">
+                <label>Asset File (zip)</label>
+                <input type="file" id="releaseFile" multiple style="font-size:13px;color:var(--text);">
+            </div>
+            <div id="uploadProgress" style="display:none;margin-bottom:12px;">
+                <div style="background:var(--bg);border-radius:4px;height:22px;overflow:hidden;">
+                    <div id="uploadProgressBar" style="height:100%;background:var(--accent);transition:width 0.3s;width:0%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;color:#fff;"></div>
+                </div>
+            </div>
+            <div class="form-actions">
+                <button class="secondary" onclick="closeUploadReleaseModal()">Cancel</button>
+                <button id="uploadBtn" onclick="uploadRelease()">Upload</button>
+            </div>
         </div>
     </div>
 </div>
@@ -1344,20 +1432,22 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
 </div>
 
 <!-- Create Workspace Modal -->
-<div id="createWorkspaceModal" class="modal-overlay" onclick="if(event.target===this)closeCreateWorkspaceModal()">
+<div id="createWorkspaceModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeCreateWorkspaceModal()">
     <div class="modal">
         <h2>Create Workspace</h2>
-        <div class="form-row">
-            <label>Name</label>
-            <input type="text" id="wsCreateName" placeholder="e.g. Nexco Highway Tracking">
-        </div>
-        <div class="form-row">
-            <label>Product</label>
-            <input type="text" id="wsCreateProduct" placeholder="e.g. FusionHub">
-        </div>
-        <div class="form-row">
-            <label>Description (optional)</label>
-            <input type="text" id="wsCreateDesc" placeholder="Short description">
+        <div class="modal-body">
+            <div class="form-row">
+                <label>Name</label>
+                <input type="text" id="wsCreateName" placeholder="e.g. Nexco Highway Tracking">
+            </div>
+            <div class="form-row">
+                <label>Product</label>
+                <input type="text" id="wsCreateProduct" placeholder="e.g. FusionHub">
+            </div>
+            <div class="form-row">
+                <label>Description (optional)</label>
+                <input type="text" id="wsCreateDesc" placeholder="Short description">
+            </div>
         </div>
         <div class="form-actions">
             <button class="secondary" onclick="closeCreateWorkspaceModal()">Cancel</button>
@@ -1479,10 +1569,12 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
 </div>
 
 <!-- 2FA Settings Modal -->
-<div id="tfaModal" class="modal-overlay" onclick="if(event.target===this)closeTFAModal()">
+<div id="tfaModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeTFAModal()">
     <div class="modal">
         <h2>Two-Factor Authentication</h2>
-        <div id="tfaContent"></div>
+        <div class="modal-body">
+            <div id="tfaContent"></div>
+        </div>
         <div class="form-actions">
             <button class="secondary" onclick="closeTFAModal()">Close</button>
         </div>
@@ -1490,7 +1582,7 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
 </div>
 
 <!-- Users Management Modal -->
-<div id="usersModal" class="modal-overlay" onclick="if(event.target===this)closeUsersModal()">
+<div id="usersModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeUsersModal()">
     <div class="modal" style="max-width:min(1200px,95vw);width:min(1200px,95vw);">
         <style>
             /* Scoped overrides — the global button/badge has a min-width:180px
@@ -1512,23 +1604,25 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
             #usersModal .email-cell > .email-value { flex: 1 1 auto; }
         </style>
         <h2>User Management</h2>
-        <div id="usersTableContainer" style="margin-bottom:16px;max-height:50vh;overflow:auto;">
-            <table>
-                <thead><tr><th>Username</th><th>Role</th><th>Email</th><th>2FA</th><th>Status</th><th></th></tr></thead>
-                <tbody id="usersTableBody"><tr><td colspan="6">Loading...</td></tr></tbody>
-            </table>
-        </div>
-        <div style="border-top:1px solid var(--border);padding-top:16px;">
-            <h3 style="font-size:14px;margin-bottom:12px;">Add User</h3>
-            <div style="display:flex;gap:8px;flex-wrap:wrap;">
-                <input type="text" id="newUsername" placeholder="Username" style="flex:1;min-width:120px;">
-                <input type="email" id="newUserEmail" placeholder="Email" style="flex:1;min-width:160px;" required>
-                <input type="password" id="newPassword" placeholder="Password (min 8)" style="flex:1;min-width:120px;">
-                <select id="newUserRole" style="width:90px;">
-                    <option value="user">User</option>
-                    <option value="admin">Admin</option>
-                </select>
-                <button onclick="createUser()" style="width:auto;">Add</button>
+        <div class="modal-body">
+            <div id="usersTableContainer" style="margin-bottom:16px;max-height:50vh;overflow:auto;">
+                <table>
+                    <thead><tr><th>Username</th><th>Role</th><th>Email</th><th>2FA</th><th>Status</th><th></th></tr></thead>
+                    <tbody id="usersTableBody"><tr><td colspan="6">Loading...</td></tr></tbody>
+                </table>
+            </div>
+            <div style="border-top:1px solid var(--border);padding-top:16px;">
+                <h3 style="font-size:14px;margin-bottom:12px;">Add User</h3>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                    <input type="text" id="newUsername" placeholder="Username" style="flex:1;min-width:120px;">
+                    <input type="email" id="newUserEmail" placeholder="Email" style="flex:1;min-width:160px;" required>
+                    <input type="password" id="newPassword" placeholder="Password (min 8)" style="flex:1;min-width:120px;">
+                    <select id="newUserRole" style="width:90px;">
+                        <option value="user">User</option>
+                        <option value="admin">Admin</option>
+                    </select>
+                    <button onclick="createUser()" style="width:auto;">Add</button>
+                </div>
             </div>
         </div>
         <div class="form-actions">
@@ -1538,7 +1632,7 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
 </div>
 
 <!-- API Tokens Modal -->
-<div id="apiTokensModal" class="modal-overlay" onclick="if(event.target===this)closeApiTokensModal()">
+<div id="apiTokensModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeApiTokensModal()">
     <div class="modal" style="max-width:min(1000px,95vw);width:min(1000px,95vw);">
         <style>
             #apiTokensModal td, #apiTokensModal th { white-space: nowrap; vertical-align: middle; }
@@ -1555,31 +1649,33 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
             #apiTokensModal .pat-active { color: var(--green); }
         </style>
         <h2>API Tokens</h2>
-        <p style="color:var(--text2);font-size:13px;margin:0 0 12px;">
-            Long-lived bearer tokens for headless clients (CI scripts, services). Send as
-            <span class="pat-prefix">Authorization: Bearer susi_pat_…</span>.
-            Tokens inherit your role and bypass the interactive 2FA gate — treat them like passwords.
-        </p>
-        <div id="apiTokensTableContainer" style="margin-bottom:16px;max-height:50vh;overflow:auto;">
-            <table>
-                <thead><tr><th>Name</th><th>Prefix</th><th>Created</th><th>Last used</th><th>Status</th><th></th></tr></thead>
-                <tbody id="apiTokensTableBody"><tr><td colspan="6">Loading...</td></tr></tbody>
-            </table>
-        </div>
-        <div style="border-top:1px solid var(--border);padding-top:16px;">
-            <h3 style="font-size:14px;margin-bottom:12px;">Create new token</h3>
-            <div style="display:flex;gap:8px;flex-wrap:wrap;">
-                <input type="text" id="newApiTokenName" placeholder="Name (e.g. github-actions release)" style="flex:1;min-width:200px;">
-                <button onclick="createApiToken()" style="width:auto;">Create</button>
-            </div>
-        </div>
-        <div id="apiAdminSection" style="border-top:1px solid var(--border);padding-top:16px;margin-top:16px;display:none;">
-            <h3 style="font-size:14px;margin-bottom:8px;">All tokens (admin)</h3>
-            <div id="apiAllTokensContainer" style="max-height:30vh;overflow:auto;">
+        <div class="modal-body">
+            <p style="color:var(--text2);font-size:13px;margin:0 0 12px;">
+                Long-lived bearer tokens for headless clients (CI scripts, services). Send as
+                <span class="pat-prefix">Authorization: Bearer susi_pat_…</span>.
+                Tokens inherit your role and bypass the interactive 2FA gate — treat them like passwords.
+            </p>
+            <div id="apiTokensTableContainer" style="margin-bottom:16px;max-height:50vh;overflow:auto;">
                 <table>
-                    <thead><tr><th>Owner</th><th>Name</th><th>Prefix</th><th>Last used</th><th>Status</th><th></th></tr></thead>
-                    <tbody id="apiAllTokensBody"><tr><td colspan="6">Loading...</td></tr></tbody>
+                    <thead><tr><th>Name</th><th>Prefix</th><th>Created</th><th>Last used</th><th>Status</th><th></th></tr></thead>
+                    <tbody id="apiTokensTableBody"><tr><td colspan="6">Loading...</td></tr></tbody>
                 </table>
+            </div>
+            <div style="border-top:1px solid var(--border);padding-top:16px;">
+                <h3 style="font-size:14px;margin-bottom:12px;">Create new token</h3>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                    <input type="text" id="newApiTokenName" placeholder="Name (e.g. github-actions release)" style="flex:1;min-width:200px;">
+                    <button onclick="createApiToken()" style="width:auto;">Create</button>
+                </div>
+            </div>
+            <div id="apiAdminSection" style="border-top:1px solid var(--border);padding-top:16px;margin-top:16px;display:none;">
+                <h3 style="font-size:14px;margin-bottom:8px;">All tokens (admin)</h3>
+                <div id="apiAllTokensContainer" style="max-height:30vh;overflow:auto;">
+                    <table>
+                        <thead><tr><th>Owner</th><th>Name</th><th>Prefix</th><th>Last used</th><th>Status</th><th></th></tr></thead>
+                        <tbody id="apiAllTokensBody"><tr><td colspan="6">Loading...</td></tr></tbody>
+                    </table>
+                </div>
             </div>
         </div>
         <div class="form-actions">
@@ -1589,7 +1685,13 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
 </div>
 
 <script>
+let _overlayMouseDownOnSelf = false;
+document.addEventListener('mousedown', e => {
+    _overlayMouseDownOnSelf = e.target.classList.contains('modal-overlay');
+});
+
 const API = '/api/v1';
+const LICENSE_DEFAULTS = { days: 365, maxMachines: 1, leaseDurationHours: 168, leaseGraceHours: 24 };
 let authToken = '';
 let currentUsername = '';
 
@@ -2232,6 +2334,8 @@ function selectLicense(key) {
     document.getElementById('detailExpires').textContent = formatDate(lic.expires);
     document.getElementById('detailFeatures').innerHTML = lic.features.map(f => '<span class="feature-tag">' + esc(f) + '</span>').join(' ') || 'none';
     document.getElementById('detailMachineCount').textContent = lic.active_machine_count + ' / ' + (lic.max_machines === 0 ? '\u221e' : lic.max_machines);
+    document.getElementById('detailLeaseDuration').textContent = lic.lease_duration_hours === 0 ? 'Disabled' : lic.lease_duration_hours + ' h';
+    document.getElementById('detailLeaseGrace').textContent = lic.lease_grace_hours + ' h';
 
     const btnRevoke = document.getElementById('btnRevoke');
     btnRevoke.style.display = status === 'revoked' ? 'none' : '';
@@ -2369,7 +2473,8 @@ function updateExpiryFields() {
         row.style.display = '';
         label.textContent = 'Days';
         input.type = 'number';
-        input.value = '365';
+        input.placeholder = LICENSE_DEFAULTS.days;
+        input.value = '';
     } else {
         row.style.display = '';
         label.textContent = 'Date (YYYY-MM-DD)';
@@ -2414,14 +2519,16 @@ async function createLicense() {
         product: document.getElementById('createProduct').value.trim() || 'FusionHub',
         customer: customer,
         features: getSelectedFeatures(),
-        max_machines: parseInt(document.getElementById('createMaxMachines').value) || 0,
+        max_machines: parseInt(document.getElementById('createMaxMachines').value) || LICENSE_DEFAULTS.maxMachines,
+        lease_duration_hours: parseInt(document.getElementById('createLeaseDuration').value) || LICENSE_DEFAULTS.leaseDurationHours,
+        lease_grace_hours: parseInt(document.getElementById('createLeaseGrace').value) || LICENSE_DEFAULTS.leaseGraceHours,
     };
 
     const expiryType = document.getElementById('createExpiryType').value;
     if (expiryType === 'perpetual') {
         body.perpetual = true;
     } else if (expiryType === 'days') {
-        body.days = parseInt(document.getElementById('createExpiryValue').value) || 365;
+        body.days = parseInt(document.getElementById('createExpiryValue').value) || LICENSE_DEFAULTS.days;
     } else {
         body.expires = document.getElementById('createExpiryValue').value;
     }
