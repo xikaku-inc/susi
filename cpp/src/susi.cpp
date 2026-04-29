@@ -51,6 +51,8 @@ using json = nlohmann::json;
 #define SUSI_LOG(fmt, ...) fprintf(stderr, "[susi] " fmt "\n", ##__VA_ARGS__)
 #endif
 
+const int DEFAULT_LEASE_GRACE_HOURS = 24;
+
 // ---------------------------------------------------------------------------
 // Base64 decoding (OpenSSL)
 // ---------------------------------------------------------------------------
@@ -540,6 +542,12 @@ SusiClient::LicenseStatus SusiClient::verifySignedLicenseJson(const std::string&
     }
 
     // Check lease expiry
+    if (payload.contains("lease_grace_period") && payload.at("lease_grace_period").is_number_unsigned()) {
+        m_graceHours = payload.at("lease_grace_period").get<int64_t>();
+    } else {
+        m_graceHours = DEFAULT_LEASE_GRACE_HOURS;
+    }
+
     bool inGracePeriod = false;
     if (payload.contains("lease_expires") && !payload.at("lease_expires").is_null()) {
         std::string leaseStr = payload.at("lease_expires").get<std::string>();
@@ -605,6 +613,7 @@ SusiClient::LicenseStatus SusiClient::checkLicense(const std::filesystem::path& 
     m_product.clear();
     m_customer.clear();
     m_leaseExpiresEpoch = 0;
+    m_graceHours = DEFAULT_LEASE_GRACE_HOURS;
 
     std::ifstream licenseFile(licensePath);
     if (!licenseFile.is_open()) {
@@ -628,6 +637,7 @@ SusiClient::LicenseStatus SusiClient::checkLicenseAndRefresh(const std::filesyst
     m_product.clear();
     m_customer.clear();
     m_leaseExpiresEpoch = 0;
+    m_graceHours = DEFAULT_LEASE_GRACE_HOURS;
 
     if (!m_serverUrl.empty()) {
         std::string url = m_serverUrl;
@@ -1136,6 +1146,7 @@ SusiClient::LicenseStatus SusiClient::checkLicenseToken()
     m_product.clear();
     m_customer.clear();
     m_leaseExpiresEpoch = 0;
+    m_graceHours = DEFAULT_LEASE_GRACE_HOURS;
 
     auto devices = enumerateUsbDevices();
     if (devices.empty()) {
