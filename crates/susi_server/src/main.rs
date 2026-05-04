@@ -2030,8 +2030,7 @@ async fn handle_export_token(
     Json(req): Json<ExportTokenRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
-    require_password_changed(&state, &principal)?;
-    require_admin(&state, &principal)?;
+    require_admin_full(&state, &principal)?;
 
     let usb_serial = req.usb_serial.trim().to_string();
     if usb_serial.is_empty() {
