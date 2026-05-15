@@ -213,12 +213,16 @@ impl LicenseDb {
             -- Workspace peer registry. Each FusionHub instance that logs into
             -- a workspace registers its externally-reachable URL here. Other
             -- members poll this list to populate their peer set without mDNS.
+            -- `network_id` is a peer-side scope string — peers only federate
+            -- with others sharing the same value (workspace membership is
+            -- necessary but not sufficient). Empty string means isolated.
             CREATE TABLE IF NOT EXISTS workspace_peers (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 workspace_id TEXT NOT NULL,
                 host_id TEXT NOT NULL,
                 url TEXT NOT NULL,
                 label TEXT NOT NULL DEFAULT '',
+                network_id TEXT NOT NULL DEFAULT '',
                 registered_by TEXT NOT NULL,
                 registered_at TEXT NOT NULL,
                 last_seen TEXT NOT NULL,
@@ -448,6 +452,14 @@ impl LicenseDb {
         // over an account.
         let _ = self.conn.execute_batch(
             "ALTER TABLE login_tokens ADD COLUMN kind TEXT NOT NULL DEFAULT 'device';"
+        );
+
+        // Peer-side federation scope string. Empty default keeps existing rows
+        // valid; the application layer treats empty as "isolated" so prior
+        // workspace setups must explicitly set a value on each peer to opt
+        // back into federation.
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE workspace_peers ADD COLUMN network_id TEXT NOT NULL DEFAULT '';"
         );
 
         // Migrate single-admin table to multi-user table
@@ -1905,42 +1917,45 @@ impl LicenseDb {
         Ok(secret)
     }
 
-    /// Insert or update a peer registration. Updates `url`, `label`, and
-    /// `last_seen` on conflict so a peer that moved (new public URL) refreshes
-    /// in place rather than accumulating stale rows.
+    /// Insert or update a peer registration. Updates `url`, `label`,
+    /// `network_id`, and `last_seen` on conflict so a peer that moved (new
+    /// public URL, or changed its Network ID) refreshes in place rather than
+    /// accumulating stale rows.
     pub fn upsert_workspace_peer(
         &self,
         workspace_id: &str,
         host_id: &str,
         url: &str,
         label: &str,
+        network_id: &str,
         registered_by: &str,
     ) -> Result<(), LicenseError> {
         let now = Utc::now().to_rfc3339();
         self.conn
             .execute(
                 "INSERT INTO workspace_peers
-                    (workspace_id, host_id, url, label, registered_by, registered_at, last_seen)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+                    (workspace_id, host_id, url, label, network_id, registered_by, registered_at, last_seen)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
                  ON CONFLICT(workspace_id, host_id) DO UPDATE SET
                     url = excluded.url,
                     label = excluded.label,
+                    network_id = excluded.network_id,
                     last_seen = excluded.last_seen",
-                params![workspace_id, host_id, url, label, registered_by, now],
+                params![workspace_id, host_id, url, label, network_id, registered_by, now],
             )
             .map_err(|e| LicenseError::Other(format!("DB upsert peer: {}", e)))?;
         Ok(())
     }
 
     /// List peers registered against a workspace. Returns
-    /// `(host_id, url, label, registered_by, last_seen)`.
+    /// `(host_id, url, label, network_id, registered_by, last_seen)`.
     pub fn list_workspace_peers(
         &self,
         workspace_id: &str,
-    ) -> Result<Vec<(String, String, String, String, String)>, LicenseError> {
+    ) -> Result<Vec<(String, String, String, String, String, String)>, LicenseError> {
         let mut stmt = self.conn
             .prepare(
-                "SELECT host_id, url, label, registered_by, last_seen
+                "SELECT host_id, url, label, network_id, registered_by, last_seen
                  FROM workspace_peers
                  WHERE workspace_id = ?1
                  ORDER BY host_id",
@@ -1954,6 +1969,7 @@ impl LicenseDb {
                     r.get::<_, String>(2)?,
                     r.get::<_, String>(3)?,
                     r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
                 ))
             })
             .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
@@ -4931,9 +4947,9 @@ mod tests {
         db.create_workspace("ws-2", "WS2", "", "", "admin").unwrap();
 
         // Register two peers in ws-1 and one in ws-2.
-        db.upsert_workspace_peer("ws-1", "hostA", "https://a.local:443", "Laptop A", "alice").unwrap();
-        db.upsert_workspace_peer("ws-1", "hostB", "https://b.local:443", "Laptop B", "alice").unwrap();
-        db.upsert_workspace_peer("ws-2", "hostA", "https://other.local", "", "bob").unwrap();
+        db.upsert_workspace_peer("ws-1", "hostA", "https://a.local:443", "Laptop A", "", "alice").unwrap();
+        db.upsert_workspace_peer("ws-1", "hostB", "https://b.local:443", "Laptop B", "", "alice").unwrap();
+        db.upsert_workspace_peer("ws-2", "hostA", "https://other.local", "", "", "bob").unwrap();
 
         let peers_ws1 = db.list_workspace_peers("ws-1").unwrap();
         assert_eq!(peers_ws1.len(), 2);
@@ -4947,12 +4963,33 @@ mod tests {
 
         // Re-register hostA with a new URL — must update in place.
         std::thread::sleep(std::time::Duration::from_millis(5));
-        db.upsert_workspace_peer("ws-1", "hostA", "https://a.new:443", "Laptop A v2", "alice").unwrap();
+        db.upsert_workspace_peer("ws-1", "hostA", "https://a.new:443", "Laptop A v2", "", "alice").unwrap();
         let after = db.list_workspace_peers("ws-1").unwrap();
         assert_eq!(after.len(), 2, "upsert must not create duplicate row");
         let row_a = after.iter().find(|p| p.0 == "hostA").unwrap();
         assert_eq!(row_a.1, "https://a.new:443");
         assert_eq!(row_a.2, "Laptop A v2");
+    }
+
+    #[test]
+    fn test_workspace_peer_carries_network_id_through_upsert() {
+        // Peers register their network_id; re-registration updates it in
+        // place so flipping the setting on a live instance propagates to
+        // other workspace members at their next federation poll.
+        let db = test_db();
+        db.create_workspace("ws-1", "WS", "", "", "admin").unwrap();
+        db.upsert_workspace_peer("ws-1", "hostA", "https://a", "A", "lab-east", "alice").unwrap();
+        db.upsert_workspace_peer("ws-1", "hostB", "https://b", "B", "lab-west", "alice").unwrap();
+        let rows = db.list_workspace_peers("ws-1").unwrap();
+        let a = rows.iter().find(|r| r.0 == "hostA").unwrap();
+        let b = rows.iter().find(|r| r.0 == "hostB").unwrap();
+        assert_eq!(a.3, "lab-east", "network_id stored on initial insert");
+        assert_eq!(b.3, "lab-west");
+        // Flip hostA's network_id; re-register must update the row.
+        db.upsert_workspace_peer("ws-1", "hostA", "https://a", "A", "lab-west", "alice").unwrap();
+        let rows2 = db.list_workspace_peers("ws-1").unwrap();
+        let a2 = rows2.iter().find(|r| r.0 == "hostA").unwrap();
+        assert_eq!(a2.3, "lab-west", "network_id updated on re-register");
     }
 
     #[test]
@@ -5026,14 +5063,14 @@ mod tests {
     fn test_workspace_peer_delete() {
         let db = test_db();
         db.create_workspace("ws-1", "WS", "", "", "admin").unwrap();
-        db.upsert_workspace_peer("ws-1", "hostA", "https://a", "", "alice").unwrap();
+        db.upsert_workspace_peer("ws-1", "hostA", "https://a", "", "", "alice").unwrap();
 
         assert!(db.delete_workspace_peer("ws-1", "hostA").unwrap());
         assert_eq!(db.list_workspace_peers("ws-1").unwrap().len(), 0);
         // Second delete returns false.
         assert!(!db.delete_workspace_peer("ws-1", "hostA").unwrap());
         // Wrong workspace also false.
-        db.upsert_workspace_peer("ws-1", "hostA", "https://a", "", "alice").unwrap();
+        db.upsert_workspace_peer("ws-1", "hostA", "https://a", "", "", "alice").unwrap();
         assert!(!db.delete_workspace_peer("ws-other", "hostA").unwrap());
         assert_eq!(db.list_workspace_peers("ws-1").unwrap().len(), 1);
     }
@@ -5043,7 +5080,7 @@ mod tests {
         let db = test_db();
         db.create_workspace("ws-1", "WS", "", "", "admin").unwrap();
         db.get_or_create_workspace_federation_secret("ws-1").unwrap();
-        db.upsert_workspace_peer("ws-1", "hostA", "https://a", "", "alice").unwrap();
+        db.upsert_workspace_peer("ws-1", "hostA", "https://a", "", "", "alice").unwrap();
         assert_eq!(db.list_workspace_peers("ws-1").unwrap().len(), 1);
 
         db.delete_workspace("ws-1").unwrap();

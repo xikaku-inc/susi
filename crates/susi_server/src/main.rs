@@ -3422,6 +3422,10 @@ struct RegisterPeerRequest {
     url: String,
     #[serde(default)]
     label: String,
+    /// Peer-side federation scope. Workspace members federate only with
+    /// other members that share this exact string. Empty ⇒ isolated.
+    #[serde(default)]
+    network_id: String,
 }
 
 /// Returns the workspace's federation channel secret and the live peer list.
@@ -3449,11 +3453,12 @@ async fn handle_get_workspace_federation(
     let graph_version = db.get_workspace_graph_version(&workspace_id)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
-    let peer_json: Vec<_> = peers.iter().map(|(host_id, url, label, registered_by, last_seen)| {
+    let peer_json: Vec<_> = peers.iter().map(|(host_id, url, label, network_id, registered_by, last_seen)| {
         serde_json::json!({
             "host_id": host_id,
             "url": url,
             "label": label,
+            "network_id": network_id,
             "registered_by": registered_by,
             "last_seen": last_seen,
         })
@@ -3583,7 +3588,7 @@ async fn handle_register_workspace_peer(
         return Err(error_response(StatusCode::FORBIDDEN, "Viewers cannot register peers"));
     }
 
-    db.upsert_workspace_peer(&workspace_id, &req.host_id, &req.url, &req.label, &principal.username)
+    db.upsert_workspace_peer(&workspace_id, &req.host_id, &req.url, &req.label, &req.network_id, &principal.username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
     Ok(Json(serde_json::json!({ "status": "OK" })))
