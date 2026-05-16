@@ -37,6 +37,13 @@ services:
       - SUSI_CONTACT_TO_ADDR=${SUSI_CONTACT_TO_ADDR:-}
       - SUSI_TURNSTILE_SECRET=${SUSI_TURNSTILE_SECRET:-}
       - SUSI_TURNSTILE_SITE_KEY=${SUSI_TURNSTILE_SITE_KEY:-}
+      # S3 for workspace recordings. Empty SUSI_S3_BUCKET disables the
+      # recording endpoints (they respond 503). AWS SDK reads
+      # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY automatically.
+      - SUSI_S3_BUCKET=${SUSI_S3_BUCKET:-}
+      - SUSI_S3_REGION=${SUSI_S3_REGION:-}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
     volumes:
       - susi-data:/data
     healthcheck:

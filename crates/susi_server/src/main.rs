@@ -4,6 +4,7 @@ mod email;
 mod shop;
 mod invoice_pdf;
 mod contact;
+mod s3;
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -165,6 +166,7 @@ struct AppState {
     turnstile_secret: String,
     turnstile_site_key: String,
     http: reqwest::Client,
+    s3: Option<s3::S3Storage>,
 }
 
 // Magic-link TTL: long enough for a user to switch to their mail client and
@@ -3413,6 +3415,235 @@ async fn handle_delete_config(
 }
 
 // ---------------------------------------------------------------------------
+// Workspace recordings: presigned-URL upload/download to S3.
+// ---------------------------------------------------------------------------
+
+/// Lifetime of presigned PUT and GET URLs. 15 min for PUT is enough for a
+/// few hundred MB at modest bandwidth; clients should request a fresh URL
+/// if they need longer. GET is shorter (5 min) since downloads start
+/// immediately after the user clicks.
+const RECORDING_PUT_TTL: StdDuration = StdDuration::from_secs(15 * 60);
+const RECORDING_GET_TTL: StdDuration = StdDuration::from_secs(5 * 60);
+const RECORDING_CONTENT_TYPE: &str = "application/x-ndjson";
+
+#[derive(Deserialize)]
+struct InitRecordingRequest {
+    file_name: String,
+    #[serde(default)]
+    description: String,
+}
+
+/// Replace anything that isn't an S3-friendly filename character so the
+/// object key doesn't surprise downstream tooling. Whitespace collapses to
+/// `_`; control chars are dropped.
+fn sanitize_filename(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '.' | '-' | '_' => out.push(c),
+            ' ' | '\t' => out.push('_'),
+            _ => {}
+        }
+    }
+    if out.is_empty() { "recording".to_string() } else { out }
+}
+
+fn s3_unavailable() -> (StatusCode, Json<ErrorResponse>) {
+    error_response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "S3 storage is not configured on this server",
+    )
+}
+
+fn assert_workspace_writer(
+    state: &AppState,
+    workspace_id: &str,
+    principal: &Principal,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    let db = state.db.lock().unwrap();
+    let role = db
+        .get_workspace_member_role(workspace_id, &principal.username)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
+    if role == "viewer" {
+        return Err(error_response(StatusCode::FORBIDDEN, "Viewers cannot modify recordings"));
+    }
+    Ok(())
+}
+
+fn assert_workspace_member(
+    state: &AppState,
+    workspace_id: &str,
+    principal: &Principal,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    let db = state.db.lock().unwrap();
+    db.get_workspace_member_role(workspace_id, &principal.username)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
+    Ok(())
+}
+
+async fn handle_init_recording(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<String>,
+    Json(req): Json<InitRecordingRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    require_password_changed(&state, &principal)?;
+    assert_workspace_writer(&state, &workspace_id, &principal)?;
+
+    let s3 = state.s3.as_ref().ok_or_else(s3_unavailable)?;
+
+    let safe_name = sanitize_filename(&req.file_name);
+    let uuid = uuid::Uuid::new_v4().to_string();
+    // workspace_id is the prefix the IAM policy is scoped to — keeping it
+    // first means a misconfigured client can't write outside its workspace
+    // even with a leaked presigned URL.
+    let s3_key = format!("workspaces/{}/recordings/{}-{}", workspace_id, uuid, safe_name);
+
+    let upload_url = s3
+        .presign_put(&s3_key, RECORDING_CONTENT_TYPE, RECORDING_PUT_TTL)
+        .await
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    let id = {
+        let db = state.db.lock().unwrap();
+        db.create_recording(&workspace_id, &s3_key, &safe_name, &req.description, &principal.username)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+    };
+
+    Ok((StatusCode::CREATED, Json(serde_json::json!({
+        "id": id,
+        "s3_key": s3_key,
+        "upload_url": upload_url,
+        "content_type": RECORDING_CONTENT_TYPE,
+        "expires_in_secs": RECORDING_PUT_TTL.as_secs(),
+    }))))
+}
+
+async fn handle_complete_recording(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((workspace_id, recording_id)): Path<(String, i64)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    require_password_changed(&state, &principal)?;
+    assert_workspace_writer(&state, &workspace_id, &principal)?;
+
+    let s3 = state.s3.as_ref().ok_or_else(s3_unavailable)?;
+
+    // Look up the row to learn the s3_key.
+    let row = {
+        let db = state.db.lock().unwrap();
+        db.get_recording(&workspace_id, recording_id)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+            .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Recording not found"))?
+    };
+
+    let size = s3
+        .head_size(&row.s3_key)
+        .await
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .ok_or_else(|| error_response(StatusCode::CONFLICT, "Object not yet present in S3"))?;
+
+    {
+        let db = state.db.lock().unwrap();
+        let ok = db.complete_recording(&workspace_id, recording_id, size)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+        if !ok {
+            return Err(error_response(StatusCode::NOT_FOUND, "Recording not found"));
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "id": recording_id,
+        "file_size": size,
+        "status": "uploaded",
+    })))
+}
+
+async fn handle_list_recordings(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    require_password_changed(&state, &principal)?;
+    assert_workspace_member(&state, &workspace_id, &principal)?;
+
+    let rows = {
+        let db = state.db.lock().unwrap();
+        db.list_recordings(&workspace_id)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+    };
+
+    Ok(Json(serde_json::json!({ "recordings": rows })))
+}
+
+async fn handle_get_recording_download(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((workspace_id, recording_id)): Path<(String, i64)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    require_password_changed(&state, &principal)?;
+    assert_workspace_member(&state, &workspace_id, &principal)?;
+
+    let s3 = state.s3.as_ref().ok_or_else(s3_unavailable)?;
+
+    let row = {
+        let db = state.db.lock().unwrap();
+        db.get_recording(&workspace_id, recording_id)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+            .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Recording not found"))?
+    };
+    if row.status != "uploaded" {
+        return Err(error_response(StatusCode::CONFLICT, "Recording upload not complete"));
+    }
+
+    let url = s3
+        .presign_get(&row.s3_key, RECORDING_GET_TTL)
+        .await
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    Ok(Json(serde_json::json!({
+        "id": row.id,
+        "file_name": row.file_name,
+        "file_size": row.file_size,
+        "download_url": url,
+        "expires_in_secs": RECORDING_GET_TTL.as_secs(),
+    })))
+}
+
+async fn handle_delete_recording(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((workspace_id, recording_id)): Path<(String, i64)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    require_password_changed(&state, &principal)?;
+    assert_workspace_writer(&state, &workspace_id, &principal)?;
+
+    // Tear down DB first to release the s3_key for cleanup; if S3 delete
+    // fails the worst case is an orphan object — we log but don't surface.
+    let s3_key = {
+        let db = state.db.lock().unwrap();
+        db.delete_recording(&workspace_id, recording_id)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+            .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Recording not found"))?
+    };
+
+    if let Some(s3) = state.s3.as_ref() {
+        if let Err(e) = s3.delete_object(&s3_key).await {
+            log::warn!("S3 delete_object failed for {}: {:#}", s3_key, e);
+        }
+    }
+
+    Ok(Json(serde_json::json!({ "status": "OK" })))
+}
+
+// ---------------------------------------------------------------------------
 // Workspace federation: channel secret + peer registry
 // ---------------------------------------------------------------------------
 
@@ -3960,6 +4191,24 @@ async fn main() -> Result<()> {
         .build()
         .context("Failed to build HTTP client")?;
 
+    // S3 for workspace recordings. Missing env (bucket/region/creds) is
+    // tolerated at startup — the recording endpoints respond 503 instead
+    // and the rest of the server stays up.
+    let s3_storage = match s3::S3Storage::from_env().await {
+        Ok(Some(s)) => {
+            log::info!("S3 ready: bucket={}, region={}", s.bucket(), s.region());
+            Some(s)
+        }
+        Ok(None) => {
+            log::info!("S3 not configured (SUSI_S3_BUCKET/REGION empty) — recording endpoints will respond 503");
+            None
+        }
+        Err(e) => {
+            log::error!("S3 init failed: {:#} — recording endpoints will respond 503", e);
+            None
+        }
+    };
+
     if cli.contact_to_addr.is_empty() {
         log::info!("Contact form disabled (SUSI_CONTACT_TO_ADDR empty)");
     } else if email_service.is_none() {
@@ -3990,6 +4239,7 @@ async fn main() -> Result<()> {
         turnstile_secret: cli.turnstile_secret,
         turnstile_site_key: cli.turnstile_site_key,
         http,
+        s3: s3_storage,
     });
 
     // Periodic lease cleanup. Replaces the per-read DELETE that ran inside
@@ -4122,6 +4372,11 @@ async fn main() -> Result<()> {
         // Shared workspace graph (one node-graph per workspace, version-tracked
         // for optimistic-lock concurrent edits between member fusionhubs).
         .route("/api/v1/workspaces/{id}/graph", get(handle_get_workspace_graph).put(handle_put_workspace_graph))
+        // Workspace recordings: presigned-URL upload/download to S3.
+        .route("/api/v1/workspaces/{id}/recordings", get(handle_list_recordings).post(handle_init_recording))
+        .route("/api/v1/workspaces/{id}/recordings/{rid}", axum::routing::delete(handle_delete_recording))
+        .route("/api/v1/workspaces/{id}/recordings/{rid}/complete", post(handle_complete_recording))
+        .route("/api/v1/workspaces/{id}/recordings/{rid}/download", get(handle_get_recording_download))
         .route("/api/v1/workspaces/{id}/releases", get(handle_workspace_releases))
         .route(
             "/api/v1/workspaces/{id}/docs/releases",
