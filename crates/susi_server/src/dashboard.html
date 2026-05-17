@@ -678,6 +678,7 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
             <div class="ws-tabs" role="tablist">
                 <button class="ws-tab active" data-ws-tab="releases" onclick="setWsTab('releases')">Releases</button>
                 <button class="ws-tab" data-ws-tab="configs" onclick="setWsTab('configs')">Configs</button>
+                <button class="ws-tab" data-ws-tab="recordings" onclick="setWsTab('recordings')">Recordings</button>
                 <button class="ws-tab" data-ws-tab="instances" onclick="setWsTab('instances')">Instances</button>
                 <button class="ws-tab" data-ws-tab="members" onclick="setWsTab('members')">Members</button>
                 <button class="ws-tab" data-ws-tab="settings" data-ws-admin-only onclick="setWsTab('settings')">Settings</button>
@@ -696,6 +697,14 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
             <div class="ws-tab-panel" data-ws-panel="configs">
                 <div class="detail-section-title">Config Revisions</div>
                 <div id="wsDetailConfigs" class="machines-list"></div>
+            </div>
+
+            <div class="ws-tab-panel" data-ws-panel="recordings">
+                <div class="detail-section-title" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Recordings</span>
+                    <button class="small" onclick="loadWsRecordings(selectedWsId)">Refresh</button>
+                </div>
+                <div id="wsDetailRecordings" class="machines-list"></div>
             </div>
 
             <div class="ws-tab-panel" data-ws-panel="instances">
@@ -3416,6 +3425,7 @@ async function showWsDetail(id) {
         loadWsConfigs(id);
         loadWsReleases(id);
         loadWsInstances(id);
+        loadWsRecordings(id);
     } catch (e) {
         toast('Error: ' + e.message, 'error');
     }
@@ -3912,6 +3922,94 @@ async function loadWsConfigs(wsId) {
         `).join('');
     } catch (e) {
         container.innerHTML = '<div style="color:var(--text2);font-size:13px;">Failed to load configs</div>';
+    }
+}
+
+function formatBytes(n) {
+    if (n == null) return '';
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+    if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
+    return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+}
+
+async function loadWsRecordings(wsId) {
+    if (!wsId) return;
+    const container = document.getElementById('wsDetailRecordings');
+    try {
+        const resp = await fetch(API + '/workspaces/' + wsId + '/recordings', { headers: authHeaders() });
+        if (!resp.ok) { container.innerHTML = '<div style="color:var(--text2);font-size:13px;">Failed to load</div>'; return; }
+        const data = await resp.json();
+        const recordings = data.recordings || [];
+        if (recordings.length === 0) {
+            container.innerHTML = '<div style="color:var(--text2);font-size:13px;">No recordings uploaded to this workspace yet.</div>';
+            return;
+        }
+        container.innerHTML = recordings.map(r => {
+            const ready = r.status === 'uploaded';
+            const status = ready
+                ? ''
+                : '<span style="color:var(--text2);margin-left:6px;">(' + esc(r.status) + ')</span>';
+            const dlBtn = ready
+                ? '<button class="small" onclick="downloadWsRecording(' + r.id + ')">Download</button>'
+                : '';
+            return '<div class="machine-item">' +
+                '<span style="display:flex;align-items:center;gap:10px;min-width:0;flex:1;">' +
+                    '<strong style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(r.file_name) + '</strong>' +
+                    status +
+                    (r.description ? '<span style="color:var(--text2);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">&middot; ' + esc(r.description) + '</span>' : '') +
+                '</span>' +
+                '<span class="machine-code" style="display:flex;align-items:center;gap:10px;">' +
+                    '<span>' + formatBytes(r.file_size) + '</span>' +
+                    '<span>' + esc(r.author) + ' &middot; ' + formatDateTime(r.created_at) + '</span>' +
+                    dlBtn +
+                    '<button class="small danger" onclick="deleteWsRecording(' + r.id + ')">Delete</button>' +
+                '</span>' +
+            '</div>';
+        }).join('');
+    } catch (e) {
+        container.innerHTML = '<div style="color:var(--text2);font-size:13px;">Failed to load recordings: ' + esc(e.message) + '</div>';
+    }
+}
+
+async function downloadWsRecording(id) {
+    if (!selectedWsId) return;
+    try {
+        const resp = await fetch(API + '/workspaces/' + selectedWsId + '/recordings/' + id + '/download', { headers: authHeaders() });
+        if (!resp.ok) {
+            const d = await resp.json().catch(() => ({}));
+            toast('Error: ' + (d.error || 'Could not get download URL'), 'error');
+            return;
+        }
+        const data = await resp.json();
+        // The presigned URL is single-use-ish (it's bound to a method+key+expiry,
+        // not request count). Opening in a new tab kicks off the S3 GET; the
+        // browser handles the file save dialog from the response headers.
+        if (data.download_url) {
+            window.open(data.download_url, '_blank');
+        }
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function deleteWsRecording(id) {
+    if (!selectedWsId) return;
+    if (!confirm('Delete this recording? The file will be removed from S3 and cannot be recovered.')) return;
+    try {
+        const resp = await fetch(API + '/workspaces/' + selectedWsId + '/recordings/' + id, {
+            method: 'DELETE',
+            headers: authHeaders(),
+        });
+        if (!resp.ok) {
+            const d = await resp.json().catch(() => ({}));
+            toast('Error: ' + (d.error || 'Could not delete'), 'error');
+            return;
+        }
+        toast('Recording deleted', 'success');
+        loadWsRecordings(selectedWsId);
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
     }
 }
 

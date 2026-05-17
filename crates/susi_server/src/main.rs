@@ -3603,7 +3603,7 @@ async fn handle_get_recording_download(
     }
 
     let url = s3
-        .presign_get(&row.s3_key, RECORDING_GET_TTL)
+        .presign_get(&row.s3_key, Some(&row.file_name), RECORDING_GET_TTL)
         .await
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 

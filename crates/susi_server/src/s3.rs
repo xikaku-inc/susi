@@ -66,15 +66,26 @@ impl S3Storage {
         Ok(req.uri().to_string())
     }
 
-    /// Presigned GET URL for downloading the object.
-    pub async fn presign_get(&self, key: &str, expires_in: Duration) -> Result<String> {
+    /// Presigned GET URL for downloading the object. If `download_name` is
+    /// set, S3 returns a Content-Disposition that makes browsers save-as
+    /// (with that filename) instead of rendering JSON Lines inline.
+    pub async fn presign_get(
+        &self,
+        key: &str,
+        download_name: Option<&str>,
+        expires_in: Duration,
+    ) -> Result<String> {
         let presign = PresigningConfig::expires_in(expires_in)
             .context("PresigningConfig::expires_in")?;
-        let req = self
-            .client
-            .get_object()
-            .bucket(&self.bucket)
-            .key(key)
+        let mut builder = self.client.get_object().bucket(&self.bucket).key(key);
+        if let Some(name) = download_name {
+            // Quoted filename = safe with spaces / unicode after sanitize.
+            builder = builder.response_content_disposition(format!(
+                "attachment; filename=\"{}\"",
+                name.replace('"', "")
+            ));
+        }
+        let req = builder
             .presigned(presign)
             .await
             .map_err(|e| anyhow!("S3 presign_get: {}", e))?;
