@@ -5,6 +5,7 @@ members = [
     "crates/susi_client",
     "crates/susi_admin",
     "crates/susi_server",
+    "crates/susi_helper",
 ]
 
 [workspace.dependencies]
