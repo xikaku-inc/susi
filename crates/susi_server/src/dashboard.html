@@ -893,6 +893,10 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
                         <div class="field-label">Grace Period (hours)</div>
                         <div class="field-value" id="detailLeaseGrace"></div>
                     </div>
+                    <div class="detail-field">
+                        <div class="field-label">Requires Signed Binary</div>
+                        <div class="field-value" id="detailRequireSignedBinary"></div>
+                    </div>
                 </div>
             </details>
             <div class="detail-section-title">Activated Machines</div>
@@ -923,6 +927,9 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
                 <div class="detail-field" style="grid-column:1/-1;">
                     <div class="field-label">Features</div>
                     <div id="editFeaturesContainer" class="feature-checkboxes"></div>
+                </div>
+                <div class="detail-field" style="grid-column:1/-1;">
+                    <label style="cursor:pointer;display:flex;align-items:center;gap:8px;font-size:12px;"><input type="checkbox" id="editRequireSignedBinary"> Require signed binary</label>
                 </div>
             </div>
             <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;">
@@ -1301,6 +1308,9 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
                     <div class="adv-field">
                         <label>Grace Period<br>(hours)</label>
                         <input type="number" id="createLeaseGrace" placeholder="24" min="0">
+                    </div>
+                    <div class="adv-field" style="grid-column:1/-1;">
+                        <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;font-weight:400;text-transform:none;letter-spacing:0;color:var(--text);margin:0;"><input type="checkbox" id="createRequireSignedBinary" style="width:auto;margin:0;"> Require signed binary</label>
                     </div>
                 </div>
             </details>
@@ -2355,6 +2365,7 @@ function selectLicense(key) {
     document.getElementById('detailMachineCount').textContent = lic.active_machine_count + ' / ' + (lic.max_machines === 0 ? '\u221e' : lic.max_machines);
     document.getElementById('detailLeaseDuration').textContent = lic.lease_duration_hours === 0 ? 'Disabled' : lic.lease_duration_hours + ' h';
     document.getElementById('detailLeaseGrace').textContent = lic.lease_grace_hours + ' h';
+    document.getElementById('detailRequireSignedBinary').textContent = lic.require_signed_binary ? 'Yes' : 'No';
 
     const btnRevoke = document.getElementById('btnRevoke');
     btnRevoke.style.display = status === 'revoked' ? 'none' : '';
@@ -2390,6 +2401,7 @@ function startEditLicense() {
     document.getElementById('editCustomer').value = lic.customer;
     document.getElementById('editProduct').value = lic.product;
     document.getElementById('editMaxMachines').value = lic.max_machines;
+    document.getElementById('editRequireSignedBinary').checked = !!lic.require_signed_binary;
     const isPerpetual = lic.expires === 'perpetual';
     document.getElementById('editPerpetual').checked = isPerpetual;
     const expiresInput = document.getElementById('editExpires');
@@ -2428,6 +2440,7 @@ async function saveEditLicense() {
         expires: isPerpetual ? 'perpetual' : (document.getElementById('editExpires').value || null),
         features: features,
         max_machines: parseInt(document.getElementById('editMaxMachines').value) || 0,
+        require_signed_binary: document.getElementById('editRequireSignedBinary').checked,
     };
     if (!body.customer) { toast('Customer is required', 'error'); return; }
     try {
@@ -2475,6 +2488,7 @@ function showCreateModal() {
     document.querySelectorAll('#createFeaturesContainer input[type=checkbox]').forEach(cb => cb.checked = false);
     document.getElementById('createLeaseDuration').value = '';
     document.getElementById('createLeaseGrace').value = '';
+    document.getElementById('createRequireSignedBinary').checked = false;
     document.querySelector('#createModal .advanced-options').open = false;
     document.getElementById('createModal').classList.add('visible');
     document.getElementById('createCustomer').focus();
@@ -2544,6 +2558,7 @@ async function createLicense() {
         max_machines: parseInt(document.getElementById('createMaxMachines').value) || LICENSE_DEFAULTS.maxMachines,
         lease_duration_hours: (() => { const v = parseInt(document.getElementById('createLeaseDuration').value); return Number.isNaN(v) ? LICENSE_DEFAULTS.leaseDurationHours : v; })(),
         lease_grace_hours: parseInt(document.getElementById('createLeaseGrace').value) || LICENSE_DEFAULTS.leaseGraceHours,
+        require_signed_binary: document.getElementById('createRequireSignedBinary').checked,
     };
 
     const expiryType = document.getElementById('createExpiryType').value;

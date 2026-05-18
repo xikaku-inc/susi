@@ -2091,6 +2091,7 @@ async fn handle_export_token(
         machine_codes: vec![activation_code],
         lease_expires: None,
         lease_grace_period: None,
+        require_signed_binary: license.require_signed_binary
     };
 
     let signed = sign_license(&state.private_key, &payload)
