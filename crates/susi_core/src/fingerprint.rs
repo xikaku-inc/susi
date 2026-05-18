@@ -101,34 +101,19 @@ fn get_hardware_ids() -> Result<(String, String), LicenseError> {
 
 #[cfg(target_os = "linux")]
 fn root_disk_serial() -> String {
-    // Find the device mounted at "/"
-    let root_dev = std::fs::read_to_string("/proc/mounts").ok().and_then(|s| {
-        s.lines()
-            .find(|l| l.split_whitespace().nth(1) == Some("/"))
-            .and_then(|l| l.split_whitespace().next())
-            .filter(|d| d.starts_with("/dev/"))
-            .map(|d| d[5..].to_string()) // strip "/dev/"
-    });
-
-    let dev = match root_dev {
+    let root_dev = root_block_device();
+    let disk = match root_dev {
         Some(d) => d,
         None => return String::new(),
     };
 
-    // Determine base disk name (strip partition suffix)
-    // NVMe/eMMC: "nvme0n1p1" → "nvme0n1", "mmcblk0p1" → "mmcblk0"
-    // SATA/SCSI: "sda1" → "sda"
-    let disk = if let Some(p) = dev.rfind('p') {
-        let suffix = &dev[p + 1..];
-        if p > 0 && !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) {
-            dev[..p].to_string()
-        } else {
-            dev.trim_end_matches(|c: char| c.is_ascii_digit()).to_string()
-        }
-    } else {
-        dev.trim_end_matches(|c: char| c.is_ascii_digit()).to_string()
-    };
+    // /dev/disk/by-id/ contains stable udev-managed symlinks (works for direct
+    // disks, NVMe, and LVM dm-uuid entries) without requiring root.
+    if let Some(id) = disk_id_from_by_id(&disk) {
+        return id;
+    }
 
+    // Sysfs serial attributes (SATA/SCSI direct path)
     for path in &[
         format!("/sys/block/{}/device/serial", disk),
         format!("/sys/block/{}/serial", disk),
@@ -140,7 +125,126 @@ fn root_disk_serial() -> String {
             }
         }
     }
+
+    // NVMe: /sys/class/nvme/nvme0/serial (disk name like "nvme0n1" → controller "nvme0")
+    if disk.starts_with("nvme") {
+        if let Some(ctrl) = disk.split('n').next() {
+            if let Ok(s) = std::fs::read_to_string(format!("/sys/class/nvme/{}/serial", ctrl)) {
+                let s = s.trim().to_string();
+                if !s.is_empty() {
+                    return s;
+                }
+            }
+        }
+    }
+
     String::new()
+}
+
+/// Resolve the root block device name (e.g. "sda", "nvme0n1", "dm-0").
+/// For LVM/dm devices, also tries to follow slaves to the underlying disk.
+#[cfg(target_os = "linux")]
+fn root_block_device() -> Option<String> {
+    let mounts = std::fs::read_to_string("/proc/mounts").ok()?;
+    let raw = mounts
+        .lines()
+        .find(|l| l.split_whitespace().nth(1) == Some("/"))?
+        .split_whitespace()
+        .next()?
+        .strip_prefix("/dev/")?
+        .to_string();
+
+    // mapper device → resolve via sysfs dm slaves
+    if raw.starts_with("mapper/") || raw.starts_with("dm-") {
+        let dm = if raw.starts_with("mapper/") {
+            // /dev/mapper/foo → find the dm-N that is its slave
+            resolve_mapper_to_dm(raw.strip_prefix("mapper/").unwrap_or(&raw))?
+        } else {
+            raw
+        };
+
+        // Follow one level of slaves to the physical disk
+        let slaves_dir = format!("/sys/block/{}/slaves", dm);
+        if let Ok(rd) = std::fs::read_dir(&slaves_dir) {
+            for entry in rd.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if !name.is_empty() {
+                    // Strip partition suffix from the slave disk name
+                    return Some(strip_partition_suffix(&name));
+                }
+            }
+        }
+        return Some(dm);
+    }
+
+    Some(strip_partition_suffix(&raw))
+}
+
+#[cfg(target_os = "linux")]
+fn resolve_mapper_to_dm(mapper_name: &str) -> Option<String> {
+    // /sys/block/dm-N/dm/name contains the mapper name
+    if let Ok(rd) = std::fs::read_dir("/sys/block") {
+        for entry in rd.flatten() {
+            let bname = entry.file_name().to_string_lossy().to_string();
+            if !bname.starts_with("dm-") {
+                continue;
+            }
+            let name_path = format!("/sys/block/{}/dm/name", bname);
+            if let Ok(n) = std::fs::read_to_string(&name_path) {
+                if n.trim() == mapper_name {
+                    return Some(bname);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Strip trailing partition number from a block device name.
+/// NVMe/eMMC: "nvme0n1p3" → "nvme0n1", SATA: "sda1" → "sda".
+#[cfg(target_os = "linux")]
+fn strip_partition_suffix(dev: &str) -> String {
+    if let Some(p) = dev.rfind('p') {
+        let suffix = &dev[p + 1..];
+        if p > 0 && !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) {
+            return dev[..p].to_string();
+        }
+    }
+    dev.trim_end_matches(|c: char| c.is_ascii_digit()).to_string()
+}
+
+/// Find a stable ID for `disk` in /dev/disk/by-id/.
+/// Prefers entries that contain "serial", then "wwn", then "dm-uuid", then any match.
+#[cfg(target_os = "linux")]
+fn disk_id_from_by_id(disk: &str) -> Option<String> {
+    let rd = std::fs::read_dir("/dev/disk/by-id").ok()?;
+    let mut candidates: Vec<String> = Vec::new();
+
+    for entry in rd.flatten() {
+        let link_name = entry.file_name().to_string_lossy().to_string();
+        // Each entry is a symlink; its target ends with the device name (possibly with partition)
+        if let Ok(target) = std::fs::read_link(entry.path()) {
+            let target_str = target.to_string_lossy();
+            let target_dev = target_str.rsplit('/').next().unwrap_or("");
+            let target_disk = strip_partition_suffix(target_dev);
+            if target_disk == disk {
+                // Skip partition-specific entries (they include "-partN" suffix)
+                if !link_name.contains("-part") {
+                    candidates.push(link_name);
+                }
+            }
+        }
+    }
+
+    // Rank: serial > wwn > dm-uuid > anything else
+    let rank = |s: &String| -> u8 {
+        if s.contains("serial") { 0 }
+        else if s.starts_with("wwn-") { 1 }
+        else if s.starts_with("dm-uuid") { 2 }
+        else { 3 }
+    };
+    candidates.sort_by_key(rank);
+    candidates.into_iter().next()
 }
 
 /// macOS: IOPlatformUUID + IOPlatformSerialNumber (via ioreg)
