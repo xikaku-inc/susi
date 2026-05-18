@@ -2454,6 +2454,9 @@ async function deleteLicense() {
 // Create modal
 function showCreateModal() {
     document.querySelectorAll('#createFeaturesContainer input[type=checkbox]').forEach(cb => cb.checked = false);
+    document.getElementById('createLeaseDuration').value = '';
+    document.getElementById('createLeaseGrace').value = '';
+    document.querySelector('#createModal .advanced-options').open = false;
     document.getElementById('createModal').classList.add('visible');
     document.getElementById('createCustomer').focus();
 }
@@ -2520,7 +2523,7 @@ async function createLicense() {
         customer: customer,
         features: getSelectedFeatures(),
         max_machines: parseInt(document.getElementById('createMaxMachines').value) || LICENSE_DEFAULTS.maxMachines,
-        lease_duration_hours: parseInt(document.getElementById('createLeaseDuration').value) || LICENSE_DEFAULTS.leaseDurationHours,
+        lease_duration_hours: (() => { const v = parseInt(document.getElementById('createLeaseDuration').value); return Number.isNaN(v) ? LICENSE_DEFAULTS.leaseDurationHours : v; })(),
         lease_grace_hours: parseInt(document.getElementById('createLeaseGrace').value) || LICENSE_DEFAULTS.leaseGraceHours,
     };
 
