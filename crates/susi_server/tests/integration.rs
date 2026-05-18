@@ -418,7 +418,9 @@ fn test_fallback_to_cached_file() {
     child.wait().ok();
 
     // A second client aimed at the now-dead server must fall back to the file.
-    let client2 = LicenseClient::with_server(&public_pem, api_url).unwrap();
+    let client2 = LicenseClient::with_server(&public_pem, api_url)
+        .unwrap()
+        .with_machine_code_cache(test_machine_code_cache());
     let status = client2.verify_and_refresh(&license_path, &license_key, None);
     assert!(status.is_valid(), "fallback: expected Valid from cache, got: {:?}", status);
 }
@@ -444,7 +446,7 @@ fn test_require_signed_binary_enforcement() {
     let license_key = server.create_license(&token, true);
 
     // Activate manually to inspect the raw SignedLicense.
-    let machine_code = LicenseClient::get_machine_code().expect("machine code");
+    let machine_code = TEST_MACHINE_CODE;
     let resp = server
         .http()
         .post(format!("{}/activate", server.api_url))
@@ -537,7 +539,7 @@ fn test_update_require_signed_binary() {
     assert_eq!(body["require_signed_binary"], false, "API response must reflect update");
 
     // Re-activate and inspect the fresh payload.
-    let machine_code = LicenseClient::get_machine_code().unwrap();
+    let machine_code = TEST_MACHINE_CODE;
     let signed: susi_core::SignedLicense = http
         .post(format!("{}/activate", server.api_url))
         .json(&json!({"license_key": key, "machine_code": machine_code}))
