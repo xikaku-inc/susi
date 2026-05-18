@@ -1344,6 +1344,9 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
                 <label>Friendly Name</label>
                 <input type="text" id="exportFriendlyName" placeholder="e.g. Vehicle-ECU-1">
             </div>
+            <div id="exportTokenHint" class="form-row" style="display:none;font-size:12px;color:var(--text2);line-height:1.5">
+                Put the downloaded file on a USB drive in a folder called <code style="font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:var(--bg3);padding:1px 5px;border-radius:3px">.susi</code>. Make sure the file is called <code style="font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:var(--bg3);padding:1px 5px;border-radius:3px">license.bin</code>
+            </div>
             <div class="form-actions">
                 <button class="secondary" onclick="closeExportModal()">Cancel</button>
                 <button onclick="doExport()">Export &amp; Download</button>
@@ -2637,6 +2640,7 @@ function onExportTypeChange() {
     const isToken = document.querySelector('input[name="exportType"]:checked').value === 'token';
     document.getElementById('exportFileRow').style.display = isToken ? 'none' : '';
     document.getElementById('exportTokenRow').style.display = isToken ? '' : 'none';
+    document.getElementById('exportTokenHint').style.display = isToken ? '' : 'none';
     const fileLabel = document.getElementById('exportTypeFileLabel');
     const tokenLabel = document.getElementById('exportTypeTokenLabel');
     fileLabel.style.background = isToken ? 'transparent' : 'var(--accent)';
