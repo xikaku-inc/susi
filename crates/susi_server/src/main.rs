@@ -2078,6 +2078,7 @@ async fn handle_export_token(
         features: license.features.clone(),
         machine_codes: vec![activation_code],
         lease_expires: None,
+        lease_grace_period: None,
     };
 
     let signed = sign_license(&state.private_key, &payload)

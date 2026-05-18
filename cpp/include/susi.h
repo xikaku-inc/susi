@@ -65,8 +65,6 @@ public:
 
     /// Returns true if the lease is expired past the grace period.
     bool isLeaseExpired() const;
-
-    void setGraceHours(int64_t hours) { m_graceHours = hours; }
 private:
     /// Verifies the signature of the signed license JSON string and returns the license status.
     /// If activation code is not provided, the local machine code is used.

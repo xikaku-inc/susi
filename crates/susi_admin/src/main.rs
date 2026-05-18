@@ -536,6 +536,7 @@ fn cmd_export_token(
         features: license.features.clone(),
         machine_codes: vec![activation_code],
         lease_expires: None,
+        lease_grace_period: None,
     };
 
     let signed = sign_license(&private_key, &payload)?;
