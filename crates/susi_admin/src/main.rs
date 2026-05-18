@@ -543,6 +543,7 @@ fn cmd_export_token(
         features: license.features.clone(),
         machine_codes: vec![activation_code],
         lease_expires: None,
+        lease_grace_period: None,
         require_signed_binary: license.require_signed_binary,
     };
 

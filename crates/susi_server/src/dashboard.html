@@ -229,7 +229,7 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
 }
 .feature-checkboxes tr:last-child td { border-bottom: none; }
 .feature-checkboxes tr:hover td { background: rgba(108, 140, 255, 0.04); }
-.feature-checkboxes td:first-child { width: 24px; text-align: center; }
+.feature-checkboxes td:first-child { width: 32px; text-align: center; }
 .feature-checkboxes .feat-id {
     color: var(--text2);
     font-size: 11px;
@@ -257,16 +257,21 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
     padding-top: 80px;
 }
 .modal-overlay.visible { display: flex; }
+body:has(.modal-overlay.visible) { overflow: hidden; }
 .modal {
     background: var(--bg2);
     border: 1px solid var(--border);
     border-radius: 12px;
     width: 100%;
     max-width: 520px;
+    max-height: calc(100vh - 120px);
     padding: 24px;
     box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+    display: flex;
+    flex-direction: column;
 }
-.modal h2 { font-size: 16px; margin-bottom: 16px; }
+.modal h2 { font-size: 16px; margin-bottom: 16px; flex-shrink: 0; }
+.modal-body { flex: 1; overflow-y: auto; min-height: 0; padding-right: 12px; }
 .modal .form-row {
     margin-bottom: 12px;
 }
@@ -279,7 +284,46 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
     gap: 8px;
     justify-content: flex-end;
     margin-top: 20px;
+    flex-shrink: 0;
 }
+
+.advanced-options {
+    margin-bottom: 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+}
+.advanced-options summary {
+    padding: 8px 12px;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text2);
+    user-select: none;
+    list-style: none;
+}
+.advanced-options summary::-webkit-details-marker { display: none; }
+.advanced-options summary::before { content: '▶ '; font-size: 10px; }
+.advanced-options[open] summary::before { content: '▼ '; }
+.advanced-options .advanced-body {
+    padding: 8px 12px 12px;
+    border-top: 1px solid var(--border);
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+}
+.advanced-options .adv-field label {
+    display: block;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text2);
+    margin-bottom: 4px;
+}
+.advanced-options .adv-field input { width: 100%; }
 
 .toast {
     position: fixed;
@@ -337,6 +381,10 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
     padding-bottom: 4px;
     border-bottom: 1px solid var(--border);
 }
+.detail-advanced summary { cursor: pointer; user-select: none; list-style: none; }
+.detail-advanced summary::-webkit-details-marker { display: none; }
+.detail-advanced summary::after { content: ' ▶'; font-size: 9px; }
+.detail-advanced[open] summary::after { content: ' ▼'; }
 
 /* Tabs styled like the top-nav menu items: pill hover with rounded corners,
    accent-tinted active state. No underline. */
@@ -678,6 +726,8 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
             <div class="ws-tabs" role="tablist">
                 <button class="ws-tab active" data-ws-tab="releases" onclick="setWsTab('releases')">Releases</button>
                 <button class="ws-tab" data-ws-tab="configs" onclick="setWsTab('configs')">Configs</button>
+                <button class="ws-tab" data-ws-tab="recordings" onclick="setWsTab('recordings')">Recordings</button>
+                <button class="ws-tab" data-ws-tab="instances" onclick="setWsTab('instances')">Instances</button>
                 <button class="ws-tab" data-ws-tab="members" onclick="setWsTab('members')">Members</button>
                 <button class="ws-tab" data-ws-tab="settings" data-ws-admin-only onclick="setWsTab('settings')">Settings</button>
             </div>
@@ -695,6 +745,22 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
             <div class="ws-tab-panel" data-ws-panel="configs">
                 <div class="detail-section-title">Config Revisions</div>
                 <div id="wsDetailConfigs" class="machines-list"></div>
+            </div>
+
+            <div class="ws-tab-panel" data-ws-panel="recordings">
+                <div class="detail-section-title" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Recordings</span>
+                    <button class="small" onclick="loadWsRecordings(selectedWsId)">Refresh</button>
+                </div>
+                <div id="wsDetailRecordings" class="machines-list"></div>
+            </div>
+
+            <div class="ws-tab-panel" data-ws-panel="instances">
+                <div class="detail-section-title" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Connected Instances</span>
+                    <button class="small" onclick="loadWsInstances(selectedWsId)">Refresh</button>
+                </div>
+                <div id="wsDetailInstances" class="machines-list"></div>
             </div>
 
             <div class="ws-tab-panel" data-ws-panel="members">
@@ -816,6 +882,19 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
                     <div class="field-value" id="detailMachineCount"></div>
                 </div>
             </div>
+            <details class="detail-advanced">
+                <summary class="detail-section-title">Advanced Options</summary>
+                <div class="detail-grid" style="margin-top:8px;">
+                    <div class="detail-field">
+                        <div class="field-label">Lease Duration (hours)</div>
+                        <div class="field-value" id="detailLeaseDuration"></div>
+                    </div>
+                    <div class="detail-field">
+                        <div class="field-label">Grace Period (hours)</div>
+                        <div class="field-value" id="detailLeaseGrace"></div>
+                    </div>
+                </div>
+            </details>
             <div class="detail-section-title">Activated Machines</div>
             <div id="detailMachines" class="machines-list"></div>
         </div>
@@ -1038,33 +1117,35 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
 </div><!-- /page-website -->
 
 <!-- Order detail modal -->
-<div id="orderModal" class="modal-overlay" onclick="if(event.target===this)closeOrderModal()">
+<div id="orderModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeOrderModal()">
     <div class="modal" style="max-width:700px;">
         <h2 id="orderModalTitle">Order</h2>
-        <div id="orderModalBody" style="font-size:13px;"></div>
-        <div id="orderModalShipForm" style="display:none;margin-top:18px;border-top:1px solid var(--border);padding-top:14px;">
-            <h3 style="margin:0 0 12px;font-size:14px;">Mark as shipped</h3>
-            <div class="form-row" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
-                <div><label>Carrier</label>
-                    <select id="orderShipCarrier">
-                        <option value="USPS">USPS</option>
-                        <option value="UPS">UPS</option>
-                        <option value="FedEx">FedEx</option>
-                        <option value="DHL">DHL</option>
-                        <option value="EMS">EMS / Japan Post</option>
-                        <option value="Other">Other</option>
-                    </select>
+        <div class="modal-body">
+            <div id="orderModalBody" style="font-size:13px;"></div>
+            <div id="orderModalShipForm" style="display:none;margin-top:18px;border-top:1px solid var(--border);padding-top:14px;">
+                <h3 style="margin:0 0 12px;font-size:14px;">Mark as shipped</h3>
+                <div class="form-row" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+                    <div><label>Carrier</label>
+                        <select id="orderShipCarrier">
+                            <option value="USPS">USPS</option>
+                            <option value="UPS">UPS</option>
+                            <option value="FedEx">FedEx</option>
+                            <option value="DHL">DHL</option>
+                            <option value="EMS">EMS / Japan Post</option>
+                            <option value="Other">Other</option>
+                        </select>
+                    </div>
+                    <div><label>Tracking number</label>
+                        <input type="text" id="orderShipTracking" placeholder="9400 1112 0000 …">
+                    </div>
                 </div>
-                <div><label>Tracking number</label>
-                    <input type="text" id="orderShipTracking" placeholder="9400 1112 0000 …">
+                <div class="form-row">
+                    <label style="display:flex;align-items:center;gap:6px;">
+                        <input type="checkbox" id="orderShipNotify" checked> Send tracking email to customer
+                    </label>
                 </div>
+                <div id="orderShipError" style="background:rgba(248,113,113,0.15);border:1px solid var(--red);color:var(--red);padding:8px 12px;border-radius:var(--radius);font-size:12px;display:none;margin-top:8px;"></div>
             </div>
-            <div class="form-row">
-                <label style="display:flex;align-items:center;gap:6px;">
-                    <input type="checkbox" id="orderShipNotify" checked> Send tracking email to customer
-                </label>
-            </div>
-            <div id="orderShipError" style="background:rgba(248,113,113,0.15);border:1px solid var(--red);color:var(--red);padding:8px 12px;border-radius:var(--radius);font-size:12px;display:none;margin-top:8px;"></div>
         </div>
         <div class="form-actions">
             <button class="secondary" onclick="closeOrderModal()">Close</button>
@@ -1074,23 +1155,25 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
 </div>
 
 <!-- New Website Page Modal -->
-<div id="websitePageModal" class="modal-overlay" onclick="if(event.target===this)closeWebsitePageModal()">
+<div id="websitePageModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeWebsitePageModal()">
     <div class="modal">
         <h2>New Page</h2>
-        <div class="form-row">
-            <label>Slug</label>
-            <input type="text" id="websitePageSlug" placeholder="my-new-page">
-            <p style="font-size:11px;color:var(--text2);margin:4px 0 0;">Lowercase letters, digits, and hyphens. Will be reachable at <code>/{slug}</code>.</p>
+        <div class="modal-body">
+            <div class="form-row">
+                <label>Slug</label>
+                <input type="text" id="websitePageSlug" placeholder="my-new-page">
+                <p style="font-size:11px;color:var(--text2);margin:4px 0 0;">Lowercase letters, digits, and hyphens. Will be reachable at <code>/{slug}</code>.</p>
+            </div>
+            <div class="form-row">
+                <label>Title</label>
+                <input type="text" id="websitePageTitle" placeholder="My New Page">
+            </div>
+            <div class="form-row" style="display:grid;grid-template-columns:1fr 100px;gap:12px;">
+                <div><label>Parent slug (optional)</label><input type="text" id="websitePageParent" placeholder="(top-level)"></div>
+                <div><label>Ord</label><input type="number" id="websitePageOrd" value="0"></div>
+            </div>
+            <div id="websitePageError" style="background:rgba(248,113,113,0.15);border:1px solid var(--red);color:var(--red);padding:10px 14px;border-radius:var(--radius);margin-top:12px;font-size:12px;display:none;"></div>
         </div>
-        <div class="form-row">
-            <label>Title</label>
-            <input type="text" id="websitePageTitle" placeholder="My New Page">
-        </div>
-        <div class="form-row" style="display:grid;grid-template-columns:1fr 100px;gap:12px;">
-            <div><label>Parent slug (optional)</label><input type="text" id="websitePageParent" placeholder="(top-level)"></div>
-            <div><label>Ord</label><input type="number" id="websitePageOrd" value="0"></div>
-        </div>
-        <div id="websitePageError" style="background:rgba(248,113,113,0.15);border:1px solid var(--red);color:var(--red);padding:10px 14px;border-radius:var(--radius);margin-top:12px;font-size:12px;display:none;"></div>
         <div class="form-actions">
             <button class="secondary" onclick="closeWebsitePageModal()">Cancel</button>
             <button class="primary" onclick="createWebsitePage()">Create + Open editor</button>
@@ -1099,35 +1182,37 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
 </div>
 
 <!-- Product Modal -->
-<div id="productModal" class="modal-overlay" onclick="if(event.target===this)closeProductModal()">
+<div id="productModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeProductModal()">
     <div class="modal">
         <h2 id="productModalTitle">New Product</h2>
-        <div class="form-row">
-            <label>SKU</label>
-            <input type="text" id="productSku" placeholder="imu-mini">
+        <div class="modal-body">
+            <div class="form-row">
+                <label>SKU</label>
+                <input type="text" id="productSku" placeholder="imu-mini">
+            </div>
+            <div class="form-row">
+                <label>Title</label>
+                <input type="text" id="productTitle" placeholder="IMU Mini">
+            </div>
+            <div class="form-row">
+                <label>Description (Markdown)</label>
+                <textarea id="productDesc" rows="4" style="width:100%;"></textarea>
+            </div>
+            <div class="form-row" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+                <div><label>Price (cents)</label><input type="number" id="productPrice" min="0" value="0"></div>
+                <div><label>Currency</label><input type="text" id="productCurrency" value="usd" maxlength="3"></div>
+            </div>
+            <div class="form-row">
+                <label>Image asset (website asset filename)</label>
+                <input type="text" id="productImage" placeholder="sensor.png — upload via Website assets first">
+            </div>
+            <div class="form-row" style="display:grid;grid-template-columns:1fr 120px 100px;gap:12px;">
+                <div><label>Tax code</label><input type="text" id="productTaxCode" value="txcd_99999999"></div>
+                <div><label>Ord</label><input type="number" id="productOrd" value="0"></div>
+                <div style="display:flex;align-items:flex-end;"><label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="productActive" checked> Active</label></div>
+            </div>
+            <div id="productError" style="background:rgba(248,113,113,0.15);border:1px solid var(--red);color:var(--red);padding:10px 14px;border-radius:var(--radius);margin-top:12px;font-size:12px;" style="display:none;"></div>
         </div>
-        <div class="form-row">
-            <label>Title</label>
-            <input type="text" id="productTitle" placeholder="IMU Mini">
-        </div>
-        <div class="form-row">
-            <label>Description (Markdown)</label>
-            <textarea id="productDesc" rows="4" style="width:100%;"></textarea>
-        </div>
-        <div class="form-row" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
-            <div><label>Price (cents)</label><input type="number" id="productPrice" min="0" value="0"></div>
-            <div><label>Currency</label><input type="text" id="productCurrency" value="usd" maxlength="3"></div>
-        </div>
-        <div class="form-row">
-            <label>Image asset (website asset filename)</label>
-            <input type="text" id="productImage" placeholder="sensor.png — upload via Website assets first">
-        </div>
-        <div class="form-row" style="display:grid;grid-template-columns:1fr 120px 100px;gap:12px;">
-            <div><label>Tax code</label><input type="text" id="productTaxCode" value="txcd_99999999"></div>
-            <div><label>Ord</label><input type="number" id="productOrd" value="0"></div>
-            <div style="display:flex;align-items:flex-end;"><label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="productActive" checked> Active</label></div>
-        </div>
-        <div id="productError" style="background:rgba(248,113,113,0.15);border:1px solid var(--red);color:var(--red);padding:10px 14px;border-radius:var(--radius);margin-top:12px;font-size:12px;" style="display:none;"></div>
         <div class="form-actions">
             <button class="secondary" onclick="closeProductModal()">Cancel</button>
             <button class="primary" onclick="saveProduct()">Save</button>
@@ -1136,30 +1221,32 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
 </div>
 
 <!-- Shipping Rate Modal -->
-<div id="rateModal" class="modal-overlay" onclick="if(event.target===this)closeRateModal()">
+<div id="rateModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeRateModal()">
     <div class="modal">
         <h2 id="rateModalTitle">New Shipping Rate</h2>
-        <div class="form-row">
-            <label>Label</label>
-            <input type="text" id="rateLabel" placeholder="US Standard">
+        <div class="modal-body">
+            <div class="form-row">
+                <label>Label</label>
+                <input type="text" id="rateLabel" placeholder="US Standard">
+            </div>
+            <div class="form-row" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+                <div><label>Amount (cents)</label><input type="number" id="rateAmount" min="0" value="0"></div>
+                <div><label>Currency</label><input type="text" id="rateCurrency" value="usd" maxlength="3"></div>
+            </div>
+            <div class="form-row">
+                <label>Regions (US, CA, or * for both)</label>
+                <input type="text" id="rateRegions" value="*" placeholder="US, CA">
+            </div>
+            <div class="form-row" style="display:grid;grid-template-columns:1fr 1fr 100px;gap:12px;">
+                <div><label>Delivery min (days)</label><input type="number" id="rateMinDays" min="0"></div>
+                <div><label>Delivery max (days)</label><input type="number" id="rateMaxDays" min="0"></div>
+                <div><label>Ord</label><input type="number" id="rateOrd" value="0"></div>
+            </div>
+            <div class="form-row">
+                <label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="rateActive" checked> Active</label>
+            </div>
+            <div id="rateError" style="background:rgba(248,113,113,0.15);border:1px solid var(--red);color:var(--red);padding:10px 14px;border-radius:var(--radius);margin-top:12px;font-size:12px;" style="display:none;"></div>
         </div>
-        <div class="form-row" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
-            <div><label>Amount (cents)</label><input type="number" id="rateAmount" min="0" value="0"></div>
-            <div><label>Currency</label><input type="text" id="rateCurrency" value="usd" maxlength="3"></div>
-        </div>
-        <div class="form-row">
-            <label>Regions (US, CA, or * for both)</label>
-            <input type="text" id="rateRegions" value="*" placeholder="US, CA">
-        </div>
-        <div class="form-row" style="display:grid;grid-template-columns:1fr 1fr 100px;gap:12px;">
-            <div><label>Delivery min (days)</label><input type="number" id="rateMinDays" min="0"></div>
-            <div><label>Delivery max (days)</label><input type="number" id="rateMaxDays" min="0"></div>
-            <div><label>Ord</label><input type="number" id="rateOrd" value="0"></div>
-        </div>
-        <div class="form-row">
-            <label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="rateActive" checked> Active</label>
-        </div>
-        <div id="rateError" style="background:rgba(248,113,113,0.15);border:1px solid var(--red);color:var(--red);padding:10px 14px;border-radius:var(--radius);margin-top:12px;font-size:12px;" style="display:none;"></div>
         <div class="form-actions">
             <button class="secondary" onclick="closeRateModal()">Cancel</button>
             <button class="primary" onclick="saveRate()">Save</button>
@@ -1170,38 +1257,53 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
 </div><!-- /container -->
 
 <!-- Create License Modal -->
-<div id="createModal" class="modal-overlay" onclick="if(event.target===this)closeCreateModal()">
+<div id="createModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeCreateModal()">
     <div class="modal">
         <h2>Create New License</h2>
-        <div class="form-row">
-            <label>Customer</label>
-            <input type="text" id="createCustomer" placeholder="Company name">
-        </div>
-        <div class="form-row">
-            <label>Product</label>
-            <input type="text" id="createProduct" value="FusionHub">
-        </div>
-        <div class="form-row">
-            <label>Expiry</label>
-            <select id="createExpiryType" onchange="updateExpiryFields()">
-                <option value="days">Days from now</option>
-                <option value="date">Specific date</option>
-                <option value="perpetual">Perpetual</option>
-            </select>
-        </div>
-        <div class="form-row" id="createExpiryValueRow">
-            <label id="createExpiryValueLabel">Days</label>
-            <input type="text" id="createExpiryValue" value="365">
-        </div>
-        <div class="form-row">
-            <label>Features</label>
-            <div id="createFeaturesContainer" class="feature-checkboxes">
-                <span style="color:var(--text2);font-size:12px">Loading features...</span>
+        <div class="modal-body">
+            <div class="form-row">
+                <label>Customer</label>
+                <input type="text" id="createCustomer" placeholder="Company name">
             </div>
-        </div>
-        <div class="form-row">
-            <label>Max Machines (0 = unlimited)</label>
-            <input type="number" id="createMaxMachines" value="1" min="0">
+            <div class="form-row">
+                <label>Product</label>
+                <input type="text" id="createProduct" value="FusionHub">
+            </div>
+            <div class="form-row">
+                <label>Expiry</label>
+                <select id="createExpiryType" onchange="updateExpiryFields()">
+                    <option value="days">Days from now</option>
+                    <option value="date">Specific date</option>
+                    <option value="perpetual">Perpetual</option>
+                </select>
+            </div>
+            <div class="form-row" id="createExpiryValueRow">
+                <label id="createExpiryValueLabel">Days</label>
+                <input type="text" id="createExpiryValue" placeholder="365">
+            </div>
+            <div class="form-row">
+                <label>Features</label>
+                <div id="createFeaturesContainer" class="feature-checkboxes">
+                    <span style="color:var(--text2);font-size:12px">Loading features...</span>
+                </div>
+            </div>
+            <div class="form-row">
+                <label>Max Machines (0 = unlimited)</label>
+                <input type="number" id="createMaxMachines" placeholder="1" min="0">
+            </div>
+            <details class="advanced-options">
+                <summary>Advanced Options</summary>
+                <div class="advanced-body">
+                    <div class="adv-field">
+                        <label>Lease Duration<br>(hours, 0 = disable lease)</label>
+                        <input type="number" id="createLeaseDuration" placeholder="168" min="0">
+                    </div>
+                    <div class="adv-field">
+                        <label>Grace Period<br>(hours)</label>
+                        <input type="number" id="createLeaseGrace" placeholder="24" min="0">
+                    </div>
+                </div>
+            </details>
         </div>
         <div class="form-actions">
             <button class="secondary" onclick="closeCreateModal()">Cancel</button>
@@ -1211,68 +1313,90 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
 </div>
 
 <!-- Export Modal -->
-<div id="exportModal" class="modal-overlay" onclick="if(event.target===this)closeExportModal()">
+<div id="exportModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeExportModal()">
     <div class="modal">
-        <h2>Export Signed License File</h2>
-        <div class="form-row">
-            <label>License Key</label>
-            <input type="text" id="exportKey" readonly>
-        </div>
-        <div class="form-row">
-            <label>Machine Code (SHA256 fingerprint)</label>
-            <input type="text" id="exportMachineCode" placeholder="Paste machine fingerprint here">
-        </div>
-        <div class="form-row">
-            <label>Friendly Name</label>
-            <input type="text" id="exportFriendlyName" placeholder="e.g. Vehicle-ECU-1">
-        </div>
-        <div class="form-actions">
-            <button class="secondary" onclick="closeExportModal()">Cancel</button>
-            <button onclick="doExport()">Export &amp; Download</button>
+        <h2>Export License</h2>
+        <div class="modal-body">
+            <div class="form-row">
+                <label>License Key</label>
+                <input type="text" id="exportKey" readonly>
+            </div>
+            <div class="form-row">
+                <label>Export Type</label>
+                <div style="display:flex;background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:3px;gap:3px;width:100%">
+                    <label id="exportTypeFileLabel" style="flex:1;text-align:center;padding:6px 18px;border-radius:4px;cursor:pointer;font-size:13px;font-weight:500;transition:background .15s,color .15s;background:var(--accent);color:#fff">
+                        <input type="radio" name="exportType" value="file" checked onchange="onExportTypeChange()" style="display:none"> License File
+                    </label>
+                    <label id="exportTypeTokenLabel" style="flex:1;text-align:center;padding:6px 18px;border-radius:4px;cursor:pointer;font-size:13px;font-weight:500;transition:background .15s,color .15s;background:transparent;color:var(--text2)">
+                        <input type="radio" name="exportType" value="token" onchange="onExportTypeChange()" style="display:none"> USB Token
+                    </label>
+                </div>
+            </div>
+            <div id="exportFileRow" class="form-row">
+                <label>Machine Code (SHA256 fingerprint)</label>
+                <input type="text" id="exportMachineCode" placeholder="Paste machine fingerprint here">
+            </div>
+            <div id="exportTokenRow" class="form-row" style="display:none">
+                <label>USB Serial Number</label>
+                <input type="text" id="exportUsbSerial" placeholder="Paste usb serial number here">
+            </div>
+            <div class="form-row">
+                <label>Friendly Name</label>
+                <input type="text" id="exportFriendlyName" placeholder="e.g. Vehicle-ECU-1">
+            </div>
+            <div id="exportTokenHint" class="form-row" style="display:none;font-size:12px;color:var(--text2);line-height:1.5">
+                Put the downloaded file on a USB drive in a folder called <code style="font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:var(--bg3);padding:1px 5px;border-radius:3px">.susi</code>. Make sure the file is called <code style="font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:var(--bg3);padding:1px 5px;border-radius:3px">license.bin</code>
+            </div>
+            <div class="form-actions">
+                <button class="secondary" onclick="closeExportModal()">Cancel</button>
+                <button onclick="doExport()">Export &amp; Download</button>
+            </div>
         </div>
     </div>
 </div>
 
 <!-- Upload Release Modal -->
-<div id="uploadReleaseModal" class="modal-overlay" onclick="if(event.target===this)closeUploadReleaseModal()">
+<div id="uploadReleaseModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeUploadReleaseModal()">
     <div class="modal">
         <h2>Upload Release</h2>
-        <div class="form-row">
-            <label>Version Tag</label>
-            <input type="text" id="releaseTag" placeholder="e.g. v1.3.0">
-        </div>
-        <div class="form-row">
-            <label>Release Name (optional)</label>
-            <input type="text" id="releaseName" placeholder="e.g. FusionHub v1.3.0">
-        </div>
-        <div class="form-row">
-            <label>Release Notes (Markdown)</label>
-            <textarea id="releaseBody" rows="6" style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:var(--radius);font-size:13px;font-family:inherit;width:100%;resize:vertical;" placeholder="## Changes&#10;- Fixed something&#10;- Added feature"></textarea>
-        </div>
-        <div class="form-row">
-            <label class="checkbox" style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:var(--text2);">
-                <input type="checkbox" id="releasePrerelease" style="accent-color:var(--accent);width:16px;height:16px;">
-                Pre-release
-            </label>
-        </div>
-        <div class="form-row">
-            <label>Scope</label>
-            <select id="releaseWorkspace" style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:var(--radius);font-size:13px;width:100%;">
-                <option value="">Global (all workspaces)</option>
-            </select>
-        </div>
-        <div class="form-row">
-            <label>Asset File (zip)</label>
-            <input type="file" id="releaseFile" multiple style="font-size:13px;color:var(--text);">
-        </div>
-        <div id="uploadProgress" style="display:none;margin-bottom:12px;">
-            <div style="background:var(--bg);border-radius:4px;height:22px;overflow:hidden;">
-                <div id="uploadProgressBar" style="height:100%;background:var(--accent);transition:width 0.3s;width:0%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;color:#fff;"></div>
+        <div class="modal-body">
+            <div class="form-row">
+                <label>Version Tag</label>
+                <input type="text" id="releaseTag" placeholder="e.g. v1.3.0">
             </div>
-        </div>
-        <div class="form-actions">
-            <button class="secondary" onclick="closeUploadReleaseModal()">Cancel</button>
-            <button id="uploadBtn" onclick="uploadRelease()">Upload</button>
+            <div class="form-row">
+                <label>Release Name (optional)</label>
+                <input type="text" id="releaseName" placeholder="e.g. FusionHub v1.3.0">
+            </div>
+            <div class="form-row">
+                <label>Release Notes (Markdown)</label>
+                <textarea id="releaseBody" rows="6" style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:var(--radius);font-size:13px;font-family:inherit;width:100%;resize:vertical;" placeholder="## Changes&#10;- Fixed something&#10;- Added feature"></textarea>
+            </div>
+            <div class="form-row">
+                <label class="checkbox" style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:var(--text2);">
+                    <input type="checkbox" id="releasePrerelease" style="accent-color:var(--accent);width:16px;height:16px;">
+                    Pre-release
+                </label>
+            </div>
+            <div class="form-row">
+                <label>Scope</label>
+                <select id="releaseWorkspace" style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:var(--radius);font-size:13px;width:100%;">
+                    <option value="">Global (all workspaces)</option>
+                </select>
+            </div>
+            <div class="form-row">
+                <label>Asset File (zip)</label>
+                <input type="file" id="releaseFile" multiple style="font-size:13px;color:var(--text);">
+            </div>
+            <div id="uploadProgress" style="display:none;margin-bottom:12px;">
+                <div style="background:var(--bg);border-radius:4px;height:22px;overflow:hidden;">
+                    <div id="uploadProgressBar" style="height:100%;background:var(--accent);transition:width 0.3s;width:0%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;color:#fff;"></div>
+                </div>
+            </div>
+            <div class="form-actions">
+                <button class="secondary" onclick="closeUploadReleaseModal()">Cancel</button>
+                <button id="uploadBtn" onclick="uploadRelease()">Upload</button>
+            </div>
         </div>
     </div>
 </div>
@@ -1326,20 +1450,22 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
 </div>
 
 <!-- Create Workspace Modal -->
-<div id="createWorkspaceModal" class="modal-overlay" onclick="if(event.target===this)closeCreateWorkspaceModal()">
+<div id="createWorkspaceModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeCreateWorkspaceModal()">
     <div class="modal">
         <h2>Create Workspace</h2>
-        <div class="form-row">
-            <label>Name</label>
-            <input type="text" id="wsCreateName" placeholder="e.g. Nexco Highway Tracking">
-        </div>
-        <div class="form-row">
-            <label>Product</label>
-            <input type="text" id="wsCreateProduct" placeholder="e.g. FusionHub">
-        </div>
-        <div class="form-row">
-            <label>Description (optional)</label>
-            <input type="text" id="wsCreateDesc" placeholder="Short description">
+        <div class="modal-body">
+            <div class="form-row">
+                <label>Name</label>
+                <input type="text" id="wsCreateName" placeholder="e.g. Nexco Highway Tracking">
+            </div>
+            <div class="form-row">
+                <label>Product</label>
+                <input type="text" id="wsCreateProduct" placeholder="e.g. FusionHub">
+            </div>
+            <div class="form-row">
+                <label>Description (optional)</label>
+                <input type="text" id="wsCreateDesc" placeholder="Short description">
+            </div>
         </div>
         <div class="form-actions">
             <button class="secondary" onclick="closeCreateWorkspaceModal()">Cancel</button>
@@ -1461,10 +1587,12 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
 </div>
 
 <!-- 2FA Settings Modal -->
-<div id="tfaModal" class="modal-overlay" onclick="if(event.target===this)closeTFAModal()">
+<div id="tfaModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeTFAModal()">
     <div class="modal">
         <h2>Two-Factor Authentication</h2>
-        <div id="tfaContent"></div>
+        <div class="modal-body">
+            <div id="tfaContent"></div>
+        </div>
         <div class="form-actions">
             <button class="secondary" onclick="closeTFAModal()">Close</button>
         </div>
@@ -1472,7 +1600,7 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
 </div>
 
 <!-- Users Management Modal -->
-<div id="usersModal" class="modal-overlay" onclick="if(event.target===this)closeUsersModal()">
+<div id="usersModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeUsersModal()">
     <div class="modal" style="max-width:min(1200px,95vw);width:min(1200px,95vw);">
         <style>
             /* Scoped overrides — the global button/badge has a min-width:180px
@@ -1494,23 +1622,25 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
             #usersModal .email-cell > .email-value { flex: 1 1 auto; }
         </style>
         <h2>User Management</h2>
-        <div id="usersTableContainer" style="margin-bottom:16px;max-height:50vh;overflow:auto;">
-            <table>
-                <thead><tr><th>Username</th><th>Role</th><th>Email</th><th>2FA</th><th>Status</th><th></th></tr></thead>
-                <tbody id="usersTableBody"><tr><td colspan="6">Loading...</td></tr></tbody>
-            </table>
-        </div>
-        <div style="border-top:1px solid var(--border);padding-top:16px;">
-            <h3 style="font-size:14px;margin-bottom:12px;">Add User</h3>
-            <div style="display:flex;gap:8px;flex-wrap:wrap;">
-                <input type="text" id="newUsername" placeholder="Username" style="flex:1;min-width:120px;">
-                <input type="email" id="newUserEmail" placeholder="Email" style="flex:1;min-width:160px;" required>
-                <input type="password" id="newPassword" placeholder="Password (min 8)" style="flex:1;min-width:120px;">
-                <select id="newUserRole" style="width:90px;">
-                    <option value="user">User</option>
-                    <option value="admin">Admin</option>
-                </select>
-                <button onclick="createUser()" style="width:auto;">Add</button>
+        <div class="modal-body">
+            <div id="usersTableContainer" style="margin-bottom:16px;max-height:50vh;overflow:auto;">
+                <table>
+                    <thead><tr><th>Username</th><th>Role</th><th>Email</th><th>2FA</th><th>Status</th><th></th></tr></thead>
+                    <tbody id="usersTableBody"><tr><td colspan="6">Loading...</td></tr></tbody>
+                </table>
+            </div>
+            <div style="border-top:1px solid var(--border);padding-top:16px;">
+                <h3 style="font-size:14px;margin-bottom:12px;">Add User</h3>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                    <input type="text" id="newUsername" placeholder="Username" style="flex:1;min-width:120px;">
+                    <input type="email" id="newUserEmail" placeholder="Email" style="flex:1;min-width:160px;" required>
+                    <input type="password" id="newPassword" placeholder="Password (min 8)" style="flex:1;min-width:120px;">
+                    <select id="newUserRole" style="width:90px;">
+                        <option value="user">User</option>
+                        <option value="admin">Admin</option>
+                    </select>
+                    <button onclick="createUser()" style="width:auto;">Add</button>
+                </div>
             </div>
         </div>
         <div class="form-actions">
@@ -1520,7 +1650,7 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
 </div>
 
 <!-- API Tokens Modal -->
-<div id="apiTokensModal" class="modal-overlay" onclick="if(event.target===this)closeApiTokensModal()">
+<div id="apiTokensModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeApiTokensModal()">
     <div class="modal" style="max-width:min(1000px,95vw);width:min(1000px,95vw);">
         <style>
             #apiTokensModal td, #apiTokensModal th { white-space: nowrap; vertical-align: middle; }
@@ -1537,31 +1667,33 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
             #apiTokensModal .pat-active { color: var(--green); }
         </style>
         <h2>API Tokens</h2>
-        <p style="color:var(--text2);font-size:13px;margin:0 0 12px;">
-            Long-lived bearer tokens for headless clients (CI scripts, services). Send as
-            <span class="pat-prefix">Authorization: Bearer susi_pat_…</span>.
-            Tokens inherit your role and bypass the interactive 2FA gate — treat them like passwords.
-        </p>
-        <div id="apiTokensTableContainer" style="margin-bottom:16px;max-height:50vh;overflow:auto;">
-            <table>
-                <thead><tr><th>Name</th><th>Prefix</th><th>Created</th><th>Last used</th><th>Status</th><th></th></tr></thead>
-                <tbody id="apiTokensTableBody"><tr><td colspan="6">Loading...</td></tr></tbody>
-            </table>
-        </div>
-        <div style="border-top:1px solid var(--border);padding-top:16px;">
-            <h3 style="font-size:14px;margin-bottom:12px;">Create new token</h3>
-            <div style="display:flex;gap:8px;flex-wrap:wrap;">
-                <input type="text" id="newApiTokenName" placeholder="Name (e.g. github-actions release)" style="flex:1;min-width:200px;">
-                <button onclick="createApiToken()" style="width:auto;">Create</button>
-            </div>
-        </div>
-        <div id="apiAdminSection" style="border-top:1px solid var(--border);padding-top:16px;margin-top:16px;display:none;">
-            <h3 style="font-size:14px;margin-bottom:8px;">All tokens (admin)</h3>
-            <div id="apiAllTokensContainer" style="max-height:30vh;overflow:auto;">
+        <div class="modal-body">
+            <p style="color:var(--text2);font-size:13px;margin:0 0 12px;">
+                Long-lived bearer tokens for headless clients (CI scripts, services). Send as
+                <span class="pat-prefix">Authorization: Bearer susi_pat_…</span>.
+                Tokens inherit your role and bypass the interactive 2FA gate — treat them like passwords.
+            </p>
+            <div id="apiTokensTableContainer" style="margin-bottom:16px;max-height:50vh;overflow:auto;">
                 <table>
-                    <thead><tr><th>Owner</th><th>Name</th><th>Prefix</th><th>Last used</th><th>Status</th><th></th></tr></thead>
-                    <tbody id="apiAllTokensBody"><tr><td colspan="6">Loading...</td></tr></tbody>
+                    <thead><tr><th>Name</th><th>Prefix</th><th>Created</th><th>Last used</th><th>Status</th><th></th></tr></thead>
+                    <tbody id="apiTokensTableBody"><tr><td colspan="6">Loading...</td></tr></tbody>
                 </table>
+            </div>
+            <div style="border-top:1px solid var(--border);padding-top:16px;">
+                <h3 style="font-size:14px;margin-bottom:12px;">Create new token</h3>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                    <input type="text" id="newApiTokenName" placeholder="Name (e.g. github-actions release)" style="flex:1;min-width:200px;">
+                    <button onclick="createApiToken()" style="width:auto;">Create</button>
+                </div>
+            </div>
+            <div id="apiAdminSection" style="border-top:1px solid var(--border);padding-top:16px;margin-top:16px;display:none;">
+                <h3 style="font-size:14px;margin-bottom:8px;">All tokens (admin)</h3>
+                <div id="apiAllTokensContainer" style="max-height:30vh;overflow:auto;">
+                    <table>
+                        <thead><tr><th>Owner</th><th>Name</th><th>Prefix</th><th>Last used</th><th>Status</th><th></th></tr></thead>
+                        <tbody id="apiAllTokensBody"><tr><td colspan="6">Loading...</td></tr></tbody>
+                    </table>
+                </div>
             </div>
         </div>
         <div class="form-actions">
@@ -1571,7 +1703,13 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
 </div>
 
 <script>
+let _overlayMouseDownOnSelf = false;
+document.addEventListener('mousedown', e => {
+    _overlayMouseDownOnSelf = e.target.classList.contains('modal-overlay');
+});
+
 const API = '/api/v1';
+const LICENSE_DEFAULTS = { days: 365, maxMachines: 1, leaseDurationHours: 168, leaseGraceHours: 24 };
 let authToken = '';
 let currentUsername = '';
 
@@ -2150,6 +2288,7 @@ async function loadLicenses() {
         status.textContent = 'Connected';
         status.className = 'status ok';
         renderTable();
+        if (selectedKey) selectLicense(selectedKey);
     } catch (e) {
         status.textContent = 'Disconnected';
         status.className = 'status err';
@@ -2214,6 +2353,8 @@ function selectLicense(key) {
     document.getElementById('detailExpires').textContent = formatDate(lic.expires);
     document.getElementById('detailFeatures').innerHTML = lic.features.map(f => '<span class="feature-tag">' + esc(f) + '</span>').join(' ') || 'none';
     document.getElementById('detailMachineCount').textContent = lic.active_machine_count + ' / ' + (lic.max_machines === 0 ? '\u221e' : lic.max_machines);
+    document.getElementById('detailLeaseDuration').textContent = lic.lease_duration_hours === 0 ? 'Disabled' : lic.lease_duration_hours + ' h';
+    document.getElementById('detailLeaseGrace').textContent = lic.lease_grace_hours + ' h';
 
     const btnRevoke = document.getElementById('btnRevoke');
     btnRevoke.style.display = status === 'revoked' ? 'none' : '';
@@ -2332,6 +2473,9 @@ async function deleteLicense() {
 // Create modal
 function showCreateModal() {
     document.querySelectorAll('#createFeaturesContainer input[type=checkbox]').forEach(cb => cb.checked = false);
+    document.getElementById('createLeaseDuration').value = '';
+    document.getElementById('createLeaseGrace').value = '';
+    document.querySelector('#createModal .advanced-options').open = false;
     document.getElementById('createModal').classList.add('visible');
     document.getElementById('createCustomer').focus();
 }
@@ -2351,7 +2495,8 @@ function updateExpiryFields() {
         row.style.display = '';
         label.textContent = 'Days';
         input.type = 'number';
-        input.value = '365';
+        input.placeholder = LICENSE_DEFAULTS.days;
+        input.value = '';
     } else {
         row.style.display = '';
         label.textContent = 'Date (YYYY-MM-DD)';
@@ -2396,14 +2541,16 @@ async function createLicense() {
         product: document.getElementById('createProduct').value.trim() || 'FusionHub',
         customer: customer,
         features: getSelectedFeatures(),
-        max_machines: parseInt(document.getElementById('createMaxMachines').value) || 0,
+        max_machines: parseInt(document.getElementById('createMaxMachines').value) || LICENSE_DEFAULTS.maxMachines,
+        lease_duration_hours: (() => { const v = parseInt(document.getElementById('createLeaseDuration').value); return Number.isNaN(v) ? LICENSE_DEFAULTS.leaseDurationHours : v; })(),
+        lease_grace_hours: parseInt(document.getElementById('createLeaseGrace').value) || LICENSE_DEFAULTS.leaseGraceHours,
     };
 
     const expiryType = document.getElementById('createExpiryType').value;
     if (expiryType === 'perpetual') {
         body.perpetual = true;
     } else if (expiryType === 'days') {
-        body.days = parseInt(document.getElementById('createExpiryValue').value) || 365;
+        body.days = parseInt(document.getElementById('createExpiryValue').value) || LICENSE_DEFAULTS.days;
     } else {
         body.expires = document.getElementById('createExpiryValue').value;
     }
@@ -2477,7 +2624,10 @@ function exportLicense() {
     if (!selectedKey) return;
     document.getElementById('exportKey').value = selectedKey;
     document.getElementById('exportMachineCode').value = '';
+    document.getElementById('exportUsbSerial').value = '';
     document.getElementById('exportFriendlyName').value = '';
+    document.querySelector('input[name="exportType"][value="file"]').checked = true;
+    onExportTypeChange();
     document.getElementById('exportModal').classList.add('visible');
     document.getElementById('exportMachineCode').focus();
 }
@@ -2486,18 +2636,44 @@ function closeExportModal() {
     document.getElementById('exportModal').classList.remove('visible');
 }
 
+function onExportTypeChange() {
+    const isToken = document.querySelector('input[name="exportType"]:checked').value === 'token';
+    document.getElementById('exportFileRow').style.display = isToken ? 'none' : '';
+    document.getElementById('exportTokenRow').style.display = isToken ? '' : 'none';
+    document.getElementById('exportTokenHint').style.display = isToken ? '' : 'none';
+    const fileLabel = document.getElementById('exportTypeFileLabel');
+    const tokenLabel = document.getElementById('exportTypeTokenLabel');
+    fileLabel.style.background = isToken ? 'transparent' : 'var(--accent)';
+    fileLabel.style.color = isToken ? 'var(--text2)' : '#fff';
+    tokenLabel.style.background = isToken ? 'var(--accent)' : 'transparent';
+    tokenLabel.style.color = isToken ? '#fff' : 'var(--text2)';
+}
+
 async function doExport() {
     const key = document.getElementById('exportKey').value;
-    const machineCode = document.getElementById('exportMachineCode').value.trim();
     const friendlyName = document.getElementById('exportFriendlyName').value.trim();
+    const isToken = document.querySelector('input[name="exportType"]:checked').value === 'token';
 
-    if (!machineCode) { toast('Machine code is required', 'error'); return; }
+    let endpoint, body, filename;
+    if (isToken) {
+        const usbSerial = document.getElementById('exportUsbSerial').value.trim();
+        if (!usbSerial) { toast('USB serial number is required', 'error'); return; }
+        endpoint = '/licenses/' + encodeURIComponent(key) + '/export-token';
+        body = JSON.stringify({ usb_serial: usbSerial, friendly_name: friendlyName });
+        filename = 'license.bin';
+    } else {
+        const machineCode = document.getElementById('exportMachineCode').value.trim();
+        if (!machineCode) { toast('Machine code is required', 'error'); return; }
+        endpoint = '/licenses/' + encodeURIComponent(key) + '/export';
+        body = JSON.stringify({ machine_code: machineCode, friendly_name: friendlyName });
+        filename = 'license.json';
+    }
 
     try {
-        const resp = await fetch(API + '/licenses/' + encodeURIComponent(key) + '/export', {
+        const resp = await fetch(API + endpoint, {
             method: 'POST',
             headers: authHeaders(),
-            body: JSON.stringify({ machine_code: machineCode, friendly_name: friendlyName }),
+            body,
         });
         if (!resp.ok) {
             const err = await resp.json();
@@ -2508,11 +2684,11 @@ async function doExport() {
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = 'license.json';
+        a.download = filename;
         a.click();
         URL.revokeObjectURL(url);
 
-        toast('License file exported', 'success');
+        toast(isToken ? 'USB token file exported' : 'License file exported', 'success');
         closeExportModal();
         await loadLicenses();
         selectLicense(key);
@@ -3049,17 +3225,20 @@ async function loadReleases() {
 async function downloadAsset(event, tag, assetName) {
     event.preventDefault();
     try {
-        const resp = await fetch(API + '/updates/download/' + encodeURIComponent(tag) + '/' + encodeURIComponent(assetName), {
+        const resp = await fetch(API + '/updates/download-ticket', {
+            method: 'POST',
             headers: authHeaders(),
+            body: JSON.stringify({ tag: tag, asset: assetName }),
         });
         if (!resp.ok) { toast('Download failed', 'error'); return; }
-        const blob = await resp.blob();
-        const url = URL.createObjectURL(blob);
+        const { ticket } = await resp.json();
+        const url = API + '/updates/download/' + encodeURIComponent(tag) + '/' + encodeURIComponent(assetName) + '?ticket=' + encodeURIComponent(ticket);
         const a = document.createElement('a');
         a.href = url;
         a.download = assetName;
+        document.body.appendChild(a);
         a.click();
-        URL.revokeObjectURL(url);
+        a.remove();
     } catch (e) {
         toast('Download failed', 'error');
     }
@@ -3172,7 +3351,7 @@ async function populateReleaseWorkspaceDropdown(presetWorkspaceId) {
 function showUploadReleaseModal(presetWorkspaceId) {
     const tagInput = document.getElementById('releaseTag');
     tagInput.value = '';
-    tagInput.disabled = false; // may have been locked by replaceWsReleaseFile
+    tagInput.disabled = false; // may have been locked by addWsReleaseSoftware
     document.getElementById('releaseName').value = '';
     document.getElementById('releaseBody').value = '';
     document.getElementById('releasePrerelease').checked = false;
@@ -3403,6 +3582,8 @@ async function showWsDetail(id) {
         // Load configs and the unified releases list.
         loadWsConfigs(id);
         loadWsReleases(id);
+        loadWsInstances(id);
+        loadWsRecordings(id);
     } catch (e) {
         toast('Error: ' + e.message, 'error');
     }
@@ -3429,21 +3610,11 @@ document.addEventListener('click', () => {
     document.querySelectorAll('.dropdown-menu').forEach(el => { el.style.display = 'none'; });
 });
 
+// Open the upload modal pre-filled with the release's metadata so the user can
+// add one or more new binaries. The tag input is locked (backend keys assets
+// off the tag); same-named uploads overwrite via add_release_asset upsert.
 async function addWsReleaseSoftware(tag) {
-    // Identical wiring to "Replace file": pre-fill the upload modal with the
-    // current metadata and lock the tag. The semantic difference is intent —
-    // the user picks a NEW file to add. The backend will preserve any
-    // existing assets with different filenames; uploading a same-named file
-    // overwrites it (existing add_release_asset upsert behaviour). The
-    // modal supports multi-select, so several binaries can ship at once.
-    return replaceWsReleaseFile(tag);
-}
-
-async function replaceWsReleaseFile(tag) {
     if (!selectedWsId) return;
-    // Pre-fill the existing upload modal with the current metadata so the user
-    // only has to pick a new file. The tag input is locked because the
-    // backend keys re-uploads off the tag.
     try {
         const resp = await fetch(API + '/workspaces/' + selectedWsId + '/releases', { headers: authHeaders() });
         if (!resp.ok) { toast('Failed to load release', 'error'); return; }
@@ -3458,6 +3629,59 @@ async function replaceWsReleaseFile(tag) {
         document.getElementById('releaseBody').value = r.body || '';
         document.getElementById('releasePrerelease').checked = !!r.prerelease;
         document.getElementById('releaseFile').focus();
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+// Replace one specific asset on a release. Opens a hidden file picker; the
+// chosen file is POSTed to the per-asset replace endpoint which atomically
+// removes the old row+file and writes the new one (the new file may have a
+// different name than the old).
+function replaceWsReleaseAsset(tag, fileName) {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.style.display = 'none';
+    input.addEventListener('change', async () => {
+        const file = input.files && input.files[0];
+        input.remove();
+        if (!file) return;
+        const fd = new FormData();
+        fd.append('file', file);
+        try {
+            const resp = await fetch(
+                API + '/releases/' + encodeURIComponent(tag) + '/assets/' + encodeURIComponent(fileName) + '/replace',
+                { method: 'POST', headers: authHeaders(), body: fd }
+            );
+            if (!resp.ok) {
+                const d = await resp.json().catch(() => ({}));
+                toast('Error: ' + (d.error || 'Could not replace file'), 'error');
+                return;
+            }
+            toast('File replaced', 'success');
+            if (selectedWsId) loadWsReleases(selectedWsId);
+        } catch (e) {
+            toast('Failed: ' + e.message, 'error');
+        }
+    });
+    document.body.appendChild(input);
+    input.click();
+}
+
+async function deleteWsReleaseAsset(tag, fileName) {
+    if (!confirm('Remove file "' + fileName + '" from release ' + tag + '?')) return;
+    try {
+        const resp = await fetch(
+            API + '/releases/' + encodeURIComponent(tag) + '/assets/' + encodeURIComponent(fileName),
+            { method: 'DELETE', headers: authHeaders() }
+        );
+        if (!resp.ok) {
+            const d = await resp.json().catch(() => ({}));
+            toast('Error: ' + (d.error || 'Could not remove file'), 'error');
+            return;
+        }
+        toast('File removed', 'success');
+        if (selectedWsId) loadWsReleases(selectedWsId);
     } catch (e) {
         toast('Failed: ' + e.message, 'error');
     }
@@ -3725,7 +3949,6 @@ function renderWsReleases() {
                 '<div id="' + menuId + '" class="dropdown-menu" style="display:none;">' +
                     '<button onclick="editWsRelease(\'' + esc(r.tag) + '\')">Edit metadata</button>' +
                     '<button onclick="addWsReleaseSoftware(\'' + esc(r.tag) + '\')">Add software</button>' +
-                    '<button onclick="replaceWsReleaseFile(\'' + esc(r.tag) + '\')">Replace file</button>' +
                     '<div class="divider"></div>' +
                     '<button onclick="editWsReleaseDocs(\'' + esc(r.tag) + '\')">Edit documentation</button>' +
                     '<button onclick="moveWsRelease(\'' + esc(r.tag) + '\')">Move to workspace…</button>' +
@@ -3772,20 +3995,28 @@ function renderWsReleaseExpansion(r, hasDocReleaseRow) {
             sorted.map(p => {
                 const indent = p.parent_slug ? '12px' : '0';
                 const pageUrl = docsUrl + '#/' + encodeURIComponent(tag) + '/' + encodeURIComponent(p.slug);
-                return '<li style="padding-left:' + indent + ';"><a href="' + pageUrl + '" style="color:var(--accent);text-decoration:none;font-size:13px;">' + esc(p.title) + '</a> <span style="color:var(--text2);font-size:11px;font-family:monospace;">' + esc(p.slug) + '</span></li>';
+                return '<li style="padding-left:' + indent + ';"><a href="' + pageUrl + '" style="color:var(--accent);text-decoration:none;font-size:13px;">' + esc(p.title) + '</a></li>';
             }).join('') +
         '</ul>';
     }
 
     let filesHtml;
+    const isAdmin = userRole === 'admin';
     if ((r.assets || []).length === 0) {
         filesHtml = '<div style="color:var(--text2);font-size:12px;">No software files attached.</div>';
     } else {
         filesHtml = '<ul style="list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:2px;">' +
-            r.assets.map(a => '<li style="display:flex;justify-content:space-between;gap:8px;font-size:13px;">' +
-                '<a href="#" onclick="event.preventDefault();downloadAsset(event,\'' + esc(tag) + '\',\'' + esc(a.name) + '\')" style="color:var(--accent);text-decoration:none;font-family:monospace;">' + esc(a.name) + '</a>' +
-                '<span style="color:var(--text2);font-size:11px;">' + formatSize(a.size) + '</span>' +
-            '</li>').join('') +
+            r.assets.map(a => {
+                const actions = isAdmin
+                    ? '<button class="small secondary" style="min-width:0;padding:2px 8px;font-size:11px;line-height:1.4;" onclick="replaceWsReleaseAsset(\'' + esc(tag) + '\',\'' + esc(a.name) + '\')" title="Replace this file">Replace</button>' +
+                      '<button class="small danger" style="min-width:0;padding:2px 7px;font-size:12px;line-height:1.4;" onclick="deleteWsReleaseAsset(\'' + esc(tag) + '\',\'' + esc(a.name) + '\')" title="Remove this file">&times;</button>'
+                    : '';
+                return '<li style="display:flex;justify-content:space-between;gap:8px;font-size:13px;align-items:center;">' +
+                    '<a href="#" onclick="event.preventDefault();downloadAsset(event,\'' + esc(tag) + '\',\'' + esc(a.name) + '\')" style="color:var(--accent);text-decoration:none;font-family:monospace;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(a.name) + '</a>' +
+                    '<span style="color:var(--text2);font-size:11px;white-space:nowrap;">' + formatSize(a.size) + '</span>' +
+                    (actions ? '<span style="display:flex;gap:4px;">' + actions + '</span>' : '') +
+                '</li>';
+            }).join('') +
         '</ul>';
     }
 
@@ -3849,6 +4080,136 @@ async function loadWsConfigs(wsId) {
         `).join('');
     } catch (e) {
         container.innerHTML = '<div style="color:var(--text2);font-size:13px;">Failed to load configs</div>';
+    }
+}
+
+function formatBytes(n) {
+    if (n == null) return '';
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+    if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
+    return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+}
+
+async function loadWsRecordings(wsId) {
+    if (!wsId) return;
+    const container = document.getElementById('wsDetailRecordings');
+    try {
+        const resp = await fetch(API + '/workspaces/' + wsId + '/recordings', { headers: authHeaders() });
+        if (!resp.ok) { container.innerHTML = '<div style="color:var(--text2);font-size:13px;">Failed to load</div>'; return; }
+        const data = await resp.json();
+        const recordings = data.recordings || [];
+        if (recordings.length === 0) {
+            container.innerHTML = '<div style="color:var(--text2);font-size:13px;">No recordings uploaded to this workspace yet.</div>';
+            return;
+        }
+        container.innerHTML = recordings.map(r => {
+            const ready = r.status === 'uploaded';
+            const status = ready
+                ? ''
+                : '<span style="color:var(--text2);margin-left:6px;">(' + esc(r.status) + ')</span>';
+            const dlBtn = ready
+                ? '<button class="small" onclick="downloadWsRecording(' + r.id + ')">Download</button>'
+                : '';
+            return '<div class="machine-item">' +
+                '<span style="display:flex;align-items:center;gap:10px;min-width:0;flex:1;">' +
+                    '<strong style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(r.file_name) + '</strong>' +
+                    status +
+                    (r.description ? '<span style="color:var(--text2);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">&middot; ' + esc(r.description) + '</span>' : '') +
+                '</span>' +
+                '<span class="machine-code" style="display:flex;align-items:center;gap:10px;">' +
+                    '<span>' + formatBytes(r.file_size) + '</span>' +
+                    '<span>' + esc(r.author) + ' &middot; ' + formatDateTime(r.created_at) + '</span>' +
+                    dlBtn +
+                    '<button class="small danger" onclick="deleteWsRecording(' + r.id + ')">Delete</button>' +
+                '</span>' +
+            '</div>';
+        }).join('');
+    } catch (e) {
+        container.innerHTML = '<div style="color:var(--text2);font-size:13px;">Failed to load recordings: ' + esc(e.message) + '</div>';
+    }
+}
+
+async function downloadWsRecording(id) {
+    if (!selectedWsId) return;
+    try {
+        const resp = await fetch(API + '/workspaces/' + selectedWsId + '/recordings/' + id + '/download', { headers: authHeaders() });
+        if (!resp.ok) {
+            const d = await resp.json().catch(() => ({}));
+            toast('Error: ' + (d.error || 'Could not get download URL'), 'error');
+            return;
+        }
+        const data = await resp.json();
+        // The presigned URL is single-use-ish (it's bound to a method+key+expiry,
+        // not request count). Opening in a new tab kicks off the S3 GET; the
+        // browser handles the file save dialog from the response headers.
+        if (data.download_url) {
+            window.open(data.download_url, '_blank');
+        }
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function deleteWsRecording(id) {
+    if (!selectedWsId) return;
+    if (!confirm('Delete this recording? The file will be removed from S3 and cannot be recovered.')) return;
+    try {
+        const resp = await fetch(API + '/workspaces/' + selectedWsId + '/recordings/' + id, {
+            method: 'DELETE',
+            headers: authHeaders(),
+        });
+        if (!resp.ok) {
+            const d = await resp.json().catch(() => ({}));
+            toast('Error: ' + (d.error || 'Could not delete'), 'error');
+            return;
+        }
+        toast('Recording deleted', 'success');
+        loadWsRecordings(selectedWsId);
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+// Render registered FusionHub peers for the workspace. Peers re-register every
+// 30s, so anything seen within 90s (3 ticks) is treated as currently online.
+async function loadWsInstances(wsId) {
+    if (!wsId) return;
+    const container = document.getElementById('wsDetailInstances');
+    try {
+        const resp = await fetch(API + '/workspaces/' + wsId + '/federation', { headers: authHeaders() });
+        if (!resp.ok) { container.innerHTML = '<div style="color:var(--text2);font-size:13px;">Failed to load</div>'; return; }
+        const data = await resp.json();
+        const peers = data.peers || [];
+        if (peers.length === 0) {
+            container.innerHTML = '<div style="color:var(--text2);font-size:13px;">No FusionHub instances have registered with this workspace.</div>';
+            return;
+        }
+        const now = Date.now();
+        container.innerHTML = peers.map(p => {
+            const seenMs = p.last_seen ? new Date(p.last_seen).getTime() : 0;
+            const ageS = seenMs ? Math.max(0, Math.floor((now - seenMs) / 1000)) : null;
+            const online = ageS !== null && ageS <= 90;
+            const dotColor = online ? '#3fb950' : 'var(--text2)';
+            const ageLabel = ageS === null ? 'never'
+                : ageS < 60 ? ageS + 's ago'
+                : ageS < 3600 ? Math.floor(ageS / 60) + 'm ago'
+                : ageS < 86400 ? Math.floor(ageS / 3600) + 'h ago'
+                : Math.floor(ageS / 86400) + 'd ago';
+            const label = p.label && p.label.trim() ? p.label : '(unnamed)';
+            const hostShort = (p.host_id || '').slice(0, 12);
+            return '<div class="machine-item">' +
+                '<span style="display:flex;align-items:center;gap:10px;min-width:0;">' +
+                    '<span title="' + (online ? 'Online' : 'Last seen ' + ageLabel) + '" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + dotColor + ';flex-shrink:0;"></span>' +
+                    '<strong style="min-width:160px;">' + esc(label) + '</strong>' +
+                    '<span class="machine-code" title="' + esc(p.host_id) + '">' + esc(hostShort) + '</span>' +
+                    '<span class="machine-code" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(p.url) + '</span>' +
+                '</span>' +
+                '<span class="machine-code">' + esc(p.registered_by) + ' &middot; ' + ageLabel + '</span>' +
+            '</div>';
+        }).join('');
+    } catch (e) {
+        container.innerHTML = '<div style="color:var(--text2);font-size:13px;">Failed to load instances</div>';
     }
 }
 

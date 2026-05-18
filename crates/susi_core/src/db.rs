@@ -51,6 +51,20 @@ pub struct ApiTokenInfo {
     pub revoked_at: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct RecordingRow {
+    pub id: i64,
+    pub workspace_id: String,
+    pub s3_key: String,
+    pub file_name: String,
+    pub description: String,
+    pub file_size: i64,
+    pub status: String,
+    pub author: String,
+    pub created_at: String,
+    pub completed_at: Option<String>,
+}
+
 pub struct LicenseDb {
     conn: Connection,
 }
@@ -183,6 +197,54 @@ impl LicenseDb {
                 UNIQUE(workspace_id, version)
             );
             CREATE INDEX IF NOT EXISTS idx_config_revisions_workspace ON config_revisions(workspace_id);
+
+            -- Workspace-scoped federation channel secret. Members of the same
+            -- workspace share this opaque base64 string; FusionHub instances
+            -- derive their ChaCha20Poly1305 data-plane key from it. Lazily
+            -- created on first read so existing workspaces just work.
+            CREATE TABLE IF NOT EXISTS workspace_federation (
+                workspace_id TEXT PRIMARY KEY,
+                channel_secret TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                rotated_at TEXT NOT NULL,
+                FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+            );
+
+            -- One node-graph per workspace. Source of truth for the
+            -- distributed pipeline shared by every member fusionhub:
+            -- `graph_version` is the optimistic-lock counter (PUT must echo
+            -- the value it loaded; mismatch ⇒ 409), `config` is the raw JSON
+            -- the editor exports. NULL row ⇒ workspace has no graph yet
+            -- (first peer to save seeds it).
+            CREATE TABLE IF NOT EXISTS workspace_graphs (
+                workspace_id  TEXT PRIMARY KEY,
+                graph_version INTEGER NOT NULL,
+                config        TEXT NOT NULL,
+                updated_by    TEXT NOT NULL,
+                updated_at    TEXT NOT NULL,
+                FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+            );
+
+            -- Workspace peer registry. Each FusionHub instance that logs into
+            -- a workspace registers its externally-reachable URL here. Other
+            -- members poll this list to populate their peer set without mDNS.
+            -- `network_id` is a peer-side scope string — peers only federate
+            -- with others sharing the same value (workspace membership is
+            -- necessary but not sufficient). Empty string means isolated.
+            CREATE TABLE IF NOT EXISTS workspace_peers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                workspace_id TEXT NOT NULL,
+                host_id TEXT NOT NULL,
+                url TEXT NOT NULL,
+                label TEXT NOT NULL DEFAULT '',
+                network_id TEXT NOT NULL DEFAULT '',
+                registered_by TEXT NOT NULL,
+                registered_at TEXT NOT NULL,
+                last_seen TEXT NOT NULL,
+                FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+                UNIQUE(workspace_id, host_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_workspace_peers_ws ON workspace_peers(workspace_id);
 
             CREATE TABLE IF NOT EXISTS doc_pages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -351,7 +413,29 @@ impl LicenseDb {
             CREATE TABLE IF NOT EXISTS site_settings (
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
-            );",
+            );
+
+            -- Workspace-scoped recording files. Susi stores only metadata +
+            -- the S3 object key; bytes live in the configured bucket under
+            -- `workspaces/{id}/recordings/{uuid}`. Two-phase upload: a row is
+            -- created with status='pending' alongside a presigned PUT URL,
+            -- then a /complete call flips it to 'uploaded' once the client
+            -- finishes its PUT.
+            CREATE TABLE IF NOT EXISTS workspace_recordings (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                workspace_id TEXT    NOT NULL,
+                s3_key       TEXT    NOT NULL UNIQUE,
+                file_name    TEXT    NOT NULL,
+                description  TEXT    NOT NULL DEFAULT '',
+                file_size    INTEGER NOT NULL DEFAULT 0,
+                status       TEXT    NOT NULL DEFAULT 'pending',
+                author       TEXT    NOT NULL,
+                created_at   TEXT    NOT NULL,
+                completed_at TEXT,
+                FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_workspace_recordings_ws
+                ON workspace_recordings(workspace_id, created_at DESC);",
             )
             .map_err(|e| LicenseError::Other(format!("DB init: {}", e)))?;
         self.migrate()?;
@@ -405,6 +489,14 @@ impl LicenseDb {
         // over an account.
         let _ = self.conn.execute_batch(
             "ALTER TABLE login_tokens ADD COLUMN kind TEXT NOT NULL DEFAULT 'device';"
+        );
+
+        // Peer-side federation scope string. Empty default keeps existing rows
+        // valid; the application layer treats empty as "isolated" so prior
+        // workspace setups must explicitly set a value on each peer to opt
+        // back into federation.
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE workspace_peers ADD COLUMN network_id TEXT NOT NULL DEFAULT '';"
         );
 
         // Migrate single-admin table to multi-user table
@@ -1804,6 +1896,254 @@ impl LicenseDb {
     }
 
     // -----------------------------------------------------------------------
+    // Workspace federation: shared channel secret + peer registry
+    // -----------------------------------------------------------------------
+
+    /// Read the workspace's federation channel secret, creating one on first
+    /// call. Members of the same workspace get the same secret on every call,
+    /// so they all derive the same ChaCha20Poly1305 data-plane key.
+    pub fn get_or_create_workspace_federation_secret(
+        &self,
+        workspace_id: &str,
+    ) -> Result<String, LicenseError> {
+        let existing: Option<String> = self.conn
+            .query_row(
+                "SELECT channel_secret FROM workspace_federation WHERE workspace_id = ?1",
+                params![workspace_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?;
+        if let Some(s) = existing {
+            return Ok(s);
+        }
+        // Fresh 32 bytes of OS entropy, base64-encoded for transport.
+        use base64::Engine as _;
+        use rand::RngCore;
+        let mut buf = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut buf);
+        let secret = base64::engine::general_purpose::STANDARD.encode(&buf);
+        let now = Utc::now().to_rfc3339();
+        self.conn
+            .execute(
+                "INSERT INTO workspace_federation (workspace_id, channel_secret, created_at, rotated_at)
+                 VALUES (?1, ?2, ?3, ?3)",
+                params![workspace_id, secret, now],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB insert federation: {}", e)))?;
+        Ok(secret)
+    }
+
+    /// Rotate the workspace's federation secret. Existing peers must re-fetch
+    /// to keep encrypting on the wire; until they do their frames will fail to
+    /// authenticate at the receiver and get dropped.
+    pub fn rotate_workspace_federation_secret(
+        &self,
+        workspace_id: &str,
+    ) -> Result<String, LicenseError> {
+        use base64::Engine as _;
+        use rand::RngCore;
+        let mut buf = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut buf);
+        let secret = base64::engine::general_purpose::STANDARD.encode(&buf);
+        let now = Utc::now().to_rfc3339();
+        let updated = self.conn
+            .execute(
+                "UPDATE workspace_federation SET channel_secret = ?2, rotated_at = ?3
+                 WHERE workspace_id = ?1",
+                params![workspace_id, secret, now],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB update federation: {}", e)))?;
+        if updated == 0 {
+            // No row yet — treat rotate as create.
+            self.conn
+                .execute(
+                    "INSERT INTO workspace_federation (workspace_id, channel_secret, created_at, rotated_at)
+                     VALUES (?1, ?2, ?3, ?3)",
+                    params![workspace_id, secret, now],
+                )
+                .map_err(|e| LicenseError::Other(format!("DB insert federation: {}", e)))?;
+        }
+        Ok(secret)
+    }
+
+    /// Insert or update a peer registration. Updates `url`, `label`,
+    /// `network_id`, and `last_seen` on conflict so a peer that moved (new
+    /// public URL, or changed its Network ID) refreshes in place rather than
+    /// accumulating stale rows.
+    pub fn upsert_workspace_peer(
+        &self,
+        workspace_id: &str,
+        host_id: &str,
+        url: &str,
+        label: &str,
+        network_id: &str,
+        registered_by: &str,
+    ) -> Result<(), LicenseError> {
+        let now = Utc::now().to_rfc3339();
+        self.conn
+            .execute(
+                "INSERT INTO workspace_peers
+                    (workspace_id, host_id, url, label, network_id, registered_by, registered_at, last_seen)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+                 ON CONFLICT(workspace_id, host_id) DO UPDATE SET
+                    url = excluded.url,
+                    label = excluded.label,
+                    network_id = excluded.network_id,
+                    last_seen = excluded.last_seen",
+                params![workspace_id, host_id, url, label, network_id, registered_by, now],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB upsert peer: {}", e)))?;
+        Ok(())
+    }
+
+    /// List peers registered against a workspace. Returns
+    /// `(host_id, url, label, network_id, registered_by, last_seen)`.
+    pub fn list_workspace_peers(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<(String, String, String, String, String, String)>, LicenseError> {
+        let mut stmt = self.conn
+            .prepare(
+                "SELECT host_id, url, label, network_id, registered_by, last_seen
+                 FROM workspace_peers
+                 WHERE workspace_id = ?1
+                 ORDER BY host_id",
+            )
+            .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
+        let rows: Vec<_> = stmt
+            .query_map(params![workspace_id], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
+                ))
+            })
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    /// Remove a peer registration. Returns true if a row was deleted.
+    pub fn delete_workspace_peer(
+        &self,
+        workspace_id: &str,
+        host_id: &str,
+    ) -> Result<bool, LicenseError> {
+        let n = self.conn
+            .execute(
+                "DELETE FROM workspace_peers WHERE workspace_id = ?1 AND host_id = ?2",
+                params![workspace_id, host_id],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB delete peer: {}", e)))?;
+        Ok(n > 0)
+    }
+
+    // -----------------------------------------------------------------------
+    // Workspace graph (one shared node-graph per workspace, version-tracked)
+    // -----------------------------------------------------------------------
+
+    /// Fetch the workspace's current graph. Returns `(graph_version, config_json,
+    /// updated_by, updated_at)` or `None` when no graph has been pushed yet.
+    pub fn get_workspace_graph(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Option<(u32, String, String, String)>, LicenseError> {
+        let mut stmt = self.conn
+            .prepare(
+                "SELECT graph_version, config, updated_by, updated_at
+                 FROM workspace_graphs WHERE workspace_id = ?1",
+            )
+            .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
+        let row = stmt
+            .query_row(params![workspace_id], |r| {
+                Ok((
+                    r.get::<_, i64>(0)? as u32,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            })
+            .ok();
+        Ok(row)
+    }
+
+    /// Cheap version-only fetch for the federation poll response — avoids
+    /// shipping the (potentially large) config blob on every poll cycle.
+    /// `None` when no graph row exists yet.
+    pub fn get_workspace_graph_version(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Option<u32>, LicenseError> {
+        let mut stmt = self.conn
+            .prepare("SELECT graph_version FROM workspace_graphs WHERE workspace_id = ?1")
+            .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
+        let row = stmt
+            .query_row(params![workspace_id], |r| r.get::<_, i64>(0))
+            .ok()
+            .map(|v| v as u32);
+        Ok(row)
+    }
+
+    /// Upsert the workspace's graph with optimistic-lock semantics. The caller
+    /// passes the version it loaded; we bump to `loaded + 1` only when the row
+    /// is still at that version (or absent ⇒ seed at version 1). Returns the
+    /// new version. `Err(GraphConflict { current })` when another writer raced
+    /// us — caller surfaces this as HTTP 409 with the current version so the
+    /// editor can refresh.
+    ///
+    /// `expected_version` is `None` only for the very first save of a
+    /// workspace (or when the caller is deliberately overwriting; today we
+    /// route deliberate overwrites through the same `Some(current)` path).
+    pub fn upsert_workspace_graph(
+        &self,
+        workspace_id: &str,
+        expected_version: Option<u32>,
+        config_json: &str,
+        updated_by: &str,
+    ) -> Result<u32, LicenseError> {
+        let now = Utc::now().to_rfc3339();
+        let current = self.get_workspace_graph_version(workspace_id)?;
+
+        match (current, expected_version) {
+            // First save: no existing row, no expected version → seed at v1.
+            (None, None) => {
+                self.conn
+                    .execute(
+                        "INSERT INTO workspace_graphs
+                            (workspace_id, graph_version, config, updated_by, updated_at)
+                         VALUES (?1, 1, ?2, ?3, ?4)",
+                        params![workspace_id, config_json, updated_by, now],
+                    )
+                    .map_err(|e| LicenseError::Other(format!("DB insert graph: {}", e)))?;
+                Ok(1)
+            }
+            // Update: expected matches current → bump to current+1.
+            (Some(cur), Some(exp)) if cur == exp => {
+                let next = cur + 1;
+                self.conn
+                    .execute(
+                        "UPDATE workspace_graphs
+                            SET graph_version = ?2, config = ?3, updated_by = ?4, updated_at = ?5
+                          WHERE workspace_id = ?1 AND graph_version = ?6",
+                        params![workspace_id, next as i64, config_json, updated_by, now, cur as i64],
+                    )
+                    .map_err(|e| LicenseError::Other(format!("DB update graph: {}", e)))?;
+                Ok(next)
+            }
+            // Anything else is a conflict — surface the current version so the
+            // editor can re-fetch and re-apply local changes on top.
+            _ => Err(LicenseError::GraphConflict {
+                current: current.unwrap_or(0),
+            }),
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Config revisions
     // -----------------------------------------------------------------------
 
@@ -1947,6 +2287,129 @@ impl LicenseDb {
     }
 
     // -----------------------------------------------------------------------
+    // Workspace recordings (S3-backed; row stores metadata + key only)
+    // -----------------------------------------------------------------------
+
+    pub fn create_recording(
+        &self,
+        workspace_id: &str,
+        s3_key: &str,
+        file_name: &str,
+        description: &str,
+        author: &str,
+    ) -> Result<i64, LicenseError> {
+        let now = Utc::now().to_rfc3339();
+        self.conn
+            .execute(
+                "INSERT INTO workspace_recordings
+                 (workspace_id, s3_key, file_name, description, file_size, status, author, created_at)
+                 VALUES (?1, ?2, ?3, ?4, 0, 'pending', ?5, ?6)",
+                params![workspace_id, s3_key, file_name, description, author, now],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB insert recording: {}", e)))?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Flip a recording row from pending to uploaded; records final size.
+    pub fn complete_recording(
+        &self,
+        workspace_id: &str,
+        id: i64,
+        file_size: u64,
+    ) -> Result<bool, LicenseError> {
+        let now = Utc::now().to_rfc3339();
+        let affected = self.conn
+            .execute(
+                "UPDATE workspace_recordings
+                 SET status = 'uploaded', file_size = ?1, completed_at = ?2
+                 WHERE workspace_id = ?3 AND id = ?4",
+                params![file_size as i64, now, workspace_id, id],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB complete recording: {}", e)))?;
+        Ok(affected > 0)
+    }
+
+    pub fn list_recordings(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<RecordingRow>, LicenseError> {
+        let mut stmt = self.conn
+            .prepare(
+                "SELECT id, workspace_id, s3_key, file_name, description, file_size, status, author, created_at, completed_at
+                 FROM workspace_recordings WHERE workspace_id = ?1
+                 ORDER BY id DESC"
+            )
+            .map_err(|e| LicenseError::Other(format!("DB prepare list_recordings: {}", e)))?;
+        let rows = stmt
+            .query_map(params![workspace_id], |r| {
+                Ok(RecordingRow {
+                    id: r.get(0)?,
+                    workspace_id: r.get(1)?,
+                    s3_key: r.get(2)?,
+                    file_name: r.get(3)?,
+                    description: r.get(4)?,
+                    file_size: r.get(5)?,
+                    status: r.get(6)?,
+                    author: r.get(7)?,
+                    created_at: r.get(8)?,
+                    completed_at: r.get(9)?,
+                })
+            })
+            .map_err(|e| LicenseError::Other(format!("DB query list_recordings: {}", e)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    pub fn get_recording(
+        &self,
+        workspace_id: &str,
+        id: i64,
+    ) -> Result<Option<RecordingRow>, LicenseError> {
+        match self.conn.query_row(
+            "SELECT id, workspace_id, s3_key, file_name, description, file_size, status, author, created_at, completed_at
+             FROM workspace_recordings WHERE workspace_id = ?1 AND id = ?2",
+            params![workspace_id, id],
+            |r| Ok(RecordingRow {
+                id: r.get(0)?,
+                workspace_id: r.get(1)?,
+                s3_key: r.get(2)?,
+                file_name: r.get(3)?,
+                description: r.get(4)?,
+                file_size: r.get(5)?,
+                status: r.get(6)?,
+                author: r.get(7)?,
+                created_at: r.get(8)?,
+                completed_at: r.get(9)?,
+            }),
+        ) {
+            Ok(row) => Ok(Some(row)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(LicenseError::Other(format!("DB query get_recording: {}", e))),
+        }
+    }
+
+    /// Delete a recording row. Returns the s3_key so the caller can purge S3.
+    pub fn delete_recording(
+        &self,
+        workspace_id: &str,
+        id: i64,
+    ) -> Result<Option<String>, LicenseError> {
+        let key: Option<String> = self.conn.query_row(
+            "SELECT s3_key FROM workspace_recordings WHERE workspace_id = ?1 AND id = ?2",
+            params![workspace_id, id],
+            |r| r.get::<_, String>(0),
+        ).optional()
+            .map_err(|e| LicenseError::Other(format!("DB lookup recording: {}", e)))?;
+        let Some(k) = key else { return Ok(None); };
+        self.conn.execute(
+            "DELETE FROM workspace_recordings WHERE workspace_id = ?1 AND id = ?2",
+            params![workspace_id, id],
+        ).map_err(|e| LicenseError::Other(format!("DB delete recording: {}", e)))?;
+        Ok(Some(k))
+    }
+
+    // -----------------------------------------------------------------------
     // Releases (with workspace scoping)
     // -----------------------------------------------------------------------
 
@@ -1982,6 +2445,16 @@ impl LicenseDb {
             )
             .map_err(|e| LicenseError::Other(format!("DB insert asset: {}", e)))?;
         Ok(())
+    }
+
+    pub fn delete_release_asset(&self, release_id: i64, file_name: &str) -> Result<bool, LicenseError> {
+        let n = self.conn
+            .execute(
+                "DELETE FROM release_assets WHERE release_id = ?1 AND file_name = ?2",
+                params![release_id, file_name],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB delete asset: {}", e)))?;
+        Ok(n > 0)
     }
 
     /// Update metadata of an existing release without touching its id (so
@@ -4345,6 +4818,33 @@ mod tests {
     }
 
     #[test]
+    fn test_release_asset_add_and_delete() {
+        let db = test_db();
+        let rid = db.insert_release("v9.9", "Test", "", false, None).unwrap();
+
+        db.add_release_asset(rid, "a.bin", 11).unwrap();
+        db.add_release_asset(rid, "b.bin", 22).unwrap();
+        let assets = db.get_release_assets(rid).unwrap();
+        assert_eq!(assets.len(), 2);
+
+        // Upsert keeps the same row count and updates size in place.
+        db.add_release_asset(rid, "a.bin", 33).unwrap();
+        let assets = db.get_release_assets(rid).unwrap();
+        assert_eq!(assets.len(), 2);
+        let a = assets.iter().find(|(n, _)| n == "a.bin").unwrap();
+        assert_eq!(a.1, 33);
+
+        // Delete one — the other remains.
+        assert!(db.delete_release_asset(rid, "a.bin").unwrap());
+        let remaining = db.get_release_assets(rid).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].0, "b.bin");
+
+        // Deleting again is a no-op (returns false).
+        assert!(!db.delete_release_asset(rid, "a.bin").unwrap());
+    }
+
+    #[test]
     fn test_doc_pages_crud_and_bulk_upsert() {
         let mut db = test_db();
         let rid = db.insert_release("v1.0", "FusionHub 1.0", "", false, None).unwrap();
@@ -4573,5 +5073,199 @@ mod tests {
         assert_eq!(db.get_release_workspace_id("v1.0").unwrap(), Some(None));
         assert_eq!(db.get_release_workspace_id("v1.1").unwrap(), Some(Some("ws-1".to_string())));
         assert_eq!(db.get_release_workspace_id("nonexistent").unwrap(), None);
+    }
+
+    #[test]
+    fn test_federation_secret_idempotent_per_workspace() {
+        let db = test_db();
+        db.create_workspace("ws-1", "WS", "", "", "admin").unwrap();
+        db.create_workspace("ws-2", "WS2", "", "", "admin").unwrap();
+
+        let s1a = db.get_or_create_workspace_federation_secret("ws-1").unwrap();
+        let s1b = db.get_or_create_workspace_federation_secret("ws-1").unwrap();
+        assert_eq!(s1a, s1b, "same workspace must return same secret");
+        assert!(!s1a.is_empty());
+        // base64 of 32 bytes → 44 chars (with padding).
+        assert_eq!(s1a.len(), 44);
+
+        let s2 = db.get_or_create_workspace_federation_secret("ws-2").unwrap();
+        assert_ne!(s1a, s2, "different workspaces must get different secrets");
+    }
+
+    #[test]
+    fn test_federation_secret_rotation() {
+        let db = test_db();
+        db.create_workspace("ws-1", "WS", "", "", "admin").unwrap();
+
+        let before = db.get_or_create_workspace_federation_secret("ws-1").unwrap();
+        let rotated = db.rotate_workspace_federation_secret("ws-1").unwrap();
+        assert_ne!(before, rotated, "rotation must produce a new secret");
+
+        // Subsequent reads return the rotated value.
+        let after = db.get_or_create_workspace_federation_secret("ws-1").unwrap();
+        assert_eq!(after, rotated);
+
+        // Rotating on a workspace that never had a secret should still work
+        // (treat as create).
+        db.create_workspace("ws-fresh", "F", "", "", "admin").unwrap();
+        let fresh = db.rotate_workspace_federation_secret("ws-fresh").unwrap();
+        assert_eq!(fresh.len(), 44);
+        assert_eq!(
+            db.get_or_create_workspace_federation_secret("ws-fresh").unwrap(),
+            fresh
+        );
+    }
+
+    #[test]
+    fn test_workspace_peer_upsert_and_list() {
+        let db = test_db();
+        db.create_workspace("ws-1", "WS", "", "", "admin").unwrap();
+        db.create_workspace("ws-2", "WS2", "", "", "admin").unwrap();
+
+        // Register two peers in ws-1 and one in ws-2.
+        db.upsert_workspace_peer("ws-1", "hostA", "https://a.local:443", "Laptop A", "", "alice").unwrap();
+        db.upsert_workspace_peer("ws-1", "hostB", "https://b.local:443", "Laptop B", "", "alice").unwrap();
+        db.upsert_workspace_peer("ws-2", "hostA", "https://other.local", "", "", "bob").unwrap();
+
+        let peers_ws1 = db.list_workspace_peers("ws-1").unwrap();
+        assert_eq!(peers_ws1.len(), 2);
+        let host_ids: Vec<&str> = peers_ws1.iter().map(|p| p.0.as_str()).collect();
+        assert!(host_ids.contains(&"hostA"));
+        assert!(host_ids.contains(&"hostB"));
+
+        let peers_ws2 = db.list_workspace_peers("ws-2").unwrap();
+        assert_eq!(peers_ws2.len(), 1);
+        assert_eq!(peers_ws2[0].1, "https://other.local");
+
+        // Re-register hostA with a new URL — must update in place.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        db.upsert_workspace_peer("ws-1", "hostA", "https://a.new:443", "Laptop A v2", "", "alice").unwrap();
+        let after = db.list_workspace_peers("ws-1").unwrap();
+        assert_eq!(after.len(), 2, "upsert must not create duplicate row");
+        let row_a = after.iter().find(|p| p.0 == "hostA").unwrap();
+        assert_eq!(row_a.1, "https://a.new:443");
+        assert_eq!(row_a.2, "Laptop A v2");
+    }
+
+    #[test]
+    fn test_workspace_peer_carries_network_id_through_upsert() {
+        // Peers register their network_id; re-registration updates it in
+        // place so flipping the setting on a live instance propagates to
+        // other workspace members at their next federation poll.
+        let db = test_db();
+        db.create_workspace("ws-1", "WS", "", "", "admin").unwrap();
+        db.upsert_workspace_peer("ws-1", "hostA", "https://a", "A", "lab-east", "alice").unwrap();
+        db.upsert_workspace_peer("ws-1", "hostB", "https://b", "B", "lab-west", "alice").unwrap();
+        let rows = db.list_workspace_peers("ws-1").unwrap();
+        let a = rows.iter().find(|r| r.0 == "hostA").unwrap();
+        let b = rows.iter().find(|r| r.0 == "hostB").unwrap();
+        assert_eq!(a.3, "lab-east", "network_id stored on initial insert");
+        assert_eq!(b.3, "lab-west");
+        // Flip hostA's network_id; re-register must update the row.
+        db.upsert_workspace_peer("ws-1", "hostA", "https://a", "A", "lab-west", "alice").unwrap();
+        let rows2 = db.list_workspace_peers("ws-1").unwrap();
+        let a2 = rows2.iter().find(|r| r.0 == "hostA").unwrap();
+        assert_eq!(a2.3, "lab-west", "network_id updated on re-register");
+    }
+
+    #[test]
+    fn test_workspace_graph_first_save_seeds_v1() {
+        let db = test_db();
+        db.create_workspace("ws-1", "WS", "", "", "admin").unwrap();
+        assert!(db.get_workspace_graph("ws-1").unwrap().is_none());
+        assert!(db.get_workspace_graph_version("ws-1").unwrap().is_none());
+
+        let v = db.upsert_workspace_graph("ws-1", None, r#"{"sources":{}}"#, "alice").unwrap();
+        assert_eq!(v, 1);
+        let row = db.get_workspace_graph("ws-1").unwrap().expect("row exists");
+        assert_eq!(row.0, 1);
+        assert_eq!(row.1, r#"{"sources":{}}"#);
+        assert_eq!(row.2, "alice");
+        assert_eq!(db.get_workspace_graph_version("ws-1").unwrap(), Some(1));
+    }
+
+    #[test]
+    fn test_workspace_graph_optimistic_lock_bumps_on_match() {
+        let db = test_db();
+        db.create_workspace("ws-1", "WS", "", "", "admin").unwrap();
+        db.upsert_workspace_graph("ws-1", None, r#"{"a":1}"#, "alice").unwrap();
+
+        let v2 = db.upsert_workspace_graph("ws-1", Some(1), r#"{"a":2}"#, "bob").unwrap();
+        assert_eq!(v2, 2);
+        let row = db.get_workspace_graph("ws-1").unwrap().unwrap();
+        assert_eq!(row.0, 2);
+        assert_eq!(row.1, r#"{"a":2}"#);
+        assert_eq!(row.2, "bob");
+    }
+
+    #[test]
+    fn test_workspace_graph_stale_version_rejected() {
+        let db = test_db();
+        db.create_workspace("ws-1", "WS", "", "", "admin").unwrap();
+        db.upsert_workspace_graph("ws-1", None, r#"{"v":1}"#, "alice").unwrap();
+        db.upsert_workspace_graph("ws-1", Some(1), r#"{"v":2}"#, "alice").unwrap();
+        // Caller still thinks it's at v1 — must fail with current=2.
+        let err = db.upsert_workspace_graph("ws-1", Some(1), r#"{"v":3}"#, "bob").unwrap_err();
+        match err {
+            crate::error::LicenseError::GraphConflict { current } => assert_eq!(current, 2),
+            other => panic!("expected GraphConflict, got {:?}", other),
+        }
+        // Stored row unchanged after the rejected write.
+        assert_eq!(db.get_workspace_graph("ws-1").unwrap().unwrap().1, r#"{"v":2}"#);
+    }
+
+    #[test]
+    fn test_workspace_graph_no_expected_version_after_first_save_conflicts() {
+        // Once a row exists, `expected_version = None` must NOT silently
+        // overwrite — that would be the same "forgot to load" footgun.
+        let db = test_db();
+        db.create_workspace("ws-1", "WS", "", "", "admin").unwrap();
+        db.upsert_workspace_graph("ws-1", None, r#"{"v":1}"#, "alice").unwrap();
+        let err = db.upsert_workspace_graph("ws-1", None, r#"{"v":2}"#, "bob").unwrap_err();
+        assert!(matches!(err, crate::error::LicenseError::GraphConflict { current: 1 }));
+    }
+
+    #[test]
+    fn test_workspace_graph_cascade_deletes_with_workspace() {
+        // Dropping the parent workspace must take the graph with it (FK ON DELETE CASCADE).
+        let db = test_db();
+        db.create_workspace("ws-1", "WS", "", "", "admin").unwrap();
+        db.upsert_workspace_graph("ws-1", None, "{}", "alice").unwrap();
+        db.delete_workspace("ws-1").unwrap();
+        assert!(db.get_workspace_graph("ws-1").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_workspace_peer_delete() {
+        let db = test_db();
+        db.create_workspace("ws-1", "WS", "", "", "admin").unwrap();
+        db.upsert_workspace_peer("ws-1", "hostA", "https://a", "", "", "alice").unwrap();
+
+        assert!(db.delete_workspace_peer("ws-1", "hostA").unwrap());
+        assert_eq!(db.list_workspace_peers("ws-1").unwrap().len(), 0);
+        // Second delete returns false.
+        assert!(!db.delete_workspace_peer("ws-1", "hostA").unwrap());
+        // Wrong workspace also false.
+        db.upsert_workspace_peer("ws-1", "hostA", "https://a", "", "", "alice").unwrap();
+        assert!(!db.delete_workspace_peer("ws-other", "hostA").unwrap());
+        assert_eq!(db.list_workspace_peers("ws-1").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_workspace_delete_cascades_federation_and_peers() {
+        let db = test_db();
+        db.create_workspace("ws-1", "WS", "", "", "admin").unwrap();
+        db.get_or_create_workspace_federation_secret("ws-1").unwrap();
+        db.upsert_workspace_peer("ws-1", "hostA", "https://a", "", "", "alice").unwrap();
+        assert_eq!(db.list_workspace_peers("ws-1").unwrap().len(), 1);
+
+        db.delete_workspace("ws-1").unwrap();
+
+        // FK cascade should have wiped both rows.
+        assert_eq!(db.list_workspace_peers("ws-1").unwrap().len(), 0);
+        // Re-creating the workspace must yield a fresh secret, not the old one.
+        db.create_workspace("ws-1", "WS again", "", "", "admin").unwrap();
+        let fresh = db.get_or_create_workspace_federation_secret("ws-1").unwrap();
+        assert_eq!(fresh.len(), 44);
     }
 }

@@ -38,6 +38,10 @@ url = "2"
 printpdf = { version = "0.7", default-features = false, features = ["embedded_images"] }
 ammonia = "4"
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+# S3 storage for workspace recordings. Susi only generates presigned URLs +
+# does HeadObject/DeleteObject; bytes never traverse the susi server.
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-s3 = { version = "1", features = ["behavior-version-latest"] }
 
 [dev-dependencies]
 susi_client = { path = "../susi_client" }

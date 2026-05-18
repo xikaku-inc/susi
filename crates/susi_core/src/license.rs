@@ -53,6 +53,9 @@ pub struct LicensePayload {
     /// time or the license stops being valid.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lease_expires: Option<DateTime<Utc>>,
+    /// Grace period in hours after lease expiry. `None` means use client default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_grace_period: Option<u32>,
     /// If true, the client binary must have a valid code signature. Absent in
     /// old license files → defaults to false (backward compatible).
     #[serde(default)]
@@ -106,6 +109,8 @@ impl License {
                 .and_then(|m| m.lease_expires_at)
         });
 
+        let lease_grace_period = lease_expires.map(|_| self.lease_grace_hours);
+
         LicensePayload {
             id: self.id.clone(),
             product: self.product.clone(),
@@ -116,6 +121,7 @@ impl License {
             features: self.features.clone(),
             machine_codes: self.active_machine_codes(),
             lease_expires,
+            lease_grace_period,
             require_signed_binary: self.require_signed_binary,
         }
     }
@@ -209,9 +215,13 @@ impl LicensePayload {
     }
 
     /// Check if the lease is expired but still within the grace period.
-    pub fn is_in_grace_period(&self, grace_hours: i64) -> bool {
+    /// Uses `self.lease_grace_hours` when present, otherwise falls back to `default_grace_hours`.
+    pub fn is_in_grace_period(&self, default_grace_hours: i64) -> bool {
         match self.lease_expires {
             Some(dt) => {
+                let grace_hours = self.lease_grace_period
+                    .map(|h| h as i64)
+                    .unwrap_or(default_grace_hours);
                 let now = Utc::now();
                 let grace_end = dt + chrono::Duration::hours(grace_hours);
                 now > dt && now <= grace_end
@@ -413,6 +423,7 @@ mod tests {
             features: vec![],
             machine_codes: vec![],
             lease_expires: Some(future),
+            lease_grace_period: None,
             require_signed_binary: false,
         };
         assert!(!payload.is_lease_expired());
@@ -438,6 +449,7 @@ mod tests {
             features: vec!["full_fusion".to_string(), "recorder".to_string()],
             machine_codes: vec!["machine1".to_string()],
             lease_expires: None,
+            lease_grace_period: None,
             require_signed_binary: false,
         };
 
@@ -460,6 +472,7 @@ mod tests {
             features: vec![],
             machine_codes: vec![],
             lease_expires: None,
+            lease_grace_period: None,
             require_signed_binary: false,
         };
 

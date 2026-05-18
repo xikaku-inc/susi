@@ -90,17 +90,20 @@ impl EmailService {
         );
 
         let html = format!(
-            "<p>Hi {user},</p>\
-             <p>You (or someone) just tried to sign in to the Susi license server from a new device:</p>\
-             <ul>\
-                <li><strong>Device:</strong> {dev}</li>\
-                <li><strong>IP:</strong> {ip}</li>\
-             </ul>\
-             <p>If this was you, click the link below within <strong>{ttl} minutes</strong> to authorize this device:</p>\
-             <p><a href=\"{link}\" style=\"display:inline-block;padding:10px 18px;background:#6c8cff;color:#fff;text-decoration:none;border-radius:6px;font-weight:600;\">Sign in</a></p>\
-             <p style=\"color:#888;font-size:12px;word-break:break-all;\">Or paste this into your browser: {link}</p>\
-             <p style=\"color:#888;font-size:12px;\">If this wasn't you, you can ignore this email — the link will expire and no sign-in will happen.</p>\
-             <p style=\"color:#888;font-size:12px;\">— Susi</p>",
+            "<div style=\"font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:540px;color:#1a1d23;line-height:1.55;\">\
+                <p style=\"margin:0 0 14px;\">Hi {user},</p>\
+                <p style=\"margin:0 0 14px;\">Someone just tried to sign in to the Susi license server from a new device:</p>\
+                <table style=\"border-collapse:collapse;margin:0 0 18px;\">\
+                    <tr><td style=\"padding:3px 18px 3px 0;color:#5c6470;\">Device</td><td style=\"padding:3px 0;font-weight:600;\">{dev}</td></tr>\
+                    <tr><td style=\"padding:3px 18px 3px 0;color:#5c6470;\">IP</td><td style=\"padding:3px 0;font-weight:600;\">{ip}</td></tr>\
+                </table>\
+                <p style=\"margin:0 0 16px;\">If this was you, click the button below within <strong>{ttl} minutes</strong> to authorize this device:</p>\
+                <p style=\"margin:0 0 20px;\"><a href=\"{link}\" style=\"display:inline-block;padding:11px 22px;background:#2563eb;color:#ffffff;text-decoration:none;border-radius:8px;font-weight:600;\">Sign in</a></p>\
+                <p style=\"margin:0 0 6px;font-size:13px;\">Or paste this into your browser:</p>\
+                <p style=\"margin:0 0 20px;font-size:13px;word-break:break-all;\"><a href=\"{link}\" style=\"color:#2563eb;text-decoration:none;\">{link}</a></p>\
+                <p style=\"margin:0 0 4px;font-size:13px;\">If this wasn't you, you can ignore this email — the link will expire and no sign-in will happen.</p>\
+                <p style=\"margin:16px 0 0;font-size:13px;\">— Susi</p>\
+             </div>",
             user = html_escape(username),
             dev = html_escape(device_label),
             ip = html_escape(ip),
@@ -158,13 +161,16 @@ impl EmailService {
         );
 
         let html = format!(
-            "<p>Hi {user},</p>\
-             <p>Someone requested a password reset for your Susi account from IP <strong>{ip}</strong>.</p>\
-             <p>If this was you, click the link below within <strong>{ttl} minutes</strong> to set a new password:</p>\
-             <p><a href=\"{link}\" style=\"display:inline-block;padding:10px 18px;background:#6c8cff;color:#fff;text-decoration:none;border-radius:6px;font-weight:600;\">Reset password</a></p>\
-             <p style=\"color:#888;font-size:12px;word-break:break-all;\">Or paste this into your browser: {link}</p>\
-             <p style=\"color:#888;font-size:12px;\">If this wasn't you, you can ignore this email — your password stays unchanged.</p>\
-             <p style=\"color:#888;font-size:12px;\">— Susi</p>",
+            "<div style=\"font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:540px;color:#1a1d23;line-height:1.55;\">\
+                <p style=\"margin:0 0 14px;\">Hi {user},</p>\
+                <p style=\"margin:0 0 16px;\">Someone requested a password reset for your Susi account from IP <strong>{ip}</strong>.</p>\
+                <p style=\"margin:0 0 16px;\">If this was you, click the button below within <strong>{ttl} minutes</strong> to set a new password:</p>\
+                <p style=\"margin:0 0 20px;\"><a href=\"{link}\" style=\"display:inline-block;padding:11px 22px;background:#2563eb;color:#ffffff;text-decoration:none;border-radius:8px;font-weight:600;\">Reset password</a></p>\
+                <p style=\"margin:0 0 6px;font-size:13px;\">Or paste this into your browser:</p>\
+                <p style=\"margin:0 0 20px;font-size:13px;word-break:break-all;\"><a href=\"{link}\" style=\"color:#2563eb;text-decoration:none;\">{link}</a></p>\
+                <p style=\"margin:0 0 4px;font-size:13px;\">If this wasn't you, you can ignore this email — your password stays unchanged.</p>\
+                <p style=\"margin:16px 0 0;font-size:13px;\">— Susi</p>\
+             </div>",
             user = html_escape(username),
             ip = html_escape(ip),
             ttl = ttl_minutes,

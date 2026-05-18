@@ -115,8 +115,6 @@ impl LicenseStatus {
 pub struct LicenseClient {
     public_key: RsaPublicKey,
     server_url: Option<String>,
-    /// Grace period in hours after lease expiry. Default: 24.
-    grace_hours: i64,
     /// Optional on-disk cache for the machine fingerprint. When set, once the
     /// fingerprint has been computed successfully it is reused on subsequent
     /// runs even if the underlying hardware ID lookup later fails transiently.
@@ -130,7 +128,6 @@ impl LicenseClient {
         Ok(Self {
             public_key,
             server_url: None,
-            grace_hours: susi_core::DEFAULT_LEASE_GRACE_HOURS as i64,
             machine_code_cache: None,
         })
     }
@@ -140,11 +137,6 @@ impl LicenseClient {
         let mut client = Self::new(public_key_pem)?;
         client.server_url = Some(server_url);
         Ok(client)
-    }
-
-    /// Set the grace period (hours) for lease expiry.
-    pub fn set_grace_hours(&mut self, hours: i64) {
-        self.grace_hours = hours;
     }
 
     /// Set a path where the computed machine fingerprint is cached. See
@@ -225,9 +217,12 @@ impl LicenseClient {
             };
         }
 
-        // Check lease expiry
+        // Check lease expiry; prefer grace hours from the payload over the client default
         if payload.is_lease_expired() {
-            if payload.is_in_grace_period(self.grace_hours) {
+            let grace_hours = payload.lease_grace_period
+                .map(|h| h as i64)
+                .unwrap_or(susi_core::DEFAULT_LEASE_GRACE_HOURS as i64);
+            if payload.is_in_grace_period(grace_hours) {
                 return LicenseStatus::ValidGracePeriod {
                     lease_expired_at: payload.lease_expires.unwrap(),
                     payload,
@@ -525,6 +520,7 @@ mod tests {
             features: vec!["full_fusion".to_string(), "recorder".to_string()],
             machine_codes: machine_code.into_iter().collect(),
             lease_expires: None,
+            lease_grace_period: None,
             require_signed_binary: false,
         }
     }
@@ -590,6 +586,7 @@ mod tests {
             features: vec![],
             machine_codes: vec![],
             lease_expires: None,
+            lease_grace_period: None,
             require_signed_binary: false,
         };
         let signed = sign_license(&private, &payload).unwrap();
@@ -670,6 +667,7 @@ mod tests {
             features: vec!["full_fusion".to_string()],
             machine_codes: vec![],
             lease_expires: None,
+            lease_grace_period: None,
             require_signed_binary: false,
         };
         let signed = sign_license(&private, &payload).unwrap();
@@ -697,11 +695,11 @@ mod tests {
     #[test]
     fn test_verify_expired_lease_in_grace() {
         let (_, pub_pem, private) = make_keypair_pems();
-        let mut client = new_test_client(&pub_pem);
-        client.set_grace_hours(24);
+        let client = new_test_client(&pub_pem);
 
-        let mut payload = make_valid_payload(None);
+        let mut payload: LicensePayload = make_valid_payload(None);
         payload.lease_expires = Some(Utc::now() - Duration::hours(2)); // expired 2h ago
+        payload.lease_grace_period = Some(24);
         let signed = sign_license(&private, &payload).unwrap();
 
         let status = client.verify_signed(&signed);
@@ -713,11 +711,11 @@ mod tests {
     #[test]
     fn test_verify_expired_lease_past_grace() {
         let (_, pub_pem, private) = make_keypair_pems();
-        let mut client = new_test_client(&pub_pem);
-        client.set_grace_hours(24);
+        let client = new_test_client(&pub_pem);
 
         let mut payload = make_valid_payload(None);
         payload.lease_expires = Some(Utc::now() - Duration::hours(48)); // expired 48h ago
+        payload.lease_grace_period = Some(24);
         let signed = sign_license(&private, &payload).unwrap();
 
         let status = client.verify_signed(&signed);
@@ -924,6 +922,7 @@ mod tests {
             features: vec![],
             machine_codes: vec![],
             lease_expires: Some(Utc::now() + Duration::hours(168)),
+            lease_grace_period: None,
             require_signed_binary: false
         };
         let signed = sign_license(&private, &payload).unwrap();

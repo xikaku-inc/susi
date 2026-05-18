@@ -4,6 +4,7 @@ mod email;
 mod shop;
 mod invoice_pdf;
 mod contact;
+mod s3;
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -15,7 +16,7 @@ use anyhow::{Context, Result};
 use argon2::{self, Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use argon2::password_hash::SaltString;
 use axum::{
-    extract::{ConnectInfo, DefaultBodyLimit, Multipart, Path, State},
+    extract::{ConnectInfo, DefaultBodyLimit, Multipart, Path, Query, State},
     http::{header, HeaderMap, StatusCode},
     response::{Html, IntoResponse},
     routing::{get, post},
@@ -89,6 +90,17 @@ struct Cli {
     #[arg(long, env = "SUSI_MAGIC_LINK_BASE_URL", default_value = "")]
     magic_link_base_url: String,
 
+    /// WebSocket URL of the FusionHub relay this susi instance points
+    /// workspace members at. Returned verbatim in
+    /// `GET /workspaces/{id}/federation` so each member's
+    /// workspace_federation poller can spawn its relay client without
+    /// hard-coding the URL. Empty ⇒ no relay; members are expected to
+    /// reach each other directly (or fall back to `FUSIONHUB_RELAY_URL`
+    /// set locally on each member). Typically
+    /// `wss://fusionhub.lp-research.com/api/relay`.
+    #[arg(long, env = "SUSI_RELAY_URL", default_value = "")]
+    relay_url: String,
+
     // -------- Shop / Stripe --------
     //
     // Both empty ⇒ shop checkout + webhook endpoints respond with 503.
@@ -143,6 +155,9 @@ struct AppState {
     contact_attempts: Mutex<HashMap<IpAddr, Vec<Instant>>>,
     email: Option<EmailService>,
     magic_link_base_url: String,
+    /// FusionHub relay URL handed to workspace members via
+    /// `GET /workspaces/{id}/federation`. Empty when not configured.
+    relay_url: String,
     stripe_secret_key: String,
     stripe_webhook_secret: String,
     shop_base_url: String,
@@ -151,6 +166,7 @@ struct AppState {
     turnstile_secret: String,
     turnstile_site_key: String,
     http: reqwest::Client,
+    s3: Option<s3::S3Storage>,
 }
 
 // Magic-link TTL: long enough for a user to switch to their mail client and
@@ -322,6 +338,22 @@ struct Claims {
     exp: i64,
 }
 
+/// Short-lived, single-asset download ticket. Lets the dashboard trigger a
+/// native browser download via plain `<a href>` (which can't carry an
+/// Authorization header) without exposing the user's session JWT in the URL.
+/// The `aud` claim makes it impossible to mistake an auth JWT for a ticket.
+#[derive(Debug, Serialize, Deserialize)]
+struct DownloadTicketClaims {
+    sub: String,
+    tag: String,
+    asset: String,
+    aud: String,
+    exp: i64,
+}
+
+const DOWNLOAD_TICKET_AUDIENCE: &str = "release-download";
+const DOWNLOAD_TICKET_TTL_SECS: i64 = 60;
+
 // ---------------------------------------------------------------------------
 // Request / response types
 // ---------------------------------------------------------------------------
@@ -415,6 +447,13 @@ struct ExportRequest {
     friendly_name: String,
 }
 
+#[derive(Deserialize)]
+struct ExportTokenRequest {
+    usb_serial: String,
+    #[serde(default)]
+    friendly_name: String,
+}
+
 #[derive(Serialize)]
 struct ErrorResponse {
     error: String,
@@ -504,6 +543,40 @@ fn create_jwt(secret: &[u8; 32], username: &str) -> Result<String, (StatusCode, 
     };
     encode(&Header::default(), &claims, &EncodingKey::from_secret(secret))
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))
+}
+
+fn mint_download_ticket(
+    secret: &[u8; 32],
+    sub: &str,
+    tag: &str,
+    asset: &str,
+) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
+    let claims = DownloadTicketClaims {
+        sub: sub.into(),
+        tag: tag.into(),
+        asset: asset.into(),
+        aud: DOWNLOAD_TICKET_AUDIENCE.into(),
+        exp: Utc::now().timestamp() + DOWNLOAD_TICKET_TTL_SECS,
+    };
+    encode(&Header::default(), &claims, &EncodingKey::from_secret(secret))
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))
+}
+
+fn validate_download_ticket(
+    secret: &[u8; 32],
+    token: &str,
+    expected_tag: &str,
+    expected_asset: &str,
+) -> Result<DownloadTicketClaims, (StatusCode, Json<ErrorResponse>)> {
+    let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
+    validation.set_audience(&[DOWNLOAD_TICKET_AUDIENCE]);
+    let claims = decode::<DownloadTicketClaims>(token, &DecodingKey::from_secret(secret), &validation)
+        .map(|d| d.claims)
+        .map_err(|_| error_response(StatusCode::UNAUTHORIZED, "Invalid or expired download ticket"))?;
+    if claims.tag != expected_tag || claims.asset != expected_asset {
+        return Err(error_response(StatusCode::FORBIDDEN, "Ticket does not match requested asset"));
+    }
+    Ok(claims)
 }
 
 fn validate_jwt(
@@ -1962,6 +2035,83 @@ async fn handle_export_license(
     ))
 }
 
+async fn handle_export_token(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(key): Path<String>,
+    Json(req): Json<ExportTokenRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    require_admin_full(&state, &principal)?;
+
+    let usb_serial = req.usb_serial.trim().to_string();
+    if usb_serial.is_empty() {
+        return Err(error_response(StatusCode::BAD_REQUEST, "USB serial is required"));
+    }
+
+    let db = state.db.lock().unwrap();
+    let license = db
+        .get_license_by_key(&key)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "License key not found"))?;
+
+    if license.revoked {
+        return Err(error_response(StatusCode::FORBIDDEN, "License has been revoked"));
+    }
+    if license.is_expired() {
+        return Err(error_response(StatusCode::FORBIDDEN, "License has expired"));
+    }
+
+    let activation_code = format!("usb:{}", usb_serial);
+
+    if !license.is_machine_activated(&activation_code) && !license.can_add_machine() {
+        return Err(error_response(
+            StatusCode::FORBIDDEN,
+            &format!("Machine limit reached (max {})", license.max_machines),
+        ));
+    }
+
+    let name = if req.friendly_name.is_empty() {
+        format!("USB Token: {}", usb_serial)
+    } else {
+        req.friendly_name.clone()
+    };
+
+    db.add_machine_activation(&license.id, &activation_code, &name, None)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    let payload = susi_core::LicensePayload {
+        id: license.id.clone(),
+        product: license.product.clone(),
+        customer: license.customer.clone(),
+        license_key: license.license_key.clone(),
+        created: license.created,
+        expires: license.expires,
+        features: license.features.clone(),
+        machine_codes: vec![activation_code],
+        lease_expires: None,
+        lease_grace_period: None,
+    };
+
+    let signed = sign_license(&state.private_key, &payload)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    let blob = susi_core::encrypt_token(&signed, &usb_serial)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    Ok((
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/octet-stream"),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"license.bin\"",
+            ),
+        ],
+        blob,
+    ))
+}
+
 async fn handle_deactivate_machine(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -2455,24 +2605,24 @@ async fn handle_get_releases(
     Ok(Json(serde_json::json!({ "releases": releases })))
 }
 
-/// Download a release asset — available to licensed clients or logged-in users
-async fn handle_download_asset(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Path((tag, asset_name)): Path<(String, String)>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    // Allow either license key or bearer auth (JWT or API token)
-    let license_ok = validate_license_key(&state, &headers).is_ok();
-    let principal_opt = validate_principal(&headers, &state).ok();
+/// Verify the caller is allowed to download `tag`. Returns the principal
+/// username if authentication used a bearer token, or `"license"` if it used a
+/// license key. Encapsulates the license/principal + workspace membership
+/// rules shared by the download endpoint and the ticket mint endpoint.
+fn authorize_release_download(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    tag: &str,
+) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
+    let license_ok = validate_license_key(state, headers).is_ok();
+    let principal_opt = validate_principal(headers, state).ok();
     if !license_ok && principal_opt.is_none() {
         return Err(error_response(StatusCode::UNAUTHORIZED, "Authentication required"));
     }
 
-    // Workspace-scoped releases are only downloadable by site admins or members
-    // of that workspace. License-only and non-member bearer tokens are denied.
     let scoped_ws = {
         let db = state.db.lock().unwrap();
-        db.get_release_workspace_id(&tag)
+        db.get_release_workspace_id(tag)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
             .flatten()
     };
@@ -2490,6 +2640,54 @@ async fn handle_download_asset(
                 return Err(error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"));
             }
         }
+    }
+
+    Ok(principal_opt
+        .map(|p| p.username)
+        .unwrap_or_else(|| "license".into()))
+}
+
+#[derive(Deserialize)]
+struct DownloadTicketRequest {
+    tag: String,
+    asset: String,
+}
+
+/// Mint a short-lived, single-asset ticket the browser can include as a query
+/// parameter on the download URL — needed because `<a href>` clicks can't
+/// attach Authorization headers, but only `<a href>`-style navigation hands
+/// the response off to the browser's native download UI.
+async fn handle_mint_download_ticket(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<DownloadTicketRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let safe_tag = docs::safe_tag(&body.tag)?;
+    let safe_asset = docs::safe_filename(&body.asset)?;
+    let sub = authorize_release_download(&state, &headers, &safe_tag)?;
+    let ticket = mint_download_ticket(&state.jwt_secret, &sub, &safe_tag, &safe_asset)?;
+    Ok(Json(serde_json::json!({
+        "ticket": ticket,
+        "expires_in": DOWNLOAD_TICKET_TTL_SECS,
+    })))
+}
+
+#[derive(Deserialize)]
+struct DownloadQuery {
+    #[serde(default)]
+    ticket: Option<String>,
+}
+
+async fn handle_download_asset(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((tag, asset_name)): Path<(String, String)>,
+    Query(q): Query<DownloadQuery>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    if let Some(ref ticket) = q.ticket {
+        validate_download_ticket(&state.jwt_secret, ticket, &tag, &asset_name)?;
+    } else {
+        authorize_release_download(&state, &headers, &tag)?;
     }
 
     // Reject traversal / empty / nul before building the path, and confirm the
@@ -2797,6 +2995,105 @@ async fn handle_delete_release(
     log::info!("Release {} deleted", tag);
 
     Ok(Json(serde_json::json!({ "status": "OK" })))
+}
+
+/// Delete a single binary asset from a release. Admin only (JWT).
+async fn handle_delete_release_asset(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((tag, file_name)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    require_admin_full(&state, &principal)?;
+    docs::safe_tag(&tag)?;
+    docs::safe_filename(&file_name)?;
+
+    let release_id = {
+        let db = state.db.lock().unwrap();
+        db.get_release_by_tag(&tag)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+            .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Release not found"))?
+    };
+    let removed = {
+        let db = state.db.lock().unwrap();
+        db.delete_release_asset(release_id, &file_name)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+    };
+    let _ = std::fs::remove_file(releases_dir(&state).join(&tag).join(&file_name));
+    if !removed {
+        return Err(error_response(StatusCode::NOT_FOUND, "Asset not found"));
+    }
+    log::info!("Release {} asset {} deleted", tag, file_name);
+    Ok(Json(serde_json::json!({ "status": "OK" })))
+}
+
+/// Replace a single binary asset on a release with a newly uploaded file.
+/// The old asset row + file are removed; the new file is written under its
+/// own name (which may differ from the old one). Admin only (JWT).
+async fn handle_replace_release_asset(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((tag, old_file_name)): Path<(String, String)>,
+    mut multipart: Multipart,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    require_admin_full(&state, &principal)?;
+    docs::safe_tag(&tag)?;
+    docs::safe_filename(&old_file_name)?;
+
+    let mut new_file_name = String::new();
+    let mut bytes: Vec<u8> = Vec::new();
+    while let Some(field) = multipart.next_field().await
+        .map_err(|e| error_response(StatusCode::BAD_REQUEST, &format!("Multipart: {}", e)))?
+    {
+        if field.name() == Some("file") {
+            new_file_name = field.file_name().unwrap_or("").to_string();
+            let data = field.bytes().await
+                .map_err(|e| error_response(StatusCode::BAD_REQUEST, &e.to_string()))?;
+            bytes = data.to_vec();
+            break;
+        }
+    }
+    if new_file_name.is_empty() || bytes.is_empty() {
+        return Err(error_response(StatusCode::BAD_REQUEST, "Missing 'file' field"));
+    }
+    docs::safe_filename(&new_file_name)?;
+
+    let release_id = {
+        let db = state.db.lock().unwrap();
+        db.get_release_by_tag(&tag)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+            .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Release not found"))?
+    };
+
+    let tag_dir = releases_dir(&state).join(&tag);
+    std::fs::create_dir_all(&tag_dir)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("mkdir: {}", e)))?;
+    let new_path = tag_dir.join(&new_file_name);
+    std::fs::write(&new_path, &bytes)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("write: {}", e)))?;
+
+    {
+        let db = state.db.lock().unwrap();
+        db.add_release_asset(release_id, &new_file_name, bytes.len() as u64)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+        // Drop the old row only if the new file landed under a different name —
+        // otherwise add_release_asset's upsert already updated the row in place.
+        if new_file_name != old_file_name {
+            db.delete_release_asset(release_id, &old_file_name)
+                .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+        }
+    }
+    if new_file_name != old_file_name {
+        let _ = std::fs::remove_file(tag_dir.join(&old_file_name));
+    }
+
+    log::info!("Release {} asset {} replaced by {} ({} bytes)", tag, old_file_name, new_file_name, bytes.len());
+    Ok(Json(serde_json::json!({
+        "status": "OK",
+        "name": new_file_name,
+        "size": bytes.len(),
+    })))
 }
 
 // ---------------------------------------------------------------------------
@@ -3213,6 +3510,467 @@ async fn handle_delete_config(
     Ok(Json(serde_json::json!({ "status": "OK" })))
 }
 
+// ---------------------------------------------------------------------------
+// Workspace recordings: presigned-URL upload/download to S3.
+// ---------------------------------------------------------------------------
+
+/// Lifetime of presigned PUT and GET URLs. 15 min for PUT is enough for a
+/// few hundred MB at modest bandwidth; clients should request a fresh URL
+/// if they need longer. GET is shorter (5 min) since downloads start
+/// immediately after the user clicks.
+const RECORDING_PUT_TTL: StdDuration = StdDuration::from_secs(15 * 60);
+const RECORDING_GET_TTL: StdDuration = StdDuration::from_secs(5 * 60);
+const RECORDING_CONTENT_TYPE: &str = "application/x-ndjson";
+
+#[derive(Deserialize)]
+struct InitRecordingRequest {
+    file_name: String,
+    #[serde(default)]
+    description: String,
+}
+
+/// Replace anything that isn't an S3-friendly filename character so the
+/// object key doesn't surprise downstream tooling. Whitespace collapses to
+/// `_`; control chars are dropped.
+fn sanitize_filename(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '.' | '-' | '_' => out.push(c),
+            ' ' | '\t' => out.push('_'),
+            _ => {}
+        }
+    }
+    if out.is_empty() { "recording".to_string() } else { out }
+}
+
+fn s3_unavailable() -> (StatusCode, Json<ErrorResponse>) {
+    error_response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "S3 storage is not configured on this server",
+    )
+}
+
+fn assert_workspace_writer(
+    state: &AppState,
+    workspace_id: &str,
+    principal: &Principal,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    let db = state.db.lock().unwrap();
+    let role = db
+        .get_workspace_member_role(workspace_id, &principal.username)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
+    if role == "viewer" {
+        return Err(error_response(StatusCode::FORBIDDEN, "Viewers cannot modify recordings"));
+    }
+    Ok(())
+}
+
+fn assert_workspace_member(
+    state: &AppState,
+    workspace_id: &str,
+    principal: &Principal,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    let db = state.db.lock().unwrap();
+    db.get_workspace_member_role(workspace_id, &principal.username)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
+    Ok(())
+}
+
+async fn handle_init_recording(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<String>,
+    Json(req): Json<InitRecordingRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    require_password_changed(&state, &principal)?;
+    assert_workspace_writer(&state, &workspace_id, &principal)?;
+
+    let s3 = state.s3.as_ref().ok_or_else(s3_unavailable)?;
+
+    let safe_name = sanitize_filename(&req.file_name);
+    let uuid = uuid::Uuid::new_v4().to_string();
+    // workspace_id is the prefix the IAM policy is scoped to — keeping it
+    // first means a misconfigured client can't write outside its workspace
+    // even with a leaked presigned URL.
+    let s3_key = format!("workspaces/{}/recordings/{}-{}", workspace_id, uuid, safe_name);
+
+    let upload_url = s3
+        .presign_put(&s3_key, RECORDING_CONTENT_TYPE, RECORDING_PUT_TTL)
+        .await
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    let id = {
+        let db = state.db.lock().unwrap();
+        db.create_recording(&workspace_id, &s3_key, &safe_name, &req.description, &principal.username)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+    };
+
+    Ok((StatusCode::CREATED, Json(serde_json::json!({
+        "id": id,
+        "s3_key": s3_key,
+        "upload_url": upload_url,
+        "content_type": RECORDING_CONTENT_TYPE,
+        "expires_in_secs": RECORDING_PUT_TTL.as_secs(),
+    }))))
+}
+
+async fn handle_complete_recording(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((workspace_id, recording_id)): Path<(String, i64)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    require_password_changed(&state, &principal)?;
+    assert_workspace_writer(&state, &workspace_id, &principal)?;
+
+    let s3 = state.s3.as_ref().ok_or_else(s3_unavailable)?;
+
+    // Look up the row to learn the s3_key.
+    let row = {
+        let db = state.db.lock().unwrap();
+        db.get_recording(&workspace_id, recording_id)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+            .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Recording not found"))?
+    };
+
+    let size = s3
+        .head_size(&row.s3_key)
+        .await
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .ok_or_else(|| error_response(StatusCode::CONFLICT, "Object not yet present in S3"))?;
+
+    {
+        let db = state.db.lock().unwrap();
+        let ok = db.complete_recording(&workspace_id, recording_id, size)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+        if !ok {
+            return Err(error_response(StatusCode::NOT_FOUND, "Recording not found"));
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "id": recording_id,
+        "file_size": size,
+        "status": "uploaded",
+    })))
+}
+
+async fn handle_list_recordings(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    require_password_changed(&state, &principal)?;
+    assert_workspace_member(&state, &workspace_id, &principal)?;
+
+    let rows = {
+        let db = state.db.lock().unwrap();
+        db.list_recordings(&workspace_id)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+    };
+
+    Ok(Json(serde_json::json!({ "recordings": rows })))
+}
+
+async fn handle_get_recording_download(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((workspace_id, recording_id)): Path<(String, i64)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    require_password_changed(&state, &principal)?;
+    assert_workspace_member(&state, &workspace_id, &principal)?;
+
+    let s3 = state.s3.as_ref().ok_or_else(s3_unavailable)?;
+
+    let row = {
+        let db = state.db.lock().unwrap();
+        db.get_recording(&workspace_id, recording_id)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+            .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Recording not found"))?
+    };
+    if row.status != "uploaded" {
+        return Err(error_response(StatusCode::CONFLICT, "Recording upload not complete"));
+    }
+
+    let url = s3
+        .presign_get(&row.s3_key, Some(&row.file_name), RECORDING_GET_TTL)
+        .await
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    Ok(Json(serde_json::json!({
+        "id": row.id,
+        "file_name": row.file_name,
+        "file_size": row.file_size,
+        "download_url": url,
+        "expires_in_secs": RECORDING_GET_TTL.as_secs(),
+    })))
+}
+
+async fn handle_delete_recording(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((workspace_id, recording_id)): Path<(String, i64)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    require_password_changed(&state, &principal)?;
+    assert_workspace_writer(&state, &workspace_id, &principal)?;
+
+    // Tear down DB first to release the s3_key for cleanup; if S3 delete
+    // fails the worst case is an orphan object — we log but don't surface.
+    let s3_key = {
+        let db = state.db.lock().unwrap();
+        db.delete_recording(&workspace_id, recording_id)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+            .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Recording not found"))?
+    };
+
+    if let Some(s3) = state.s3.as_ref() {
+        if let Err(e) = s3.delete_object(&s3_key).await {
+            log::warn!("S3 delete_object failed for {}: {:#}", s3_key, e);
+        }
+    }
+
+    Ok(Json(serde_json::json!({ "status": "OK" })))
+}
+
+// ---------------------------------------------------------------------------
+// Workspace federation: channel secret + peer registry
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct RegisterPeerRequest {
+    host_id: String,
+    url: String,
+    #[serde(default)]
+    label: String,
+    /// Peer-side federation scope. Workspace members federate only with
+    /// other members that share this exact string. Empty ⇒ isolated.
+    #[serde(default)]
+    network_id: String,
+}
+
+/// Returns the workspace's federation channel secret and the live peer list.
+/// Any workspace member (incl. viewers) can read — the secret is the symmetric
+/// key for the ZMQ data plane that all member fusionhubs need to participate.
+async fn handle_get_workspace_federation(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    require_password_changed(&state, &principal)?;
+
+    let db = state.db.lock().unwrap();
+    db.get_workspace_member_role(&workspace_id, &principal.username)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
+
+    let secret = db.get_or_create_workspace_federation_secret(&workspace_id)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    let peers = db.list_workspace_peers(&workspace_id)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    // Cheap version-only fetch — body is fetched separately via GET /graph
+    // when the polling peer notices its `applied_graph_version` is behind.
+    let graph_version = db.get_workspace_graph_version(&workspace_id)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    let peer_json: Vec<_> = peers.iter().map(|(host_id, url, label, network_id, registered_by, last_seen)| {
+        serde_json::json!({
+            "host_id": host_id,
+            "url": url,
+            "label": label,
+            "network_id": network_id,
+            "registered_by": registered_by,
+            "last_seen": last_seen,
+        })
+    }).collect();
+
+    Ok(Json(serde_json::json!({
+        "channel_secret": secret,
+        "peers": peer_json,
+        // Empty string when this susi instance isn't configured with a
+        // relay URL. Workspace members treat the empty string the same
+        // as "field missing" and fall back to FUSIONHUB_RELAY_URL set
+        // locally on each member, or "no relay" if that's also unset.
+        "relay_url": state.relay_url,
+        // `null` when no graph has been pushed yet (workspace is "empty").
+        // Polling peers compare to their local `applied_graph_version` and
+        // pull `GET /graph` whenever the susi version is newer.
+        "graph_version": graph_version,
+    })))
+}
+
+// ---------------------------------------------------------------------------
+// Workspace graph (shared node-graph, version-tracked)
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct PutGraphRequest {
+    /// Version the editor was loaded with. `None` is only valid for the
+    /// very first push of a workspace (no row yet). Mismatch ⇒ 409.
+    #[serde(default)]
+    expected_version: Option<u32>,
+    /// Raw config JSON — same shape the editor exports / loads.
+    config: serde_json::Value,
+}
+
+/// Returns the workspace's full graph + version, or 404 when no graph has been
+/// pushed yet. Any workspace member can read.
+async fn handle_get_workspace_graph(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    require_password_changed(&state, &principal)?;
+
+    let db = state.db.lock().unwrap();
+    db.get_workspace_member_role(&workspace_id, &principal.username)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
+
+    let row = db.get_workspace_graph(&workspace_id)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Workspace has no graph yet"))?;
+    let (graph_version, config_json, updated_by, updated_at) = row;
+    let config: serde_json::Value = serde_json::from_str(&config_json)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("Stored graph JSON corrupt: {}", e)))?;
+
+    Ok(Json(serde_json::json!({
+        "graph_version": graph_version,
+        "config": config,
+        "updated_by": updated_by,
+        "updated_at": updated_at,
+    })))
+}
+
+/// Optimistic-lock upsert of the workspace's graph. The request body carries
+/// the version the editor was loaded with; mismatch ⇒ 409 with the current
+/// version so the editor can refresh + reapply. Viewers cannot write.
+async fn handle_put_workspace_graph(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<String>,
+    Json(req): Json<PutGraphRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    require_password_changed(&state, &principal)?;
+
+    let db = state.db.lock().unwrap();
+    let role = db.get_workspace_member_role(&workspace_id, &principal.username)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
+    if role == "viewer" {
+        return Err(error_response(StatusCode::FORBIDDEN, "Viewers cannot edit the workspace graph"));
+    }
+
+    let config_str = serde_json::to_string(&req.config)
+        .map_err(|e| error_response(StatusCode::BAD_REQUEST, &format!("config not serialisable: {}", e)))?;
+
+    match db.upsert_workspace_graph(&workspace_id, req.expected_version, &config_str, &principal.username) {
+        Ok(new_version) => Ok(Json(serde_json::json!({ "graph_version": new_version }))),
+        Err(susi_core::error::LicenseError::GraphConflict { current }) => Err((
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: format!(
+                    "Graph version conflict — current is {}; reload and reapply",
+                    current
+                ),
+            }),
+        )),
+        Err(e) => Err(error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string())),
+    }
+}
+
+/// Register (or refresh) a FusionHub peer for this workspace. Idempotent on
+/// `(workspace_id, host_id)` — re-registration updates `url`/`label`/`last_seen`.
+/// Viewers cannot register peers (read-only role).
+async fn handle_register_workspace_peer(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<String>,
+    Json(req): Json<RegisterPeerRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    require_password_changed(&state, &principal)?;
+
+    if req.host_id.trim().is_empty() {
+        return Err(error_response(StatusCode::BAD_REQUEST, "host_id is required"));
+    }
+    if req.url.trim().is_empty() {
+        return Err(error_response(StatusCode::BAD_REQUEST, "url is required"));
+    }
+
+    let db = state.db.lock().unwrap();
+    let role = db.get_workspace_member_role(&workspace_id, &principal.username)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
+    if role == "viewer" {
+        return Err(error_response(StatusCode::FORBIDDEN, "Viewers cannot register peers"));
+    }
+
+    db.upsert_workspace_peer(&workspace_id, &req.host_id, &req.url, &req.label, &req.network_id, &principal.username)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    Ok(Json(serde_json::json!({ "status": "OK" })))
+}
+
+/// Remove a FusionHub peer from this workspace. Viewers cannot revoke.
+async fn handle_delete_workspace_peer(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((workspace_id, host_id)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    require_password_changed(&state, &principal)?;
+
+    let db = state.db.lock().unwrap();
+    let role = db.get_workspace_member_role(&workspace_id, &principal.username)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
+    if role == "viewer" {
+        return Err(error_response(StatusCode::FORBIDDEN, "Viewers cannot remove peers"));
+    }
+
+    let removed = db.delete_workspace_peer(&workspace_id, &host_id)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    if !removed {
+        return Err(error_response(StatusCode::NOT_FOUND, "Peer not registered"));
+    }
+
+    Ok(Json(serde_json::json!({ "status": "OK" })))
+}
+
+/// Rotate the workspace's federation channel secret. Forces every connected
+/// FusionHub to re-fetch on next poll and rekey. Owner/editor only.
+async fn handle_rotate_workspace_federation(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    require_password_changed(&state, &principal)?;
+
+    let db = state.db.lock().unwrap();
+    let role = db.get_workspace_member_role(&workspace_id, &principal.username)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
+    if role == "viewer" {
+        return Err(error_response(StatusCode::FORBIDDEN, "Viewers cannot rotate secrets"));
+    }
+
+    let new_secret = db.rotate_workspace_federation_secret(&workspace_id)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    Ok(Json(serde_json::json!({ "status": "OK", "channel_secret": new_secret })))
+}
+
 /// List releases visible to a workspace (workspace-specific + global).
 async fn handle_workspace_releases(
     State(state): State<Arc<AppState>>,
@@ -3529,6 +4287,24 @@ async fn main() -> Result<()> {
         .build()
         .context("Failed to build HTTP client")?;
 
+    // S3 for workspace recordings. Missing env (bucket/region/creds) is
+    // tolerated at startup — the recording endpoints respond 503 instead
+    // and the rest of the server stays up.
+    let s3_storage = match s3::S3Storage::from_env().await {
+        Ok(Some(s)) => {
+            log::info!("S3 ready: bucket={}, region={}", s.bucket(), s.region());
+            Some(s)
+        }
+        Ok(None) => {
+            log::info!("S3 not configured (SUSI_S3_BUCKET/REGION empty) — recording endpoints will respond 503");
+            None
+        }
+        Err(e) => {
+            log::error!("S3 init failed: {:#} — recording endpoints will respond 503", e);
+            None
+        }
+    };
+
     if cli.contact_to_addr.is_empty() {
         log::info!("Contact form disabled (SUSI_CONTACT_TO_ADDR empty)");
     } else if email_service.is_none() {
@@ -3550,6 +4326,7 @@ async fn main() -> Result<()> {
         contact_attempts: Mutex::new(HashMap::new()),
         email: email_service,
         magic_link_base_url: cli.magic_link_base_url.clone(),
+        relay_url: cli.relay_url.clone(),
         stripe_secret_key: cli.stripe_secret_key,
         stripe_webhook_secret: cli.stripe_webhook_secret,
         shop_base_url: if cli.shop_base_url.is_empty() { cli.magic_link_base_url.clone() } else { cli.shop_base_url },
@@ -3558,6 +4335,7 @@ async fn main() -> Result<()> {
         turnstile_secret: cli.turnstile_secret,
         turnstile_site_key: cli.turnstile_site_key,
         http,
+        s3: s3_storage,
     });
 
     // Periodic lease cleanup. Replaces the per-read DELETE that ran inside
@@ -3650,6 +4428,7 @@ async fn main() -> Result<()> {
         .route("/api/v1/licenses/{key}", get(handle_get_license).put(handle_update_license).delete(handle_delete_license))
         .route("/api/v1/licenses/{key}/revoke", post(handle_revoke_license))
         .route("/api/v1/licenses/{key}/export", post(handle_export_license))
+        .route("/api/v1/licenses/{key}/export-token", post(handle_export_token))
         .route(
             "/api/v1/licenses/{key}/machines/{machine_code}",
             axum::routing::delete(handle_deactivate_machine),
@@ -3661,15 +4440,18 @@ async fn main() -> Result<()> {
         // Releases — client endpoints (license-key protected)
         .route("/api/v1/updates/releases", get(handle_get_releases))
         .route("/api/v1/updates/download/{tag}/{asset}", get(handle_download_asset))
+        .route("/api/v1/updates/download-ticket", post(handle_mint_download_ticket))
         // Releases — admin endpoints (JWT protected)
         .route("/api/v1/releases", get(handle_list_releases_admin))
         .merge(
             Router::new()
                 .route("/api/v1/releases", post(handle_upload_release))
+                .route("/api/v1/releases/{tag}/assets/{file}/replace", post(handle_replace_release_asset))
                 .layer(DefaultBodyLimit::max(500 * 1024 * 1024))
         )
         .route("/api/v1/releases/{tag}", axum::routing::put(handle_update_release).delete(handle_delete_release))
         .route("/api/v1/releases/{tag}/move", post(handle_move_release))
+        .route("/api/v1/releases/{tag}/assets/{file}", axum::routing::delete(handle_delete_release_asset))
         // Workspace endpoints (JWT protected)
         .route("/api/v1/workspaces", get(handle_list_workspaces).post(handle_create_workspace))
         .route("/api/v1/workspaces/{id}", get(handle_get_workspace).put(handle_update_workspace).delete(handle_delete_workspace))
@@ -3679,6 +4461,19 @@ async fn main() -> Result<()> {
         .route("/api/v1/workspaces/{id}/configs", get(handle_list_configs).post(handle_push_config))
         .route("/api/v1/workspaces/{id}/configs/latest", get(handle_get_latest_config))
         .route("/api/v1/workspaces/{id}/configs/{config_id}", get(handle_get_config).put(handle_update_config).delete(handle_delete_config))
+        // FusionHub federation: shared channel secret + peer registry
+        .route("/api/v1/workspaces/{id}/federation", get(handle_get_workspace_federation))
+        .route("/api/v1/workspaces/{id}/federation/rotate", post(handle_rotate_workspace_federation))
+        .route("/api/v1/workspaces/{id}/peers", post(handle_register_workspace_peer))
+        .route("/api/v1/workspaces/{id}/peers/{host_id}", axum::routing::delete(handle_delete_workspace_peer))
+        // Shared workspace graph (one node-graph per workspace, version-tracked
+        // for optimistic-lock concurrent edits between member fusionhubs).
+        .route("/api/v1/workspaces/{id}/graph", get(handle_get_workspace_graph).put(handle_put_workspace_graph))
+        // Workspace recordings: presigned-URL upload/download to S3.
+        .route("/api/v1/workspaces/{id}/recordings", get(handle_list_recordings).post(handle_init_recording))
+        .route("/api/v1/workspaces/{id}/recordings/{rid}", axum::routing::delete(handle_delete_recording))
+        .route("/api/v1/workspaces/{id}/recordings/{rid}/complete", post(handle_complete_recording))
+        .route("/api/v1/workspaces/{id}/recordings/{rid}/download", get(handle_get_recording_download))
         .route("/api/v1/workspaces/{id}/releases", get(handle_workspace_releases))
         .route(
             "/api/v1/workspaces/{id}/docs/releases",

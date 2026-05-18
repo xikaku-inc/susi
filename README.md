@@ -69,6 +69,7 @@
 | `susi_client` | Library | Verification library + workspace/release/docs HTTP client (sync + async APIs) |
 | `susi_admin` | Binary | CLI tool for key generation, license creation, and management |
 | `susi_server` | Binary | HTTP server with SQLite backend — licensing, releases, docs, website, shop, contact |
+| `susi_helper` | Binary | End-user utility for retrieving machine fingerprints and USB serial numbers |
 | `cpp/` | C++ Library | Standalone verification client for C++ applications |
 
 `susi_server` is split into one module per surface area (`docs.rs`, `website.rs`, `shop.rs`, `contact.rs`, `email.rs`, `invoice_pdf.rs` plus the licensing/auth core in `main.rs`) so each feature can be reasoned about independently.
@@ -328,8 +329,10 @@ Machine identity is computed differently depending on the operating system:
 These values are combined and hashed with SHA-256 to produce a stable fingerprint. Print the current machine's fingerprint with:
 
 ```bash
-susi-admin fingerprint
+susi-helper fingerprint
 ```
+
+> Admins can also use `susi-admin fingerprint`, but `susi-helper` is the lightweight tool intended for end users.
 
 ## USB Hardware Tokens
 
@@ -511,6 +514,29 @@ The check runs inside the process being verified, on hardware the licensee contr
 - Signing a modified binary with any certificate (macOS, with the current `kSecCSDefaultFlags` / NULL requirement)
 
 The feature meaningfully raises the bar against casual binary patching but is not a hard cryptographic boundary against a determined local admin. Future server-side CA pinning (planned) will require the client to prove its signing certificate traces to the vendor's CA during every activation, closing the self-signed certificate bypass.
+
+## Susi Helper
+
+`susi-helper` is a small end-user utility that helps customers provide the information needed to activate a license. It requires no database or private key — it is safe to ship to end users alongside your product.
+
+```bash
+# Print the hardware fingerprint of the current machine
+# (paste this into the dashboard's "Machine Code" field when exporting a license)
+susi-helper fingerprint
+
+# List all connected USB drives and their serial numbers
+# (use the serial shown here when exporting a USB token license)
+susi-helper list-usb-serials
+```
+
+Example output of `list-usb-serials`:
+
+```
+NAME              SERIAL
+----------------  ------------
+My USB Drive      ABC123DEF456
+Backup Stick      XYZ789000000
+```
 
 ## Server
 
@@ -775,7 +801,8 @@ Upload signed binaries (installers, archives, etc.) and let licensed clients fet
 | Method | Endpoint | Auth | Description |
 |---|---|---|---|
 | `GET` | `/api/v1/updates/releases` | License key | List releases the caller can download |
-| `GET` | `/api/v1/updates/download/{tag}/{asset}` | License key | Download a release asset |
+| `GET` | `/api/v1/updates/download/{tag}/{asset}` | License key, JWT, or `?ticket=` | Stream a release asset to the caller |
+| `POST` | `/api/v1/updates/download-ticket` | License key or JWT | Mint a 60 s single-asset ticket for the download URL |
 | `GET` | `/api/v1/releases` | JWT | List all releases (admin view) |
 | `POST` | `/api/v1/releases` | JWT | Upload a new release (multipart, up to 500 MB) |
 | `PUT` / `DELETE` | `/api/v1/releases/{tag}` | JWT | Update metadata / delete |
@@ -1111,6 +1138,7 @@ cargo build --workspace --release
 Binaries are output to `target/release/`:
 - `susi-admin` — CLI management tool
 - `susi-server` — HTTP activation server
+- `susi-helper` — end-user utility for fingerprinting and USB serial lookup
 
 ## Testing
 
