@@ -94,6 +94,7 @@ mod tests {
             machine_codes: vec!["abc123def456".to_string()],
             lease_expires: None,
             lease_grace_period: None,
+            require_signed_binary: false,
         }
     }
 

@@ -1,3 +1,4 @@
+pub mod binary_signing;
 pub mod workspace;
 
 use std::path::{Path, PathBuf};
@@ -46,6 +47,8 @@ pub enum LicenseStatus {
     InvalidSignature,
     InvalidLicenseKey,
     Revoked,
+    /// The license requires a signed binary but the running binary is unsigned or tampered.
+    UnsignedBinary,
     /// Machine was removed by an administrator. Distinct from Revoked (which
     /// kills the whole license) — only this machine slot is affected. Re-activation
     /// is blocked for the tombstone window.
@@ -228,6 +231,10 @@ impl LicenseClient {
             return LicenseStatus::LeaseExpired {
                 lease_expired_at: payload.lease_expires.unwrap(),
             };
+        }
+
+        if payload.require_signed_binary && !binary_signing::is_binary_signed() {
+            return LicenseStatus::UnsignedBinary;
         }
 
         LicenseStatus::Valid { payload }
@@ -514,6 +521,7 @@ mod tests {
             machine_codes: machine_code.into_iter().collect(),
             lease_expires: None,
             lease_grace_period: None,
+            require_signed_binary: false,
         }
     }
 
@@ -579,6 +587,7 @@ mod tests {
             machine_codes: vec![],
             lease_expires: None,
             lease_grace_period: None,
+            require_signed_binary: false,
         };
         let signed = sign_license(&private, &payload).unwrap();
 
@@ -659,6 +668,7 @@ mod tests {
             machine_codes: vec![],
             lease_expires: None,
             lease_grace_period: None,
+            require_signed_binary: false,
         };
         let signed = sign_license(&private, &payload).unwrap();
 
@@ -913,6 +923,7 @@ mod tests {
             machine_codes: vec![],
             lease_expires: Some(Utc::now() + Duration::hours(168)),
             lease_grace_period: None,
+            require_signed_binary: false
         };
         let signed = sign_license(&private, &payload).unwrap();
         let body = serde_json::to_string(&signed).unwrap();

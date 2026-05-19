@@ -42,3 +42,10 @@ pulldown-cmark = { version = "0.13", default-features = false, features = ["html
 # does HeadObject/DeleteObject; bytes never traverse the susi server.
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-s3 = { version = "1", features = ["behavior-version-latest"] }
+
+[dev-dependencies]
+susi_client = { path = "../susi_client" }
+susi_core = { path = "../susi_core" }
+reqwest = { workspace = true }
+tempfile = "3"
+totp-rs = { version = "5", features = ["gen_secret"] }

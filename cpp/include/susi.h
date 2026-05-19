@@ -17,6 +17,8 @@ public:
         InvalidSignature,
         InvalidLicenseKey,
         Revoked,
+        /// The license requires a signed binary, but this binary is unsigned or tampered.
+        UnsignedBinary,
         TokenNotFound,
         FileNotFound,
         Error,
