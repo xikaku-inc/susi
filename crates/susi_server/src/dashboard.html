@@ -4,7 +4,19 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Susi Server</title>
-<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Cdefs%3E%3ClinearGradient id='bg' x1='0%25' y1='0%25' x2='100%25' y2='100%25'%3E%3Cstop offset='0%25' style='stop-color:%233a4d8c'/%3E%3Cstop offset='100%25' style='stop-color:%234a3a80'/%3E%3C/linearGradient%3E%3ClinearGradient id='core' x1='30%25' y1='0%25' x2='100%25' y2='100%25'%3E%3Cstop offset='0%25' style='stop-color:%2364d8ff'/%3E%3Cstop offset='100%25' style='stop-color:%239b6dff'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='512' height='512' rx='96' fill='url(%23bg)'/%3E%3Ccircle cx='256' cy='256' r='210' fill='url(%23core)' opacity='0.95'/%3E%3Ccircle cx='244' cy='244' r='85' fill='%23a0e8ff' opacity='0.55'/%3E%3C/svg%3E">
+<script>
+// Apply theme before paint to avoid a flash of the wrong colour scheme.
+(function () {
+    const t = localStorage.getItem('susi_theme') || 'system';
+    if (t === 'light') document.documentElement.setAttribute('data-theme', 'light');
+    else if (t === 'system' && window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) {
+        document.documentElement.setAttribute('data-theme', 'light');
+    }
+})();
+</script>
+<link rel="icon" href="/favicon.ico" sizes="32x32">
+<link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/static/favicon-180.png">
 <style>
 :root {
     --bg: #0f1117;
@@ -19,6 +31,19 @@
     --red: #f87171;
     --yellow: #fbbf24;
     --radius: 8px;
+}
+:root[data-theme="light"] {
+    --bg: #ffffff;
+    --bg2: #f4f5f8;
+    --bg3: #e7eaf0;
+    --border: #d4d8e0;
+    --text: #1a1d27;
+    --text2: #5c6470;
+    --accent: #2563eb;
+    --accent-hover: #1d4ed8;
+    --green: #16a34a;
+    --red: #dc2626;
+    --yellow: #d97706;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
 /* Scrollbar styling */
@@ -82,8 +107,31 @@ button.secondary:hover { background: var(--border); }
 button.danger { background: var(--red); }
 button.danger:hover { background: #ef4444; }
 button.small { padding: 4px 10px; font-size: 12px; }
+/* Header icon-only buttons are an exception to the 180px standard width.
+   The theme toggle holds a single emoji; padding around it is enough. */
+button.header-icon { min-width: 0; padding: 4px 10px; }
 
-input, select {
+/* Anchor styled to match the standard <button>. Used where we want
+   right-click / middle-click open-in-new-tab semantics but the same
+   pill shape (e.g., dashboard "Open editor ↗" links). */
+a.btn, a.btn:visited {
+    background: var(--accent);
+    color: #fff;
+    text-decoration: none;
+    display: inline-block;
+    padding: 8px 16px;
+    border-radius: var(--radius);
+    font-size: 13px;
+    font-weight: 500;
+    min-width: 180px;
+    text-align: center;
+    box-sizing: border-box;
+    transition: background 0.15s;
+}
+a.btn:hover { background: var(--accent-hover); color: #fff; }
+a.btn.small { padding: 4px 10px; font-size: 12px; }
+
+input, select, textarea {
     background: var(--bg);
     border: 1px solid var(--border);
     color: var(--text);
@@ -91,9 +139,10 @@ input, select {
     border-radius: var(--radius);
     font-size: 13px;
     outline: none;
+    font-family: inherit;
 }
-input:focus, select:focus { border-color: var(--accent); }
-input::placeholder { color: var(--text2); }
+input:focus, select:focus, textarea:focus { border-color: var(--accent); }
+input::placeholder, textarea::placeholder { color: var(--text2); }
 
 label {
     display: block;
@@ -180,7 +229,7 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
 }
 .feature-checkboxes tr:last-child td { border-bottom: none; }
 .feature-checkboxes tr:hover td { background: rgba(108, 140, 255, 0.04); }
-.feature-checkboxes td:first-child { width: 24px; text-align: center; }
+.feature-checkboxes td:first-child { width: 32px; text-align: center; }
 .feature-checkboxes .feat-id {
     color: var(--text2);
     font-size: 11px;
@@ -208,16 +257,21 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
     padding-top: 80px;
 }
 .modal-overlay.visible { display: flex; }
+body:has(.modal-overlay.visible) { overflow: hidden; }
 .modal {
     background: var(--bg2);
     border: 1px solid var(--border);
     border-radius: 12px;
     width: 100%;
     max-width: 520px;
+    max-height: calc(100vh - 120px);
     padding: 24px;
     box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+    display: flex;
+    flex-direction: column;
 }
-.modal h2 { font-size: 16px; margin-bottom: 16px; }
+.modal h2 { font-size: 16px; margin-bottom: 16px; flex-shrink: 0; }
+.modal-body { flex: 1; overflow-y: auto; min-height: 0; padding-right: 12px; }
 .modal .form-row {
     margin-bottom: 12px;
 }
@@ -230,7 +284,46 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
     gap: 8px;
     justify-content: flex-end;
     margin-top: 20px;
+    flex-shrink: 0;
 }
+
+.advanced-options {
+    margin-bottom: 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+}
+.advanced-options summary {
+    padding: 8px 12px;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text2);
+    user-select: none;
+    list-style: none;
+}
+.advanced-options summary::-webkit-details-marker { display: none; }
+.advanced-options summary::before { content: '▶ '; font-size: 10px; }
+.advanced-options[open] summary::before { content: '▼ '; }
+.advanced-options .advanced-body {
+    padding: 8px 12px 12px;
+    border-top: 1px solid var(--border);
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+}
+.advanced-options .adv-field label {
+    display: block;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text2);
+    margin-bottom: 4px;
+}
+.advanced-options .adv-field input { width: 100%; }
 
 .toast {
     position: fixed;
@@ -258,6 +351,7 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
 .detail-panel {
     display: none;
     margin-bottom: 20px;
+    overflow: visible;
 }
 .detail-panel.visible { display: block; }
 .detail-header {
@@ -287,6 +381,94 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
     padding-bottom: 4px;
     border-bottom: 1px solid var(--border);
 }
+.detail-advanced summary { cursor: pointer; user-select: none; list-style: none; }
+.detail-advanced summary::-webkit-details-marker { display: none; }
+.detail-advanced summary::after { content: ' ▶'; font-size: 9px; }
+.detail-advanced[open] summary::after { content: ' ▼'; }
+
+/* Tabs styled like the top-nav menu items: pill hover with rounded corners,
+   accent-tinted active state. No underline. */
+.ws-tabs {
+    display: flex;
+    gap: 4px;
+    margin: 16px 0 12px;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 8px;
+}
+.ws-tab {
+    padding: 6px 12px;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--radius);
+    color: var(--text2);
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+    transition: color 0.15s, background 0.15s;
+}
+.ws-tab:hover {
+    background: var(--bg2);
+    color: var(--text);
+}
+.ws-tab.active {
+    color: var(--accent);
+    background: rgba(106,169,255,0.10);
+}
+.ws-tab-panel { display: none; }
+.ws-tab-panel.active { display: block; }
+
+/* Releases tab: each release is wrapped in a .ws-release-row so the head and
+   the expanded body visually stay attached, with breathing room between rows. */
+.ws-release-row { margin-bottom: 8px; }
+.ws-release-row.open { margin-bottom: 16px; }
+.ws-release-row .ws-release-head { margin-bottom: 0; }
+.ws-release-row.open .ws-release-head {
+    border-radius: var(--radius) var(--radius) 0 0;
+}
+.ws-release-row.open .ws-release-expand {
+    border-top: 1px solid var(--border);
+}
+
+.dropdown { position: relative; display: inline-block; }
+.dropdown-menu {
+    position: absolute;
+    right: 0;
+    top: calc(100% + 4px);
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.25);
+    z-index: 100;
+    min-width: 160px;
+    padding: 4px 0;
+}
+.dropdown-menu button,
+.dropdown-menu a {
+    display: block;
+    width: 100%;
+    min-width: 0;
+    text-align: left;
+    background: transparent;
+    border: none;
+    padding: 8px 14px;
+    color: var(--text);
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 400;
+    border-radius: 0;
+    box-shadow: none;
+    text-decoration: none;
+    box-sizing: border-box;
+}
+.dropdown-menu button:hover,
+.dropdown-menu a:hover { background: var(--bg3); }
+.dropdown-menu button.danger { color: var(--red); background: transparent; }
+.dropdown-menu button.danger:hover { background: var(--bg3); }
+.dropdown-menu .divider {
+    height: 1px;
+    background: var(--border);
+    margin: 4px 0;
+}
 
 .machines-list { margin-top: 4px; }
 .machine-item {
@@ -303,6 +485,52 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
     font-family: "SF Mono", "Fira Code", "Consolas", monospace;
     font-size: 11px;
     color: var(--text2);
+}
+
+/* Settings panel (used on Shop page) */
+.settings-card .detail-header h3 { font-size: 13px; color: var(--text2); text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
+.settings-card .detail-body { padding: 18px 20px; }
+.settings-card .form-row { margin-bottom: 14px; }
+.settings-card .form-row:last-of-type { margin-bottom: 0; }
+.settings-card .form-row input[type="text"],
+.settings-card .form-row input[type="email"],
+.settings-card .form-row textarea { width: 100%; }
+.settings-card textarea {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: var(--radius);
+    padding: 8px 12px;
+    font-size: 13px;
+    font-family: inherit;
+    outline: none;
+    resize: vertical;
+}
+.settings-card textarea:focus { border-color: var(--accent); }
+.settings-card .field-help { font-size: 11px; color: var(--text2); margin-top: 6px; }
+.settings-card .toggle-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 14px;
+}
+.settings-card .toggle-row input[type="checkbox"] { width: auto; margin: 0; cursor: pointer; accent-color: var(--accent); }
+.settings-card .toggle-row label { margin: 0; cursor: pointer; text-transform: none; letter-spacing: 0; font-size: 13px; color: var(--text); font-weight: 400; }
+.settings-card .form-error {
+    background: rgba(248, 113, 113, 0.15);
+    border: 1px solid var(--red);
+    color: var(--red);
+    padding: 8px 12px;
+    border-radius: var(--radius);
+    font-size: 12px;
+    margin-top: 12px;
+}
+.settings-card .form-footer {
+    display: flex;
+    justify-content: flex-end;
+    padding: 14px 20px;
+    background: var(--bg3);
+    border-top: 1px solid var(--border);
 }
 
 /* Search */
@@ -361,33 +589,106 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
     margin: 8px 0;
 }
 
+.backup-codes-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 6px;
+    margin: 8px 0;
+}
+.backup-code {
+    font-family: "SF Mono", "Fira Code", "Consolas", monospace;
+    font-size: 13px;
+    letter-spacing: 1px;
+    background: var(--bg);
+    padding: 8px 10px;
+    border-radius: var(--radius);
+    text-align: center;
+    user-select: all;
+}
+
 /* Header buttons */
 .header-actions { display: flex; gap: 8px; align-items: center; }
+.header-left { display: flex; align-items: center; gap: 24px; }
+.header-left .brand {
+    color: inherit; text-decoration: none;
+    font-size: 15px; font-weight: 600;
+}
+.top-nav { display: flex; gap: 4px; align-items: center; }
+.top-nav a {
+    padding: 6px 12px;
+    border-radius: var(--radius);
+    color: var(--text2);
+    text-decoration: none;
+    font-size: 13px;
+    font-weight: 500;
+    border: 1px solid transparent;
+}
+.top-nav a:hover { background: var(--bg2); color: var(--text1); }
+.top-nav a.active {
+    color: var(--accent);
+    background: rgba(106,169,255,0.10);
+}
+
+.dash-page { display: none; }
+.dash-page.active { display: block; }
 
 @media (max-width: 768px) {
     .container { padding: 12px; }
     .detail-grid { grid-template-columns: 1fr; }
     table { font-size: 12px; }
     th, td { padding: 8px 10px; }
+    .header { padding: 0 12px; flex-wrap: wrap; gap: 8px; height: auto; min-height: 56px; }
+    .header-left { gap: 8px; flex-wrap: wrap; }
+    .header-left .brand { font-size: 14px; }
+    .top-nav { display: none; }
+    .header-actions { gap: 6px; flex-wrap: wrap; }
+    .header-actions button { min-width: 0 !important; padding: 8px 10px; min-height: 36px; }
+    button { min-width: 0; padding: 10px 14px; min-height: 40px; }
+    button.small { padding: 6px 10px; min-height: 32px; }
+    .badge { min-width: 0; padding: 3px 10px; }
+    #searchInput { min-width: 0; width: 100%; }
+    .modal { max-width: 95vw !important; width: 95vw !important; padding: 16px !important; }
+    .modal-overlay { padding: 12px !important; }
+    .table-scroll, .scroll-x { overflow-x: auto; max-width: 100%; }
+    .card { overflow-x: auto; }
+}
+@media (max-width: 480px) {
+    .header-actions span#currentUser { display: none !important; }
 }
 </style>
 </head>
 <body>
 
 <div class="header">
-    <h1>Susi Server</h1>
+    <div class="header-left">
+        <a href="/" class="brand">Susi Server</a>
+        <nav class="top-nav" id="topNav"></nav>
+    </div>
     <div class="header-actions">
         <span id="connectionStatus" class="status">Connecting...</span>
-        <button id="btnUsers" class="small secondary" onclick="showUsersModal()" style="display:none;">Users</button>
-        <button id="btn2FA" class="small secondary" onclick="show2FAModal()" style="display:none;">2FA</button>
         <span id="currentUser" style="display:none;font-size:13px;color:var(--text2);"></span>
-        <button id="btnLogout" class="small secondary" onclick="logout()" style="display:none;">Logout</button>
+        <button id="btnTheme" class="small secondary header-icon" onclick="cycleTheme()" title="Toggle theme">🌓</button>
+        <span class="dropdown" id="headerActions" style="display:none;">
+            <button class="small secondary" onclick="toggleDropdown(event,'headerActionsMenu')">Actions &#9662;</button>
+            <div id="headerActionsMenu" class="dropdown-menu" style="display:none;">
+                <button id="btnUsers" onclick="showUsersModal()" style="display:none;">Users</button>
+                <button id="btn2FA" onclick="show2FAModal()" style="display:none;">2FA</button>
+                <button id="btnApiTokens" onclick="showApiTokensModal()" style="display:none;">API Tokens</button>
+                <div class="divider"></div>
+                <button class="danger" id="btnLogout" onclick="logout()">Logout</button>
+            </div>
+        </span>
+        <button id="btnLogin" class="small secondary" onclick="showLogin()" style="display:none;">Login</button>
     </div>
 </div>
 
 <div class="container">
 
-    <!-- Workspaces section -->
+<!-- Anonymous landing route — login overlay is auto-shown by route(). -->
+<div id="page-home" class="dash-page"></div>
+
+<!-- Workspaces page -->
+<div id="page-workspaces" class="dash-page">
     <div style="margin-top:32px;margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;">
         <h2 style="font-size:16px;font-weight:600;">Workspaces</h2>
         <button id="btnCreateWorkspace" onclick="showCreateWorkspaceModal()">+ New Workspace</button>
@@ -422,28 +723,94 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
                 </div>
             </div>
 
-            <div class="detail-section-title">Members</div>
-            <div id="wsDetailMembers" class="machines-list"></div>
-            <div id="wsAddMemberRow" style="display:flex;gap:8px;margin-top:8px;">
-                <select id="wsNewMember" style="flex:1;"><option value="">Select user...</option></select>
-                <select id="wsNewMemberRole" style="width:100px;">
-                    <option value="viewer">Viewer</option>
-                    <option value="editor">Editor</option>
-                    <option value="owner">Owner</option>
-                </select>
-                <button class="small" onclick="addWsMember()">Add</button>
+            <div class="ws-tabs" role="tablist">
+                <button class="ws-tab active" data-ws-tab="releases" onclick="setWsTab('releases')">Releases</button>
+                <button class="ws-tab" data-ws-tab="configs" onclick="setWsTab('configs')">Configs</button>
+                <button class="ws-tab" data-ws-tab="recordings" onclick="setWsTab('recordings')">Recordings</button>
+                <button class="ws-tab" data-ws-tab="instances" onclick="setWsTab('instances')">Instances</button>
+                <button class="ws-tab" data-ws-tab="members" onclick="setWsTab('members')">Members</button>
+                <button class="ws-tab" data-ws-tab="settings" data-ws-admin-only onclick="setWsTab('settings')">Settings</button>
             </div>
 
-            <div class="detail-section-title">Config Revisions</div>
-            <div id="wsDetailConfigs" class="machines-list"></div>
+            <div class="ws-tab-panel active" data-ws-panel="releases">
+                <div class="detail-section-title" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Releases</span>
+                    <span style="display:flex;gap:6px;">
+                        <button id="wsCreateDocReleaseBtn" class="small" style="display:none;" onclick="createWsDocRelease()">Add release</button>
+                    </span>
+                </div>
+                <div id="wsDetailReleases" class="machines-list"></div>
+            </div>
 
-            <div id="wsDeleteRow" style="margin-top:16px;display:flex;justify-content:flex-end;">
-                <button class="small danger" onclick="deleteWorkspace()">Delete Workspace</button>
+            <div class="ws-tab-panel" data-ws-panel="configs">
+                <div class="detail-section-title">Config Revisions</div>
+                <div id="wsDetailConfigs" class="machines-list"></div>
+            </div>
+
+            <div class="ws-tab-panel" data-ws-panel="recordings">
+                <div class="detail-section-title" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Recordings</span>
+                    <button class="small" onclick="loadWsRecordings(selectedWsId)">Refresh</button>
+                </div>
+                <div id="wsDetailRecordings" class="machines-list"></div>
+            </div>
+
+            <div class="ws-tab-panel" data-ws-panel="instances">
+                <div class="detail-section-title" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Connected Instances</span>
+                    <button class="small" onclick="loadWsInstances(selectedWsId)">Refresh</button>
+                </div>
+                <div id="wsDetailInstances" class="machines-list"></div>
+            </div>
+
+            <div class="ws-tab-panel" data-ws-panel="members">
+                <div class="detail-section-title">Members</div>
+                <div id="wsDetailMembers" class="machines-list"></div>
+                <div id="wsAddMemberRow" style="display:flex;gap:8px;margin-top:8px;">
+                    <select id="wsNewMember" style="flex:1;"><option value="">Select user...</option></select>
+                    <select id="wsNewMemberRole" style="width:100px;">
+                        <option value="viewer">Viewer</option>
+                        <option value="editor">Editor</option>
+                        <option value="owner">Owner</option>
+                    </select>
+                    <button class="small" onclick="addWsMember()">Add</button>
+                </div>
+            </div>
+
+            <div class="ws-tab-panel" data-ws-panel="settings">
+                <div class="detail-section-title">Workspace Properties</div>
+                <div style="display:grid;grid-template-columns:1fr;gap:10px;max-width:560px;">
+                    <label style="display:flex;flex-direction:column;gap:4px;">
+                        <span class="field-label">Name</span>
+                        <input type="text" id="wsEditName" autocomplete="off">
+                    </label>
+                    <label style="display:flex;flex-direction:column;gap:4px;">
+                        <span class="field-label">Product</span>
+                        <input type="text" id="wsEditProduct" autocomplete="off">
+                    </label>
+                    <label style="display:flex;flex-direction:column;gap:4px;">
+                        <span class="field-label">Description</span>
+                        <textarea id="wsEditDesc" rows="3" style="resize:vertical;"></textarea>
+                    </label>
+                    <label style="display:flex;flex-direction:column;gap:4px;">
+                        <span class="field-label">Created By</span>
+                        <select id="wsEditCreatedBy"></select>
+                    </label>
+                    <div>
+                        <button class="small" onclick="saveWsProperties()">Save</button>
+                    </div>
+                </div>
+                <div class="detail-section-title" style="margin-top:24px;color:var(--red);">Danger Zone</div>
+                <div style="display:flex;justify-content:flex-start;">
+                    <button class="small danger" onclick="deleteWorkspace()">Delete Workspace</button>
+                </div>
             </div>
         </div>
     </div>
+</div><!-- /page-workspaces -->
 
-    <!-- Releases section -->
+<!-- Releases page -->
+<div id="page-releases" class="dash-page">
     <div id="adminReleasesSection" style="margin-top:32px;">
         <div style="margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;">
             <h2 style="font-size:16px;font-weight:600;">Software Releases</h2>
@@ -453,7 +820,10 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
             <div id="releasesContainer" style="padding:16px;color:var(--text2);font-size:13px;">Loading...</div>
         </div>
     </div>
+</div><!-- /page-releases -->
 
+<!-- Licenses page -->
+<div id="page-licenses" class="dash-page">
     <div id="adminLicenseTableSection">
     <h2 style="font-size:16px;font-weight:600;margin-top:32px;margin-bottom:16px;">Licenses</h2>
 
@@ -512,6 +882,23 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
                     <div class="field-value" id="detailMachineCount"></div>
                 </div>
             </div>
+            <details class="detail-advanced">
+                <summary class="detail-section-title">Advanced Options</summary>
+                <div class="detail-grid" style="margin-top:8px;">
+                    <div class="detail-field">
+                        <div class="field-label">Lease Duration (hours)</div>
+                        <div class="field-value" id="detailLeaseDuration"></div>
+                    </div>
+                    <div class="detail-field">
+                        <div class="field-label">Grace Period (hours)</div>
+                        <div class="field-value" id="detailLeaseGrace"></div>
+                    </div>
+                    <div class="detail-field">
+                        <div class="field-label">Requires Signed Binary</div>
+                        <div class="field-value" id="detailRequireSignedBinary"></div>
+                    </div>
+                </div>
+            </details>
             <div class="detail-section-title">Activated Machines</div>
             <div id="detailMachines" class="machines-list"></div>
         </div>
@@ -541,6 +928,9 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
                     <div class="field-label">Features</div>
                     <div id="editFeaturesContainer" class="feature-checkboxes"></div>
                 </div>
+                <div class="detail-field" style="grid-column:1/-1;">
+                    <label style="cursor:pointer;display:flex;align-items:center;gap:8px;font-size:12px;"><input type="checkbox" id="editRequireSignedBinary"> Require signed binary</label>
+                </div>
             </div>
             <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;">
                 <button class="secondary" onclick="cancelEditLicense()">Cancel</button>
@@ -569,41 +959,361 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
         </table>
     </div>
     </div>
-</div>
+</div><!-- /page-licenses -->
 
-<!-- Create License Modal -->
-<div id="createModal" class="modal-overlay" onclick="if(event.target===this)closeCreateModal()">
-    <div class="modal">
-        <h2>Create New License</h2>
-        <div class="form-row">
-            <label>Customer</label>
-            <input type="text" id="createCustomer" placeholder="Company name">
-        </div>
-        <div class="form-row">
-            <label>Product</label>
-            <input type="text" id="createProduct" value="FusionHub">
-        </div>
-        <div class="form-row">
-            <label>Expiry</label>
-            <select id="createExpiryType" onchange="updateExpiryFields()">
-                <option value="days">Days from now</option>
-                <option value="date">Specific date</option>
-                <option value="perpetual">Perpetual</option>
+<!-- Shop page -->
+<div id="page-shop" class="dash-page">
+    <div style="margin-top:32px;margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
+        <h2 style="font-size:16px;font-weight:600;">Orders</h2>
+        <div style="display:flex;gap:8px;">
+            <select id="ordersStatusFilter" onchange="loadShopOrders()" style="padding:6px 10px;">
+                <option value="">All statuses</option>
+                <option value="paid">Paid (awaiting fulfillment)</option>
+                <option value="shipped">Shipped</option>
             </select>
+            <button class="secondary" onclick="loadShopOrders()">Refresh</button>
         </div>
-        <div class="form-row" id="createExpiryValueRow">
-            <label id="createExpiryValueLabel">Days</label>
-            <input type="text" id="createExpiryValue" value="365">
-        </div>
-        <div class="form-row">
-            <label>Features</label>
-            <div id="createFeaturesContainer" class="feature-checkboxes">
-                <span style="color:var(--text2);font-size:12px">Loading features...</span>
+    </div>
+    <div class="card" style="padding:0;">
+        <table style="width:100%;" id="shopOrdersTable">
+            <thead>
+                <tr>
+                    <th style="width:60px;">#</th>
+                    <th style="width:160px;">Created</th>
+                    <th>Customer</th>
+                    <th style="width:120px;">Total</th>
+                    <th style="width:110px;">Status</th>
+                    <th>Tracking</th>
+                    <th style="width:160px;"></th>
+                </tr>
+            </thead>
+            <tbody id="shopOrdersBody">
+                <tr><td colspan="7" class="empty-state"><p>Loading...</p></td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <div style="margin-top:40px;margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;">
+        <h2 style="font-size:16px;font-weight:600;">Shop — Products</h2>
+        <button onclick="showProductModal()">+ New Product</button>
+    </div>
+    <div class="card" style="padding:0;">
+        <table style="width:100%;" id="shopProductsTable">
+            <thead>
+                <tr>
+                    <th style="width:56px;">Image</th>
+                    <th>SKU</th>
+                    <th>Title</th>
+                    <th style="width:120px;">Price</th>
+                    <th style="width:100px;">Active</th>
+                    <th style="width:80px;">Ord</th>
+                    <th style="width:160px;"></th>
+                </tr>
+            </thead>
+            <tbody id="shopProductsBody">
+                <tr><td colspan="7" class="empty-state"><p>Loading...</p></td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <div style="margin-top:40px;margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;">
+        <h2 style="font-size:16px;font-weight:600;">Shipping Rates</h2>
+        <button onclick="showShippingRateModal()">+ New Rate</button>
+    </div>
+    <div class="card" style="padding:0;">
+        <table style="width:100%;" id="shopRatesTable">
+            <thead>
+                <tr>
+                    <th>Label</th>
+                    <th style="width:140px;">Amount</th>
+                    <th>Regions</th>
+                    <th style="width:140px;">Delivery (days)</th>
+                    <th style="width:100px;">Active</th>
+                    <th style="width:160px;"></th>
+                </tr>
+            </thead>
+            <tbody id="shopRatesBody">
+                <tr><td colspan="6" class="empty-state"><p>Loading...</p></td></tr>
+            </tbody>
+        </table>
+    </div>
+    <p style="margin-top:16px;font-size:12px;color:var(--text2);">
+        Tip: shop ships to US and CA only. Use <code>*</code> for both, or <code>US</code> / <code>CA</code> for a single-country rate. Admin fields map directly to Stripe's <code>shipping_options</code>.
+    </p>
+
+    <div style="margin-top:40px;margin-bottom:14px;">
+        <h2 style="font-size:16px;font-weight:600;margin:0 0 14px;">Settings</h2>
+        <div class="card settings-card">
+            <div class="detail-header">
+                <h3>Email notifications</h3>
+            </div>
+            <div class="detail-body">
+                <div class="form-row">
+                    <label for="shopSetEmails">Order notification recipients</label>
+                    <input type="text" id="shopSetEmails" placeholder="klaus@xikaku.com, ops@lp-research.com">
+                    <div class="field-help">Comma-separated. Each address gets the &ldquo;new order&rdquo; email when a customer pays.</div>
+                    <div id="shopSetEmailsHint" class="field-help" style="display:none;"></div>
+                </div>
+                <div class="toggle-row">
+                    <input type="checkbox" id="shopSetCustomerEnabled">
+                    <label for="shopSetCustomerEnabled">Send branded order confirmation email to customer</label>
+                </div>
+                <div class="form-row">
+                    <label for="shopSetSupport">Customer support contact (shown in emails)</label>
+                    <input type="text" id="shopSetSupport" placeholder="support@lp-research.com">
+                </div>
+                <div class="form-row">
+                    <label for="shopSetThankYou">Optional thank-you message (HTML)</label>
+                    <textarea id="shopSetThankYou" rows="3" placeholder="Free-form HTML shown in the customer confirmation email above the items list."></textarea>
+                </div>
+                <div id="shopSetError" class="form-error" style="display:none;"></div>
+            </div>
+            <div class="form-footer">
+                <button class="primary" onclick="saveShopSettings()">Save settings</button>
             </div>
         </div>
-        <div class="form-row">
-            <label>Max Machines (0 = unlimited)</label>
-            <input type="number" id="createMaxMachines" value="1" min="0">
+    </div>
+</div><!-- /page-shop -->
+
+<!-- Website Pages -->
+<div id="page-website" class="dash-page">
+    <div style="margin-top:8px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
+        <h2 style="font-size:16px;font-weight:600;">Website — Pages</h2>
+        <button onclick="showWebsitePageModal()">+ New Page</button>
+    </div>
+    <p style="margin-top:0;margin-bottom:16px;font-size:12px;color:var(--text2);">
+        Click <em>Open editor</em> to edit a page on the public site (Edit button appears in the header). Pages are reachable at <code>https://xikaku.com/{slug}</code> on the canonical domain.
+    </p>
+    <div class="card" style="padding:0;">
+        <table style="width:100%;" id="websitePagesTable">
+            <thead>
+                <tr>
+                    <th>Slug</th>
+                    <th>Title</th>
+                    <th style="width:140px;">Parent</th>
+                    <th style="width:80px;">Ord</th>
+                    <th style="width:180px;">Updated</th>
+                    <th style="width:200px;"></th>
+                </tr>
+            </thead>
+            <tbody id="websitePagesBody">
+                <tr><td colspan="6" class="empty-state"><p>Loading...</p></td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <div style="margin-top:40px;margin-bottom:14px;">
+        <h2 style="font-size:16px;font-weight:600;margin:0 0 14px;">Site Settings</h2>
+        <div class="card settings-card">
+            <div class="detail-header">
+                <h3>Analytics</h3>
+            </div>
+            <div class="detail-body">
+                <div class="form-row">
+                    <label for="siteSetGaId">Google Analytics Measurement ID</label>
+                    <input type="text" id="siteSetGaId" placeholder="G-XXXXXXXXXX">
+                    <div class="field-help">Leave empty to disable. When set, the gtag.js snippet is injected on every public page.</div>
+                </div>
+                <div id="siteSetError" class="form-error" style="display:none;"></div>
+            </div>
+            <div class="form-footer">
+                <button class="primary" onclick="saveSiteSettings()">Save settings</button>
+            </div>
+        </div>
+    </div>
+</div><!-- /page-website -->
+
+<!-- Order detail modal -->
+<div id="orderModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeOrderModal()">
+    <div class="modal" style="max-width:700px;">
+        <h2 id="orderModalTitle">Order</h2>
+        <div class="modal-body">
+            <div id="orderModalBody" style="font-size:13px;"></div>
+            <div id="orderModalShipForm" style="display:none;margin-top:18px;border-top:1px solid var(--border);padding-top:14px;">
+                <h3 style="margin:0 0 12px;font-size:14px;">Mark as shipped</h3>
+                <div class="form-row" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+                    <div><label>Carrier</label>
+                        <select id="orderShipCarrier">
+                            <option value="USPS">USPS</option>
+                            <option value="UPS">UPS</option>
+                            <option value="FedEx">FedEx</option>
+                            <option value="DHL">DHL</option>
+                            <option value="EMS">EMS / Japan Post</option>
+                            <option value="Other">Other</option>
+                        </select>
+                    </div>
+                    <div><label>Tracking number</label>
+                        <input type="text" id="orderShipTracking" placeholder="9400 1112 0000 …">
+                    </div>
+                </div>
+                <div class="form-row">
+                    <label style="display:flex;align-items:center;gap:6px;">
+                        <input type="checkbox" id="orderShipNotify" checked> Send tracking email to customer
+                    </label>
+                </div>
+                <div id="orderShipError" style="background:rgba(248,113,113,0.15);border:1px solid var(--red);color:var(--red);padding:8px 12px;border-radius:var(--radius);font-size:12px;display:none;margin-top:8px;"></div>
+            </div>
+        </div>
+        <div class="form-actions">
+            <button class="secondary" onclick="closeOrderModal()">Close</button>
+            <button class="primary" id="orderShipBtn" onclick="submitMarkShipped()" style="display:none;">Mark shipped + email customer</button>
+        </div>
+    </div>
+</div>
+
+<!-- New Website Page Modal -->
+<div id="websitePageModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeWebsitePageModal()">
+    <div class="modal">
+        <h2>New Page</h2>
+        <div class="modal-body">
+            <div class="form-row">
+                <label>Slug</label>
+                <input type="text" id="websitePageSlug" placeholder="my-new-page">
+                <p style="font-size:11px;color:var(--text2);margin:4px 0 0;">Lowercase letters, digits, and hyphens. Will be reachable at <code>/{slug}</code>.</p>
+            </div>
+            <div class="form-row">
+                <label>Title</label>
+                <input type="text" id="websitePageTitle" placeholder="My New Page">
+            </div>
+            <div class="form-row" style="display:grid;grid-template-columns:1fr 100px;gap:12px;">
+                <div><label>Parent slug (optional)</label><input type="text" id="websitePageParent" placeholder="(top-level)"></div>
+                <div><label>Ord</label><input type="number" id="websitePageOrd" value="0"></div>
+            </div>
+            <div id="websitePageError" style="background:rgba(248,113,113,0.15);border:1px solid var(--red);color:var(--red);padding:10px 14px;border-radius:var(--radius);margin-top:12px;font-size:12px;display:none;"></div>
+        </div>
+        <div class="form-actions">
+            <button class="secondary" onclick="closeWebsitePageModal()">Cancel</button>
+            <button class="primary" onclick="createWebsitePage()">Create + Open editor</button>
+        </div>
+    </div>
+</div>
+
+<!-- Product Modal -->
+<div id="productModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeProductModal()">
+    <div class="modal">
+        <h2 id="productModalTitle">New Product</h2>
+        <div class="modal-body">
+            <div class="form-row">
+                <label>SKU</label>
+                <input type="text" id="productSku" placeholder="imu-mini">
+            </div>
+            <div class="form-row">
+                <label>Title</label>
+                <input type="text" id="productTitle" placeholder="IMU Mini">
+            </div>
+            <div class="form-row">
+                <label>Description (Markdown)</label>
+                <textarea id="productDesc" rows="4" style="width:100%;"></textarea>
+            </div>
+            <div class="form-row" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+                <div><label>Price (cents)</label><input type="number" id="productPrice" min="0" value="0"></div>
+                <div><label>Currency</label><input type="text" id="productCurrency" value="usd" maxlength="3"></div>
+            </div>
+            <div class="form-row">
+                <label>Image asset (website asset filename)</label>
+                <input type="text" id="productImage" placeholder="sensor.png — upload via Website assets first">
+            </div>
+            <div class="form-row" style="display:grid;grid-template-columns:1fr 120px 100px;gap:12px;">
+                <div><label>Tax code</label><input type="text" id="productTaxCode" value="txcd_99999999"></div>
+                <div><label>Ord</label><input type="number" id="productOrd" value="0"></div>
+                <div style="display:flex;align-items:flex-end;"><label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="productActive" checked> Active</label></div>
+            </div>
+            <div id="productError" style="background:rgba(248,113,113,0.15);border:1px solid var(--red);color:var(--red);padding:10px 14px;border-radius:var(--radius);margin-top:12px;font-size:12px;" style="display:none;"></div>
+        </div>
+        <div class="form-actions">
+            <button class="secondary" onclick="closeProductModal()">Cancel</button>
+            <button class="primary" onclick="saveProduct()">Save</button>
+        </div>
+    </div>
+</div>
+
+<!-- Shipping Rate Modal -->
+<div id="rateModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeRateModal()">
+    <div class="modal">
+        <h2 id="rateModalTitle">New Shipping Rate</h2>
+        <div class="modal-body">
+            <div class="form-row">
+                <label>Label</label>
+                <input type="text" id="rateLabel" placeholder="US Standard">
+            </div>
+            <div class="form-row" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+                <div><label>Amount (cents)</label><input type="number" id="rateAmount" min="0" value="0"></div>
+                <div><label>Currency</label><input type="text" id="rateCurrency" value="usd" maxlength="3"></div>
+            </div>
+            <div class="form-row">
+                <label>Regions (US, CA, or * for both)</label>
+                <input type="text" id="rateRegions" value="*" placeholder="US, CA">
+            </div>
+            <div class="form-row" style="display:grid;grid-template-columns:1fr 1fr 100px;gap:12px;">
+                <div><label>Delivery min (days)</label><input type="number" id="rateMinDays" min="0"></div>
+                <div><label>Delivery max (days)</label><input type="number" id="rateMaxDays" min="0"></div>
+                <div><label>Ord</label><input type="number" id="rateOrd" value="0"></div>
+            </div>
+            <div class="form-row">
+                <label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="rateActive" checked> Active</label>
+            </div>
+            <div id="rateError" style="background:rgba(248,113,113,0.15);border:1px solid var(--red);color:var(--red);padding:10px 14px;border-radius:var(--radius);margin-top:12px;font-size:12px;" style="display:none;"></div>
+        </div>
+        <div class="form-actions">
+            <button class="secondary" onclick="closeRateModal()">Cancel</button>
+            <button class="primary" onclick="saveRate()">Save</button>
+        </div>
+    </div>
+</div>
+
+</div><!-- /container -->
+
+<!-- Create License Modal -->
+<div id="createModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeCreateModal()">
+    <div class="modal">
+        <h2>Create New License</h2>
+        <div class="modal-body">
+            <div class="form-row">
+                <label>Customer</label>
+                <input type="text" id="createCustomer" placeholder="Company name">
+            </div>
+            <div class="form-row">
+                <label>Product</label>
+                <input type="text" id="createProduct" value="FusionHub">
+            </div>
+            <div class="form-row">
+                <label>Expiry</label>
+                <select id="createExpiryType" onchange="updateExpiryFields()">
+                    <option value="days">Days from now</option>
+                    <option value="date">Specific date</option>
+                    <option value="perpetual">Perpetual</option>
+                </select>
+            </div>
+            <div class="form-row" id="createExpiryValueRow">
+                <label id="createExpiryValueLabel">Days</label>
+                <input type="text" id="createExpiryValue" placeholder="365">
+            </div>
+            <div class="form-row">
+                <label>Features</label>
+                <div id="createFeaturesContainer" class="feature-checkboxes">
+                    <span style="color:var(--text2);font-size:12px">Loading features...</span>
+                </div>
+            </div>
+            <div class="form-row">
+                <label>Max Machines (0 = unlimited)</label>
+                <input type="number" id="createMaxMachines" placeholder="1" min="0">
+            </div>
+            <details class="advanced-options">
+                <summary>Advanced Options</summary>
+                <div class="advanced-body">
+                    <div class="adv-field">
+                        <label>Lease Duration<br>(hours, 0 = disable lease)</label>
+                        <input type="number" id="createLeaseDuration" placeholder="168" min="0">
+                    </div>
+                    <div class="adv-field">
+                        <label>Grace Period<br>(hours)</label>
+                        <input type="number" id="createLeaseGrace" placeholder="24" min="0">
+                    </div>
+                    <div class="adv-field" style="grid-column:1/-1;">
+                        <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;font-weight:400;text-transform:none;letter-spacing:0;color:var(--text);margin:0;"><input type="checkbox" id="createRequireSignedBinary" style="width:auto;margin:0;"> Require signed binary</label>
+                    </div>
+                </div>
+            </details>
         </div>
         <div class="form-actions">
             <button class="secondary" onclick="closeCreateModal()">Cancel</button>
@@ -613,81 +1323,159 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
 </div>
 
 <!-- Export Modal -->
-<div id="exportModal" class="modal-overlay" onclick="if(event.target===this)closeExportModal()">
+<div id="exportModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeExportModal()">
     <div class="modal">
-        <h2>Export Signed License File</h2>
-        <div class="form-row">
-            <label>License Key</label>
-            <input type="text" id="exportKey" readonly>
-        </div>
-        <div class="form-row">
-            <label>Machine Code (SHA256 fingerprint)</label>
-            <input type="text" id="exportMachineCode" placeholder="Paste machine fingerprint here">
-        </div>
-        <div class="form-row">
-            <label>Friendly Name</label>
-            <input type="text" id="exportFriendlyName" placeholder="e.g. Vehicle-ECU-1">
-        </div>
-        <div class="form-actions">
-            <button class="secondary" onclick="closeExportModal()">Cancel</button>
-            <button onclick="doExport()">Export &amp; Download</button>
+        <h2>Export License</h2>
+        <div class="modal-body">
+            <div class="form-row">
+                <label>License Key</label>
+                <input type="text" id="exportKey" readonly>
+            </div>
+            <div class="form-row">
+                <label>Export Type</label>
+                <div style="display:flex;background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:3px;gap:3px;width:100%">
+                    <label id="exportTypeFileLabel" style="flex:1;text-align:center;padding:6px 18px;border-radius:4px;cursor:pointer;font-size:13px;font-weight:500;transition:background .15s,color .15s;background:var(--accent);color:#fff">
+                        <input type="radio" name="exportType" value="file" checked onchange="onExportTypeChange()" style="display:none"> License File
+                    </label>
+                    <label id="exportTypeTokenLabel" style="flex:1;text-align:center;padding:6px 18px;border-radius:4px;cursor:pointer;font-size:13px;font-weight:500;transition:background .15s,color .15s;background:transparent;color:var(--text2)">
+                        <input type="radio" name="exportType" value="token" onchange="onExportTypeChange()" style="display:none"> USB Token
+                    </label>
+                </div>
+            </div>
+            <div id="exportFileRow" class="form-row">
+                <label>Machine Code (SHA256 fingerprint)</label>
+                <input type="text" id="exportMachineCode" placeholder="Paste machine fingerprint here">
+            </div>
+            <div id="exportTokenRow" class="form-row" style="display:none">
+                <label>USB Serial Number</label>
+                <input type="text" id="exportUsbSerial" placeholder="Paste usb serial number here">
+            </div>
+            <div class="form-row">
+                <label>Friendly Name</label>
+                <input type="text" id="exportFriendlyName" placeholder="e.g. Vehicle-ECU-1">
+            </div>
+            <div id="exportTokenHint" class="form-row" style="display:none;font-size:12px;color:var(--text2);line-height:1.5">
+                Put the downloaded file on a USB drive in a folder called <code style="font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:var(--bg3);padding:1px 5px;border-radius:3px">.susi</code>. Make sure the file is called <code style="font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:var(--bg3);padding:1px 5px;border-radius:3px">license.bin</code>
+            </div>
+            <div class="form-actions">
+                <button class="secondary" onclick="closeExportModal()">Cancel</button>
+                <button onclick="doExport()">Export &amp; Download</button>
+            </div>
         </div>
     </div>
 </div>
 
 <!-- Upload Release Modal -->
-<div id="uploadReleaseModal" class="modal-overlay" onclick="if(event.target===this)closeUploadReleaseModal()">
+<div id="uploadReleaseModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeUploadReleaseModal()">
     <div class="modal">
         <h2>Upload Release</h2>
+        <div class="modal-body">
+            <div class="form-row">
+                <label>Version Tag</label>
+                <input type="text" id="releaseTag" placeholder="e.g. v1.3.0">
+            </div>
+            <div class="form-row">
+                <label>Release Name (optional)</label>
+                <input type="text" id="releaseName" placeholder="e.g. FusionHub v1.3.0">
+            </div>
+            <div class="form-row">
+                <label>Release Notes (Markdown)</label>
+                <textarea id="releaseBody" rows="6" style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:var(--radius);font-size:13px;font-family:inherit;width:100%;resize:vertical;" placeholder="## Changes&#10;- Fixed something&#10;- Added feature"></textarea>
+            </div>
+            <div class="form-row">
+                <label class="checkbox" style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:var(--text2);">
+                    <input type="checkbox" id="releasePrerelease" style="accent-color:var(--accent);width:16px;height:16px;">
+                    Pre-release
+                </label>
+            </div>
+            <div class="form-row">
+                <label>Scope</label>
+                <select id="releaseWorkspace" style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:var(--radius);font-size:13px;width:100%;">
+                    <option value="">Global (all workspaces)</option>
+                </select>
+            </div>
+            <div class="form-row">
+                <label>Asset File (zip)</label>
+                <input type="file" id="releaseFile" multiple style="font-size:13px;color:var(--text);">
+            </div>
+            <div id="uploadProgress" style="display:none;margin-bottom:12px;">
+                <div style="background:var(--bg);border-radius:4px;height:22px;overflow:hidden;">
+                    <div id="uploadProgressBar" style="height:100%;background:var(--accent);transition:width 0.3s;width:0%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;color:#fff;"></div>
+                </div>
+            </div>
+            <div class="form-actions">
+                <button class="secondary" onclick="closeUploadReleaseModal()">Cancel</button>
+                <button id="uploadBtn" onclick="uploadRelease()">Upload</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Edit Release Modal -->
+<div id="editReleaseModal" class="modal-overlay" onclick="if(event.target===this)closeEditReleaseModal()">
+    <div class="modal">
+        <h2>Edit Release</h2>
         <div class="form-row">
             <label>Version Tag</label>
-            <input type="text" id="releaseTag" placeholder="e.g. v1.3.0">
+            <input type="text" id="editReleaseTag" disabled style="opacity:0.6;">
         </div>
         <div class="form-row">
-            <label>Release Name (optional)</label>
-            <input type="text" id="releaseName" placeholder="e.g. FusionHub v1.3.0">
+            <label>Release Name</label>
+            <input type="text" id="editReleaseName">
         </div>
         <div class="form-row">
             <label>Release Notes (Markdown)</label>
-            <textarea id="releaseBody" rows="6" style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:var(--radius);font-size:13px;font-family:inherit;width:100%;resize:vertical;" placeholder="## Changes&#10;- Fixed something&#10;- Added feature"></textarea>
+            <textarea id="editReleaseBody" rows="6" style="width:100%;resize:vertical;" placeholder="## Changes&#10;- ..."></textarea>
         </div>
         <div class="form-row">
             <label class="checkbox" style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:var(--text2);">
-                <input type="checkbox" id="releasePrerelease" style="accent-color:var(--accent);width:16px;height:16px;">
+                <input type="checkbox" id="editReleasePrerelease" style="accent-color:var(--accent);width:16px;height:16px;">
                 Pre-release
             </label>
         </div>
-        <div class="form-row">
-            <label>Asset File (zip)</label>
-            <input type="file" id="releaseFile" style="font-size:13px;color:var(--text);">
+        <div class="form-actions">
+            <button class="secondary" onclick="closeEditReleaseModal()">Cancel</button>
+            <button onclick="saveEditedRelease()">Save</button>
         </div>
-        <div id="uploadProgress" style="display:none;margin-bottom:12px;">
-            <div style="background:var(--bg);border-radius:4px;height:22px;overflow:hidden;">
-                <div id="uploadProgressBar" style="height:100%;background:var(--accent);transition:width 0.3s;width:0%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;color:#fff;"></div>
-            </div>
+    </div>
+</div>
+
+<!-- Move Release Modal -->
+<div id="moveReleaseModal" class="modal-overlay" onclick="if(event.target===this)closeMoveReleaseModal()">
+    <div class="modal">
+        <h2>Move Release</h2>
+        <div class="form-row">
+            <label>Release</label>
+            <input type="text" id="moveReleaseTag" disabled style="opacity:0.6;">
+        </div>
+        <div class="form-row">
+            <label>Target workspace</label>
+            <select id="moveReleaseTarget" style="width:100%;"></select>
         </div>
         <div class="form-actions">
-            <button class="secondary" onclick="closeUploadReleaseModal()">Cancel</button>
-            <button id="uploadBtn" onclick="uploadRelease()">Upload</button>
+            <button class="secondary" onclick="closeMoveReleaseModal()">Cancel</button>
+            <button onclick="confirmMoveRelease()">Move</button>
         </div>
     </div>
 </div>
 
 <!-- Create Workspace Modal -->
-<div id="createWorkspaceModal" class="modal-overlay" onclick="if(event.target===this)closeCreateWorkspaceModal()">
+<div id="createWorkspaceModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeCreateWorkspaceModal()">
     <div class="modal">
         <h2>Create Workspace</h2>
-        <div class="form-row">
-            <label>Name</label>
-            <input type="text" id="wsCreateName" placeholder="e.g. Nexco Highway Tracking">
-        </div>
-        <div class="form-row">
-            <label>Product</label>
-            <input type="text" id="wsCreateProduct" placeholder="e.g. FusionHub">
-        </div>
-        <div class="form-row">
-            <label>Description (optional)</label>
-            <input type="text" id="wsCreateDesc" placeholder="Short description">
+        <div class="modal-body">
+            <div class="form-row">
+                <label>Name</label>
+                <input type="text" id="wsCreateName" placeholder="e.g. Nexco Highway Tracking">
+            </div>
+            <div class="form-row">
+                <label>Product</label>
+                <input type="text" id="wsCreateProduct" placeholder="e.g. FusionHub">
+            </div>
+            <div class="form-row">
+                <label>Description (optional)</label>
+                <input type="text" id="wsCreateDesc" placeholder="Short description">
+            </div>
         </div>
         <div class="form-actions">
             <button class="secondary" onclick="closeCreateWorkspaceModal()">Cancel</button>
@@ -711,10 +1499,78 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
             <input type="password" id="loginPassword" placeholder="Password" autocomplete="current-password" onkeydown="if(event.key==='Enter')submitLogin()">
         </div>
         <div id="loginTotpRow" class="form-row" style="display:none;">
-            <label>2FA Code</label>
-            <input type="text" id="loginTotp" placeholder="6-digit code" maxlength="6" autocomplete="one-time-code" onkeydown="if(event.key==='Enter')submitLogin()">
+            <label>2FA Code <span style="font-weight:400;color:var(--text2);font-size:11px;">(or a backup code)</span></label>
+            <input type="text" id="loginTotp" placeholder="6-digit code, or XXXXX-XXXXX" maxlength="20" autocomplete="one-time-code" onkeydown="if(event.key==='Enter')submitLogin()">
         </div>
         <button onclick="submitLogin()">Sign In</button>
+        <div style="text-align:center;margin-top:12px;font-size:12px;">
+            <a href="#" onclick="event.preventDefault();showForgotPassword();" style="color:var(--text2);">Forgot password?</a>
+        </div>
+    </div>
+</div>
+
+<!-- Forgot-password overlay: ask for username, then send reset email. -->
+<div id="forgotPasswordOverlay" class="auth-overlay">
+    <div class="auth-card">
+        <h2>Reset your password</h2>
+        <div class="subtitle">Enter your username or email — we'll send a reset link if an address is on file.</div>
+        <div id="forgotPasswordError" class="auth-error"></div>
+        <div class="form-row">
+            <label>Username or email</label>
+            <input type="text" id="forgotIdentifier" placeholder="Username or email" autocomplete="username" onkeydown="if(event.key==='Enter')submitForgotPassword()">
+        </div>
+        <button onclick="submitForgotPassword()">Send reset link</button>
+        <div style="text-align:center;margin-top:12px;font-size:12px;">
+            <a href="#" onclick="event.preventDefault();document.getElementById('forgotPasswordOverlay').classList.remove('visible');showLogin();" style="color:var(--text2);">Back to sign in</a>
+        </div>
+    </div>
+</div>
+
+<!-- Password-reset overlay: shown when user lands on /#/reset/<token>. -->
+<div id="resetPasswordOverlay" class="auth-overlay">
+    <div class="auth-card">
+        <h2>Set a new password</h2>
+        <div class="subtitle">Choose a new password for your Susi account.</div>
+        <div id="resetPasswordError" class="auth-error"></div>
+        <div class="form-row">
+            <label>New Password (min 8 chars)</label>
+            <input type="password" id="rpNew" placeholder="New password" autocomplete="new-password">
+        </div>
+        <div class="form-row">
+            <label>Confirm New Password</label>
+            <input type="password" id="rpConfirm" placeholder="Confirm password" autocomplete="new-password" onkeydown="if(event.key==='Enter')submitResetPassword()">
+        </div>
+        <button onclick="submitResetPassword()">Set new password</button>
+    </div>
+</div>
+
+<!-- Magic-link "check your email" overlay -->
+<div id="magicLinkOverlay" class="auth-overlay">
+    <div class="auth-card">
+        <h2>Check your email</h2>
+        <div class="subtitle" id="magicLinkHint">We sent a sign-in link to your inbox.</div>
+        <p style="color:var(--text2);font-size:13px;line-height:1.5;margin-top:12px;">
+            Click the link in the email to authorize this device. The link expires in <span id="magicLinkTtl">15</span> minutes.
+            You can close this tab — the link will open the dashboard directly.
+        </p>
+        <div class="form-actions">
+            <button class="secondary" onclick="document.getElementById('magicLinkOverlay').classList.remove('visible');showLogin();">Back to sign in</button>
+        </div>
+    </div>
+</div>
+
+<!-- Magic-link exchange overlay (shown when user lands on /#/magic/<token>) -->
+<div id="magicExchangeOverlay" class="auth-overlay">
+    <div class="auth-card">
+        <h2 id="magicExchangeTitle">Signing you in...</h2>
+        <div id="magicExchangeError" class="auth-error"></div>
+        <div id="magicExchangeTotpRow" class="form-row" style="display:none;">
+            <label>2FA Code <span style="font-weight:400;color:var(--text2);font-size:11px;">(or a backup code)</span></label>
+            <input type="text" id="magicExchangeTotp" placeholder="6-digit code, or XXXXX-XXXXX" maxlength="20" autocomplete="one-time-code" onkeydown="if(event.key==='Enter')completeMagicExchange()">
+        </div>
+        <div id="magicExchangeActions" class="form-actions" style="display:none;">
+            <button onclick="completeMagicExchange()">Sign in</button>
+        </div>
     </div>
 </div>
 
@@ -741,10 +1597,12 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
 </div>
 
 <!-- 2FA Settings Modal -->
-<div id="tfaModal" class="modal-overlay" onclick="if(event.target===this)closeTFAModal()">
+<div id="tfaModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeTFAModal()">
     <div class="modal">
         <h2>Two-Factor Authentication</h2>
-        <div id="tfaContent"></div>
+        <div class="modal-body">
+            <div id="tfaContent"></div>
+        </div>
         <div class="form-actions">
             <button class="secondary" onclick="closeTFAModal()">Close</button>
         </div>
@@ -752,25 +1610,47 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
 </div>
 
 <!-- Users Management Modal -->
-<div id="usersModal" class="modal-overlay" onclick="if(event.target===this)closeUsersModal()">
-    <div class="modal" style="max-width:820px;">
+<div id="usersModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeUsersModal()">
+    <div class="modal" style="max-width:min(1200px,95vw);width:min(1200px,95vw);">
+        <style>
+            /* Scoped overrides — the global button/badge has a min-width:180px
+               from the status-pill design elsewhere that's wrong for inline
+               row actions here. */
+            #usersModal .role-pill { min-width: 0; padding: 2px 10px; }
+            #usersModal td, #usersModal th { white-space: nowrap; }
+            #usersModal td.col-actions { text-align: right; }
+            #usersModal button.small { min-width: 0; margin-left: 4px; }
+            /* Keep the Set/Edit button pinned to the right edge of the email
+               column so the buttons line up across rows regardless of the
+               address length. */
+            #usersModal .email-cell {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                min-width: 260px;
+            }
+            #usersModal .email-cell > .email-value { flex: 1 1 auto; }
+        </style>
         <h2>User Management</h2>
-        <div id="usersTableContainer" style="margin-bottom:16px;max-height:50vh;overflow-y:auto;">
-            <table>
-                <thead><tr><th>Username</th><th>Role</th><th>2FA</th><th>Status</th><th></th></tr></thead>
-                <tbody id="usersTableBody"><tr><td colspan="5">Loading...</td></tr></tbody>
-            </table>
-        </div>
-        <div style="border-top:1px solid var(--border);padding-top:16px;">
-            <h3 style="font-size:14px;margin-bottom:12px;">Add User</h3>
-            <div style="display:flex;gap:8px;flex-wrap:wrap;">
-                <input type="text" id="newUsername" placeholder="Username" style="flex:1;min-width:120px;">
-                <input type="password" id="newPassword" placeholder="Password (min 8)" style="flex:1;min-width:120px;">
-                <select id="newUserRole" style="width:90px;">
-                    <option value="user">User</option>
-                    <option value="admin">Admin</option>
-                </select>
-                <button onclick="createUser()" style="width:auto;">Add</button>
+        <div class="modal-body">
+            <div id="usersTableContainer" style="margin-bottom:16px;max-height:50vh;overflow:auto;">
+                <table>
+                    <thead><tr><th>Username</th><th>Role</th><th>Email</th><th>2FA</th><th>Status</th><th></th></tr></thead>
+                    <tbody id="usersTableBody"><tr><td colspan="6">Loading...</td></tr></tbody>
+                </table>
+            </div>
+            <div style="border-top:1px solid var(--border);padding-top:16px;">
+                <h3 style="font-size:14px;margin-bottom:12px;">Add User</h3>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                    <input type="text" id="newUsername" placeholder="Username" style="flex:1;min-width:120px;">
+                    <input type="email" id="newUserEmail" placeholder="Email" style="flex:1;min-width:160px;" required>
+                    <input type="password" id="newPassword" placeholder="Password (min 8)" style="flex:1;min-width:120px;">
+                    <select id="newUserRole" style="width:90px;">
+                        <option value="user">User</option>
+                        <option value="admin">Admin</option>
+                    </select>
+                    <button onclick="createUser()" style="width:auto;">Add</button>
+                </div>
             </div>
         </div>
         <div class="form-actions">
@@ -779,23 +1659,261 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
     </div>
 </div>
 
+<!-- API Tokens Modal -->
+<div id="apiTokensModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeApiTokensModal()">
+    <div class="modal" style="max-width:min(1000px,95vw);width:min(1000px,95vw);">
+        <style>
+            #apiTokensModal td, #apiTokensModal th { white-space: nowrap; vertical-align: middle; }
+            #apiTokensModal td.col-actions { text-align: right; }
+            #apiTokensModal button.small { min-width: 0; margin-left: 4px; }
+            #apiTokensModal .pat-prefix {
+                font-family: "SF Mono", "Fira Code", "Consolas", monospace;
+                font-size: 12px;
+                background: var(--bg);
+                padding: 2px 8px;
+                border-radius: 4px;
+            }
+            #apiTokensModal .pat-revoked { color: var(--red); }
+            #apiTokensModal .pat-active { color: var(--green); }
+        </style>
+        <h2>API Tokens</h2>
+        <div class="modal-body">
+            <p style="color:var(--text2);font-size:13px;margin:0 0 12px;">
+                Long-lived bearer tokens for headless clients (CI scripts, services). Send as
+                <span class="pat-prefix">Authorization: Bearer susi_pat_…</span>.
+                Tokens inherit your role and bypass the interactive 2FA gate — treat them like passwords.
+            </p>
+            <div id="apiTokensTableContainer" style="margin-bottom:16px;max-height:50vh;overflow:auto;">
+                <table>
+                    <thead><tr><th>Name</th><th>Prefix</th><th>Created</th><th>Last used</th><th>Status</th><th></th></tr></thead>
+                    <tbody id="apiTokensTableBody"><tr><td colspan="6">Loading...</td></tr></tbody>
+                </table>
+            </div>
+            <div style="border-top:1px solid var(--border);padding-top:16px;">
+                <h3 style="font-size:14px;margin-bottom:12px;">Create new token</h3>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                    <input type="text" id="newApiTokenName" placeholder="Name (e.g. github-actions release)" style="flex:1;min-width:200px;">
+                    <button onclick="createApiToken()" style="width:auto;">Create</button>
+                </div>
+            </div>
+            <div id="apiAdminSection" style="border-top:1px solid var(--border);padding-top:16px;margin-top:16px;display:none;">
+                <h3 style="font-size:14px;margin-bottom:8px;">All tokens (admin)</h3>
+                <div id="apiAllTokensContainer" style="max-height:30vh;overflow:auto;">
+                    <table>
+                        <thead><tr><th>Owner</th><th>Name</th><th>Prefix</th><th>Last used</th><th>Status</th><th></th></tr></thead>
+                        <tbody id="apiAllTokensBody"><tr><td colspan="6">Loading...</td></tr></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+        <div class="form-actions">
+            <button class="secondary" onclick="closeApiTokensModal()">Close</button>
+        </div>
+    </div>
+</div>
+
 <script>
+let _overlayMouseDownOnSelf = false;
+document.addEventListener('mousedown', e => {
+    _overlayMouseDownOnSelf = e.target.classList.contains('modal-overlay');
+});
+
 const API = '/api/v1';
+const LICENSE_DEFAULTS = { days: 365, maxMachines: 1, leaseDurationHours: 168, leaseGraceHours: 24 };
 let authToken = '';
 let currentUsername = '';
+
+// Stable per-browser identifier. Generated once and persisted in localStorage;
+// clearing site data = new device on next login (by design — it re-triggers
+// the magic-link check). Not a security signal on its own, just a marker.
+function getDeviceFp() {
+    let fp = localStorage.getItem('device_fp');
+    if (!fp) {
+        if (window.crypto && crypto.randomUUID) {
+            fp = crypto.randomUUID();
+        } else {
+            // Very old browser fallback — 128 bits from Math.random.
+            fp = 'fp-' + Array.from({length: 8}, () => Math.random().toString(36).slice(2, 6)).join('');
+        }
+        localStorage.setItem('device_fp', fp);
+    }
+    return fp;
+}
+function getDeviceLabel() {
+    // Short, human-readable — no PII beyond the UA string.
+    const ua = navigator.userAgent || 'unknown';
+    return ua.length > 200 ? ua.slice(0, 200) : ua;
+}
 let userRole = '';
 let licenses = [];
 let selectedKey = null;
 let totpEnabled = false;
+let backupCodesRemaining = null;
+let mustEnableTotp = false;
+
+// Theme: 'dark' | 'light' | 'system' — persisted in localStorage.
+function applyTheme(t) {
+    const root = document.documentElement;
+    if (t === 'system') {
+        root.removeAttribute('data-theme');
+        const prefersLight = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches;
+        if (prefersLight) root.setAttribute('data-theme', 'light');
+    } else {
+        root.setAttribute('data-theme', t);
+    }
+    const btn = document.getElementById('btnTheme');
+    if (btn) btn.textContent = t === 'dark' ? '🌙' : t === 'light' ? '☀️' : '🌓';
+    if (btn) btn.title = 'Theme: ' + t + ' (click to cycle)';
+}
+function cycleTheme() {
+    const cur = localStorage.getItem('susi_theme') || 'system';
+    const next = cur === 'dark' ? 'light' : cur === 'light' ? 'system' : 'dark';
+    localStorage.setItem('susi_theme', next);
+    applyTheme(next);
+}
+applyTheme(localStorage.getItem('susi_theme') || 'system');
+if (window.matchMedia) {
+    window.matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => {
+        if ((localStorage.getItem('susi_theme') || 'system') === 'system') {
+            applyTheme('system');
+        }
+    });
+}
+
+// Declared before init() so startMagicExchange() can write to it on the
+// magic-link path. `let` bindings are in the TDZ until this line executes;
+// writing from an early IIFE would throw ReferenceError and silently kill the
+// whole magic flow.
+let pendingMagicToken = '';
+
+// Intercept magic-link landings (#/magic/<token>). Runs on both initial
+// page load AND on hashchange — the latter matters when the email link
+// opens in an already-open tab, which only fires hashchange (not a full
+// reload). Returns true if a magic token was found and consumed.
+function tryHandleMagicLink() {
+    const magicMatch = window.location.hash.match(/^#\/magic\/([A-Za-z0-9]+)/);
+    if (!magicMatch) return false;
+    // Clear any stale overlays from the tab's prior state (login prompt,
+    // change-password prompt from an old session) so the magic-exchange
+    // overlay is the only thing showing.
+    ['loginOverlay', 'changePasswordOverlay', 'forgotPasswordOverlay', 'resetPasswordOverlay'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.classList.remove('visible');
+    });
+    // Clear the hash so reloading the page doesn't try to reuse the token.
+    history.replaceState(null, '', window.location.pathname + window.location.search);
+    startMagicExchange(magicMatch[1]).catch(e => {
+        console.error('Magic-link exchange crashed:', e);
+        const err = document.getElementById('magicExchangeError');
+        if (err) {
+            document.getElementById('magicExchangeOverlay').classList.add('visible');
+            document.getElementById('magicExchangeTitle').textContent = 'Sign-in failed';
+            err.textContent = 'Something went wrong. Reload and try again.';
+            err.classList.add('visible');
+        }
+    });
+    return true;
+}
+
+// Intercept password-reset landings (#/reset/<token>). Same dual-fire
+// reasoning as tryHandleMagicLink. Returns true if a reset token was
+// captured. The actual submit happens when the user fills in the new
+// password and clicks the button.
+let pendingResetToken = '';
+function tryHandleResetLink() {
+    const resetMatch = window.location.hash.match(/^#\/reset\/([A-Za-z0-9]+)/);
+    if (!resetMatch) return false;
+    pendingResetToken = resetMatch[1];
+    ['loginOverlay', 'changePasswordOverlay', 'forgotPasswordOverlay', 'magicExchangeOverlay'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.classList.remove('visible');
+    });
+    history.replaceState(null, '', window.location.pathname + window.location.search);
+    document.getElementById('resetPasswordError').classList.remove('visible');
+    document.getElementById('rpNew').value = '';
+    document.getElementById('rpConfirm').value = '';
+    document.getElementById('resetPasswordOverlay').classList.add('visible');
+    setTimeout(() => document.getElementById('rpNew').focus(), 50);
+    return true;
+}
 
 (function init() {
     authToken = localStorage.getItem('auth_token') || '';
+
+    if (tryHandleMagicLink()) return;
+    if (tryHandleResetLink()) return;
+
+    window.addEventListener('hashchange', () => {
+        // An email link that opens in an already-open tab only fires
+        // hashchange, not a full reload. Catch #/magic/<token> and
+        // #/reset/<token> here too.
+        if (tryHandleMagicLink()) return;
+        if (tryHandleResetLink()) return;
+        route();
+    });
     if (!authToken) {
-        showLogin();
+        renderNav();
+        route();
     } else {
         checkAuthStatus();
     }
 })();
+
+/// Decide which dash-page to show based on the hash route + auth state.
+function route() {
+    const hash = location.hash.replace(/^#\/?/, '').split('/')[0] || '';
+    let target = hash;
+    const allowedAnon = new Set(['', 'home']);
+    if (!authToken && !allowedAnon.has(target)) {
+        // Protected page requested by anonymous user — show login.
+        showLogin();
+        return;
+    }
+    if (!authToken) {
+        target = 'home';
+        showLogin();
+    }
+    if (authToken && (target === '' || target === 'home')) {
+        // Logged-in user landing on / — pick the first available section.
+        target = (userRole === 'admin') ? 'releases' : 'workspaces';
+        if (location.hash !== '#/' + target) location.hash = '#/' + target;
+    }
+    showPage(target);
+}
+
+function showPage(name) {
+    document.querySelectorAll('.dash-page').forEach(p => p.classList.remove('active'));
+    const page = document.getElementById('page-' + name);
+    if (page) page.classList.add('active');
+    renderNav();
+    document.querySelectorAll('#topNav a').forEach(a => {
+        a.classList.toggle('active', a.dataset.page === name);
+    });
+}
+
+function renderNav() {
+    const nav = document.getElementById('topNav');
+    if (!nav) return;
+    const isAdmin = userRole === 'admin';
+    const items = [
+        { page: 'docs', label: 'Documentation', href: '/docs', show: true },
+        { page: 'workspaces', label: 'Workspaces', href: '#/workspaces', show: !!authToken },
+        { page: 'releases', label: 'Releases', href: '#/releases', show: !!authToken },
+        { page: 'licenses', label: 'Licenses', href: '#/licenses', show: !!authToken && isAdmin },
+        { page: 'website', label: 'Website', href: '#/website', show: !!authToken && isAdmin },
+        { page: 'shop', label: 'Shop', href: '#/shop', show: !!authToken && isAdmin },
+    ];
+    nav.innerHTML = items.filter(i => i.show).map(i =>
+        '<a href="' + i.href + '" data-page="' + i.page + '">' + i.label + '</a>'
+    ).join('');
+    // Login/logout button visibility
+    document.getElementById('btnLogin').style.display = authToken ? 'none' : '';
+    document.getElementById('headerActions').style.display = authToken ? '' : 'none';
+    document.getElementById('currentUser').style.display = authToken ? '' : 'none';
+    document.getElementById('btn2FA').style.display = authToken ? 'block' : 'none';
+    document.getElementById('btnUsers').style.display = (authToken && isAdmin) ? 'block' : 'none';
+    document.getElementById('btnApiTokens').style.display = authToken ? 'block' : 'none';
+}
 
 function showLogin() {
     document.getElementById('loginOverlay').classList.add('visible');
@@ -805,10 +1923,6 @@ function showLogin() {
     document.getElementById('loginTotp').value = '';
     document.getElementById('loginTotpRow').style.display = 'none';
     document.getElementById('loginError').classList.remove('visible');
-    document.getElementById('btnLogout').style.display = 'none';
-    document.getElementById('btn2FA').style.display = 'none';
-    document.getElementById('btnUsers').style.display = 'none';
-    document.getElementById('currentUser').style.display = 'none';
     setTimeout(() => document.getElementById('loginUsername').focus(), 50);
 }
 
@@ -821,7 +1935,12 @@ async function submitLogin() {
     if (!username) { errEl.textContent = 'Username is required'; errEl.classList.add('visible'); return; }
     if (!password) { errEl.textContent = 'Password is required'; errEl.classList.add('visible'); return; }
 
-    const body = { username, password };
+    const body = {
+        username,
+        password,
+        device_fp: getDeviceFp(),
+        device_label: getDeviceLabel(),
+    };
     const totpCode = document.getElementById('loginTotp').value.trim();
     if (totpCode) body.totp_code = totpCode;
 
@@ -832,6 +1951,15 @@ async function submitLogin() {
             body: JSON.stringify(body),
         });
         const data = await resp.json();
+
+        if (data.magic_link_sent) {
+            document.getElementById('loginOverlay').classList.remove('visible');
+            const hint = data.email_hint ? 'We sent a sign-in link to ' + data.email_hint + '.' : 'We sent a sign-in link to your inbox.';
+            document.getElementById('magicLinkHint').textContent = hint;
+            document.getElementById('magicLinkTtl').textContent = data.ttl_minutes || 15;
+            document.getElementById('magicLinkOverlay').classList.add('visible');
+            return;
+        }
 
         if (data.totp_required) {
             document.getElementById('loginTotpRow').style.display = '';
@@ -862,6 +1990,72 @@ async function submitLogin() {
     } catch (e) {
         errEl.textContent = 'Connection failed: ' + e.message;
         errEl.classList.add('visible');
+    }
+}
+
+// -- Magic-link exchange --
+// pendingMagicToken is declared near the top of the script so the init IIFE
+// can trigger startMagicExchange without hitting its TDZ.
+
+async function startMagicExchange(token) {
+    pendingMagicToken = token;
+    document.getElementById('magicExchangeOverlay').classList.add('visible');
+    document.getElementById('magicExchangeError').classList.remove('visible');
+    document.getElementById('magicExchangeTotpRow').style.display = 'none';
+    document.getElementById('magicExchangeActions').style.display = 'none';
+    document.getElementById('magicExchangeTitle').textContent = 'Signing you in...';
+    await completeMagicExchange();
+}
+
+async function completeMagicExchange() {
+    const errEl = document.getElementById('magicExchangeError');
+    errEl.classList.remove('visible');
+
+    const body = { token: pendingMagicToken };
+    const totp = document.getElementById('magicExchangeTotp').value.trim();
+    if (totp) body.totp_code = totp;
+
+    try {
+        const resp = await fetch(API + '/auth/magic', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const data = await resp.json();
+
+        if (data.totp_required) {
+            document.getElementById('magicExchangeTitle').textContent = 'Enter your 2FA code';
+            document.getElementById('magicExchangeTotpRow').style.display = '';
+            document.getElementById('magicExchangeActions').style.display = '';
+            document.getElementById('magicExchangeTotp').focus();
+            return;
+        }
+        if (!resp.ok) {
+            document.getElementById('magicExchangeTitle').textContent = 'Sign-in failed';
+            errEl.textContent = data.error || 'Invalid or expired link';
+            errEl.classList.add('visible');
+            document.getElementById('magicExchangeActions').style.display = '';
+            return;
+        }
+
+        // Success — store the UUID of this device server-side for next time.
+        // (Server already called register_device under our fingerprint; we
+        // just finish the client-side session.)
+        authToken = data.token;
+        localStorage.setItem('auth_token', authToken);
+        userRole = data.role || 'user';
+        // Strip the token from the URL so a refresh doesn't re-trigger.
+        history.replaceState(null, '', window.location.pathname + window.location.search);
+        document.getElementById('magicExchangeOverlay').classList.remove('visible');
+        if (data.must_change_password) {
+            showChangePassword();
+        } else {
+            enterDashboard();
+        }
+    } catch (e) {
+        errEl.textContent = 'Connection failed: ' + e.message;
+        errEl.classList.add('visible');
+        document.getElementById('magicExchangeActions').style.display = '';
     }
 }
 
@@ -900,7 +2094,74 @@ async function submitChangePassword() {
         }
         document.getElementById('changePasswordOverlay').classList.remove('visible');
         toast('Password changed successfully', 'success');
-        enterDashboard();
+        // Re-sync auth state from the server. enterDashboard() alone leaves
+        // mustEnableTotp/currentUsername/totpEnabled stale (magic-exchange
+        // never populated them), which makes the admin /licenses 403 get
+        // misrouted as another change-password prompt — the loop the user hit.
+        await checkAuthStatus();
+    } catch (e) {
+        errEl.textContent = 'Connection failed: ' + e.message;
+        errEl.classList.add('visible');
+    }
+}
+
+function showForgotPassword() {
+    document.getElementById('loginOverlay').classList.remove('visible');
+    document.getElementById('forgotPasswordOverlay').classList.add('visible');
+    document.getElementById('forgotPasswordError').classList.remove('visible');
+    document.getElementById('forgotIdentifier').value =
+        document.getElementById('loginUsername').value || '';
+    setTimeout(() => document.getElementById('forgotIdentifier').focus(), 50);
+}
+
+async function submitForgotPassword() {
+    const errEl = document.getElementById('forgotPasswordError');
+    errEl.classList.remove('visible');
+    const identifier = document.getElementById('forgotIdentifier').value.trim();
+    if (!identifier) { errEl.textContent = 'Enter your username or email'; errEl.classList.add('visible'); return; }
+    try {
+        // Server always responds 200 to avoid leaking which accounts exist.
+        // We mirror that by always advancing to the "check your inbox" view.
+        await fetch(API + '/auth/forgot-password', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ identifier }),
+        });
+        document.getElementById('forgotPasswordOverlay').classList.remove('visible');
+        document.getElementById('magicLinkHint').textContent =
+            'If an email is on file for that account, a reset link is on its way.';
+        document.getElementById('magicLinkTtl').textContent = '30';
+        document.getElementById('magicLinkOverlay').classList.add('visible');
+    } catch (e) {
+        errEl.textContent = 'Connection failed: ' + e.message;
+        errEl.classList.add('visible');
+    }
+}
+
+async function submitResetPassword() {
+    const errEl = document.getElementById('resetPasswordError');
+    errEl.classList.remove('visible');
+    const newPw = document.getElementById('rpNew').value;
+    const confirm = document.getElementById('rpConfirm').value;
+    if (newPw.length < 8) { errEl.textContent = 'Password must be at least 8 characters'; errEl.classList.add('visible'); return; }
+    if (newPw !== confirm) { errEl.textContent = 'Passwords do not match'; errEl.classList.add('visible'); return; }
+    if (!pendingResetToken) { errEl.textContent = 'Reset link missing — open the email link again'; errEl.classList.add('visible'); return; }
+    try {
+        const resp = await fetch(API + '/auth/reset-password', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token: pendingResetToken, new_password: newPw }),
+        });
+        if (!resp.ok) {
+            const data = await resp.json().catch(() => ({}));
+            errEl.textContent = data.error || 'Reset failed';
+            errEl.classList.add('visible');
+            return;
+        }
+        pendingResetToken = '';
+        document.getElementById('resetPasswordOverlay').classList.remove('visible');
+        toast('Password reset — please sign in', 'success');
+        showLogin();
     } catch (e) {
         errEl.textContent = 'Connection failed: ' + e.message;
         errEl.classList.add('visible');
@@ -913,46 +2174,53 @@ async function checkAuthStatus() {
         if (resp.status === 401) {
             authToken = '';
             localStorage.removeItem('auth_token');
-            showLogin();
+            renderNav();
+            route();
             return;
         }
         const data = await resp.json();
         totpEnabled = data.totp_enabled;
+        backupCodesRemaining = (typeof data.backup_codes_remaining === 'number') ? data.backup_codes_remaining : null;
+        mustEnableTotp = !!data.must_enable_totp;
         currentUsername = data.username || '';
         userRole = data.role || 'user';
         if (data.must_change_password) {
             showChangePassword();
         } else {
             enterDashboard();
+            if (mustEnableTotp) {
+                toast('Admin accounts must enable 2FA. Complete enrollment now.', 'error');
+                show2FAModal(true);
+            }
         }
     } catch (e) {
-        showLogin();
+        renderNav();
+        route();
     }
 }
 
 function enterDashboard() {
     document.getElementById('loginOverlay').classList.remove('visible');
     document.getElementById('changePasswordOverlay').classList.remove('visible');
-    document.getElementById('btnLogout').style.display = '';
-    document.getElementById('btn2FA').style.display = '';
     const userEl = document.getElementById('currentUser');
     userEl.textContent = currentUsername;
-    userEl.style.display = '';
 
     const isAdmin = userRole === 'admin';
-    document.getElementById('btnUsers').style.display = isAdmin ? '' : 'none';
     document.getElementById('adminLicenseToolbar').style.display = isAdmin ? '' : 'none';
     document.getElementById('detailPanel').classList.remove('visible');
-    document.getElementById('adminLicenseTableSection').style.display = isAdmin ? '' : 'none';
     document.getElementById('btnCreateWorkspace').style.display = isAdmin ? '' : 'none';
     document.getElementById('btnUploadRelease').style.display = isAdmin ? '' : 'none';
 
     loadFeatures();
     if (isAdmin) {
         loadLicenses();
+        loadShop();
+        loadWebsitePages();
+        loadSiteSettings();
     }
     loadReleases();
     loadWorkspaces();
+    route(); // pick the right page based on hash + role
 }
 
 function logout() {
@@ -964,7 +2232,10 @@ function logout() {
     selectedKey = null;
     document.getElementById('licenseTableBody').innerHTML = '<tr><td colspan="7" class="empty-state"><p>Loading...</p></td></tr>';
     closeDetail();
-    showLogin();
+    document.getElementById('loginOverlay').classList.remove('visible');
+    location.hash = '';
+    renderNav();
+    route();
 }
 
 function authHeaders() {
@@ -983,6 +2254,14 @@ function formatDate(iso) {
     if (!iso || iso === 'perpetual') return 'Perpetual';
     const d = new Date(iso);
     return d.toLocaleDateString('en-CA'); // YYYY-MM-DD
+}
+
+function formatDateTime(iso) {
+    if (!iso) return '';
+    const d = new Date(iso);
+    const date = d.toLocaleDateString('en-CA'); // YYYY-MM-DD
+    const time = d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false });
+    return date + ' ' + time;
 }
 
 function getStatus(lic) {
@@ -1005,13 +2284,21 @@ async function loadLicenses() {
             return;
         }
         if (resp.status === 403) {
-            showChangePassword();
+            // 403 now has two flavors: must_change_password OR must_enable_totp.
+            // checkAuthStatus already sets global flags before this runs, so
+            // consult them instead of blindly assuming change-password.
+            if (mustEnableTotp) {
+                show2FAModal(true);
+            } else {
+                showChangePassword();
+            }
             return;
         }
         licenses = await resp.json();
         status.textContent = 'Connected';
         status.className = 'status ok';
         renderTable();
+        if (selectedKey) selectLicense(selectedKey);
     } catch (e) {
         status.textContent = 'Disconnected';
         status.className = 'status err';
@@ -1056,8 +2343,8 @@ document.getElementById('searchInput').addEventListener('input', renderTable);
 
 function esc(s) {
     const d = document.createElement('div');
-    d.textContent = s;
-    return d.innerHTML;
+    d.textContent = s == null ? '' : String(s);
+    return d.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 // Detail panel
@@ -1076,6 +2363,9 @@ function selectLicense(key) {
     document.getElementById('detailExpires').textContent = formatDate(lic.expires);
     document.getElementById('detailFeatures').innerHTML = lic.features.map(f => '<span class="feature-tag">' + esc(f) + '</span>').join(' ') || 'none';
     document.getElementById('detailMachineCount').textContent = lic.active_machine_count + ' / ' + (lic.max_machines === 0 ? '\u221e' : lic.max_machines);
+    document.getElementById('detailLeaseDuration').textContent = lic.lease_duration_hours === 0 ? 'Disabled' : lic.lease_duration_hours + ' h';
+    document.getElementById('detailLeaseGrace').textContent = lic.lease_grace_hours + ' h';
+    document.getElementById('detailRequireSignedBinary').textContent = lic.require_signed_binary ? 'Yes' : 'No';
 
     const btnRevoke = document.getElementById('btnRevoke');
     btnRevoke.style.display = status === 'revoked' ? 'none' : '';
@@ -1111,6 +2401,7 @@ function startEditLicense() {
     document.getElementById('editCustomer').value = lic.customer;
     document.getElementById('editProduct').value = lic.product;
     document.getElementById('editMaxMachines').value = lic.max_machines;
+    document.getElementById('editRequireSignedBinary').checked = !!lic.require_signed_binary;
     const isPerpetual = lic.expires === 'perpetual';
     document.getElementById('editPerpetual').checked = isPerpetual;
     const expiresInput = document.getElementById('editExpires');
@@ -1149,6 +2440,7 @@ async function saveEditLicense() {
         expires: isPerpetual ? 'perpetual' : (document.getElementById('editExpires').value || null),
         features: features,
         max_machines: parseInt(document.getElementById('editMaxMachines').value) || 0,
+        require_signed_binary: document.getElementById('editRequireSignedBinary').checked,
     };
     if (!body.customer) { toast('Customer is required', 'error'); return; }
     try {
@@ -1194,6 +2486,10 @@ async function deleteLicense() {
 // Create modal
 function showCreateModal() {
     document.querySelectorAll('#createFeaturesContainer input[type=checkbox]').forEach(cb => cb.checked = false);
+    document.getElementById('createLeaseDuration').value = '';
+    document.getElementById('createLeaseGrace').value = '';
+    document.getElementById('createRequireSignedBinary').checked = false;
+    document.querySelector('#createModal .advanced-options').open = false;
     document.getElementById('createModal').classList.add('visible');
     document.getElementById('createCustomer').focus();
 }
@@ -1213,7 +2509,8 @@ function updateExpiryFields() {
         row.style.display = '';
         label.textContent = 'Days';
         input.type = 'number';
-        input.value = '365';
+        input.placeholder = LICENSE_DEFAULTS.days;
+        input.value = '';
     } else {
         row.style.display = '';
         label.textContent = 'Date (YYYY-MM-DD)';
@@ -1258,14 +2555,17 @@ async function createLicense() {
         product: document.getElementById('createProduct').value.trim() || 'FusionHub',
         customer: customer,
         features: getSelectedFeatures(),
-        max_machines: parseInt(document.getElementById('createMaxMachines').value) || 0,
+        max_machines: parseInt(document.getElementById('createMaxMachines').value) || LICENSE_DEFAULTS.maxMachines,
+        lease_duration_hours: (() => { const v = parseInt(document.getElementById('createLeaseDuration').value); return Number.isNaN(v) ? LICENSE_DEFAULTS.leaseDurationHours : v; })(),
+        lease_grace_hours: parseInt(document.getElementById('createLeaseGrace').value) || LICENSE_DEFAULTS.leaseGraceHours,
+        require_signed_binary: document.getElementById('createRequireSignedBinary').checked,
     };
 
     const expiryType = document.getElementById('createExpiryType').value;
     if (expiryType === 'perpetual') {
         body.perpetual = true;
     } else if (expiryType === 'days') {
-        body.days = parseInt(document.getElementById('createExpiryValue').value) || 365;
+        body.days = parseInt(document.getElementById('createExpiryValue').value) || LICENSE_DEFAULTS.days;
     } else {
         body.expires = document.getElementById('createExpiryValue').value;
     }
@@ -1339,7 +2639,10 @@ function exportLicense() {
     if (!selectedKey) return;
     document.getElementById('exportKey').value = selectedKey;
     document.getElementById('exportMachineCode').value = '';
+    document.getElementById('exportUsbSerial').value = '';
     document.getElementById('exportFriendlyName').value = '';
+    document.querySelector('input[name="exportType"][value="file"]').checked = true;
+    onExportTypeChange();
     document.getElementById('exportModal').classList.add('visible');
     document.getElementById('exportMachineCode').focus();
 }
@@ -1348,18 +2651,44 @@ function closeExportModal() {
     document.getElementById('exportModal').classList.remove('visible');
 }
 
+function onExportTypeChange() {
+    const isToken = document.querySelector('input[name="exportType"]:checked').value === 'token';
+    document.getElementById('exportFileRow').style.display = isToken ? 'none' : '';
+    document.getElementById('exportTokenRow').style.display = isToken ? '' : 'none';
+    document.getElementById('exportTokenHint').style.display = isToken ? '' : 'none';
+    const fileLabel = document.getElementById('exportTypeFileLabel');
+    const tokenLabel = document.getElementById('exportTypeTokenLabel');
+    fileLabel.style.background = isToken ? 'transparent' : 'var(--accent)';
+    fileLabel.style.color = isToken ? 'var(--text2)' : '#fff';
+    tokenLabel.style.background = isToken ? 'var(--accent)' : 'transparent';
+    tokenLabel.style.color = isToken ? '#fff' : 'var(--text2)';
+}
+
 async function doExport() {
     const key = document.getElementById('exportKey').value;
-    const machineCode = document.getElementById('exportMachineCode').value.trim();
     const friendlyName = document.getElementById('exportFriendlyName').value.trim();
+    const isToken = document.querySelector('input[name="exportType"]:checked').value === 'token';
 
-    if (!machineCode) { toast('Machine code is required', 'error'); return; }
+    let endpoint, body, filename;
+    if (isToken) {
+        const usbSerial = document.getElementById('exportUsbSerial').value.trim();
+        if (!usbSerial) { toast('USB serial number is required', 'error'); return; }
+        endpoint = '/licenses/' + encodeURIComponent(key) + '/export-token';
+        body = JSON.stringify({ usb_serial: usbSerial, friendly_name: friendlyName });
+        filename = 'license.bin';
+    } else {
+        const machineCode = document.getElementById('exportMachineCode').value.trim();
+        if (!machineCode) { toast('Machine code is required', 'error'); return; }
+        endpoint = '/licenses/' + encodeURIComponent(key) + '/export';
+        body = JSON.stringify({ machine_code: machineCode, friendly_name: friendlyName });
+        filename = 'license.json';
+    }
 
     try {
-        const resp = await fetch(API + '/licenses/' + encodeURIComponent(key) + '/export', {
+        const resp = await fetch(API + endpoint, {
             method: 'POST',
             headers: authHeaders(),
-            body: JSON.stringify({ machine_code: machineCode, friendly_name: friendlyName }),
+            body,
         });
         if (!resp.ok) {
             const err = await resp.json();
@@ -1370,11 +2699,11 @@ async function doExport() {
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = 'license.json';
+        a.download = filename;
         a.click();
         URL.revokeObjectURL(url);
 
-        toast('License file exported', 'success');
+        toast(isToken ? 'USB token file exported' : 'License file exported', 'success');
         closeExportModal();
         await loadLicenses();
         selectLicense(key);
@@ -1384,14 +2713,27 @@ async function doExport() {
 }
 
 // 2FA settings
-function show2FAModal() {
+function show2FAModal(force) {
     const content = document.getElementById('tfaContent');
     if (totpEnabled) {
+        const remaining = (typeof backupCodesRemaining === 'number') ? backupCodesRemaining : null;
+        const backupLine = remaining === null
+            ? ''
+            : '<p style="font-size:12px;color:var(--text2);margin-bottom:14px;">' +
+              'Backup codes remaining: <strong>' + remaining + '</strong> of 8. ' +
+              '<a href="#" onclick="showRegenerateBackupCodes();return false;">Regenerate</a>' +
+              '</p>';
         content.innerHTML =
-            '<p style="margin-bottom:14px;">Two-factor authentication is <strong style="color:var(--green);">enabled</strong>.</p>' +
+            '<p style="margin-bottom:6px;">Two-factor authentication is <strong style="color:var(--green);">enabled</strong>.</p>' +
+            backupLine +
             '<div class="form-row"><label>Enter current 2FA code to disable</label>' +
             '<input type="text" id="tfaDisableCode" placeholder="6-digit code" maxlength="6" autocomplete="one-time-code"></div>' +
             '<button class="danger" onclick="disable2FA()">Disable 2FA</button>';
+    } else if (force) {
+        content.innerHTML =
+            '<p style="margin-bottom:8px;">Your admin account must have two-factor authentication enabled.</p>' +
+            '<p style="font-size:12px;color:var(--text2);margin-bottom:14px;">You can&#39;t access admin features until you complete enrollment.</p>' +
+            '<button onclick="setup2FA()">Enable 2FA</button>';
     } else {
         content.innerHTML =
             '<p style="margin-bottom:14px;">Two-factor authentication is <strong style="color:var(--text2);">disabled</strong>.</p>' +
@@ -1440,14 +2782,88 @@ async function verify2FA() {
             headers: authHeaders(),
             body: JSON.stringify({ totp_code: code }),
         });
+        const data = await resp.json();
         if (!resp.ok) {
-            const data = await resp.json();
             toast('Error: ' + data.error, 'error');
             return;
         }
         totpEnabled = true;
-        toast('2FA enabled successfully', 'success');
-        closeTFAModal();
+        mustEnableTotp = false;
+        backupCodesRemaining = (data.backup_codes || []).length;
+        showBackupCodes(data.backup_codes || [], /*firstTime*/ true);
+        // Pages loaded before enrollment got 403'd by the admin-TOTP gate;
+        // re-fetch now that this session can pass the gate. The 2FA modal
+        // stays visible on top so the user can still save backup codes.
+        if (userRole === 'admin') {
+            loadLicenses();
+            loadShop();
+            loadWebsitePages();
+        }
+        loadReleases();
+        loadWorkspaces();
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+function showBackupCodes(codes, firstTime) {
+    const content = document.getElementById('tfaContent');
+    const codeList = codes.map(c => '<div class="backup-code">' + esc(c) + '</div>').join('');
+    const heading = firstTime ? '2FA enabled — save your backup codes' : 'Your new backup codes';
+    content.innerHTML =
+        '<p style="margin-bottom:4px;"><strong>' + heading + '</strong></p>' +
+        '<p style="font-size:12px;color:var(--text2);margin-bottom:12px;">' +
+        'Each code works once if you lose your authenticator. Copy them somewhere safe — ' +
+        'you will not see them again.' +
+        '</p>' +
+        '<div class="backup-codes-grid">' + codeList + '</div>' +
+        '<div style="display:flex;gap:8px;margin-top:14px;">' +
+        '<button class="secondary" onclick="copyBackupCodes(' + JSON.stringify(codes).replace(/"/g, '&quot;') + ')">Copy all</button>' +
+        '<button onclick="closeTFAModal()">I&#39;ve saved them</button>' +
+        '</div>';
+}
+
+function copyBackupCodes(codes) {
+    const text = codes.join('\n');
+    if (navigator.clipboard) {
+        navigator.clipboard.writeText(text).then(
+            () => toast('Backup codes copied to clipboard', 'success'),
+            () => toast('Copy failed — select and copy manually', 'error'),
+        );
+    } else {
+        toast('Clipboard not supported — select and copy manually', 'error');
+    }
+}
+
+function showRegenerateBackupCodes() {
+    const content = document.getElementById('tfaContent');
+    content.innerHTML =
+        '<p style="margin-bottom:6px;"><strong>Regenerate backup codes</strong></p>' +
+        '<p style="font-size:12px;color:var(--text2);margin-bottom:12px;">' +
+        'Your old backup codes will stop working. Enter your password to confirm.' +
+        '</p>' +
+        '<div class="form-row"><label>Current password</label>' +
+        '<input type="password" id="tfaRegenPw" autocomplete="current-password"></div>' +
+        '<div style="display:flex;gap:8px;">' +
+        '<button class="secondary" onclick="show2FAModal()">Cancel</button>' +
+        '<button onclick="submitRegenerateBackupCodes()">Regenerate</button>' +
+        '</div>';
+    setTimeout(() => document.getElementById('tfaRegenPw').focus(), 50);
+}
+
+async function submitRegenerateBackupCodes() {
+    const pw = document.getElementById('tfaRegenPw').value;
+    if (!pw) { toast('Enter your password', 'error'); return; }
+    try {
+        const resp = await fetch(API + '/auth/regenerate-backup-codes', {
+            method: 'POST',
+            headers: authHeaders(),
+            body: JSON.stringify({ current_password: pw }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) { toast('Error: ' + data.error, 'error'); return; }
+        backupCodesRemaining = (data.backup_codes || []).length;
+        showBackupCodes(data.backup_codes || [], /*firstTime*/ false);
     } catch (e) {
         toast('Failed: ' + e.message, 'error');
     }
@@ -1497,14 +2913,25 @@ async function loadUsers() {
             const status = u.must_change_password ? '<span style="color:var(--yellow);">Must change password</span>' : '<span style="color:var(--green);">Active</span>';
             const tfa = u.totp_enabled ? '<span style="color:var(--green);">Enabled</span>' : '<span style="color:var(--text2);">Off</span>';
             const roleBadge = u.role === 'admin'
-                ? '<span class="badge" style="background:rgba(108,140,255,0.15);color:var(--accent);">admin</span>'
-                : '<span class="badge" style="background:var(--bg3);color:var(--text2);">user</span>';
+                ? '<span class="badge role-pill" style="background:rgba(108,140,255,0.15);color:var(--accent);">admin</span>'
+                : '<span class="badge role-pill" style="background:var(--bg3);color:var(--text2);">user</span>';
+            // esc(JSON.stringify(x)) is HTML-safe for both the " and ' in the
+            // inline onclick attribute. A bare JSON.stringify would break the
+            // attribute quoting, which silently stopped the Edit button from
+            // firing.
+            const emailArg = u.email ? esc(JSON.stringify(u.email)) : "''";
+            const emailInner = u.email
+                ? '<span class="email-value">' + esc(u.email) + '</span>'
+                  + '<button class="small secondary" onclick="setUserEmail(\'' + esc(u.username) + '\',' + emailArg + ')">Edit</button>'
+                : '<span class="email-value" style="color:var(--text2);font-size:11px;">(none)</span>'
+                  + '<button class="small secondary" onclick="setUserEmail(\'' + esc(u.username) + '\',\'\')">Set</button>';
+            const emailCell = '<span class="email-cell">' + emailInner + '</span>';
             const actions = isSelf
                 ? '<span style="color:var(--text2);font-size:11px;">You</span>'
-                : '<button class="small secondary" onclick="renameUser(\'' + esc(u.username) + '\')">Rename</button> ' +
-                  '<button class="small secondary" onclick="resetUserPassword(\'' + esc(u.username) + '\')">Reset PW</button> ' +
+                : '<button class="small secondary" onclick="renameUser(\'' + esc(u.username) + '\')">Rename</button>' +
+                  '<button class="small secondary" onclick="resetUserPassword(\'' + esc(u.username) + '\')">Reset PW</button>' +
                   '<button class="small danger" onclick="deleteUser(\'' + esc(u.username) + '\')">Delete</button>';
-            return '<tr><td>' + esc(u.username) + '</td><td>' + roleBadge + '</td><td>' + tfa + '</td><td>' + status + '</td><td style="text-align:right;">' + actions + '</td></tr>';
+            return '<tr><td>' + esc(u.username) + '</td><td>' + roleBadge + '</td><td class="col-email">' + emailCell + '</td><td>' + tfa + '</td><td>' + status + '</td><td class="col-actions">' + actions + '</td></tr>';
         }).join('');
     } catch (e) {
         toast('Failed to load users: ' + e.message, 'error');
@@ -1513,16 +2940,19 @@ async function loadUsers() {
 
 async function createUser() {
     const username = document.getElementById('newUsername').value.trim();
+    const email = document.getElementById('newUserEmail').value.trim();
     const password = document.getElementById('newPassword').value;
     const role = document.getElementById('newUserRole').value;
     if (!username) { toast('Username is required', 'error'); return; }
+    if (!email) { toast('Email is required', 'error'); return; }
     if (password.length < 8) { toast('Password must be at least 8 characters', 'error'); return; }
 
+    const body = { username, email, password, role };
     try {
         const resp = await fetch(API + '/auth/users', {
             method: 'POST',
             headers: authHeaders(),
-            body: JSON.stringify({ username, password, role }),
+            body: JSON.stringify(body),
         });
         if (!resp.ok) {
             const data = await resp.json();
@@ -1530,6 +2960,7 @@ async function createUser() {
             return;
         }
         document.getElementById('newUsername').value = '';
+        document.getElementById('newUserEmail').value = '';
         document.getElementById('newPassword').value = '';
         document.getElementById('newUserRole').value = 'user';
         toast('User "' + username + '" created', 'success');
@@ -1602,6 +3033,184 @@ async function resetUserPassword(username) {
     }
 }
 
+async function setUserEmail(username, current) {
+    const val = prompt('Email for "' + username + '" (empty to clear):', current || '');
+    if (val === null) return;
+    try {
+        const resp = await fetch(API + '/auth/users/' + encodeURIComponent(username) + '/email', {
+            method: 'PUT',
+            headers: authHeaders(),
+            body: JSON.stringify({ email: val.trim() }),
+        });
+        if (!resp.ok) {
+            const data = await resp.json();
+            toast('Error: ' + data.error, 'error');
+            return;
+        }
+        toast('Email updated for "' + username + '"', 'success');
+        await loadUsers();
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+// ----- API tokens -----
+
+function showApiTokensModal() {
+    document.getElementById('apiTokensModal').classList.add('visible');
+    document.getElementById('newApiTokenName').value = '';
+    loadMyApiTokens();
+    if (userRole === 'admin') {
+        document.getElementById('apiAdminSection').style.display = '';
+        loadAllApiTokens();
+    } else {
+        document.getElementById('apiAdminSection').style.display = 'none';
+    }
+}
+
+function closeApiTokensModal() {
+    document.getElementById('apiTokensModal').classList.remove('visible');
+}
+
+function fmtTokenStatus(t) {
+    if (t.revoked_at) return '<span class="pat-revoked">Revoked</span>';
+    return '<span class="pat-active">Active</span>';
+}
+function fmtTokenDate(s) {
+    if (!s) return '<span style="color:var(--text2);">–</span>';
+    return esc(new Date(s).toLocaleString());
+}
+
+async function loadMyApiTokens() {
+    try {
+        const resp = await fetch(API + '/auth/api-tokens', { headers: authHeaders() });
+        if (!resp.ok) return;
+        const tokens = await resp.json();
+        const tbody = document.getElementById('apiTokensTableBody');
+        if (tokens.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="6" style="color:var(--text2);text-align:center;padding:16px;">No tokens yet.</td></tr>';
+            return;
+        }
+        tbody.innerHTML = tokens.map(t => {
+            const actions = t.revoked_at
+                ? '<span style="color:var(--text2);font-size:11px;">–</span>'
+                : '<button class="small danger" onclick="revokeMyApiToken(' + t.id + ')">Revoke</button>';
+            return '<tr>'
+                + '<td>' + esc(t.name) + '</td>'
+                + '<td><span class="pat-prefix">' + esc(t.token_prefix) + '…</span></td>'
+                + '<td>' + fmtTokenDate(t.created_at) + '</td>'
+                + '<td>' + fmtTokenDate(t.last_used_at) + '</td>'
+                + '<td>' + fmtTokenStatus(t) + '</td>'
+                + '<td class="col-actions">' + actions + '</td>'
+                + '</tr>';
+        }).join('');
+    } catch (e) {
+        toast('Failed to load tokens: ' + e.message, 'error');
+    }
+}
+
+async function loadAllApiTokens() {
+    try {
+        const resp = await fetch(API + '/auth/api-tokens/all', { headers: authHeaders() });
+        if (!resp.ok) return;
+        const tokens = await resp.json();
+        const tbody = document.getElementById('apiAllTokensBody');
+        if (tokens.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="6" style="color:var(--text2);text-align:center;padding:16px;">No tokens.</td></tr>';
+            return;
+        }
+        tbody.innerHTML = tokens.map(t => {
+            const actions = t.revoked_at
+                ? '<span style="color:var(--text2);font-size:11px;">–</span>'
+                : '<button class="small danger" onclick="revokeAnyApiToken(' + t.id + ')">Revoke</button>';
+            return '<tr>'
+                + '<td>' + esc(t.username) + '</td>'
+                + '<td>' + esc(t.name) + '</td>'
+                + '<td><span class="pat-prefix">' + esc(t.token_prefix) + '…</span></td>'
+                + '<td>' + fmtTokenDate(t.last_used_at) + '</td>'
+                + '<td>' + fmtTokenStatus(t) + '</td>'
+                + '<td class="col-actions">' + actions + '</td>'
+                + '</tr>';
+        }).join('');
+    } catch (e) {
+        toast('Failed to load admin tokens: ' + e.message, 'error');
+    }
+}
+
+async function createApiToken() {
+    const name = document.getElementById('newApiTokenName').value.trim();
+    if (!name) { toast('Token name is required', 'error'); return; }
+    try {
+        const resp = await fetch(API + '/auth/api-tokens', {
+            method: 'POST',
+            headers: authHeaders(),
+            body: JSON.stringify({ name }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) { toast('Error: ' + data.error, 'error'); return; }
+        showNewApiTokenOnce(data.token, data.name);
+        document.getElementById('newApiTokenName').value = '';
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+function showNewApiTokenOnce(rawToken, name) {
+    // Reuse the backup-codes display style for "save this once" context.
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay visible';
+    overlay.style.zIndex = '10000';
+    overlay.innerHTML =
+        '<div class="modal" style="max-width:600px;">' +
+        '<h2>Token created</h2>' +
+        '<p style="margin-bottom:6px;">Token: <strong>' + esc(name) + '</strong></p>' +
+        '<p style="font-size:12px;color:var(--text2);margin-bottom:12px;">' +
+        'Copy this now — it will not be shown again. Store it like a password.' +
+        '</p>' +
+        '<div class="secret-display" id="newPatRaw">' + esc(rawToken) + '</div>' +
+        '<div style="display:flex;gap:8px;margin-top:14px;justify-content:flex-end;">' +
+        '<button class="secondary" id="newPatCopy">Copy</button>' +
+        '<button id="newPatDone">I&#39;ve saved it</button>' +
+        '</div>' +
+        '</div>';
+    document.body.appendChild(overlay);
+    overlay.querySelector('#newPatCopy').onclick = () => {
+        if (navigator.clipboard) {
+            navigator.clipboard.writeText(rawToken).then(
+                () => toast('Token copied to clipboard', 'success'),
+                () => toast('Copy failed — select and copy manually', 'error'),
+            );
+        }
+    };
+    overlay.querySelector('#newPatDone').onclick = () => {
+        overlay.remove();
+        loadMyApiTokens();
+        if (userRole === 'admin') loadAllApiTokens();
+    };
+}
+
+async function revokeMyApiToken(id) {
+    if (!confirm('Revoke this token? Any client using it will stop working immediately.')) return;
+    try {
+        const resp = await fetch(API + '/auth/api-tokens/' + id, { method: 'DELETE', headers: authHeaders() });
+        if (!resp.ok) { const d = await resp.json(); toast('Error: ' + d.error, 'error'); return; }
+        toast('Token revoked', 'success');
+        await loadMyApiTokens();
+        if (userRole === 'admin') await loadAllApiTokens();
+    } catch (e) { toast('Failed: ' + e.message, 'error'); }
+}
+
+async function revokeAnyApiToken(id) {
+    if (!confirm('Revoke this token (admin)? Any client using it will stop working immediately.')) return;
+    try {
+        const resp = await fetch(API + '/auth/api-tokens/all/' + id, { method: 'DELETE', headers: authHeaders() });
+        if (!resp.ok) { const d = await resp.json(); toast('Error: ' + d.error, 'error'); return; }
+        toast('Token revoked', 'success');
+        await loadAllApiTokens();
+        await loadMyApiTokens();
+    } catch (e) { toast('Failed: ' + e.message, 'error'); }
+}
+
 // Releases
 let releases = [];
 
@@ -1609,6 +3218,10 @@ async function loadReleases() {
     const container = document.getElementById('releasesContainer');
     const endpoint = userRole === 'admin' ? '/releases' : '/updates/releases';
     try {
+        if (userRole === 'admin' && workspaces.length === 0) {
+            const wresp = await fetch(API + '/workspaces', { headers: authHeaders() });
+            if (wresp.ok) workspaces = (await wresp.json()).workspaces || [];
+        }
         const resp = await fetch(API + endpoint, {
             headers: authHeaders(),
         });
@@ -1627,17 +3240,20 @@ async function loadReleases() {
 async function downloadAsset(event, tag, assetName) {
     event.preventDefault();
     try {
-        const resp = await fetch(API + '/updates/download/' + encodeURIComponent(tag) + '/' + encodeURIComponent(assetName), {
+        const resp = await fetch(API + '/updates/download-ticket', {
+            method: 'POST',
             headers: authHeaders(),
+            body: JSON.stringify({ tag: tag, asset: assetName }),
         });
         if (!resp.ok) { toast('Download failed', 'error'); return; }
-        const blob = await resp.blob();
-        const url = URL.createObjectURL(blob);
+        const { ticket } = await resp.json();
+        const url = API + '/updates/download/' + encodeURIComponent(tag) + '/' + encodeURIComponent(assetName) + '?ticket=' + encodeURIComponent(ticket);
         const a = document.createElement('a');
         a.href = url;
         a.download = assetName;
+        document.body.appendChild(a);
         a.click();
-        URL.revokeObjectURL(url);
+        a.remove();
     } catch (e) {
         toast('Download failed', 'error');
     }
@@ -1688,6 +3304,12 @@ function renderReleases() {
             '<span style="color:var(--text2);font-size:11px;margin-left:8px;">' + formatSize(a.size) + '</span>'
         ).join('<br>');
         const pre = r.prerelease ? ' <span style="background:rgba(251,191,36,0.15);color:var(--yellow);font-size:11px;font-weight:600;padding:2px 8px;border-radius:4px;">Pre-release</span>' : '';
+        let scope = '';
+        if (r.workspace_id) {
+            const ws = workspaces.find(w => w.id === r.workspace_id);
+            const label = ws ? ws.name : r.workspace_id;
+            scope = ' <span style="background:rgba(96,165,250,0.15);color:var(--accent);font-size:11px;font-weight:600;padding:2px 8px;border-radius:4px;" title="Workspace-scoped release">' + esc(label) + '</span>';
+        }
         const dlBtns = (r.assets || []).filter(a => /\.(msi|zip)$/i.test(a.name)).map(a =>
             '<button class="small" onclick="event.stopPropagation();downloadAsset(event,\'' + esc(r.tag) + '\',\'' + esc(a.name) + '\')" title="' + esc(a.name) + ' (' + formatSize(a.size) + ')">' +
             a.name.match(/\.(msi|zip)$/i)[1].toUpperCase() + '</button>'
@@ -1704,9 +3326,9 @@ function renderReleases() {
         return '<div style="padding:10px 0;border-bottom:1px solid var(--border);" class="release-item">' +
             '<div onclick="toggleRelease(\'' + esc(r.tag) + '\')" style="display:flex;align-items:flex-start;justify-content:space-between;cursor:pointer;">' +
                 '<div>' +
-                    '<div style="font-weight:600;font-size:14px;font-family:monospace;">' + arrow + esc(r.tag) + pre + '</div>' +
+                    '<div style="font-weight:600;font-size:14px;font-family:monospace;">' + arrow + esc(r.tag) + pre + scope + '</div>' +
                     (r.name && r.name !== r.tag ? '<div style="font-size:13px;color:var(--text2);margin-left:18px;">' + esc(r.name) + '</div>' : '') +
-                    '<div style="font-size:12px;color:var(--text2);margin-top:4px;margin-left:18px;">' + formatDate(r.published_at) + '</div>' +
+                    '<div style="font-size:12px;color:var(--text2);margin-top:4px;margin-left:18px;">' + formatDateTime(r.published_at) + '</div>' +
                 '</div>' +
                 '<div style="display:flex;gap:6px;align-items:center;flex-shrink:0;">' + dlBtns + deleteBtn + '</div>' +
             '</div>' +
@@ -1715,8 +3337,36 @@ function renderReleases() {
     }).join('');
 }
 
-function showUploadReleaseModal() {
-    document.getElementById('releaseTag').value = '';
+async function populateReleaseWorkspaceDropdown(presetWorkspaceId) {
+    const sel = document.getElementById('releaseWorkspace');
+    // Non-admins can only target a workspace they're already in, so hide the
+    // "Global" option for them. The preset path is also non-admin-friendly.
+    const isAdmin = userRole === 'admin';
+    sel.innerHTML = isAdmin && !presetWorkspaceId
+        ? '<option value="">Global (all workspaces)</option>' : '';
+    try {
+        const resp = await fetch(API + '/workspaces', { headers: authHeaders() });
+        if (!resp.ok) return;
+        const data = await resp.json();
+        (data.workspaces || []).forEach(ws => {
+            const opt = document.createElement('option');
+            opt.value = ws.id;
+            opt.textContent = ws.name + (ws.product ? ' (' + ws.product + ')' : '');
+            sel.appendChild(opt);
+        });
+        if (presetWorkspaceId) {
+            sel.value = presetWorkspaceId;
+            sel.disabled = true;
+        } else {
+            sel.disabled = false;
+        }
+    } catch (e) {}
+}
+
+function showUploadReleaseModal(presetWorkspaceId) {
+    const tagInput = document.getElementById('releaseTag');
+    tagInput.value = '';
+    tagInput.disabled = false; // may have been locked by addWsReleaseSoftware
     document.getElementById('releaseName').value = '';
     document.getElementById('releaseBody').value = '';
     document.getElementById('releasePrerelease').checked = false;
@@ -1724,7 +3374,8 @@ function showUploadReleaseModal() {
     document.getElementById('uploadProgress').style.display = 'none';
     document.getElementById('uploadBtn').disabled = false;
     document.getElementById('uploadReleaseModal').classList.add('visible');
-    document.getElementById('releaseTag').focus();
+    populateReleaseWorkspaceDropdown(presetWorkspaceId);
+    tagInput.focus();
 }
 
 function closeUploadReleaseModal() {
@@ -1736,6 +3387,7 @@ async function uploadRelease() {
     const name = document.getElementById('releaseName').value.trim();
     const body = document.getElementById('releaseBody').value;
     const prerelease = document.getElementById('releasePrerelease').checked;
+    const workspaceId = document.getElementById('releaseWorkspace').value;
     const fileInput = document.getElementById('releaseFile');
 
     if (!tag) { toast('Version tag is required', 'error'); return; }
@@ -1746,7 +3398,10 @@ async function uploadRelease() {
     formData.append('name', name);
     formData.append('body', body);
     formData.append('prerelease', prerelease ? 'true' : 'false');
-    formData.append('file', fileInput.files[0]);
+    if (workspaceId) formData.append('workspace_id', workspaceId);
+    // The backend handler iterates over every "file" multipart field, so a
+    // single submission can attach (or replace) several binaries at once.
+    for (const f of fileInput.files) formData.append('file', f);
 
     document.getElementById('uploadBtn').disabled = true;
     document.getElementById('uploadProgress').style.display = '';
@@ -1769,7 +3424,11 @@ async function uploadRelease() {
             if (xhr.status >= 200 && xhr.status < 300) {
                 toast('Release ' + tag + ' uploaded', 'success');
                 closeUploadReleaseModal();
-                loadReleases();
+                if (workspaceId && selectedWsId === workspaceId) {
+                    loadWsReleases(workspaceId);
+                } else if (typeof loadReleases === 'function' && userRole === 'admin') {
+                    loadReleases();
+                }
             } else {
                 try {
                     const data = JSON.parse(xhr.responseText);
@@ -1852,17 +3511,13 @@ function renderWorkspaces() {
     `).join('');
 }
 
-function esc(str) {
-    const div = document.createElement('div');
-    div.textContent = str || '';
-    return div.innerHTML;
-}
 
 async function showWsDetail(id) {
     selectedWsId = id;
     renderWorkspaces();
     const panel = document.getElementById('wsDetailPanel');
     panel.classList.add('visible');
+    setWsTab('releases');
 
     try {
         const resp = await fetch(API + '/workspaces/' + id, { headers: authHeaders() });
@@ -1886,29 +3541,528 @@ async function showWsDetail(id) {
                 </div>
             `).join('');
 
-        // Only admins can manage members and delete workspaces
+        // Only admins can manage members, edit workspace properties, or delete.
         const showMemberMgmt = userRole === 'admin';
         document.getElementById('wsAddMemberRow').style.display = showMemberMgmt ? 'flex' : 'none';
-        document.getElementById('wsDeleteRow').style.display = showMemberMgmt ? 'flex' : 'none';
+        document.querySelectorAll('#wsDetailPanel [data-ws-admin-only]').forEach(el => {
+            el.style.display = showMemberMgmt ? '' : 'none';
+        });
         if (showMemberMgmt) {
-            const memberNames = new Set(members.map(m => m.username));
+            document.getElementById('wsEditName').value = ws.name || '';
+            document.getElementById('wsEditProduct').value = ws.product || '';
+            document.getElementById('wsEditDesc').value = ws.description || '';
+            // Populate the Created By selector with all known users so admins
+            // can re-attribute the workspace. Fetched once per panel open.
+            const cbSel = document.getElementById('wsEditCreatedBy');
             try {
                 const uResp = await fetch(API + '/auth/users', { headers: authHeaders() });
                 if (uResp.ok) {
                     const allUsers = await uResp.json();
-                    const sel = document.getElementById('wsNewMember');
-                    sel.innerHTML = '<option value="">Select user...</option>' +
-                        allUsers.filter(u => !memberNames.has(u.username))
-                            .map(u => '<option value="' + esc(u.username) + '">' + esc(u.username) + '</option>')
-                            .join('');
+                    cbSel.innerHTML = allUsers
+                        .map(u => '<option value="' + esc(u.username) + '">' + esc(u.username) + '</option>')
+                        .join('');
+                    cbSel.value = ws.created_by || '';
                 }
             } catch (_) {}
         }
+        if (showMemberMgmt) {
+            const memberNames = new Set(members.map(m => m.username));
+            const sel = document.getElementById('wsNewMember');
+            try {
+                const uResp = await fetch(API + '/auth/users', { headers: authHeaders() });
+                if (!uResp.ok) {
+                    sel.innerHTML = '<option value="">Failed to load users (HTTP ' + uResp.status + ')</option>';
+                } else {
+                    const allUsers = await uResp.json();
+                    const candidates = allUsers.filter(u => !memberNames.has(u.username));
+                    if (candidates.length === 0) {
+                        sel.innerHTML = '<option value="">No other users — add one via Actions → Users</option>';
+                    } else {
+                        sel.innerHTML = '<option value="">Select user...</option>' +
+                            candidates
+                                .map(u => '<option value="' + esc(u.username) + '">' + esc(u.username) + '</option>')
+                                .join('');
+                    }
+                }
+            } catch (e) {
+                sel.innerHTML = '<option value="">Failed to load users: ' + esc(e.message) + '</option>';
+            }
+        }
 
-        // Load configs
+        // Only site admins create doc releases or upload software, even into
+        // a workspace they're a member of. Workspace members can read.
+        const canEdit = userRole === 'admin';
+        document.getElementById('wsCreateDocReleaseBtn').style.display = canEdit ? '' : 'none';
+
+        // Load configs and the unified releases list.
         loadWsConfigs(id);
+        loadWsReleases(id);
+        loadWsInstances(id);
+        loadWsRecordings(id);
     } catch (e) {
         toast('Error: ' + e.message, 'error');
+    }
+}
+
+function setWsTab(name) {
+    document.querySelectorAll('#wsDetailPanel .ws-tab').forEach(b => {
+        b.classList.toggle('active', b.dataset.wsTab === name);
+    });
+    document.querySelectorAll('#wsDetailPanel .ws-tab-panel').forEach(p => {
+        p.classList.toggle('active', p.dataset.wsPanel === name);
+    });
+}
+
+function toggleDropdown(event, id) {
+    event.stopPropagation();
+    document.querySelectorAll('.dropdown-menu').forEach(el => {
+        if (el.id !== id) el.style.display = 'none';
+    });
+    const m = document.getElementById(id);
+    if (m) m.style.display = (m.style.display === 'block') ? 'none' : 'block';
+}
+document.addEventListener('click', () => {
+    document.querySelectorAll('.dropdown-menu').forEach(el => { el.style.display = 'none'; });
+});
+
+// Open the upload modal pre-filled with the release's metadata so the user can
+// add one or more new binaries. The tag input is locked (backend keys assets
+// off the tag); same-named uploads overwrite via add_release_asset upsert.
+async function addWsReleaseSoftware(tag) {
+    if (!selectedWsId) return;
+    try {
+        const resp = await fetch(API + '/workspaces/' + selectedWsId + '/releases', { headers: authHeaders() });
+        if (!resp.ok) { toast('Failed to load release', 'error'); return; }
+        const data = await resp.json();
+        const r = (data.releases || []).find(x => x.tag === tag);
+        if (!r) { toast('Release not found', 'error'); return; }
+        showUploadReleaseModal(selectedWsId);
+        const tagInput = document.getElementById('releaseTag');
+        tagInput.value = r.tag;
+        tagInput.disabled = true;
+        document.getElementById('releaseName').value = r.name || '';
+        document.getElementById('releaseBody').value = r.body || '';
+        document.getElementById('releasePrerelease').checked = !!r.prerelease;
+        document.getElementById('releaseFile').focus();
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+// Replace one specific asset on a release. Opens a hidden file picker; the
+// chosen file is POSTed to the per-asset replace endpoint which atomically
+// removes the old row+file and writes the new one (the new file may have a
+// different name than the old).
+function replaceWsReleaseAsset(tag, fileName) {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.style.display = 'none';
+    input.addEventListener('change', async () => {
+        const file = input.files && input.files[0];
+        input.remove();
+        if (!file) return;
+        const fd = new FormData();
+        fd.append('file', file);
+        try {
+            const resp = await fetch(
+                API + '/releases/' + encodeURIComponent(tag) + '/assets/' + encodeURIComponent(fileName) + '/replace',
+                { method: 'POST', headers: authHeaders(), body: fd }
+            );
+            if (!resp.ok) {
+                const d = await resp.json().catch(() => ({}));
+                toast('Error: ' + (d.error || 'Could not replace file'), 'error');
+                return;
+            }
+            toast('File replaced', 'success');
+            if (selectedWsId) loadWsReleases(selectedWsId);
+        } catch (e) {
+            toast('Failed: ' + e.message, 'error');
+        }
+    });
+    document.body.appendChild(input);
+    input.click();
+}
+
+async function deleteWsReleaseAsset(tag, fileName) {
+    if (!confirm('Remove file "' + fileName + '" from release ' + tag + '?')) return;
+    try {
+        const resp = await fetch(
+            API + '/releases/' + encodeURIComponent(tag) + '/assets/' + encodeURIComponent(fileName),
+            { method: 'DELETE', headers: authHeaders() }
+        );
+        if (!resp.ok) {
+            const d = await resp.json().catch(() => ({}));
+            toast('Error: ' + (d.error || 'Could not remove file'), 'error');
+            return;
+        }
+        toast('File removed', 'success');
+        if (selectedWsId) loadWsReleases(selectedWsId);
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+// Move a release to a different workspace. The dropdown of targets is built
+// from the cached `workspaces` list (excluding the current workspace) — same
+// list rendered on the Workspaces tab, so it's already authoritative.
+function moveWsRelease(tag) {
+    if (!selectedWsId) return;
+    const select = document.getElementById('moveReleaseTarget');
+    const options = (workspaces || [])
+        .filter(w => w.id !== selectedWsId)
+        .map(w => '<option value="' + esc(w.id) + '">' + esc(w.name) + '</option>')
+        .join('');
+    if (!options) {
+        toast('No other workspaces available', 'error');
+        return;
+    }
+    select.innerHTML = options;
+    document.getElementById('moveReleaseTag').value = tag;
+    document.getElementById('moveReleaseModal').classList.add('visible');
+}
+
+function closeMoveReleaseModal() {
+    document.getElementById('moveReleaseModal').classList.remove('visible');
+}
+
+async function confirmMoveRelease() {
+    const tag = document.getElementById('moveReleaseTag').value;
+    const target = document.getElementById('moveReleaseTarget').value;
+    if (!tag || !target) return;
+    try {
+        const resp = await fetch(API + '/releases/' + encodeURIComponent(tag) + '/move', {
+            method: 'POST',
+            headers: authHeaders(),
+            body: JSON.stringify({ workspace_id: target }),
+        });
+        if (!resp.ok) {
+            const data = await resp.json().catch(() => ({}));
+            toast('Error: ' + (data.error || 'Could not move release'), 'error');
+            return;
+        }
+        closeMoveReleaseModal();
+        toast('Release ' + tag + ' moved', 'success');
+        // Reload current workspace's releases — the moved release is no longer
+        // in scope here, so the row will disappear.
+        loadWsReleases(selectedWsId);
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+// Open the documentation editor for a release. Idempotently ensures a
+// doc-release row exists for the tag (so the docs page has something to load
+// and the user can immediately add pages), then opens /docs in a new tab.
+async function editWsReleaseDocs(tag) {
+    if (!selectedWsId) return;
+    try {
+        const resp = await fetch(API + '/workspaces/' + selectedWsId + '/docs/releases', {
+            method: 'POST',
+            headers: authHeaders(),
+            body: JSON.stringify({ tag, name: tag }),
+        });
+        if (!resp.ok) {
+            const data = await resp.json().catch(() => ({}));
+            toast('Error: ' + (data.error || 'Could not open documentation'), 'error');
+            return;
+        }
+        const url = '/docs?workspace=' + encodeURIComponent(selectedWsId) + '&tag=' + encodeURIComponent(tag);
+        window.open(url, '_blank');
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function editWsRelease(tag) {
+    if (!selectedWsId) return;
+    // Pull the current metadata so the modal pre-fills accurately. The
+    // workspace releases listing has the fields we need; one extra fetch
+    // keeps things idempotent if other admins changed the row meanwhile.
+    try {
+        const resp = await fetch(API + '/workspaces/' + selectedWsId + '/releases', { headers: authHeaders() });
+        if (!resp.ok) { toast('Failed to load release', 'error'); return; }
+        const data = await resp.json();
+        const r = (data.releases || []).find(x => x.tag === tag);
+        if (!r) { toast('Release not found', 'error'); return; }
+        document.getElementById('editReleaseTag').value = r.tag;
+        document.getElementById('editReleaseName').value = r.name || '';
+        document.getElementById('editReleaseBody').value = r.body || '';
+        document.getElementById('editReleasePrerelease').checked = !!r.prerelease;
+        document.getElementById('editReleaseModal').classList.add('visible');
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+function closeEditReleaseModal() {
+    document.getElementById('editReleaseModal').classList.remove('visible');
+}
+
+async function saveEditedRelease() {
+    const tag = document.getElementById('editReleaseTag').value;
+    const name = document.getElementById('editReleaseName').value.trim();
+    const body = document.getElementById('editReleaseBody').value;
+    const prerelease = document.getElementById('editReleasePrerelease').checked;
+    if (!tag) return;
+    try {
+        const resp = await fetch(API + '/releases/' + encodeURIComponent(tag), {
+            method: 'PUT',
+            headers: authHeaders(),
+            body: JSON.stringify({ name, body, prerelease }),
+        });
+        if (!resp.ok) {
+            const d = await resp.json().catch(() => ({}));
+            toast('Error: ' + (d.error || 'Could not save'), 'error');
+            return;
+        }
+        toast('Release ' + tag + ' updated', 'success');
+        closeEditReleaseModal();
+        if (selectedWsId) loadWsReleases(selectedWsId);
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function deleteWsRelease(tag) {
+    if (!selectedWsId) return;
+    if (!confirm('Delete release "' + tag + '"? Binary assets and any documentation pages on this release will be removed.')) return;
+    try {
+        const resp = await fetch(API + '/releases/' + encodeURIComponent(tag), {
+            method: 'DELETE',
+            headers: authHeaders(),
+        });
+        if (!resp.ok) {
+            const d = await resp.json().catch(() => ({}));
+            toast('Error: ' + (d.error || 'Could not delete'), 'error');
+            return;
+        }
+        toast('Release ' + tag + ' deleted', 'success');
+        loadWsReleases(selectedWsId);
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function saveWsProperties() {
+    if (!selectedWsId) return;
+    const name = document.getElementById('wsEditName').value.trim();
+    const product = document.getElementById('wsEditProduct').value.trim();
+    const description = document.getElementById('wsEditDesc').value;
+    const createdBy = document.getElementById('wsEditCreatedBy').value;
+    if (!name) { toast('Name is required', 'error'); return; }
+    const payload = { name, product, description };
+    if (createdBy) payload.created_by = createdBy;
+    try {
+        const resp = await fetch(API + '/workspaces/' + selectedWsId, {
+            method: 'PUT',
+            headers: authHeaders(),
+            body: JSON.stringify(payload),
+        });
+        if (!resp.ok) {
+            const d = await resp.json().catch(() => ({}));
+            toast('Error: ' + (d.error || 'Could not save'), 'error');
+            return;
+        }
+        toast('Workspace updated', 'success');
+        // Refresh both the card grid and the panel header.
+        loadWorkspaces();
+        document.getElementById('wsDetailTitle').textContent = name;
+        document.getElementById('wsDetailProduct').textContent = product || '-';
+        document.getElementById('wsDetailDesc').textContent = description || '-';
+        document.getElementById('wsDetailCreatedBy').textContent = createdBy || '-';
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function createWsDocRelease() {
+    if (!selectedWsId) return;
+    const tag = prompt('Release tag (e.g. v1.0):');
+    if (!tag) return;
+    const trimmed = tag.trim();
+    if (!trimmed) return;
+    const name = prompt('Release name (optional):', trimmed) || '';
+    try {
+        const resp = await fetch(API + '/workspaces/' + selectedWsId + '/docs/releases', {
+            method: 'POST',
+            headers: authHeaders(),
+            body: JSON.stringify({ tag: trimmed, name }),
+        });
+        if (!resp.ok) {
+            const data = await resp.json().catch(() => ({}));
+            toast('Error: ' + (data.error || 'Could not create release'), 'error');
+            return;
+        }
+        toast('Release ' + trimmed + ' created', 'success');
+        loadWsReleases(selectedWsId);
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+// Cached state for the unified Releases tab so toggling expansion doesn't
+// trigger a network refetch.
+let wsReleasesData = { wsId: null, allRels: [], docPageCounts: new Map() };
+const wsExpandedTags = new Set();
+const wsReleasePages = new Map(); // tag -> [{slug, title, parent_slug, ord}]
+
+async function loadWsReleases(wsId) {
+    const container = document.getElementById('wsDetailReleases');
+    try {
+        // Pull both the software view (assets) and the doc view (page counts)
+        // and merge by tag. Both endpoints are workspace-scoped now, so the
+        // union is the full per-workspace release set.
+        const [relsResp, docsResp] = await Promise.all([
+            fetch(API + '/workspaces/' + wsId + '/releases', { headers: authHeaders() }),
+            fetch(API + '/workspaces/' + wsId + '/docs/releases', { headers: authHeaders() }),
+        ]);
+        if (!relsResp.ok) { container.innerHTML = '<div style="color:var(--text2);font-size:13px;">Failed to load</div>'; return; }
+        const relsData = await relsResp.json();
+        const docsData = docsResp.ok ? await docsResp.json() : { releases: [] };
+
+        const docPageCounts = new Map();
+        (docsData.releases || []).forEach(r => docPageCounts.set(r.tag, r.page_count || 0));
+
+        const merged = new Map();
+        (relsData.releases || []).forEach(r => merged.set(r.tag, r));
+        (docsData.releases || []).forEach(d => {
+            if (!merged.has(d.tag)) {
+                merged.set(d.tag, { tag: d.tag, name: d.name, published_at: d.published_at, prerelease: false, assets: [] });
+            }
+        });
+        const allRels = Array.from(merged.values())
+            .sort((a, b) => (b.published_at || '').localeCompare(a.published_at || ''));
+
+        // Reset expansion state on workspace change so we don't carry stale
+        // open rows from a different workspace.
+        if (wsReleasesData.wsId !== wsId) {
+            wsExpandedTags.clear();
+            wsReleasePages.clear();
+        }
+        wsReleasesData = { wsId, allRels, docPageCounts };
+        renderWsReleases();
+    } catch (e) {
+        container.innerHTML = '<div style="color:var(--text2);font-size:13px;">Failed to load releases</div>';
+    }
+}
+
+function renderWsReleases() {
+    const container = document.getElementById('wsDetailReleases');
+    const { wsId, allRels, docPageCounts } = wsReleasesData;
+    if (!wsId) return;
+    if (allRels.length === 0) {
+        container.innerHTML = '<div style="color:var(--text2);font-size:13px;">No releases yet. Upload software or create an empty release to start adding documentation.</div>';
+        return;
+    }
+    const isAdmin = userRole === 'admin';
+    container.innerHTML = allRels.map(r => {
+        const pre = r.prerelease ? ' <span style="background:rgba(251,191,36,0.15);color:var(--yellow);font-size:10px;font-weight:600;padding:1px 6px;border-radius:4px;">Pre</span>' : '';
+        const menuId = 'rel-menu-' + r.tag.replace(/[^a-zA-Z0-9_-]/g, '_');
+        const adminBtns = isAdmin
+            ? ' <span class="dropdown" onclick="event.stopPropagation();">' +
+                '<button class="small secondary" onclick="toggleDropdown(event,\'' + menuId + '\')">Actions &#9662;</button>' +
+                '<div id="' + menuId + '" class="dropdown-menu" style="display:none;">' +
+                    '<button onclick="editWsRelease(\'' + esc(r.tag) + '\')">Edit metadata</button>' +
+                    '<button onclick="addWsReleaseSoftware(\'' + esc(r.tag) + '\')">Add software</button>' +
+                    '<div class="divider"></div>' +
+                    '<button onclick="editWsReleaseDocs(\'' + esc(r.tag) + '\')">Edit documentation</button>' +
+                    '<button onclick="moveWsRelease(\'' + esc(r.tag) + '\')">Move to workspace…</button>' +
+                    '<div class="divider"></div>' +
+                    '<button class="danger" onclick="deleteWsRelease(\'' + esc(r.tag) + '\')">Delete</button>' +
+                '</div>' +
+              '</span>'
+            : '';
+        const expanded = wsExpandedTags.has(r.tag);
+        const chev = expanded ? '&#9662;' : '&#9656;';
+        const expandedBlock = expanded ? renderWsReleaseExpansion(r, docPageCounts.has(r.tag)) : '';
+        return '<div class="ws-release-row' + (expanded ? ' open' : '') + '">' +
+            '<div class="machine-item ws-release-head" style="flex-wrap:wrap;gap:8px;cursor:pointer;" onclick="toggleWsRelease(\'' + esc(r.tag) + '\')">' +
+                '<span style="flex:1;min-width:200px;display:flex;align-items:center;gap:6px;">' +
+                    '<span class="ws-release-chev" style="color:var(--text2);width:12px;display:inline-block;">' + chev + '</span>' +
+                    '<strong style="font-family:monospace;">' + esc(r.tag) + '</strong>' + pre +
+                    (r.name && r.name !== r.tag ? ' <span style="color:var(--text2);margin-left:6px;">' + esc(r.name) + '</span>' : '') +
+                    ' <span style="color:var(--text2);margin-left:6px;font-size:11px;">' + formatDate(r.published_at) + '</span>' +
+                '</span>' +
+                '<span style="display:flex;gap:4px;flex-wrap:wrap;align-items:center;justify-content:flex-end;">' +
+                    adminBtns +
+                '</span>' +
+            '</div>' +
+            expandedBlock +
+        '</div>';
+    }).join('');
+}
+
+function renderWsReleaseExpansion(r, hasDocReleaseRow) {
+    const wsId = wsReleasesData.wsId;
+    const tag = r.tag;
+    const pages = wsReleasePages.get(tag);
+    const docsUrl = '/docs?workspace=' + encodeURIComponent(wsId) + '&tag=' + encodeURIComponent(tag);
+    let pagesHtml;
+    if (!hasDocReleaseRow) {
+        pagesHtml = '<div style="color:var(--text2);font-size:12px;">No documentation pages yet.</div>';
+    } else if (pages === undefined) {
+        pagesHtml = '<div style="color:var(--text2);font-size:12px;">Loading pages…</div>';
+    } else if (pages.length === 0) {
+        pagesHtml = '<div style="color:var(--text2);font-size:12px;">No pages on this release.</div>';
+    } else {
+        const sorted = [...pages].sort((a, b) => (a.ord - b.ord) || a.title.localeCompare(b.title));
+        pagesHtml = '<ul style="list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:2px;">' +
+            sorted.map(p => {
+                const indent = p.parent_slug ? '12px' : '0';
+                const pageUrl = docsUrl + '#/' + encodeURIComponent(tag) + '/' + encodeURIComponent(p.slug);
+                return '<li style="padding-left:' + indent + ';"><a href="' + pageUrl + '" style="color:var(--accent);text-decoration:none;font-size:13px;">' + esc(p.title) + '</a></li>';
+            }).join('') +
+        '</ul>';
+    }
+
+    let filesHtml;
+    const isAdmin = userRole === 'admin';
+    if ((r.assets || []).length === 0) {
+        filesHtml = '<div style="color:var(--text2);font-size:12px;">No software files attached.</div>';
+    } else {
+        filesHtml = '<ul style="list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:2px;">' +
+            r.assets.map(a => {
+                const actions = isAdmin
+                    ? '<button class="small secondary" style="min-width:0;padding:2px 8px;font-size:11px;line-height:1.4;" onclick="replaceWsReleaseAsset(\'' + esc(tag) + '\',\'' + esc(a.name) + '\')" title="Replace this file">Replace</button>' +
+                      '<button class="small danger" style="min-width:0;padding:2px 7px;font-size:12px;line-height:1.4;" onclick="deleteWsReleaseAsset(\'' + esc(tag) + '\',\'' + esc(a.name) + '\')" title="Remove this file">&times;</button>'
+                    : '';
+                return '<li style="display:flex;justify-content:space-between;gap:8px;font-size:13px;align-items:center;">' +
+                    '<a href="#" onclick="event.preventDefault();downloadAsset(event,\'' + esc(tag) + '\',\'' + esc(a.name) + '\')" style="color:var(--accent);text-decoration:none;font-family:monospace;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(a.name) + '</a>' +
+                    '<span style="color:var(--text2);font-size:11px;white-space:nowrap;">' + formatSize(a.size) + '</span>' +
+                    (actions ? '<span style="display:flex;gap:4px;">' + actions + '</span>' : '') +
+                '</li>';
+            }).join('') +
+        '</ul>';
+    }
+
+    return '<div class="ws-release-expand" style="padding:8px 12px 12px 30px;display:grid;grid-template-columns:1fr 1fr;gap:16px;background:var(--bg);border-radius:0 0 var(--radius) var(--radius);">' +
+        '<div><div class="field-label">Documentation pages</div>' + pagesHtml + '</div>' +
+        '<div><div class="field-label">Software files</div>' + filesHtml + '</div>' +
+    '</div>';
+}
+
+async function toggleWsRelease(tag) {
+    if (wsExpandedTags.has(tag)) {
+        wsExpandedTags.delete(tag);
+        renderWsReleases();
+        return;
+    }
+    wsExpandedTags.add(tag);
+    renderWsReleases(); // optimistic; shows "Loading pages…" until fetch returns
+    // Lazy-fetch the pages list once per release tag.
+    if (!wsReleasePages.has(tag) && wsReleasesData.docPageCounts.has(tag)) {
+        try {
+            const resp = await fetch(API + '/docs/' + encodeURIComponent(tag) + '/pages', { headers: authHeaders() });
+            if (resp.ok) {
+                const data = await resp.json();
+                wsReleasePages.set(tag, data.pages || []);
+            } else {
+                wsReleasePages.set(tag, []);
+            }
+        } catch (_) {
+            wsReleasePages.set(tag, []);
+        }
+        if (wsExpandedTags.has(tag)) renderWsReleases();
     }
 }
 
@@ -1941,6 +4095,136 @@ async function loadWsConfigs(wsId) {
         `).join('');
     } catch (e) {
         container.innerHTML = '<div style="color:var(--text2);font-size:13px;">Failed to load configs</div>';
+    }
+}
+
+function formatBytes(n) {
+    if (n == null) return '';
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+    if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
+    return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+}
+
+async function loadWsRecordings(wsId) {
+    if (!wsId) return;
+    const container = document.getElementById('wsDetailRecordings');
+    try {
+        const resp = await fetch(API + '/workspaces/' + wsId + '/recordings', { headers: authHeaders() });
+        if (!resp.ok) { container.innerHTML = '<div style="color:var(--text2);font-size:13px;">Failed to load</div>'; return; }
+        const data = await resp.json();
+        const recordings = data.recordings || [];
+        if (recordings.length === 0) {
+            container.innerHTML = '<div style="color:var(--text2);font-size:13px;">No recordings uploaded to this workspace yet.</div>';
+            return;
+        }
+        container.innerHTML = recordings.map(r => {
+            const ready = r.status === 'uploaded';
+            const status = ready
+                ? ''
+                : '<span style="color:var(--text2);margin-left:6px;">(' + esc(r.status) + ')</span>';
+            const dlBtn = ready
+                ? '<button class="small" onclick="downloadWsRecording(' + r.id + ')">Download</button>'
+                : '';
+            return '<div class="machine-item">' +
+                '<span style="display:flex;align-items:center;gap:10px;min-width:0;flex:1;">' +
+                    '<strong style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(r.file_name) + '</strong>' +
+                    status +
+                    (r.description ? '<span style="color:var(--text2);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">&middot; ' + esc(r.description) + '</span>' : '') +
+                '</span>' +
+                '<span class="machine-code" style="display:flex;align-items:center;gap:10px;">' +
+                    '<span>' + formatBytes(r.file_size) + '</span>' +
+                    '<span>' + esc(r.author) + ' &middot; ' + formatDateTime(r.created_at) + '</span>' +
+                    dlBtn +
+                    '<button class="small danger" onclick="deleteWsRecording(' + r.id + ')">Delete</button>' +
+                '</span>' +
+            '</div>';
+        }).join('');
+    } catch (e) {
+        container.innerHTML = '<div style="color:var(--text2);font-size:13px;">Failed to load recordings: ' + esc(e.message) + '</div>';
+    }
+}
+
+async function downloadWsRecording(id) {
+    if (!selectedWsId) return;
+    try {
+        const resp = await fetch(API + '/workspaces/' + selectedWsId + '/recordings/' + id + '/download', { headers: authHeaders() });
+        if (!resp.ok) {
+            const d = await resp.json().catch(() => ({}));
+            toast('Error: ' + (d.error || 'Could not get download URL'), 'error');
+            return;
+        }
+        const data = await resp.json();
+        // The presigned URL is single-use-ish (it's bound to a method+key+expiry,
+        // not request count). Opening in a new tab kicks off the S3 GET; the
+        // browser handles the file save dialog from the response headers.
+        if (data.download_url) {
+            window.open(data.download_url, '_blank');
+        }
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function deleteWsRecording(id) {
+    if (!selectedWsId) return;
+    if (!confirm('Delete this recording? The file will be removed from S3 and cannot be recovered.')) return;
+    try {
+        const resp = await fetch(API + '/workspaces/' + selectedWsId + '/recordings/' + id, {
+            method: 'DELETE',
+            headers: authHeaders(),
+        });
+        if (!resp.ok) {
+            const d = await resp.json().catch(() => ({}));
+            toast('Error: ' + (d.error || 'Could not delete'), 'error');
+            return;
+        }
+        toast('Recording deleted', 'success');
+        loadWsRecordings(selectedWsId);
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+// Render registered FusionHub peers for the workspace. Peers re-register every
+// 30s, so anything seen within 90s (3 ticks) is treated as currently online.
+async function loadWsInstances(wsId) {
+    if (!wsId) return;
+    const container = document.getElementById('wsDetailInstances');
+    try {
+        const resp = await fetch(API + '/workspaces/' + wsId + '/federation', { headers: authHeaders() });
+        if (!resp.ok) { container.innerHTML = '<div style="color:var(--text2);font-size:13px;">Failed to load</div>'; return; }
+        const data = await resp.json();
+        const peers = data.peers || [];
+        if (peers.length === 0) {
+            container.innerHTML = '<div style="color:var(--text2);font-size:13px;">No FusionHub instances have registered with this workspace.</div>';
+            return;
+        }
+        const now = Date.now();
+        container.innerHTML = peers.map(p => {
+            const seenMs = p.last_seen ? new Date(p.last_seen).getTime() : 0;
+            const ageS = seenMs ? Math.max(0, Math.floor((now - seenMs) / 1000)) : null;
+            const online = ageS !== null && ageS <= 90;
+            const dotColor = online ? '#3fb950' : 'var(--text2)';
+            const ageLabel = ageS === null ? 'never'
+                : ageS < 60 ? ageS + 's ago'
+                : ageS < 3600 ? Math.floor(ageS / 60) + 'm ago'
+                : ageS < 86400 ? Math.floor(ageS / 3600) + 'h ago'
+                : Math.floor(ageS / 86400) + 'd ago';
+            const label = p.label && p.label.trim() ? p.label : '(unnamed)';
+            const hostShort = (p.host_id || '').slice(0, 12);
+            return '<div class="machine-item">' +
+                '<span style="display:flex;align-items:center;gap:10px;min-width:0;">' +
+                    '<span title="' + (online ? 'Online' : 'Last seen ' + ageLabel) + '" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + dotColor + ';flex-shrink:0;"></span>' +
+                    '<strong style="min-width:160px;">' + esc(label) + '</strong>' +
+                    '<span class="machine-code" title="' + esc(p.host_id) + '">' + esc(hostShort) + '</span>' +
+                    '<span class="machine-code" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(p.url) + '</span>' +
+                '</span>' +
+                '<span class="machine-code">' + esc(p.registered_by) + ' &middot; ' + ageLabel + '</span>' +
+            '</div>';
+        }).join('');
+    } catch (e) {
+        container.innerHTML = '<div style="color:var(--text2);font-size:13px;">Failed to load instances</div>';
     }
 }
 
@@ -2053,8 +4337,631 @@ document.addEventListener('keydown', e => {
         closeUsersModal();
         closeUploadReleaseModal();
         closeCreateWorkspaceModal();
+        closeProductModal();
+        closeRateModal();
     }
 });
+
+// ---------------------------------------------------------------------------
+// Shop admin — products + shipping rates
+// ---------------------------------------------------------------------------
+let shopProducts = [];
+let shopRates = [];
+let editingProductSku = null;  // null = create mode
+let editingRateId = null;      // null = create mode
+
+async function loadShop() {
+    if (userRole !== 'admin') return;
+    await Promise.all([loadShopProducts(), loadShopRates(), loadShopOrders(), loadShopSettings()]);
+}
+
+async function loadShopSettings() {
+    try {
+        const resp = await fetch(API + '/shop/admin/settings', { headers: authHeaders() });
+        if (!resp.ok) return;
+        const s = await resp.json();
+        document.getElementById('shopSetEmails').value = s.notification_emails || '';
+        // Customer email defaults to ON when never set; treat empty as on.
+        const ce = s.customer_email_enabled;
+        document.getElementById('shopSetCustomerEnabled').checked = (ce === '' || ce === '1' || ce === 'true' || ce == null);
+        document.getElementById('shopSetSupport').value = s.support_contact || '';
+        document.getElementById('shopSetThankYou').value = s.customer_thank_you_html || '';
+        const hint = document.getElementById('shopSetEmailsHint');
+        if (hint) {
+            if (!s.notification_emails && s.notification_emails_fallback) {
+                hint.style.display = '';
+                hint.textContent = 'Currently falling back to env var: ' + s.notification_emails_fallback;
+            } else {
+                hint.style.display = 'none';
+            }
+        }
+    } catch (e) {
+        // Non-fatal — settings just won't pre-fill.
+    }
+}
+
+async function saveShopSettings() {
+    const errEl = document.getElementById('shopSetError');
+    errEl.style.display = 'none';
+    const body = {
+        notification_emails: document.getElementById('shopSetEmails').value,
+        customer_email_enabled: document.getElementById('shopSetCustomerEnabled').checked ? '1' : '0',
+        support_contact: document.getElementById('shopSetSupport').value,
+        customer_thank_you_html: document.getElementById('shopSetThankYou').value,
+    };
+    try {
+        const resp = await fetch(API + '/shop/admin/settings', {
+            method: 'PUT',
+            headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) { errEl.textContent = data.error || ('HTTP ' + resp.status); errEl.style.display = ''; return; }
+        toast('Shop settings saved', 'success');
+        await loadShopSettings();
+    } catch (e) { errEl.textContent = e.message; errEl.style.display = ''; }
+}
+
+async function loadSiteSettings() {
+    if (userRole !== 'admin') return;
+    try {
+        const resp = await fetch(API + '/site/admin/settings', { headers: authHeaders() });
+        if (!resp.ok) return;
+        const s = await resp.json();
+        document.getElementById('siteSetGaId').value = s.google_analytics_id || '';
+    } catch (e) {
+        // Non-fatal — settings just won't pre-fill.
+    }
+}
+
+async function saveSiteSettings() {
+    const errEl = document.getElementById('siteSetError');
+    errEl.style.display = 'none';
+    const body = {
+        google_analytics_id: document.getElementById('siteSetGaId').value.trim(),
+    };
+    try {
+        const resp = await fetch(API + '/site/admin/settings', {
+            method: 'PUT',
+            headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) { errEl.textContent = data.error || ('HTTP ' + resp.status); errEl.style.display = ''; return; }
+        toast('Site settings saved', 'success');
+        await loadSiteSettings();
+    } catch (e) { errEl.textContent = e.message; errEl.style.display = ''; }
+}
+
+async function loadShopProducts() {
+    const tbody = document.getElementById('shopProductsBody');
+    try {
+        const resp = await fetch(API + '/shop/admin/products', { headers: authHeaders() });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        shopProducts = (await resp.json()).products || [];
+        renderShopProducts();
+    } catch (e) {
+        tbody.innerHTML = '<tr><td colspan="7" class="empty-state"><p>Failed to load: ' + escHtml(e.message) + '</p></td></tr>';
+    }
+}
+
+function renderShopProducts() {
+    const tbody = document.getElementById('shopProductsBody');
+    if (!shopProducts.length) {
+        tbody.innerHTML = '<tr><td colspan="7" class="empty-state"><p>No products yet.</p></td></tr>';
+        return;
+    }
+    tbody.innerHTML = shopProducts.map(p => {
+        const img = p.image_url
+            ? '<img src="' + escHtml(p.image_url) + '" style="width:40px;height:40px;object-fit:cover;border-radius:4px;">'
+            : '<span style="color:var(--text2);font-size:11px;">—</span>';
+        const price = shopFmtMoney(p.price_cents, p.currency);
+        return '<tr>'
+            + '<td>' + img + '</td>'
+            + '<td><code>' + escHtml(p.sku) + '</code></td>'
+            + '<td>' + escHtml(p.title) + '</td>'
+            + '<td>' + escHtml(price) + '</td>'
+            + '<td>' + (p.active ? 'yes' : '<span style="color:var(--text2);">no</span>') + '</td>'
+            + '<td>' + p.ord + '</td>'
+            + '<td style="text-align:right;">'
+            +   '<button class="small secondary" onclick="showProductModal(\'' + escHtml(p.sku) + '\')">Edit</button> '
+            +   '<button class="small danger" onclick="deleteShopProduct(\'' + escHtml(p.sku) + '\')">Delete</button>'
+            + '</td>'
+            + '</tr>';
+    }).join('');
+}
+
+function shopFmtMoney(cents, currency) {
+    return (cents / 100).toFixed(2) + ' ' + (currency || 'usd').toUpperCase();
+}
+
+function showProductModal(sku) {
+    editingProductSku = sku || null;
+    const title = sku ? 'Edit Product' : 'New Product';
+    document.getElementById('productModalTitle').textContent = title;
+    document.getElementById('productError').style.display = 'none';
+    if (sku) {
+        const p = shopProducts.find(x => x.sku === sku);
+        if (!p) return;
+        document.getElementById('productSku').value = p.sku;
+        document.getElementById('productSku').disabled = true;
+        document.getElementById('productTitle').value = p.title;
+        document.getElementById('productDesc').value = p.description_md || '';
+        document.getElementById('productPrice').value = p.price_cents;
+        document.getElementById('productCurrency').value = p.currency;
+        document.getElementById('productImage').value = p.image_asset || '';
+        document.getElementById('productTaxCode').value = p.tax_code;
+        document.getElementById('productOrd').value = p.ord;
+        document.getElementById('productActive').checked = p.active;
+    } else {
+        document.getElementById('productSku').value = '';
+        document.getElementById('productSku').disabled = false;
+        document.getElementById('productTitle').value = '';
+        document.getElementById('productDesc').value = '';
+        document.getElementById('productPrice').value = 0;
+        document.getElementById('productCurrency').value = 'usd';
+        document.getElementById('productImage').value = '';
+        document.getElementById('productTaxCode').value = 'txcd_99999999';
+        document.getElementById('productOrd').value = 0;
+        document.getElementById('productActive').checked = true;
+    }
+    document.getElementById('productModal').classList.add('visible');
+}
+
+function closeProductModal() { document.getElementById('productModal').classList.remove('visible'); }
+
+async function saveProduct() {
+    const errEl = document.getElementById('productError');
+    errEl.style.display = 'none';
+    const sku = (editingProductSku || document.getElementById('productSku').value).trim();
+    if (!sku) { errEl.textContent = 'SKU required'; errEl.style.display = ''; return; }
+    const body = {
+        title: document.getElementById('productTitle').value.trim(),
+        description_md: document.getElementById('productDesc').value,
+        price_cents: parseInt(document.getElementById('productPrice').value, 10) || 0,
+        currency: document.getElementById('productCurrency').value.trim() || 'usd',
+        image_asset: document.getElementById('productImage').value.trim() || null,
+        tax_code: document.getElementById('productTaxCode').value.trim() || 'txcd_99999999',
+        ord: parseInt(document.getElementById('productOrd').value, 10) || 0,
+        active: document.getElementById('productActive').checked,
+    };
+    try {
+        const resp = await fetch(API + '/shop/admin/products/' + encodeURIComponent(sku), {
+            method: 'PUT',
+            headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) { errEl.textContent = data.error || ('HTTP ' + resp.status); errEl.style.display = ''; return; }
+        closeProductModal();
+        toast(editingProductSku ? 'Product updated' : 'Product created', 'success');
+        await loadShopProducts();
+    } catch (e) { errEl.textContent = e.message; errEl.style.display = ''; }
+}
+
+async function deleteShopProduct(sku) {
+    if (!confirm('Delete product "' + sku + '"? This cannot be undone.')) return;
+    try {
+        const resp = await fetch(API + '/shop/admin/products/' + encodeURIComponent(sku), {
+            method: 'DELETE', headers: authHeaders(),
+        });
+        if (!resp.ok) { const d = await resp.json().catch(() => ({})); toast('Error: ' + (d.error || resp.status), 'error'); return; }
+        toast('Product deleted', 'success');
+        await loadShopProducts();
+    } catch (e) { toast('Failed: ' + e.message, 'error'); }
+}
+
+// ----- Shipping rates -----
+
+async function loadShopRates() {
+    const tbody = document.getElementById('shopRatesBody');
+    try {
+        const resp = await fetch(API + '/shop/admin/shipping_rates', { headers: authHeaders() });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        shopRates = (await resp.json()).rates || [];
+        renderShopRates();
+    } catch (e) {
+        tbody.innerHTML = '<tr><td colspan="6" class="empty-state"><p>Failed to load: ' + escHtml(e.message) + '</p></td></tr>';
+    }
+}
+
+function renderShopRates() {
+    const tbody = document.getElementById('shopRatesBody');
+    if (!shopRates.length) {
+        tbody.innerHTML = '<tr><td colspan="6" class="empty-state"><p>No shipping rates — orders cannot ship until you add at least one.</p></td></tr>';
+        return;
+    }
+    tbody.innerHTML = shopRates.map(r => {
+        const regions = (r.regions || []).join(', ');
+        const delivery = (r.delivery_min_days != null && r.delivery_max_days != null)
+            ? r.delivery_min_days + '–' + r.delivery_max_days
+            : (r.delivery_min_days != null ? '≥' + r.delivery_min_days : (r.delivery_max_days != null ? '≤' + r.delivery_max_days : '—'));
+        return '<tr>'
+            + '<td>' + escHtml(r.label) + '</td>'
+            + '<td>' + escHtml(shopFmtMoney(r.amount_cents, r.currency)) + '</td>'
+            + '<td><code>' + escHtml(regions) + '</code></td>'
+            + '<td>' + escHtml(delivery) + '</td>'
+            + '<td>' + (r.active ? 'yes' : '<span style="color:var(--text2);">no</span>') + '</td>'
+            + '<td style="text-align:right;">'
+            +   '<button class="small secondary" onclick="showShippingRateModal(' + r.id + ')">Edit</button> '
+            +   '<button class="small danger" onclick="deleteShopRate(' + r.id + ')">Delete</button>'
+            + '</td>'
+            + '</tr>';
+    }).join('');
+}
+
+function showShippingRateModal(id) {
+    editingRateId = id || null;
+    document.getElementById('rateModalTitle').textContent = id ? 'Edit Shipping Rate' : 'New Shipping Rate';
+    document.getElementById('rateError').style.display = 'none';
+    if (id) {
+        const r = shopRates.find(x => x.id === id);
+        if (!r) return;
+        document.getElementById('rateLabel').value = r.label;
+        document.getElementById('rateAmount').value = r.amount_cents;
+        document.getElementById('rateCurrency').value = r.currency;
+        document.getElementById('rateRegions').value = (r.regions || []).join(', ');
+        document.getElementById('rateMinDays').value = r.delivery_min_days ?? '';
+        document.getElementById('rateMaxDays').value = r.delivery_max_days ?? '';
+        document.getElementById('rateOrd').value = r.ord;
+        document.getElementById('rateActive').checked = r.active;
+    } else {
+        document.getElementById('rateLabel').value = '';
+        document.getElementById('rateAmount').value = 0;
+        document.getElementById('rateCurrency').value = 'usd';
+        document.getElementById('rateRegions').value = '*';
+        document.getElementById('rateMinDays').value = '';
+        document.getElementById('rateMaxDays').value = '';
+        document.getElementById('rateOrd').value = 0;
+        document.getElementById('rateActive').checked = true;
+    }
+    document.getElementById('rateModal').classList.add('visible');
+}
+
+function closeRateModal() { document.getElementById('rateModal').classList.remove('visible'); }
+
+async function saveRate() {
+    const errEl = document.getElementById('rateError');
+    errEl.style.display = 'none';
+    const regionsRaw = document.getElementById('rateRegions').value;
+    const regions = regionsRaw.split(',').map(s => s.trim()).filter(s => s.length > 0);
+    if (!regions.length) { errEl.textContent = 'At least one region required (US, CA, or * for both)'; errEl.style.display = ''; return; }
+    const allowed = new Set(['US', 'CA', '*']);
+    const bad = regions.find(r => !allowed.has(r.toUpperCase()));
+    if (bad) { errEl.textContent = 'Unsupported region "' + bad + '" — only US, CA, or * are allowed'; errEl.style.display = ''; return; }
+    const minDays = document.getElementById('rateMinDays').value;
+    const maxDays = document.getElementById('rateMaxDays').value;
+    const body = {
+        label: document.getElementById('rateLabel').value.trim(),
+        amount_cents: parseInt(document.getElementById('rateAmount').value, 10) || 0,
+        currency: document.getElementById('rateCurrency').value.trim() || 'usd',
+        regions,
+        delivery_min_days: minDays === '' ? null : (parseInt(minDays, 10) || 0),
+        delivery_max_days: maxDays === '' ? null : (parseInt(maxDays, 10) || 0),
+        ord: parseInt(document.getElementById('rateOrd').value, 10) || 0,
+        active: document.getElementById('rateActive').checked,
+    };
+    try {
+        const url = editingRateId
+            ? API + '/shop/admin/shipping_rates/' + editingRateId
+            : API + '/shop/admin/shipping_rates';
+        const method = editingRateId ? 'PUT' : 'POST';
+        const resp = await fetch(url, {
+            method,
+            headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) { errEl.textContent = data.error || ('HTTP ' + resp.status); errEl.style.display = ''; return; }
+        closeRateModal();
+        toast(editingRateId ? 'Rate updated' : 'Rate created', 'success');
+        await loadShopRates();
+    } catch (e) { errEl.textContent = e.message; errEl.style.display = ''; }
+}
+
+async function deleteShopRate(id) {
+    if (!confirm('Delete this shipping rate?')) return;
+    try {
+        const resp = await fetch(API + '/shop/admin/shipping_rates/' + id, {
+            method: 'DELETE', headers: authHeaders(),
+        });
+        if (!resp.ok) { const d = await resp.json().catch(() => ({})); toast('Error: ' + (d.error || resp.status), 'error'); return; }
+        toast('Rate deleted', 'success');
+        await loadShopRates();
+    } catch (e) { toast('Failed: ' + e.message, 'error'); }
+}
+
+const escHtml = esc;
+
+// ---------------------------------------------------------------------------
+// Shop admin — orders
+// ---------------------------------------------------------------------------
+let shopOrders = [];
+let viewingOrderId = null;
+
+async function loadShopOrders() {
+    const tbody = document.getElementById('shopOrdersBody');
+    if (!tbody) return;
+    const filter = (document.getElementById('ordersStatusFilter') || {}).value || '';
+    const url = API + '/shop/admin/orders' + (filter ? '?status=' + encodeURIComponent(filter) : '');
+    try {
+        const resp = await fetch(url, { headers: authHeaders() });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        shopOrders = (await resp.json()).orders || [];
+        renderShopOrders();
+    } catch (e) {
+        tbody.innerHTML = '<tr><td colspan="7" class="empty-state"><p>Failed to load: ' + escHtml(e.message) + '</p></td></tr>';
+    }
+}
+
+function renderShopOrders() {
+    const tbody = document.getElementById('shopOrdersBody');
+    if (!shopOrders.length) {
+        tbody.innerHTML = '<tr><td colspan="7" class="empty-state"><p>No orders yet.</p></td></tr>';
+        return;
+    }
+    tbody.innerHTML = shopOrders.map(o => {
+        const total = (o.amount_total_cents / 100).toFixed(2) + ' ' + (o.currency || 'usd').toUpperCase();
+        const customer = o.customer_name || o.customer_email || '—';
+        const created = o.created_at ? new Date(o.created_at).toLocaleString() : '';
+        const statusColor = o.status === 'shipped' ? 'var(--green)' : 'var(--text2)';
+        const tracking = o.tracking_number
+            ? (o.tracking_url
+                ? '<a href="' + escHtml(o.tracking_url) + '" target="_blank" rel="noopener">' + escHtml(o.tracking_carrier) + ' ' + escHtml(o.tracking_number) + '</a>'
+                : escHtml(o.tracking_carrier) + ' ' + escHtml(o.tracking_number))
+            : '<span style="color:var(--text2);">—</span>';
+        return '<tr>'
+            + '<td>#' + o.id + '</td>'
+            + '<td style="font-size:12px;color:var(--text2);">' + escHtml(created) + '</td>'
+            + '<td>' + escHtml(customer) + '<div style="font-size:11px;color:var(--text2);">' + escHtml(o.customer_email) + '</div></td>'
+            + '<td>' + escHtml(total) + '</td>'
+            + '<td style="color:' + statusColor + ';font-weight:500;">' + escHtml(o.status) + '</td>'
+            + '<td style="font-size:12px;">' + tracking + '</td>'
+            + '<td style="text-align:right;">'
+            +   '<button class="small secondary" onclick="openOrderModal(' + o.id + ')">View</button>'
+            + '</td>'
+            + '</tr>';
+    }).join('');
+}
+
+function openOrderModal(id) {
+    const o = shopOrders.find(x => x.id === id);
+    if (!o) return;
+    viewingOrderId = id;
+    document.getElementById('orderModalTitle').textContent = 'Order #' + id;
+    document.getElementById('orderShipError').style.display = 'none';
+
+    const total = (o.amount_total_cents / 100).toFixed(2) + ' ' + (o.currency || 'usd').toUpperCase();
+    const created = o.created_at ? new Date(o.created_at).toLocaleString() : '';
+    const ship = o.ship_to || {};
+    const addr = ship.address || {};
+    const addrLines = [
+        ship.name || o.customer_name,
+        addr.line1, addr.line2,
+        [addr.city, addr.state, addr.postal_code].filter(Boolean).join(', '),
+        addr.country,
+    ].filter(Boolean).map(l => escHtml(l)).join('<br>');
+
+    let itemsHtml = '<div style="color:var(--text2);font-size:12px;">No item data.</div>';
+    if (Array.isArray(o.line_items) && o.line_items.length) {
+        itemsHtml = '<table style="width:100%;font-size:12px;"><tr><th style="text-align:left;">Item</th><th style="text-align:right;">Qty</th><th style="text-align:right;">Total</th></tr>'
+            + o.line_items.map(li => {
+                const liTotal = ((li.amount_total || 0) / 100).toFixed(2) + ' ' + ((li.currency || o.currency || 'usd').toUpperCase());
+                return '<tr><td>' + escHtml(li.description || '(item)') + '</td><td style="text-align:right;">' + (li.quantity || 1) + '</td><td style="text-align:right;">' + escHtml(liTotal) + '</td></tr>';
+            }).join('')
+            + '</table>';
+    }
+
+    const trackingBlock = o.tracking_number
+        ? '<div style="margin-top:14px;background:rgba(74,222,128,0.10);border:1px solid var(--green);padding:10px 12px;border-radius:var(--radius);">'
+            + '<strong>Shipped via ' + escHtml(o.tracking_carrier) + '</strong> on ' + escHtml(o.shipped_at ? new Date(o.shipped_at).toLocaleString() : '')
+            + '<br>Tracking: <code>' + escHtml(o.tracking_number) + '</code>'
+            + (o.tracking_url ? ' · <a href="' + escHtml(o.tracking_url) + '" target="_blank">track</a>' : '')
+            + '</div>'
+        : '';
+
+    document.getElementById('orderModalBody').innerHTML =
+        '<div style="display:grid;grid-template-columns:1fr 1fr;gap:18px;">'
+        +   '<div>'
+        +     '<div style="color:var(--text2);font-size:11px;text-transform:uppercase;">Customer</div>'
+        +     '<div>' + escHtml(o.customer_name || '—') + '</div>'
+        +     '<div style="color:var(--text2);font-size:12px;">' + escHtml(o.customer_email) + '</div>'
+        +     '<div style="color:var(--text2);font-size:11px;text-transform:uppercase;margin-top:14px;">Created</div>'
+        +     '<div>' + escHtml(created) + '</div>'
+        +     '<div style="color:var(--text2);font-size:11px;text-transform:uppercase;margin-top:14px;">Stripe</div>'
+        +     '<div><a href="' + escHtml(o.stripe_link) + '" target="_blank" rel="noopener">' + escHtml(o.stripe_session_id) + '</a></div>'
+        +   '</div>'
+        +   '<div>'
+        +     '<div style="color:var(--text2);font-size:11px;text-transform:uppercase;">Ship to</div>'
+        +     '<div>' + (addrLines || '<span style="color:var(--text2);">No address</span>') + '</div>'
+        +     '<div style="color:var(--text2);font-size:11px;text-transform:uppercase;margin-top:14px;">Total</div>'
+        +     '<div style="font-weight:600;font-size:15px;">' + escHtml(total) + '</div>'
+        +   '</div>'
+        + '</div>'
+        + '<div style="margin-top:18px;color:var(--text2);font-size:11px;text-transform:uppercase;">Items</div>'
+        + '<div>' + itemsHtml + '</div>'
+        + trackingBlock;
+
+    // Show ship form only when not yet shipped.
+    const shipForm = document.getElementById('orderModalShipForm');
+    const shipBtn = document.getElementById('orderShipBtn');
+    if (o.status === 'shipped') {
+        shipForm.style.display = 'none';
+        shipBtn.style.display = 'none';
+    } else {
+        shipForm.style.display = '';
+        shipBtn.style.display = '';
+        document.getElementById('orderShipTracking').value = '';
+        document.getElementById('orderShipNotify').checked = true;
+    }
+    document.getElementById('orderModal').classList.add('visible');
+}
+
+function closeOrderModal() {
+    document.getElementById('orderModal').classList.remove('visible');
+    viewingOrderId = null;
+}
+
+async function submitMarkShipped() {
+    if (!viewingOrderId) return;
+    const carrier = document.getElementById('orderShipCarrier').value;
+    const tracking = document.getElementById('orderShipTracking').value.trim();
+    const notify = document.getElementById('orderShipNotify').checked;
+    const errEl = document.getElementById('orderShipError');
+    errEl.style.display = 'none';
+    if (!tracking) { errEl.textContent = 'Tracking number required'; errEl.style.display = ''; return; }
+    try {
+        const resp = await fetch(API + '/shop/admin/orders/' + viewingOrderId + '/ship', {
+            method: 'POST',
+            headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+            body: JSON.stringify({ carrier, tracking_number: tracking, notify_customer: notify }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) { errEl.textContent = data.error || ('HTTP ' + resp.status); errEl.style.display = ''; return; }
+        toast('Order marked as shipped' + (notify ? ' (customer emailed)' : ''), 'success');
+        closeOrderModal();
+        await loadShopOrders();
+    } catch (e) { errEl.textContent = e.message; errEl.style.display = ''; }
+}
+
+// ---------------------------------------------------------------------------
+// Website pages admin
+//
+// We don't ship a full markdown editor in the dashboard — page editing happens
+// inline on /site/{slug} where the existing EasyMDE-based editor lives. This
+// tab just lists pages and lets you create / delete / jump-to-editor.
+// ---------------------------------------------------------------------------
+let websitePages = [];
+
+async function loadWebsitePages() {
+    if (userRole !== 'admin') return;
+    const tbody = document.getElementById('websitePagesBody');
+    try {
+        const resp = await fetch(API + '/website/pages', { headers: authHeaders() });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const data = await resp.json();
+        websitePages = data.pages || [];
+        renderWebsitePagesTable();
+    } catch (e) {
+        tbody.innerHTML = '<tr><td colspan="6" class="empty-state"><p>Failed to load: ' + escHtml(e.message) + '</p></td></tr>';
+    }
+}
+
+function renderWebsitePagesTable() {
+    const tbody = document.getElementById('websitePagesBody');
+    if (!websitePages.length) {
+        tbody.innerHTML = '<tr><td colspan="6" class="empty-state"><p>No pages yet</p><button onclick="showWebsitePageModal()">Create your first page</button></td></tr>';
+        return;
+    }
+    tbody.innerHTML = websitePages.map(p => {
+        const editUrl = '/site/' + encodeURIComponent(p.slug);
+        const parent = p.parent_slug
+            ? '<code>' + escHtml(p.parent_slug) + '</code>'
+            : '<span style="color:var(--text2);">—</span>';
+        const menuId = 'website-page-menu-' + p.slug.replace(/[^a-zA-Z0-9_-]/g, '_');
+        return '<tr>'
+            + '<td><code>' + escHtml(p.slug) + '</code></td>'
+            + '<td>' + escHtml(p.title) + '</td>'
+            + '<td>' + parent + '</td>'
+            + '<td>' + p.ord + '</td>'
+            + '<td style="color:var(--text2);font-size:12px;">' + escHtml(p.updated_at || '') + '</td>'
+            + '<td>'
+            +   '<span class="dropdown" onclick="event.stopPropagation();">'
+            +     '<button class="small secondary" onclick="toggleDropdown(event,\'' + menuId + '\')">Actions &#9662;</button>'
+            +     '<div id="' + menuId + '" class="dropdown-menu" style="display:none;">'
+            +       '<a href="' + escHtml(editUrl) + '" target="_blank" rel="noopener">Open editor ↗</a>'
+            +       '<div class="divider"></div>'
+            +       '<button class="danger" onclick="deleteWebsitePage(' + JSON.stringify(p.slug) + ')">Delete</button>'
+            +     '</div>'
+            +   '</span>'
+            + '</td>'
+            + '</tr>';
+    }).join('');
+}
+
+function showWebsitePageModal() {
+    document.getElementById('websitePageSlug').value = '';
+    document.getElementById('websitePageTitle').value = '';
+    document.getElementById('websitePageParent').value = '';
+    document.getElementById('websitePageOrd').value = 0;
+    document.getElementById('websitePageError').style.display = 'none';
+    document.getElementById('websitePageModal').classList.add('visible');
+    setTimeout(() => document.getElementById('websitePageSlug').focus(), 50);
+}
+
+function closeWebsitePageModal() {
+    document.getElementById('websitePageModal').classList.remove('visible');
+}
+
+async function createWebsitePage() {
+    const errEl = document.getElementById('websitePageError');
+    errEl.style.display = 'none';
+    const slug = document.getElementById('websitePageSlug').value.trim();
+    const title = document.getElementById('websitePageTitle').value.trim();
+    const parent = document.getElementById('websitePageParent').value.trim();
+    const ord = parseInt(document.getElementById('websitePageOrd').value, 10) || 0;
+    if (!/^[a-z0-9][a-z0-9-]*$/.test(slug)) {
+        errEl.textContent = 'Slug must be lowercase letters, digits, and hyphens (no spaces).';
+        errEl.style.display = '';
+        return;
+    }
+    if (!title) {
+        errEl.textContent = 'Title is required.';
+        errEl.style.display = '';
+        return;
+    }
+    if (websitePages.some(p => p.slug === slug)) {
+        errEl.textContent = 'Slug already exists.';
+        errEl.style.display = '';
+        return;
+    }
+    const body = {
+        title,
+        body_md: '# ' + title + '\n\nWrite your page content here.\n',
+        parent_slug: parent || null,
+        ord,
+        meta_description: '',
+    };
+    try {
+        const resp = await fetch(API + '/website/pages/' + encodeURIComponent(slug), {
+            method: 'PUT',
+            headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+            errEl.textContent = data.error || ('HTTP ' + resp.status);
+            errEl.style.display = '';
+            return;
+        }
+        closeWebsitePageModal();
+        await loadWebsitePages();
+        // Open the inline editor in a new tab so the user can write content.
+        window.open('/site/' + encodeURIComponent(slug), '_blank', 'noopener');
+    } catch (e) {
+        errEl.textContent = e.message || 'Failed to create page';
+        errEl.style.display = '';
+    }
+}
+
+async function deleteWebsitePage(slug) {
+    if (!confirm('Delete page "' + slug + '"? This cannot be undone.')) return;
+    try {
+        const resp = await fetch(API + '/website/pages/' + encodeURIComponent(slug), {
+            method: 'DELETE',
+            headers: authHeaders(),
+        });
+        if (!resp.ok) {
+            const data = await resp.json().catch(() => ({}));
+            alert(data.error || ('HTTP ' + resp.status));
+            return;
+        }
+        await loadWebsitePages();
+        toast('Page deleted', 'success');
+    } catch (e) {
+        alert(e.message || 'Failed to delete');
+    }
+}
 </script>
 </body>
 </html>

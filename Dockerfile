@@ -1,5 +1,7 @@
 # Stage 1: Build the Rust binary
-FROM rust:1.88-bookworm AS builder
+# aws-sdk-s3 1.132 requires rustc >= 1.91.1; bumped from 1.88 when S3
+# support for workspace recordings was added.
+FROM rust:1.95-bookworm AS builder
 
 WORKDIR /app
 

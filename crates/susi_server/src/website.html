@@ -1,0 +1,2328 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!--SEO_HEAD-->
+<!--ANALYTICS-->
+<script>
+// Apply theme before paint to avoid a flash of the wrong colour scheme.
+(function () {
+    const t = localStorage.getItem('susi_theme') || 'system';
+    if (t === 'light') document.documentElement.setAttribute('data-theme', 'light');
+    else if (t === 'system' && window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) {
+        document.documentElement.setAttribute('data-theme', 'light');
+    }
+})();
+</script>
+<link rel="icon" href="/favicon.ico" sizes="32x32">
+<link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/static/favicon-180.png">
+<link rel="stylesheet" href="/docs/easymde.css">
+<script src="/docs/easymde.js" defer></script>
+<style>
+:root {
+    --bg: #000000;
+    --bg2: #161922;
+    --bg3: #1d212c;
+    --border: #262b38;
+    --text1: #e6e8ec;
+    --text2: #9aa0aa;
+    --accent: #6aa9ff;
+    --accent-soft: rgba(106,169,255,0.15);
+    --code-bg: #11141b;
+    --radius: 6px;
+    --sidebar-width: 280px;
+}
+:root[data-theme="light"] {
+    --bg: #ffffff;
+    --bg2: #f5f6f8;
+    --bg3: #eceef2;
+    --border: #d8dbe1;
+    --text1: #1a1d23;
+    --text2: #5c6470;
+    --accent: #2563eb;
+    --accent-soft: rgba(37,99,235,0.10);
+    --code-bg: #f1f3f6;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+* { scrollbar-width: thin; scrollbar-color: var(--bg3) var(--bg2); }
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: var(--bg2); }
+*::-webkit-scrollbar-thumb {
+    background: var(--bg3);
+    border-radius: 5px;
+    border: 2px solid var(--bg2);
+}
+*::-webkit-scrollbar-thumb:hover { background: var(--border); }
+*::-webkit-scrollbar-corner { background: var(--bg2); }
+body {
+    background: var(--bg);
+    color: var(--text1);
+    font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Ubuntu, "Helvetica Neue", sans-serif;
+    font-size: 14px;
+    line-height: 1.43;
+    min-height: 100vh;
+}
+.header {
+    height: 56px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 24px;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+}
+.header .brand {
+    color: inherit; text-decoration: none;
+    font-size: 16px; font-weight: 600; letter-spacing: 0.02em;
+    display: flex; align-items: center;
+}
+.header .brand img { height: 28px; display: block; }
+.header .brand img.logo-light,
+.content img.logo-light { display: none; }
+:root[data-theme="light"] .header .brand img.logo-dark,
+:root[data-theme="light"] .content img.logo-dark { display: none; }
+:root[data-theme="light"] .header .brand img.logo-light { display: block; }
+:root[data-theme="light"] .content img.logo-light { display: block; }
+.header-right { display: flex; gap: 10px; align-items: center; }
+.btn {
+    padding: 6px 12px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text1);
+    font-size: 13px;
+    cursor: pointer;
+    font-family: inherit;
+    min-height: 32px;
+}
+.btn:hover { background: var(--bg3); }
+.nav-toggle {
+    display: none;
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text1);
+    width: 40px; height: 36px;
+    border-radius: var(--radius);
+    cursor: pointer;
+    padding: 0;
+    align-items: center;
+    justify-content: center;
+}
+.nav-toggle:hover { background: var(--bg3); }
+.nav-toggle svg { width: 20px; height: 20px; display: block; stroke: currentColor; }
+.nav-overlay {
+    position: fixed; inset: 56px 0 0 0;
+    background: rgba(0,0,0,0.4);
+    opacity: 0; pointer-events: none;
+    transition: opacity 0.2s;
+    z-index: 140;
+}
+.nav-overlay.open { opacity: 1; pointer-events: auto; }
+.btn.primary { background: var(--accent); color: white; border-color: var(--accent); }
+.btn.primary:hover { filter: brightness(1.1); }
+.btn.danger { color: #e2615e; }
+
+.layout {
+    display: grid;
+    grid-template-columns: var(--sidebar-width) 1fr var(--sidebar-width);
+    min-height: calc(100vh - 56px);
+}
+.layout.no-sidebar { grid-template-columns: 1fr var(--sidebar-width); }
+.layout.no-sidebar .sidebar { display: none; }
+.layout.no-toc { grid-template-columns: var(--sidebar-width) 1fr; }
+.layout.no-toc .toc-rail { display: none; }
+.layout.no-sidebar.no-toc { grid-template-columns: 1fr; }
+.sidebar {
+    border-right: 1px solid var(--border);
+    background: var(--bg);
+    padding: 16px 0;
+    overflow-y: auto;
+    max-height: calc(100vh - 56px);
+    position: sticky;
+    top: 56px;
+}
+.sidebar h3 {
+    font-size: 11px;
+    font-weight: 400;
+    color: var(--text2);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin: 16px 16px 8px;
+}
+.sidebar a {
+    display: block;
+    color: var(--text1);
+    text-decoration: none;
+    font-size: 16px;
+    padding: 6px 16px 6px 24px;
+    border-left: 2px solid transparent;
+}
+.sidebar a:hover { color: var(--accent); }
+.sidebar a.active {
+    border-left-color: var(--accent);
+    color: var(--accent);
+    font-weight: 500;
+}
+.sidebar a.section-head {
+    padding-left: 24px;
+}
+.sidebar a .chev { display: none; }
+.sidebar .sidebar-children,
+.sidebar .sidebar-children.collapsed { display: block; }
+.sidebar .sidebar-children a { padding-left: 40px; }
+.sidebar .empty { padding: 16px; color: var(--text2); font-size: 14px; }
+
+.content {
+    padding: 40px 56px;
+    max-width: 880px;
+    margin-left: auto;
+    margin-right: auto;
+    width: 100%;
+    font-size: 16px;
+    line-height: 1.71;
+}
+.content h1 { font-size: 28px; margin: 0 0 18px; font-weight: 400; line-height: 1.14; }
+.content h2 { font-size: 21px; margin: 32px 0 12px; font-weight: 600; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+.content h3 { font-size: 16px; margin: 24px 0 10px; font-weight: 600; }
+.content h4 { font-size: 14px; margin: 18px 0 8px; font-weight: 600; color: var(--text2); }
+.content p { margin: 10px 0; }
+.content code {
+    background: var(--code-bg);
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-family: "SF Mono", "Consolas", "Fira Code", monospace;
+    font-size: 12.5px;
+}
+.content pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+    overflow-x: auto;
+    font-size: 12.5px;
+    line-height: 1.5;
+    margin: 14px 0;
+}
+.content pre code { background: transparent; padding: 0; font-size: inherit; }
+.content blockquote {
+    border-left: 3px solid var(--accent);
+    background: var(--accent-soft);
+    padding: 8px 14px;
+    margin: 14px 0;
+    color: var(--text1);
+    border-radius: 0 var(--radius) var(--radius) 0;
+}
+.content table { border-collapse: collapse; margin: 14px 0; width: 100%; }
+.content .table-scroll { overflow-x: auto; max-width: 100%; margin: 14px 0; -webkit-overflow-scrolling: touch; }
+.content .table-scroll table { margin: 0; }
+.content th, .content td {
+    border: 1px solid var(--border);
+    padding: 7px 11px; text-align: left; vertical-align: top;
+}
+.content th { background: var(--bg2); font-weight: 600; }
+.content tr:nth-child(even) td { background: var(--bg2); }
+.content table.grid { table-layout: fixed; }
+.content table.grid,
+.content table.grid th,
+.content table.grid td,
+.content table.grid tr:nth-child(even) td { background: transparent; border: none; }
+.content table.grid th { font-weight: inherit; text-align: left; }
+.content table.grid td, .content table.grid th { vertical-align: top; padding: 14px; }
+.content .video-embed { position: relative; padding-top: 56.25%; margin: 16px 0; }
+.content .video-embed iframe {
+    position: absolute; top: 0; left: 0;
+    width: 100%; height: 100%; border: 0;
+    border-radius: var(--radius);
+}
+.content ul, .content ol { margin: 10px 0; padding-left: 24px; }
+.content li { margin: 4px 0; }
+.content a { color: var(--accent); text-decoration: none; }
+.content a:hover { text-decoration: underline; }
+.content img { max-width: 100%; border-radius: var(--radius); display: block; margin: 16px auto; }
+.content img.no-radius, .EasyMDEContainer .editor-preview img.no-radius,
+.EasyMDEContainer .editor-preview-side img.no-radius { border-radius: 0; }
+.content hr { border: none; border-top: 1px solid var(--border); margin: 22px 0; }
+.content td img, .content th img { display: inline-block; margin: 0; }
+.content h1, .content h2, .content h3, .content h4 { scroll-margin-top: 72px; }
+
+.meta {
+    color: var(--text2);
+    font-size: 14px;
+    margin-bottom: 24px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--border);
+}
+
+/* EasyMDE theme overrides — match the surrounding dark UI. */
+.EasyMDEContainer { background: var(--bg); }
+.EasyMDEContainer .CodeMirror {
+    background: var(--code-bg);
+    color: var(--text1);
+    border: 1px solid var(--border);
+    border-radius: 0 0 var(--radius) var(--radius);
+    min-height: 480px;
+    font-family: "SF Mono", "Consolas", "Fira Code", monospace;
+    font-size: 13px;
+}
+.EasyMDEContainer .CodeMirror-cursor { border-color: var(--text1); }
+.EasyMDEContainer .CodeMirror-selected { background: var(--accent-soft) !important; }
+.EasyMDEContainer .CodeMirror-line { color: var(--text1); }
+.editor-toolbar {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius) var(--radius) 0 0;
+    border-bottom: none;
+    opacity: 1 !important;
+    position: sticky;
+    top: 56px;
+    z-index: 9;
+}
+.editor-toolbar button {
+    color: var(--text1) !important;
+    border: 1px solid transparent !important;
+    border-radius: 4px !important;
+    padding: 4px 8px !important;
+    font-size: 12px !important;
+    font-weight: 500;
+    background: transparent !important;
+    min-width: 32px;
+    text-align: center;
+}
+.editor-toolbar button:hover, .editor-toolbar button.active {
+    background: var(--bg3) !important;
+    border-color: var(--border) !important;
+}
+.editor-toolbar i.separator { border-left: 1px solid var(--border); margin: 0 4px; }
+.editor-statusbar {
+    background: var(--bg2);
+    color: var(--text2);
+    border: 1px solid var(--border);
+    border-top: none;
+    border-radius: 0 0 var(--radius) var(--radius);
+    padding: 4px 10px;
+    font-size: 11px;
+}
+.EasyMDEContainer .editor-preview, .EasyMDEContainer .editor-preview-side {
+    background: var(--bg); color: var(--text1);
+    border: 1px solid var(--border); padding: 16px 20px;
+}
+.EasyMDEContainer .editor-preview-active-side { display: block; }
+.EasyMDEContainer .editor-preview img, .EasyMDEContainer .editor-preview-side img {
+    max-width: 100%; border-radius: var(--radius);
+}
+.EasyMDEContainer .editor-preview h1, .EasyMDEContainer .editor-preview-side h1 { font-size: 22px; margin: 0 0 12px; }
+.EasyMDEContainer .editor-preview h2, .EasyMDEContainer .editor-preview-side h2 {
+    font-size: 17px; margin: 18px 0 10px; padding-bottom: 4px; border-bottom: 1px solid var(--border);
+}
+.EasyMDEContainer .editor-preview code, .EasyMDEContainer .editor-preview-side code {
+    background: var(--code-bg); padding: 1px 5px; border-radius: 3px; font-size: 12px;
+}
+.EasyMDEContainer .editor-preview pre, .EasyMDEContainer .editor-preview-side pre {
+    background: var(--code-bg); border: 1px solid var(--border); padding: 12px; border-radius: var(--radius);
+}
+.EasyMDEContainer .editor-preview table, .EasyMDEContainer .editor-preview-side table {
+    border-collapse: collapse; width: 100%; font-size: 12px;
+}
+.EasyMDEContainer .editor-preview th, .EasyMDEContainer .editor-preview td,
+.EasyMDEContainer .editor-preview-side th, .EasyMDEContainer .editor-preview-side td {
+    border: 1px solid var(--border); padding: 5px 8px; text-align: left;
+}
+.EasyMDEContainer .editor-preview th, .EasyMDEContainer .editor-preview-side th { background: var(--bg2); }
+
+.edit-meta-row {
+    display: flex; gap: 12px; flex-wrap: wrap;
+    margin-bottom: 12px; align-items: center;
+}
+.edit-meta-row label { font-size: 12px; color: var(--text2); }
+.edit-meta-row input, .edit-meta-row select {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text1);
+    padding: 6px 10px;
+    border-radius: var(--radius);
+    font-size: 13px;
+    font-family: inherit;
+}
+.edit-actions {
+    display: flex; gap: 8px; margin-top: 14px;
+    position: sticky; bottom: 0;
+    background: var(--bg);
+    padding: 12px 0;
+    border-top: 1px solid var(--border);
+    z-index: 9;
+}
+
+.toast {
+    position: fixed; bottom: 24px; left: 50%;
+    transform: translateX(-50%);
+    background: var(--bg3); border: 1px solid var(--border);
+    color: var(--text1); padding: 10px 18px;
+    border-radius: var(--radius); font-size: 13px;
+    z-index: 100; opacity: 0; transition: opacity 0.2s;
+}
+.toast.visible { opacity: 1; }
+.toast.error { border-color: #e2615e; color: #e2615e; }
+.toast.success { border-color: #5fb878; color: #5fb878; }
+
+.empty-state {
+    color: var(--text2); text-align: center;
+    padding: 80px 20px; font-size: 14px;
+}
+.empty-state h2 { color: var(--text1); margin-bottom: 8px; font-weight: 500; }
+
+/* Admin modals (history + assets) */
+.admin-modal {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.55);
+    display: none; align-items: center; justify-content: center;
+    z-index: 200;
+}
+.admin-modal.visible { display: flex; }
+.admin-modal-inner {
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: var(--radius);
+    width: min(1000px, 95vw); max-height: 90vh;
+    display: flex; flex-direction: column;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.35);
+}
+.admin-modal-head {
+    display: flex; align-items: center; gap: 12px;
+    padding: 14px 18px; border-bottom: 1px solid var(--border);
+}
+.admin-modal-head h3 { margin: 0; font-size: 16px; font-weight: 600; flex: 1; }
+.admin-modal-body { flex: 1; overflow-y: auto; padding: 16px 18px; font-size: 13px; }
+.admin-modal-foot {
+    display: flex; gap: 8px; padding: 12px 18px;
+    border-top: 1px solid var(--border);
+    align-items: center;
+}
+
+.rev-list { display: flex; flex-direction: column; gap: 6px; }
+.rev-item {
+    display: flex; gap: 10px; align-items: center;
+    padding: 10px 12px; border: 1px solid var(--border);
+    border-radius: var(--radius); cursor: pointer;
+}
+.rev-item:hover { background: var(--bg2); }
+.rev-item.selected { border-color: var(--accent); background: var(--bg2); }
+.rev-when { font-size: 12px; color: var(--text2); width: 170px; flex-shrink: 0; }
+.rev-author { font-size: 12px; color: var(--text2); width: 140px; flex-shrink: 0; }
+.rev-title { flex: 1; color: var(--text1); }
+.rev-size { color: var(--text2); font-size: 11px; font-variant-numeric: tabular-nums; }
+.rev-preview {
+    margin-top: 14px; padding: 12px;
+    background: var(--bg2); border-radius: var(--radius);
+    max-height: 300px; overflow: auto;
+    font-family: ui-monospace, monospace; font-size: 12px;
+    white-space: pre-wrap; word-break: break-word;
+}
+
+.asset-toolbar {
+    display: flex; gap: 8px; align-items: center;
+    margin-bottom: 14px; flex-wrap: wrap;
+}
+.asset-toolbar input[type="search"] {
+    background: var(--bg); border: 1px solid var(--border);
+    color: var(--text1); padding: 6px 10px;
+    border-radius: var(--radius); font-size: 13px;
+    font-family: inherit; flex: 1; min-width: 180px;
+}
+.asset-toolbar label { font-size: 12px; color: var(--text2); }
+.asset-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 12px;
+}
+.asset-tile {
+    border: 1px solid var(--border); border-radius: var(--radius);
+    overflow: hidden; background: var(--bg2);
+    display: flex; flex-direction: column;
+}
+.asset-tile.orphan { border-color: #e2615e; }
+.asset-thumb {
+    height: 120px; display: flex; align-items: center; justify-content: center;
+    background:
+        repeating-conic-gradient(var(--bg) 0% 25%, var(--bg2) 0% 50%)
+        50% / 16px 16px;
+}
+.asset-thumb img { max-width: 100%; max-height: 100%; object-fit: contain; display: block; }
+.asset-meta { padding: 8px 10px; font-size: 12px; }
+.asset-name {
+    font-family: ui-monospace, monospace;
+    word-break: break-all; color: var(--text1);
+    max-height: 32px; overflow: hidden;
+}
+.asset-info {
+    display: flex; justify-content: space-between;
+    color: var(--text2); font-size: 11px; margin-top: 4px;
+}
+.asset-usage-pill {
+    display: inline-block;
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 999px; padding: 1px 8px; font-size: 11px;
+}
+.asset-usage-pill.orphan {
+    color: #e2615e; border-color: #e2615e;
+}
+.asset-actions {
+    display: flex; gap: 4px; padding: 4px 6px 6px;
+    border-top: 1px solid var(--border);
+}
+.asset-actions button {
+    flex: 1; font-size: 11px; padding: 4px 6px;
+    background: var(--bg); border: 1px solid var(--border);
+    color: var(--text1); border-radius: var(--radius); cursor: pointer;
+}
+.asset-actions button:hover { background: var(--bg3); }
+.asset-actions button.danger { color: #e2615e; border-color: #e2615e; }
+
+/* Right-side table of contents */
+.toc-rail {
+    border-left: 1px solid var(--border);
+    background: var(--bg);
+    padding: 24px 18px;
+    overflow-y: auto;
+    max-height: calc(100vh - 56px);
+    position: sticky; top: 56px;
+    font-size: 16px;
+}
+.toc-rail .toc-title {
+    font-size: 11px; font-weight: 400;
+    color: var(--text2);
+    text-transform: uppercase; letter-spacing: 0.06em;
+    margin-bottom: 8px;
+}
+.toc-rail a {
+    display: block; color: var(--text2);
+    text-decoration: none;
+    padding: 4px 0; border-left: 2px solid transparent;
+    padding-left: 10px; line-height: 1.4;
+}
+.toc-rail a:hover { color: var(--text1); }
+.toc-rail a.active {
+    color: var(--accent); border-left-color: var(--accent);
+    font-weight: 500;
+}
+.toc-rail a.lvl-3 { padding-left: 22px; }
+.toc-rail a.lvl-4 { padding-left: 34px; color: var(--text2); }
+
+@media (max-width: 1100px) {
+    .layout,
+    .layout.no-sidebar,
+    .layout.no-toc { grid-template-columns: var(--sidebar-width) 1fr; }
+    .layout.no-sidebar { grid-template-columns: 1fr; }
+    .toc-rail { display: none; }
+}
+@media (max-width: 900px) {
+    :root { --sidebar-width: 200px; }
+    .content { padding: 32px 32px; }
+}
+@media (max-width: 720px) {
+    .layout,
+    .layout.no-sidebar,
+    .layout.no-toc,
+    .layout.no-sidebar.no-toc { grid-template-columns: 1fr; }
+    .sidebar {
+        position: fixed;
+        top: 56px;
+        left: 0;
+        width: 280px;
+        max-width: 80vw;
+        height: calc(100vh - 56px);
+        max-height: none;
+        border-right: 1px solid var(--border);
+        border-bottom: none;
+        z-index: 150;
+        transform: translateX(-100%);
+        transition: transform 0.2s ease;
+    }
+    .sidebar.open { transform: translateX(0); }
+    .layout.no-sidebar .sidebar { display: none; }
+    .nav-toggle { display: inline-flex; }
+    .content { padding: 20px 16px; max-width: 100%; }
+    .content h1 { font-size: 26px; }
+    .content h2 { font-size: 19px; }
+    .header { padding: 0 12px; }
+    .header .brand { font-size: 15px; }
+    .header-right { gap: 4px; }
+    .header-right .btn { padding: 8px 10px; font-size: 13px; min-height: 36px; }
+    .cart-badge { margin-left: 4px; padding: 0 5px; }
+}
+
+/* ---- Shop ---- */
+.shop-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 18px; margin-top: 24px; }
+.shop-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; display: flex; flex-direction: column; text-decoration: none; color: inherit; }
+.shop-card:hover { border-color: var(--accent); }
+.shop-card-img { aspect-ratio: 4/3; background: var(--bg3); display: flex; align-items: center; justify-content: center; color: var(--text2); overflow: hidden; }
+.shop-card-img img { width: 100%; height: 100%; object-fit: cover; }
+.shop-card-body { padding: 12px 14px; display: flex; flex-direction: column; gap: 6px; flex: 1; }
+.shop-card-title { font-weight: 600; font-size: 13.5px; line-height: 1.35; }
+.shop-card-price { color: var(--text2); font-size: 13px; }
+.shop-card-actions { margin-top: auto; padding-top: 8px; }
+.shop-card-actions button { width: 100%; }
+
+.shop-detail { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; margin-top: 8px; }
+@media (max-width: 800px) { .shop-detail { grid-template-columns: 1fr; } }
+.shop-detail-img { background: var(--bg3); border-radius: 8px; aspect-ratio: 4/3; overflow: hidden; display: flex; align-items: center; justify-content: center; color: var(--text2); }
+.shop-detail-img img { width: 100%; height: 100%; object-fit: cover; }
+.shop-detail-buy { display: flex; align-items: center; gap: 10px; margin-top: 18px; }
+.shop-detail-buy input { width: 70px; text-align: center; padding: 6px 8px; background: var(--bg2); color: var(--text1); border: 1px solid var(--border); border-radius: var(--radius); font: inherit; }
+
+/* Cart button + badge in header */
+.cart-btn { position: relative; }
+.cart-badge { display: inline-block; min-width: 18px; height: 18px; line-height: 18px; text-align: center; background: var(--accent); color: white; border-radius: 9px; font-size: 11px; font-weight: 600; margin-left: 6px; padding: 0 6px; }
+
+/* Cart drawer */
+.cart-drawer { position: fixed; top: 0; right: 0; height: 100vh; width: 380px; max-width: 100vw; background: var(--bg2); border-left: 1px solid var(--border); transform: translateX(100%); transition: transform 0.2s ease; display: flex; flex-direction: column; z-index: 200; }
+.cart-drawer.open { transform: translateX(0); }
+.cart-head { display: flex; justify-content: space-between; align-items: center; padding: 14px 18px; border-bottom: 1px solid var(--border); }
+.cart-head h3 { margin: 0; font-size: 15px; }
+.cart-body { flex: 1; overflow-y: auto; padding: 12px 18px; }
+.cart-item { display: grid; grid-template-columns: 48px 1fr auto; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--border); align-items: center; }
+.cart-item-img { width: 48px; height: 48px; background: var(--bg3); border-radius: 4px; overflow: hidden; display: flex; align-items: center; justify-content: center; color: var(--text2); font-size: 11px; }
+.cart-item-img img { width: 100%; height: 100%; object-fit: cover; }
+.cart-item-title { font-size: 13px; font-weight: 500; }
+.cart-item-meta { font-size: 12px; color: var(--text2); display: flex; gap: 8px; align-items: center; margin-top: 2px; }
+.cart-item-meta input { width: 54px; padding: 4px 8px; font-size: 12px; background: var(--bg); color: var(--text1); border: 1px solid var(--border); border-radius: 4px; font: inherit; }
+.cart-item-price { font-size: 13px; }
+.cart-foot { padding: 14px 18px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 10px; }
+.cart-total { display: flex; justify-content: space-between; font-weight: 600; }
+.cart-hint { font-size: 11px; color: var(--text2); }
+.cart-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.35); opacity: 0; pointer-events: none; transition: opacity 0.2s; z-index: 199; }
+.cart-overlay.open { opacity: 1; pointer-events: auto; }
+.cart-error { background: rgba(226,97,94,0.12); border: 1px solid #e2615e; color: #e2615e; padding: 8px 10px; border-radius: var(--radius); font-size: 12px; }
+.cart-drawer select { width: 100%; padding: 7px 10px; background: var(--bg); color: var(--text1); border: 1px solid var(--border); border-radius: var(--radius); font: inherit; }
+
+/* Buy callout on sensor pages */
+.buy-callout { margin-top: 36px; padding-top: 24px; border-top: 1px solid var(--border); }
+.buy-callout h2 { font-size: 18px; margin: 0 0 14px; padding-bottom: 0; border-bottom: none; }
+.buy-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+.buy-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; text-decoration: none; color: inherit; display: flex; gap: 12px; align-items: center; }
+.buy-card:hover { border-color: var(--accent); }
+.buy-card-img { width: 56px; height: 56px; background: var(--bg3); border-radius: 4px; overflow: hidden; display: flex; align-items: center; justify-content: center; color: var(--text2); font-size: 11px; flex-shrink: 0; }
+.buy-card-img img { width: 100%; height: 100%; object-fit: cover; }
+.buy-card-body { flex: 1; min-width: 0; }
+.buy-card-title { font-weight: 500; font-size: 13px; line-height: 1.3; }
+.buy-card-price { font-size: 12px; color: var(--text2); margin-top: 2px; }
+
+/* Contact form */
+.contact-form { margin: 24px 0; max-width: 560px; display: flex; flex-direction: column; gap: 12px; }
+.contact-form label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text2); }
+.contact-form input, .contact-form textarea { padding: 8px 10px; background: var(--bg); color: var(--text1); border: 1px solid var(--border); border-radius: var(--radius); font: inherit; font-size: 14px; }
+.contact-form input:focus, .contact-form textarea:focus { outline: none; border-color: var(--accent); }
+.contact-form textarea { min-height: 140px; resize: vertical; }
+.contact-form .hp-field { position: absolute; left: -9999px; width: 1px; height: 1px; opacity: 0; }
+.contact-form .row-actions { display: flex; gap: 10px; align-items: center; }
+.contact-form .status { font-size: 13px; }
+.contact-form .status.ok { color: #4caf75; }
+.contact-form .status.err { color: #e2615e; }
+.contact-form .turnstile-slot { min-height: 65px; }
+.email-obf { cursor: pointer; color: var(--accent); text-decoration: underline; }
+</style>
+</head>
+<body>
+
+<div class="header">
+    <button class="nav-toggle" id="navToggle" onclick="toggleSidebar()" aria-label="Open menu">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="3" y1="6" x2="21" y2="6"></line>
+            <line x1="3" y1="12" x2="21" y2="12"></line>
+            <line x1="3" y1="18" x2="21" y2="18"></line>
+        </svg>
+    </button>
+    <a href="/site" class="brand" aria-label="Xikaku">
+        <img class="logo-dark" src="/static/logo-dark.png" alt="Xikaku">
+        <img class="logo-light" src="/static/logo.png" alt="Xikaku">
+    </a>
+    <div class="header-right">
+        <button id="editBtn" class="btn" onclick="enterEditMode()" style="display:none;">Edit</button>
+        <button id="newPageBtn" class="btn" onclick="newPage()" style="display:none;">+ Page</button>
+        <button id="btnCart" class="btn cart-btn" onclick="openCart()">Cart<span id="cartBadge" class="cart-badge" style="display:none;">0</span></button>
+        <button id="btnTheme" class="btn" onclick="cycleTheme()" title="Toggle theme">🌓</button>
+        <button id="navLogoutBtn" class="btn" onclick="logoutFromSite()" style="display:none;">Logout</button>
+    </div>
+</div>
+
+<div class="layout no-sidebar no-toc" id="layout">
+    <aside class="sidebar" id="sidebar"></aside>
+    <main class="content" id="content"><!--BODY_CONTENT--></main>
+    <aside class="toc-rail" id="tocRail" aria-label="On this page"></aside>
+</div>
+
+<div id="navOverlay" class="nav-overlay" onclick="closeSidebar()"></div>
+
+<div id="toast" class="toast"></div>
+
+<!-- Cart drawer -->
+<div class="cart-overlay" id="cartOverlay" onclick="closeCart()"></div>
+<div class="cart-drawer" id="cartDrawer">
+    <div class="cart-head">
+        <h3>Your cart</h3>
+        <button class="btn" onclick="closeCart()">&times;</button>
+    </div>
+    <div class="cart-body" id="cartBody"></div>
+    <div class="cart-foot">
+        <div id="cartShipRow" style="display:none;">
+            <label style="display:block;font-size:12px;color:var(--text2);margin-bottom:4px;">Ship to</label>
+            <select id="cartCountry" onchange="persistShipCountry()"></select>
+        </div>
+        <div class="cart-total"><span>Subtotal</span><span id="cartTotal">$0.00</span></div>
+        <div class="cart-hint">Tax + shipping calculated at checkout.</div>
+        <button class="btn primary" id="checkoutBtn" onclick="checkout()" disabled>Checkout</button>
+        <div id="cartError" class="cart-error" style="display:none;"></div>
+    </div>
+</div>
+
+<script>
+function applyTheme(t) {
+    const root = document.documentElement;
+    if (t === 'system') {
+        root.removeAttribute('data-theme');
+        const prefersLight = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches;
+        if (prefersLight) root.setAttribute('data-theme', 'light');
+    } else {
+        root.setAttribute('data-theme', t);
+    }
+    const btn = document.getElementById('btnTheme');
+    if (btn) {
+        btn.textContent = t === 'dark' ? '🌙' : t === 'light' ? '☀️' : '🌓';
+        btn.title = 'Theme: ' + t + ' (click to cycle)';
+    }
+}
+function toggleSidebar() {
+    const sb = document.getElementById('sidebar');
+    const ov = document.getElementById('navOverlay');
+    if (!sb) return;
+    const open = sb.classList.toggle('open');
+    if (ov) ov.classList.toggle('open', open);
+}
+function closeSidebar() {
+    const sb = document.getElementById('sidebar');
+    const ov = document.getElementById('navOverlay');
+    if (sb) sb.classList.remove('open');
+    if (ov) ov.classList.remove('open');
+}
+document.addEventListener('click', (e) => {
+    const sb = document.getElementById('sidebar');
+    if (!sb || !sb.classList.contains('open')) return;
+    const a = e.target.closest('a');
+    if (a && sb.contains(a)) closeSidebar();
+});
+
+function cycleTheme() {
+    const cur = localStorage.getItem('susi_theme') || 'system';
+    const next = cur === 'dark' ? 'light' : cur === 'light' ? 'system' : 'dark';
+    localStorage.setItem('susi_theme', next);
+    applyTheme(next);
+}
+applyTheme(localStorage.getItem('susi_theme') || 'system');
+if (window.matchMedia) {
+    window.matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => {
+        if ((localStorage.getItem('susi_theme') || 'system') === 'system') applyTheme('system');
+    });
+}
+
+const API = '/api/v1';
+
+// On the canonical public domain (xikaku.com) the website lives at clean URLs
+// (/contact, /about, etc.). On other hosts (susi.lp-research.com) it stays
+// under /site/{slug} so the admin dashboard at / isn't shadowed.
+const CANONICAL_HOSTS = ['xikaku.com', 'www.xikaku.com'];
+const SITE_PATH_PREFIX = CANONICAL_HOSTS.includes(location.host) ? '' : '/site';
+function pageHref(slug) { return SITE_PATH_PREFIX + '/' + encodeURIComponent(slug); }
+function siteRootHref() { return SITE_PATH_PREFIX || '/'; }
+// Top-level paths that must NOT be intercepted as website slugs on xikaku.com.
+const RESERVED_TOP_PATHS = new Set(['site', 'shop', 'api', 'static', 'docs', 'robots.txt', 'sitemap.xml', 'llms.txt', 'favicon.ico', 'health', '.well-known']);
+
+let pages = [];
+let assets = [];
+let currentSlug = null;
+let currentPage = null;
+let editMode = false;
+let isAdmin = false;
+
+function authToken() { return localStorage.getItem('auth_token') || ''; }
+function isPotentialAdmin() { return !!authToken(); }
+
+async function resolveAdminStatus() {
+    if (!authToken()) { isAdmin = false; return; }
+    try {
+        const r = await fetch('/api/v1/auth/status', { headers: { 'Authorization': 'Bearer ' + authToken() }});
+        if (r.ok) {
+            const d = await r.json();
+            isAdmin = (d.role === 'admin');
+        } else if (r.status === 401) {
+            localStorage.removeItem('auth_token');
+            isAdmin = false;
+        }
+    } catch (e) { isAdmin = false; }
+    updateAdminChrome();
+}
+
+function updateAdminChrome() {
+    document.getElementById('navLogoutBtn').style.display = isAdmin ? '' : 'none';
+    document.getElementById('newPageBtn').style.display = isAdmin ? '' : 'none';
+    document.getElementById('editBtn').style.display = (isAdmin && currentPage) ? '' : 'none';
+}
+
+function logoutFromSite() {
+    localStorage.removeItem('auth_token');
+    isAdmin = false;
+    location.reload();
+}
+
+function toast(msg, kind) {
+    const el = document.getElementById('toast');
+    el.textContent = msg;
+    el.className = 'toast visible' + (kind ? ' ' + kind : '');
+    setTimeout(() => el.classList.remove('visible'), 2400);
+}
+
+function escHtml(s) {
+    return (s || '')
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+// ---------------------------------------------------------------------------
+// Markdown renderer (same as docs.html)
+// ---------------------------------------------------------------------------
+
+function videoEmbedSrc(url) {
+    let m = url.match(/^https?:\/\/(?:www\.)?vimeo\.com\/(\d+)(?:\/([a-f0-9]+))?/);
+    if (m) return 'https://player.vimeo.com/video/' + m[1] + (m[2] ? '?h=' + m[2] : '');
+    m = url.match(/^https?:\/\/player\.vimeo\.com\/video\/\d+/);
+    if (m) return url;
+    m = url.match(/^https?:\/\/(?:www\.)?youtube\.com\/watch\?v=([A-Za-z0-9_-]+)/);
+    if (m) return 'https://www.youtube.com/embed/' + m[1];
+    m = url.match(/^https?:\/\/youtu\.be\/([A-Za-z0-9_-]+)/);
+    if (m) return 'https://www.youtube.com/embed/' + m[1];
+    m = url.match(/^https?:\/\/(?:www\.)?youtube\.com\/embed\/[A-Za-z0-9_-]+/);
+    if (m) return url;
+    return null;
+}
+
+function renderInline(s) {
+    let out = escHtml(s);
+    out = out.replace(/`([^`]+)`/g, (_, c) => '<code>' + c + '</code>');
+    out = out.replace(/\{\{email:([^\s}]+)\}\}/g, (_, addr) => {
+        const at = addr.indexOf('@');
+        if (at <= 0 || at === addr.length - 1) return escHtml(addr);
+        const u = addr.slice(0, at);
+        const d = addr.slice(at + 1);
+        return '<span class="email-obf" data-u="' + btoa(u) + '" data-d="' + btoa(d) + '" tabindex="0" role="button">show email</span>';
+    });
+    out = out.replace(/!\[([^\]]*)\]\(([^)]+)\)(\{[^}]*\})?/g, (_, alt, url, attrs) => {
+        const vsrc = videoEmbedSrc(url);
+        if (vsrc) {
+            return '<div class="video-embed"><iframe src="' + vsrc
+                + '" title="' + alt
+                + '" allow="autoplay; fullscreen; picture-in-picture"'
+                + ' allowfullscreen loading="lazy"></iframe></div>';
+        }
+        let extra = '';
+        if (attrs) {
+            const w = attrs.match(/\bwidth\s*=\s*(\d+(?:px|%)?)/i);
+            const h = attrs.match(/\bheight\s*=\s*(\d+(?:px|%)?)/i);
+            if (w) extra += ' width="' + w[1] + '"';
+            if (h) extra += ' height="' + h[1] + '"';
+            const classes = [...attrs.matchAll(/\.([A-Za-z][\w-]*)/g)].map(m => m[1]);
+            if (classes.length) extra += ' class="' + classes.join(' ') + '"';
+        }
+        return '<img alt="' + alt + '" src="' + resolveAssetUrl(url) + '"' + extra + '>';
+    });
+    out = out.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, text, url) => {
+        const safe = url.startsWith('http') || url.startsWith('#') || url.startsWith('/')
+            ? url : pageHref(url);
+        return '<a href="' + safe + '">' + text + '</a>';
+    });
+    out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    out = out.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
+    return out;
+}
+
+function resolveAssetUrl(url) {
+    if (url.startsWith('http') || url.startsWith('/') || url.startsWith('data:')) return url;
+    return API + '/website/assets/' + encodeURIComponent(url);
+}
+
+function renderMarkdown(src) {
+    if (!src) return '';
+    const lines = src.replace(/\r\n/g, '\n').split('\n');
+    const out = [];
+    let i = 0;
+    while (i < lines.length) {
+        const line = lines[i];
+        if (line.trim() === '{{contact-form}}') {
+            out.push('<div data-contact-form></div>');
+            i++;
+            continue;
+        }
+        const fence = line.match(/^```(.*)$/);
+        if (fence) {
+            const lang = fence[1].trim();
+            const buf = [];
+            i++;
+            while (i < lines.length && !lines[i].match(/^```\s*$/)) {
+                buf.push(lines[i]); i++;
+            }
+            i++;
+            out.push('<pre><code' + (lang ? ' class="lang-' + escHtml(lang) + '"' : '') + '>'
+                + escHtml(buf.join('\n')) + '</code></pre>');
+            continue;
+        }
+        const h = line.match(/^(#{1,6})\s+(.*)$/);
+        if (h) {
+            const level = h[1].length;
+            out.push('<h' + level + '>' + renderInline(h[2]) + '</h' + level + '>');
+            i++;
+            continue;
+        }
+        if (/^---+\s*$/.test(line)) { out.push('<hr>'); i++; continue; }
+        if (line.startsWith('> ')) {
+            const buf = [];
+            while (i < lines.length && lines[i].startsWith('> ')) {
+                buf.push(lines[i].slice(2)); i++;
+            }
+            out.push('<blockquote>' + renderMarkdown(buf.join('\n')) + '</blockquote>');
+            continue;
+        }
+        if (line.includes('|') && i + 1 < lines.length && /^\s*\|?[\s:|-]+\|[\s:|-]+\|?\s*$/.test(lines[i+1])) {
+            const headers = splitTableRow(line);
+            i += 2;
+            const rows = [];
+            while (i < lines.length && lines[i].includes('|') && lines[i].trim() !== '') {
+                rows.push(splitTableRow(lines[i])); i++;
+            }
+            const isGrid = headers.every(h => h.trim() === '');
+            let html = isGrid ? '<table class="grid"><tbody>' : '<div class="table-scroll"><table><thead><tr>';
+            if (!isGrid) {
+                headers.forEach(hh => html += '<th>' + renderInline(hh) + '</th>');
+                html += '</tr></thead><tbody>';
+            }
+            rows.forEach(r => {
+                html += '<tr>';
+                r.forEach(c => html += '<td>' + renderInline(c) + '</td>');
+                html += '</tr>';
+            });
+            html += '</tbody></table>' + (isGrid ? '' : '</div>');
+            out.push(html);
+            continue;
+        }
+        if (/^[-*]\s+/.test(line)) {
+            const buf = [];
+            while (i < lines.length && /^[-*]\s+/.test(lines[i])) {
+                buf.push(lines[i].replace(/^[-*]\s+/, '')); i++;
+            }
+            out.push('<ul>' + buf.map(b => '<li>' + renderInline(b) + '</li>').join('') + '</ul>');
+            continue;
+        }
+        const ol = line.match(/^(\d+)\.\s+(.*)$/);
+        if (ol) {
+            const start = ol[1];
+            const buf = [ol[2]];
+            i++;
+            while (i < lines.length && /^\d+\.\s+/.test(lines[i])) {
+                buf.push(lines[i].replace(/^\d+\.\s+/, '')); i++;
+            }
+            const startAttr = start === '1' ? '' : ' start="' + start + '"';
+            out.push('<ol' + startAttr + '>' + buf.map(b => '<li>' + renderInline(b) + '</li>').join('') + '</ol>');
+            continue;
+        }
+        if (line.trim() === '') { i++; continue; }
+        const para = [line];
+        i++;
+        while (i < lines.length && lines[i].trim() !== ''
+               && !/^(#{1,6}\s|```|>|---+\s*$|[-*]\s|\d+\.\s)/.test(lines[i])
+               && !(lines[i].includes('|') && i + 1 < lines.length && /^\s*\|?[\s:|-]+\|/.test(lines[i+1]))) {
+            para.push(lines[i]); i++;
+        }
+        const joined = para.map((ln, k) =>
+            (k < para.length - 1 && /  +$/.test(ln)) ? ln.replace(/\s+$/, '') + '\u0001' : ln
+        ).join(' ');
+        out.push('<p>' + renderInline(joined).replace(/\u0001/g, '<br>') + '</p>');
+    }
+    return out.join('\n');
+}
+
+function splitTableRow(line) {
+    let s = line.trim();
+    if (s.startsWith('|')) s = s.slice(1);
+    if (s.endsWith('|')) s = s.slice(0, -1);
+    const cells = [];
+    let cur = '';
+    for (let j = 0; j < s.length; j++) {
+        if (s[j] === '\\' && j + 1 < s.length && s[j+1] === '|') { cur += '|'; j++; }
+        else if (s[j] === '|') { cells.push(cur.trim()); cur = ''; }
+        else cur += s[j];
+    }
+    cells.push(cur.trim());
+    return cells;
+}
+
+// ---------------------------------------------------------------------------
+// Data fetch
+// ---------------------------------------------------------------------------
+
+async function loadIndex() {
+    const resp = await fetch(API + '/website/pages');
+    if (!resp.ok) { return false; }
+    const data = await resp.json();
+    pages = data.pages || [];
+    assets = data.assets || [];
+    return true;
+}
+
+async function loadPage(slug) {
+    currentSlug = slug;
+    const resp = await fetch(API + '/website/pages/' + encodeURIComponent(slug));
+    if (!resp.ok) {
+        currentPage = null;
+        renderEmptyState('Page "' + slug + '" not found.');
+        return;
+    }
+    currentPage = await resp.json();
+    editMode = false;
+    if (easymde) { try { easymde.toTextArea(); } catch (e) {} easymde = null; }
+    renderSidebar();
+    renderPage();
+}
+
+// ---------------------------------------------------------------------------
+// Render
+// ---------------------------------------------------------------------------
+
+function renderSidebar() {
+    const sb = document.getElementById('sidebar');
+    const layout = document.getElementById('layout');
+    // Treat /shop as a non-empty sidebar context too — even when there are
+    // no pages we still want to show the Shop link.
+    const onShop = currentSlug === '__shop__';
+    if (pages.length <= 1 && !onShop) {
+        sb.innerHTML = '';
+        if (layout) layout.classList.add('no-sidebar');
+        return;
+    }
+    if (layout) layout.classList.remove('no-sidebar');
+    const byParent = new Map();
+    const topLevel = [];
+    const slugSet = new Set(pages.map(p => p.slug));
+    pages.forEach(p => {
+        if (p.parent_slug && slugSet.has(p.parent_slug)) {
+            if (!byParent.has(p.parent_slug)) byParent.set(p.parent_slug, []);
+            byParent.get(p.parent_slug).push(p);
+        } else {
+            topLevel.push(p);
+        }
+    });
+    topLevel.sort((a, b) => a.ord - b.ord || a.title.localeCompare(b.title));
+    let html = '';
+    topLevel.forEach(p => {
+        const children = byParent.get(p.slug) || [];
+        children.sort((a, b) => a.ord - b.ord || a.title.localeCompare(b.title));
+        const hasChildren = children.length > 0;
+        const expanded = hasChildren && (p.slug === currentSlug || children.some(c => c.slug === currentSlug));
+        html += renderSidebarItem(p, true, hasChildren, expanded);
+        if (hasChildren) {
+            html += '<div class="sidebar-children' + (expanded ? '' : ' collapsed') + '">';
+            children.forEach(c => html += renderSidebarItem(c, false, false, false));
+            html += '</div>';
+        }
+    });
+    const orphans = pages.filter(p => p.parent_slug && !slugSet.has(p.parent_slug));
+    if (orphans.length) {
+        const groups = new Map();
+        orphans.forEach(o => {
+            if (!groups.has(o.parent_slug)) groups.set(o.parent_slug, []);
+            groups.get(o.parent_slug).push(o);
+        });
+        for (const [g, items] of groups) {
+            html += '<h3>' + escHtml(g) + '</h3>';
+            items.sort((a, b) => a.ord - b.ord || a.title.localeCompare(b.title));
+            items.forEach(it => html += renderSidebarItem(it, false, false, false));
+        }
+    }
+    const shopActive = currentSlug === '__shop__' ? ' active' : '';
+    html += '<a class="section-head' + shopActive + '" href="/shop">Shop</a>';
+    sb.innerHTML = html;
+}
+
+function renderSidebarItem(p, isHead, hasChildren, expanded) {
+    const cls = (p.slug === currentSlug ? 'active' : '') + (isHead ? ' section-head' : '');
+    const chev = hasChildren ? '<span class="chev">' + (expanded ? '▼' : '▶') + '</span>' : '';
+    return '<a class="' + cls + '" href="' + pageHref(p.slug) + '">'
+        + chev + escHtml(p.title) + '</a>';
+}
+
+function renderEmptyState(msg) {
+    const layout = document.getElementById('layout');
+    if (layout) { layout.classList.add('no-toc'); layout.classList.add('no-sidebar'); }
+    document.getElementById('content').innerHTML =
+        '<div class="empty-state"><h2>' + escHtml(msg) + '</h2></div>';
+    document.getElementById('editBtn').style.display = 'none';
+}
+
+function renderNoPages() {
+    const layout = document.getElementById('layout');
+    if (layout) { layout.classList.add('no-toc'); layout.classList.add('no-sidebar'); }
+    const c = document.getElementById('content');
+    if (isAdmin) {
+        c.innerHTML =
+            '<div class="empty-state">' +
+                '<h2>No pages yet</h2>' +
+                '<p>Create the first page to get started.</p>' +
+                '<p style="margin-top:20px;"><button class="btn primary" onclick="newPage()">+ New page</button></p>' +
+            '</div>';
+    } else {
+        c.innerHTML = '<div class="empty-state"><h2>Coming soon</h2></div>';
+    }
+}
+
+function renderPage() {
+    const c = document.getElementById('content');
+    const layout = document.getElementById('layout');
+    if (!currentPage) {
+        renderEmptyState('Select a page.');
+        return;
+    }
+    updateAdminChrome();
+    if (editMode) {
+        if (layout) layout.classList.add('no-toc');
+        renderEditor();
+        return;
+    }
+    const meta = currentPage.updated_at
+        ? '<div class="meta">Updated ' + escHtml(formatDate(currentPage.updated_at)) + '</div>'
+        : '';
+    let html = meta + renderMarkdown(currentPage.body_md || '');
+    const { html: withIds, headings } = injectHeadingIds(html);
+    c.innerHTML = withIds;
+    renderToc(headings);
+    revealEmailObfs(c);
+    mountContactForms(c);
+    // Append a "buy" callout for sensor pages whose slug maps to live SKUs.
+    if (currentSlug && SLUG_TO_SKU_PREFIXES[currentSlug]) {
+        loadShopProducts().then(() => injectBuyCallout(currentSlug));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Table of contents
+// ---------------------------------------------------------------------------
+
+function injectHeadingIds(html) {
+    const used = new Map();
+    const headings = [];
+    function slugify(text) {
+        const base = text.toLowerCase()
+            .replace(/<[^>]+>/g, '')
+            .replace(/&[a-z]+;/g, ' ')
+            .replace(/[^\p{L}\p{N}]+/gu, '-')
+            .replace(/^-+|-+$/g, '')
+            || 'section';
+        const n = used.get(base) || 0;
+        used.set(base, n + 1);
+        return n === 0 ? base : base + '-' + n;
+    }
+    const out = html.replace(/<h([1-4])(?![^>]*\bid=)([^>]*)>([\s\S]*?)<\/h\1>/g,
+        (_m, lvl, attrs, inner) => {
+            const level = parseInt(lvl, 10);
+            const text = inner.replace(/<[^>]+>/g, '').trim();
+            if (!text) return _m;
+            const id = slugify(text);
+            headings.push({ level, text, id });
+            return '<h' + lvl + attrs + ' id="' + id + '">' + inner + '</h' + lvl + '>';
+        });
+    return { html: out, headings };
+}
+
+let tocActiveObserver = null;
+
+function renderToc(headings) {
+    const rail = document.getElementById('tocRail');
+    const layout = document.getElementById('layout');
+    if (!rail) return;
+    if (tocActiveObserver) { tocActiveObserver.disconnect(); tocActiveObserver = null; }
+
+    let items = headings.slice();
+    if (items.length && items[0].level === 1 && currentPage
+        && items[0].text.toLowerCase() === (currentPage.title || '').toLowerCase()) {
+        items = items.slice(1);
+    }
+    if (items.length < 2) {
+        rail.innerHTML = '';
+        if (layout) layout.classList.add('no-toc');
+        return;
+    }
+    if (layout) layout.classList.remove('no-toc');
+
+    const links = items.map(h => {
+        const cls = 'lvl-' + h.level;
+        return '<a class="' + cls + '" href="#' + h.id + '" data-toc-id="' + h.id + '">' + escHtml(h.text) + '</a>';
+    }).join('');
+    rail.innerHTML = '<div class="toc-title">On this page</div>' + links;
+
+    rail.querySelectorAll('a').forEach(a => {
+        a.addEventListener('click', (e) => {
+            e.preventDefault();
+            const id = a.getAttribute('data-toc-id');
+            const el = document.getElementById(id);
+            if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        });
+    });
+
+    const observed = items.map(h => document.getElementById(h.id)).filter(Boolean);
+    const linkById = new Map();
+    rail.querySelectorAll('a').forEach(a => linkById.set(a.getAttribute('data-toc-id'), a));
+    const setActive = (id) => {
+        rail.querySelectorAll('a.active').forEach(a => a.classList.remove('active'));
+        const a = linkById.get(id);
+        if (a) a.classList.add('active');
+    };
+    tocActiveObserver = new IntersectionObserver((entries) => {
+        const visible = entries
+            .filter(e => e.isIntersecting)
+            .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top);
+        if (visible.length) setActive(visible[0].target.id);
+    }, { rootMargin: '-72px 0px -60% 0px', threshold: 0 });
+    observed.forEach(el => tocActiveObserver.observe(el));
+    if (observed[0]) setActive(observed[0].id);
+}
+
+// ---------------------------------------------------------------------------
+// Editor
+// ---------------------------------------------------------------------------
+
+let easymde = null;
+
+function renderEditor() {
+    const c = document.getElementById('content');
+    const title = currentPage.title || '';
+    const parent = currentPage.parent_slug || '';
+    const ord = currentPage.ord || 0;
+    const body = currentPage.body_md || '';
+    const metaDesc = currentPage.meta_description || '';
+    const parentOptions = buildParentOptions(parent, currentSlug);
+    c.innerHTML =
+        '<div class="edit-meta-row">' +
+            '<label>Title</label><input id="editTitle" type="text" style="flex:1;min-width:200px;">' +
+            '<label>Slug</label><input id="editSlug" type="text" style="width:160px;">' +
+            '<label>Parent</label><select id="editParent" style="min-width:200px;">' + parentOptions + '</select>' +
+            '<label>Order</label><input id="editOrd" type="number" style="width:80px;">' +
+        '</div>' +
+        '<div class="edit-meta-row" style="margin-top:8px;">' +
+            '<label title="Overrides the auto-derived description for SEO / AI crawlers. Leave empty to auto-derive from body.">SEO description</label>' +
+            '<input id="editMetaDesc" type="text" maxlength="300" '
+                + 'placeholder="Shown as meta description and in AI/search snippets — keep under ~160 chars. Blank = auto-derive." '
+                + 'style="flex:1;min-width:200px;">' +
+        '</div>' +
+        '<textarea id="editBody"></textarea>' +
+        '<div class="edit-actions">' +
+            '<button class="btn primary" onclick="savePage()">Save</button>' +
+            '<button class="btn" onclick="cancelEdit()">Cancel</button>' +
+            '<button class="btn" onclick="openHistory()" title="Page edit history">History</button>' +
+            '<button class="btn" onclick="openAssets()" title="Image & asset library">Assets</button>' +
+            '<div style="flex:1"></div>' +
+            '<button class="btn danger" onclick="deletePage()">Delete page</button>' +
+        '</div>';
+    document.getElementById('editTitle').value = title;
+    document.getElementById('editSlug').value = currentSlug;
+    document.getElementById('editOrd').value = ord;
+    document.getElementById('editMetaDesc').value = metaDesc;
+    initEasyMDE(body);
+}
+
+function buildParentOptions(selected, excludeSlug) {
+    const opts = ['<option value="">(none — top level)</option>'];
+    const sorted = [...pages].sort((a, b) => a.title.localeCompare(b.title));
+    const known = new Set();
+    sorted.forEach(p => {
+        if (p.slug === excludeSlug) return;
+        known.add(p.slug);
+        const sel = p.slug === selected ? ' selected' : '';
+        opts.push('<option value="' + escHtml(p.slug) + '"' + sel + '>'
+            + escHtml(p.title) + ' (' + escHtml(p.slug) + ')</option>');
+    });
+    if (selected && !known.has(selected)) {
+        opts.push('<option value="' + escHtml(selected) + '" selected>'
+            + escHtml(selected) + ' (orphan)</option>');
+    }
+    return opts.join('');
+}
+
+function initEasyMDE(initialBody) {
+    if (typeof EasyMDE === 'undefined') {
+        toast('Editor failed to load — refresh the page', 'error');
+        return;
+    }
+    if (easymde) { try { easymde.toTextArea(); } catch (e) {} easymde = null; }
+
+    easymde = new EasyMDE({
+        element: document.getElementById('editBody'),
+        initialValue: initialBody,
+        autofocus: true,
+        spellChecker: false,
+        autoDownloadFontAwesome: false,
+        status: ['lines', 'words'],
+        uploadImage: true,
+        imageUploadFunction: easymdeImageUpload,
+        imageMaxSize: 100 * 1024 * 1024,
+        imageAccept: 'image/*',
+        imageTexts: {
+            sbInit: 'Attach images by drag-and-drop, paste, or the upload button.',
+            sbOnDrop: 'Uploading #images_names#…',
+            sbProgress: 'Uploading #file_name#: #progress#%',
+            sbOnUploaded: 'Uploaded #image_name#',
+            sizeUnits: ' B, KB, MB',
+        },
+        previewRender: (txt) => renderMarkdown(txt),
+        renderingConfig: { singleLineBreaks: false, codeSyntaxHighlighting: false },
+        toolbar: [
+            { name: 'bold', action: EasyMDE.toggleBold, text: 'B', title: 'Bold' },
+            { name: 'italic', action: EasyMDE.toggleItalic, text: 'I', title: 'Italic' },
+            { name: 'heading', action: EasyMDE.toggleHeadingSmaller, text: 'H', title: 'Heading' },
+            '|',
+            { name: 'quote', action: EasyMDE.toggleBlockquote, text: '❝', title: 'Quote' },
+            { name: 'code', action: EasyMDE.toggleCodeBlock, text: '</>', title: 'Code block' },
+            { name: 'unordered-list', action: EasyMDE.toggleUnorderedList, text: '•', title: 'Bulleted list' },
+            { name: 'ordered-list', action: EasyMDE.toggleOrderedList, text: '1.', title: 'Numbered list' },
+            { name: 'table', action: EasyMDE.drawTable, text: '⊞', title: 'Insert table' },
+            '|',
+            { name: 'link', action: EasyMDE.drawLink, text: '🔗', title: 'Insert link' },
+            { name: 'upload-image', action: '*image-upload*', text: '🖼', title: 'Upload image' },
+            { name: 'horizontal-rule', action: EasyMDE.drawHorizontalRule, text: '—', title: 'Horizontal rule' },
+            '|',
+            { name: 'preview', action: EasyMDE.togglePreview, text: '👁', title: 'Toggle preview', noDisable: true },
+        ],
+    });
+}
+
+async function easymdeImageUpload(file, onSuccess, onError) {
+    if (!isPotentialAdmin()) { onError('Login required'); return; }
+    const name = generateAssetName(file);
+    try {
+        const fd = new FormData();
+        fd.append('file', file, name);
+        const resp = await fetch(API + '/website/assets', {
+            method: 'POST',
+            headers: { 'Authorization': 'Bearer ' + authToken() },
+            body: fd,
+        });
+        if (resp.status === 401) {
+            onError('Session expired');
+            handleSessionExpired(easymde ? easymde.value() : '');
+            return;
+        }
+        if (!resp.ok) {
+            const d = await resp.json().catch(() => ({}));
+            onError(d.error || ('HTTP ' + resp.status));
+            return;
+        }
+        const data = await resp.json();
+        onSuccess(data.name);
+        toast('Uploaded ' + data.name, 'success');
+    } catch (e) {
+        onError(e.message);
+    }
+}
+
+function inferExtension(file) {
+    const m = (file.type || '').match(/^image\/(\w+)/);
+    if (!m) return 'png';
+    const ext = m[1].toLowerCase();
+    return ext === 'jpeg' ? 'jpg' : ext;
+}
+
+function generateAssetName(file) {
+    const orig = (file.name || '').replace(/[^A-Za-z0-9._-]/g, '_');
+    // Browsers use a generic "image.png" filename for clipboard-pasted
+    // images, which collides across pages — always timestamp those.
+    const isPasteDefault = /^image\.(png|jpe?g|gif|webp|svg)$/i.test(orig);
+    if (orig && !isPasteDefault && /\.[A-Za-z0-9]+$/.test(orig)) return orig;
+    const ts = new Date().toISOString().replace(/[:.]/g, '-').replace(/Z$/, '');
+    return 'image-' + ts + '.' + inferExtension(file);
+}
+
+function formatDate(s) {
+    if (!s) return '';
+    const d = new Date(s);
+    if (isNaN(d.getTime())) return s;
+    return d.toLocaleString();
+}
+
+function enterEditMode() {
+    if (!currentPage) return;
+    if (!isPotentialAdmin()) { toast('Login required', 'error'); return; }
+    editMode = true;
+    renderPage();
+}
+
+function cancelEdit() {
+    if (easymde) { try { easymde.toTextArea(); } catch (e) {} easymde = null; }
+    editMode = false;
+    renderPage();
+}
+
+async function savePage() {
+    const title = document.getElementById('editTitle').value.trim();
+    const parent = document.getElementById('editParent').value.trim();
+    const ord = parseInt(document.getElementById('editOrd').value, 10) || 0;
+    const body_md = easymde ? easymde.value() : document.getElementById('editBody').value;
+    const metaDescEl = document.getElementById('editMetaDesc');
+    const meta_description = metaDescEl ? metaDescEl.value.trim() : '';
+    const newSlug = document.getElementById('editSlug').value.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '-');
+    if (!title) { toast('Title is required', 'error'); return; }
+    if (!newSlug) { toast('Slug is required', 'error'); return; }
+
+    let targetSlug = currentSlug;
+    if (newSlug !== currentSlug) {
+        const renameResp = await fetch(API + '/website/pages/' + encodeURIComponent(currentSlug) + '/rename', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken() },
+            body: JSON.stringify({ new_slug: newSlug }),
+        });
+        if (renameResp.status === 401) { handleSessionExpired(body_md); return; }
+        if (!renameResp.ok) {
+            const d = await renameResp.json().catch(() => ({}));
+            toast('Rename failed: ' + (d.error || renameResp.status), 'error');
+            return;
+        }
+        targetSlug = newSlug;
+    }
+
+    const resp = await fetch(API + '/website/pages/' + encodeURIComponent(targetSlug), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken() },
+        body: JSON.stringify({ title, body_md, parent_slug: parent || null, ord, meta_description }),
+    });
+    if (resp.status === 401) { handleSessionExpired(body_md); return; }
+    if (!resp.ok) {
+        const d = await resp.json().catch(() => ({}));
+        toast('Save failed: ' + (d.error || resp.status), 'error');
+        return;
+    }
+    toast('Saved', 'success');
+    editMode = false;
+    await loadIndex();
+    if (targetSlug !== currentSlug) {
+        navigateTo(targetSlug);
+    } else {
+        await loadPage(currentSlug);
+    }
+}
+
+function handleSessionExpired(currentBody) {
+    localStorage.removeItem('auth_token');
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.55);display:flex;align-items:center;justify-content:center;z-index:200;';
+    overlay.innerHTML =
+        '<div style="background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:24px;max-width:480px;color:var(--text1);">' +
+            '<h2 style="margin:0 0 8px;font-size:16px;">Session expired</h2>' +
+            '<p style="margin:0 0 14px;color:var(--text2);font-size:13px;">' +
+                'Your login token is no longer valid. Copy your edits to the clipboard before logging in again so you don\'t lose them.' +
+            '</p>' +
+            '<div style="display:flex;gap:8px;justify-content:flex-end;">' +
+                '<button class="btn" id="copyEdits">Copy edits to clipboard</button>' +
+                '<button class="btn primary" id="reloginBtn">Log in again</button>' +
+            '</div>' +
+        '</div>';
+    document.body.appendChild(overlay);
+    overlay.querySelector('#copyEdits').onclick = async () => {
+        try {
+            await navigator.clipboard.writeText(currentBody || '');
+            toast('Copied to clipboard', 'success');
+        } catch (e) {
+            toast('Copy failed — select-all and copy manually', 'error');
+        }
+    };
+    overlay.querySelector('#reloginBtn').onclick = () => {
+        window.open('/', '_blank');
+        overlay.remove();
+        toast('Log in, then come back to this tab and click Save again.', 'success');
+    };
+}
+
+async function deletePage() {
+    if (!confirm('Delete page "' + currentPage.title + '"? This cannot be undone.')) return;
+    const resp = await fetch(API + '/website/pages/' + encodeURIComponent(currentSlug), {
+        method: 'DELETE',
+        headers: { 'Authorization': 'Bearer ' + authToken() },
+    });
+    if (!resp.ok) { toast('Delete failed', 'error'); return; }
+    toast('Deleted', 'success');
+    currentSlug = null; currentPage = null;
+    await loadIndex();
+    navigateTo(null);
+}
+
+async function newPage() {
+    if (!isPotentialAdmin()) { toast('Login required', 'error'); return; }
+    const slug = prompt('New page slug (lowercase, no spaces):');
+    if (!slug) return;
+    const cleanSlug = slug.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '-');
+    if (!cleanSlug) { toast('Invalid slug', 'error'); return; }
+    const title = prompt('Page title:', cleanSlug) || cleanSlug;
+    const resp = await fetch(API + '/website/pages/' + encodeURIComponent(cleanSlug), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken() },
+        body: JSON.stringify({ title, body_md: '# ' + title + '\n\n', parent_slug: null, ord: 999 }),
+    });
+    if (!resp.ok) { toast('Create failed', 'error'); return; }
+    await loadIndex();
+    navigateTo(cleanSlug);
+}
+
+// ---------------------------------------------------------------------------
+// Routing
+// ---------------------------------------------------------------------------
+
+// Path-based routing with legacy hash backcompat. On the canonical public
+// domain (xikaku.com) URLs are /{slug}; on susi.lp-research.com they're
+// /site/{slug}. If a visitor lands on /site#/foo we transparently upgrade to
+// the canonical path form via replaceState so crawlers and shared links
+// resolve cleanly.
+function slugFromLocation() {
+    const path = location.pathname || '';
+    // Always recognize legacy /site/{slug} so old links keep working.
+    const legacy = path.match(/^\/site\/([^\/\?#]+)/);
+    if (legacy) return decodeURIComponent(legacy[1]);
+    // Clean URL form on the canonical host: /{slug} where slug isn't reserved.
+    if (SITE_PATH_PREFIX === '') {
+        const m = path.match(/^\/([^\/\?#]+)$/);
+        if (m && !RESERVED_TOP_PATHS.has(m[1])) return decodeURIComponent(m[1]);
+    }
+    const hash = location.hash.replace(/^#\/?/, '');
+    return decodeURIComponent(hash.split('/').filter(Boolean)[0] || '');
+}
+
+function navigateTo(slug) {
+    const target = slug ? pageHref(slug) : siteRootHref();
+    if (location.pathname + location.search !== target) {
+        history.pushState({}, '', target);
+    }
+    if (location.hash) {
+        history.replaceState({}, '', target);
+    }
+    route();
+}
+
+async function route() {
+    // Shop routes are handled by a separate render path that reuses the
+    // same chrome (header, sidebar, drawer) but renders product views.
+    const shopRoute = shopRouteFromLocation();
+    if (shopRoute) {
+        await Promise.all([loadIndex(), loadShopProducts()]);
+        if (shopRoute.kind === 'grid')    renderShopGrid();
+        if (shopRoute.kind === 'detail')  renderShopDetail(shopRoute.sku);
+        if (shopRoute.kind === 'success') renderShopSuccess();
+        if (shopRoute.kind === 'cancel')  renderShopCancel();
+        return;
+    }
+
+    const slug = slugFromLocation();
+    // Upgrade legacy hash URLs (#/foo) to the canonical path form. Crawlers
+    // don't follow fragments but users still get a clean URL in the address bar.
+    if (location.hash) {
+        const clean = slug ? pageHref(slug) : siteRootHref();
+        history.replaceState({}, '', clean + location.search);
+    }
+    await loadIndex();
+    if (pages.length === 0) { renderNoPages(); return; }
+    if (slug) {
+        await loadPage(slug);
+    } else {
+        // Default: first top-level page by ord
+        const sorted = [...pages].sort((a, b) => a.ord - b.ord || a.title.localeCompare(b.title));
+        const first = sorted.find(p => !p.parent_slug) || sorted[0];
+        history.replaceState({}, '', pageHref(first.slug));
+        await loadPage(first.slug);
+    }
+}
+
+window.addEventListener('popstate', route);
+window.addEventListener('hashchange', route);
+
+// Intercept intra-site link clicks for SPA navigation.
+// Lets Ctrl/Cmd/middle-click still open in a new tab (server renders them fine).
+document.addEventListener('click', (e) => {
+    const a = e.target.closest && e.target.closest('a[href^="/"]');
+    if (!a) return;
+    if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+    const href = a.getAttribute('href');
+    if (!href) return;
+    if (href.startsWith('/shop')) {
+        // Same-origin /shop, /shop/, /shop/{sku}, /shop/success, /shop/cancel.
+        // Skip /shop#... (fragment-only) so anchors still work.
+        if (href.startsWith('/shop#')) return;
+        e.preventDefault();
+        if (location.pathname + location.search !== href) {
+            history.pushState({}, '', href);
+        }
+        route();
+        return;
+    }
+    // Legacy /site/{slug} form (susi.lp-research.com or old links on xikaku).
+    const legacy = href.match(/^\/site\/([^\/\?#]+)/);
+    if (legacy) {
+        e.preventDefault();
+        navigateTo(decodeURIComponent(legacy[1]));
+        return;
+    }
+    // Clean form (xikaku.com): /{slug} where slug isn't a reserved top-level path.
+    if (SITE_PATH_PREFIX === '') {
+        const clean = href.match(/^\/([^\/\?#]+)$/);
+        if (clean && !RESERVED_TOP_PATHS.has(clean[1])) {
+            e.preventDefault();
+            navigateTo(decodeURIComponent(clean[1]));
+        }
+    }
+});
+
+// ---------------------------------------------------------------------------
+// History modal
+// ---------------------------------------------------------------------------
+
+let historyState = { slug: null, revisions: [], selectedId: null };
+
+async function openHistory() {
+    if (!currentSlug) { toast('Save the page first to see history', 'error'); return; }
+    historyState = { slug: currentSlug, revisions: [], selectedId: null };
+    document.getElementById('historyModal').classList.add('visible');
+    renderHistory('<div class="empty-state">Loading revisions…</div>');
+    try {
+        const resp = await fetch(API + '/website/pages/' + encodeURIComponent(currentSlug) + '/revisions', {
+            headers: { 'Authorization': 'Bearer ' + authToken() },
+        });
+        if (!resp.ok) { renderHistory('<div class="empty-state">Failed to load revisions.</div>'); return; }
+        const data = await resp.json();
+        historyState.revisions = data.revisions || [];
+        renderHistoryList();
+    } catch (e) {
+        renderHistory('<div class="empty-state">' + escHtml(e.message) + '</div>');
+    }
+}
+
+function closeHistory() { document.getElementById('historyModal').classList.remove('visible'); }
+
+function renderHistory(html) { document.getElementById('historyBody').innerHTML = html; }
+
+function renderHistoryList() {
+    const revs = historyState.revisions;
+    if (!revs.length) {
+        renderHistory('<div class="empty-state">No revisions yet. This page has been saved only once — history is captured from the next save onward.</div>');
+        return;
+    }
+    const items = revs.map(r => {
+        const when = formatDate(r.captured_at);
+        const author = r.author || '—';
+        const size = r.body_length + ' chars';
+        const sel = r.id === historyState.selectedId ? ' selected' : '';
+        return '<div class="rev-item' + sel + '" onclick="selectRevision(' + r.id + ')">'
+            + '<div class="rev-when">' + escHtml(when) + '</div>'
+            + '<div class="rev-author">' + escHtml(author) + '</div>'
+            + '<div class="rev-title">' + escHtml(r.title) + '</div>'
+            + '<div class="rev-size">' + size + '</div>'
+            + '</div>';
+    }).join('');
+    const preview = '<div id="revPreview"></div>';
+    renderHistory('<div class="rev-list">' + items + '</div>' + preview);
+    if (historyState.selectedId) showRevisionPreview(historyState.selectedId);
+}
+
+async function selectRevision(id) {
+    historyState.selectedId = id;
+    // Update selection class without re-rendering the whole list.
+    document.querySelectorAll('.rev-item').forEach(el => el.classList.remove('selected'));
+    const target = [...document.querySelectorAll('.rev-item')].find(
+        el => el.getAttribute('onclick') === 'selectRevision(' + id + ')'
+    );
+    if (target) target.classList.add('selected');
+    await showRevisionPreview(id);
+}
+
+async function showRevisionPreview(id) {
+    const box = document.getElementById('revPreview');
+    if (!box) return;
+    box.innerHTML = '<div class="empty-state">Loading…</div>';
+    try {
+        const resp = await fetch(
+            API + '/website/pages/' + encodeURIComponent(historyState.slug)
+                + '/revisions/' + id,
+            { headers: { 'Authorization': 'Bearer ' + authToken() } },
+        );
+        if (!resp.ok) { box.innerHTML = '<div class="empty-state">Failed to load.</div>'; return; }
+        const data = await resp.json();
+        const body = data.body_md || '';
+        const snippet = body.length > 4000 ? body.slice(0, 4000) + '\n…[truncated]' : body;
+        box.innerHTML = '<div style="display:flex;gap:8px;margin-bottom:10px;align-items:center;">'
+            + '<strong>' + escHtml(data.title || '') + '</strong>'
+            + '<span style="color:var(--text2);font-size:12px;">' + escHtml(formatDate(data.captured_at || '')) + '</span>'
+            + '<div style="flex:1"></div>'
+            + '<button class="btn primary" onclick="restoreRevision(' + id + ')">Restore this revision</button>'
+            + '</div>'
+            + '<div class="rev-preview">' + escHtml(snippet) + '</div>';
+    } catch (e) {
+        box.innerHTML = '<div class="empty-state">' + escHtml(e.message) + '</div>';
+    }
+}
+
+async function restoreRevision(id) {
+    if (!confirm('Restore this revision? Your current editor content will be overwritten, and the current saved state will be captured as a new revision.')) return;
+    try {
+        const resp = await fetch(
+            API + '/website/pages/' + encodeURIComponent(historyState.slug)
+                + '/revisions/' + id + '/restore',
+            { method: 'POST', headers: { 'Authorization': 'Bearer ' + authToken() } },
+        );
+        if (!resp.ok) {
+            const d = await resp.json().catch(() => ({}));
+            toast(d.error || ('HTTP ' + resp.status), 'error');
+            return;
+        }
+        toast('Revision restored — reloading page', 'success');
+        closeHistory();
+        // Reload the page content so the editor picks up the restored body.
+        cancelEdit();
+        await route();
+    } catch (e) {
+        toast(e.message, 'error');
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Assets modal
+// ---------------------------------------------------------------------------
+
+let assetsState = { all: [], filter: '', orphansOnly: false };
+
+async function openAssets() {
+    document.getElementById('assetsModal').classList.add('visible');
+    document.getElementById('assetsBody').innerHTML = '<div class="empty-state">Loading assets…</div>';
+    try {
+        const resp = await fetch(API + '/website/admin/assets', {
+            headers: { 'Authorization': 'Bearer ' + authToken() },
+        });
+        if (!resp.ok) {
+            document.getElementById('assetsBody').innerHTML = '<div class="empty-state">Failed to load assets.</div>';
+            return;
+        }
+        const data = await resp.json();
+        assetsState.all = data.assets || [];
+        renderAssets();
+    } catch (e) {
+        document.getElementById('assetsBody').innerHTML = '<div class="empty-state">' + escHtml(e.message) + '</div>';
+    }
+}
+
+function closeAssets() { document.getElementById('assetsModal').classList.remove('visible'); }
+
+function renderAssets() {
+    const q = assetsState.filter.toLowerCase();
+    const orphansOnly = assetsState.orphansOnly;
+    const filtered = assetsState.all.filter(a => {
+        if (orphansOnly && a.usage_count > 0) return false;
+        if (q && !a.name.toLowerCase().includes(q)) return false;
+        return true;
+    });
+    const assetCount = assetsState.all.length;
+    const orphanCount = assetsState.all.filter(a => a.usage_count === 0).length;
+    const bar =
+        '<div class="asset-toolbar">'
+            + '<input type="search" id="assetFilter" placeholder="Filter by name…" value="' + escHtml(assetsState.filter) + '">'
+            + '<label><input type="checkbox" id="assetOrphans" ' + (orphansOnly ? 'checked' : '') + '> Orphans only (' + orphanCount + ')</label>'
+            + '<span style="color:var(--text2);font-size:12px;">'
+                + filtered.length + ' of ' + assetCount + ' shown'
+            + '</span>'
+        + '</div>';
+    if (!filtered.length) {
+        document.getElementById('assetsBody').innerHTML = bar + '<div class="empty-state">No assets match the current filter.</div>';
+        wireAssetFilters();
+        return;
+    }
+    const tiles = filtered.map(a => {
+        const url = API + '/website/assets/' + encodeURIComponent(a.name);
+        const kb = (a.size / 1024).toFixed(0) + ' KB';
+        const orphan = a.usage_count === 0;
+        const pill = orphan
+            ? '<span class="asset-usage-pill orphan">orphan</span>'
+            : '<span class="asset-usage-pill" title="' + escHtml((a.pages || []).join(', ')) + '">used on ' + a.usage_count + '</span>';
+        return '<div class="asset-tile' + (orphan ? ' orphan' : '') + '">'
+            + '<div class="asset-thumb"><img src="' + url + '" alt="' + escHtml(a.name) + '" loading="lazy"></div>'
+            + '<div class="asset-meta">'
+                + '<div class="asset-name">' + escHtml(a.name) + '</div>'
+                + '<div class="asset-info">' + pill + '<span>' + kb + '</span></div>'
+            + '</div>'
+            + '<div class="asset-actions">'
+                + '<button onclick="copyAssetMd(\'' + encodeAttr(a.name) + '\')" title="Copy markdown">Copy MD</button>'
+                + '<button onclick="renameAsset(\'' + encodeAttr(a.name) + '\')" title="Rename (rewrites page refs)">Rename</button>'
+                + '<button class="danger" onclick="deleteAsset(\'' + encodeAttr(a.name) + '\',' + a.usage_count + ')" title="Delete file">Delete</button>'
+            + '</div>'
+        + '</div>';
+    }).join('');
+    document.getElementById('assetsBody').innerHTML = bar + '<div class="asset-grid">' + tiles + '</div>';
+    wireAssetFilters();
+}
+
+function wireAssetFilters() {
+    const f = document.getElementById('assetFilter');
+    if (f) f.oninput = (e) => { assetsState.filter = e.target.value; renderAssets(); f.focus(); f.setSelectionRange(f.value.length, f.value.length); };
+    const o = document.getElementById('assetOrphans');
+    if (o) o.onchange = (e) => { assetsState.orphansOnly = e.target.checked; renderAssets(); };
+}
+
+function encodeAttr(s) { return (s || '').replace(/'/g, "\\'"); }
+
+function copyAssetMd(name) {
+    const md = '![](' + name + '){width=100%}';
+    navigator.clipboard.writeText(md).then(
+        () => toast('Copied: ' + md, 'success'),
+        (e) => toast('Clipboard denied: ' + e.message, 'error'),
+    );
+}
+
+async function renameAsset(oldName) {
+    const next = prompt('New filename (keep the extension):', oldName);
+    if (!next || next === oldName) return;
+    try {
+        const resp = await fetch(API + '/website/assets/' + encodeURIComponent(oldName) + '/rename', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Bearer ' + authToken(),
+            },
+            body: JSON.stringify({ new_name: next }),
+        });
+        const d = await resp.json().catch(() => ({}));
+        if (!resp.ok) { toast(d.error || ('HTTP ' + resp.status), 'error'); return; }
+        toast('Renamed — rewrote ' + (d.pages_updated || 0) + ' page(s)', 'success');
+        await openAssets(); // refresh
+    } catch (e) { toast(e.message, 'error'); }
+}
+
+async function deleteAsset(name, usageCount) {
+    const msg = usageCount > 0
+        ? 'This asset is referenced by ' + usageCount + ' page(s). Deleting will break those images. Continue?'
+        : 'Delete ' + name + '?';
+    if (!confirm(msg)) return;
+    try {
+        const resp = await fetch(API + '/website/assets/' + encodeURIComponent(name), {
+            method: 'DELETE',
+            headers: { 'Authorization': 'Bearer ' + authToken() },
+        });
+        if (!resp.ok) {
+            const d = await resp.json().catch(() => ({}));
+            toast(d.error || ('HTTP ' + resp.status), 'error');
+            return;
+        }
+        toast('Deleted ' + name, 'success');
+        assetsState.all = assetsState.all.filter(a => a.name !== name);
+        renderAssets();
+    } catch (e) { toast(e.message, 'error'); }
+}
+
+// ---------------------------------------------------------------------------
+// Shop — product grid, detail, cart, checkout
+//
+// Cart lives entirely in localStorage. Server-side, /api/v1/shop/checkout
+// looks up authoritative prices and creates a Stripe Checkout Session.
+// ---------------------------------------------------------------------------
+
+const SHOP_API = '/api/v1/shop';
+let shopProducts = [];
+let shopProductBySku = new Map();
+
+// Map sensor-page slug -> SKU prefixes for the buy callout. Most pages share
+// the slug stem with their SKUs (lpms-ig1 → lpms-ig1-…), but the U3 and AL3
+// family pages have variant SKUs that don't share the page's slug stem, so
+// they need explicit lists. The "lpms-ig1-" entry has a trailing hyphen so it
+// won't match lpms-ig1p-* or lpms-ig1w.
+const SLUG_TO_SKU_PREFIXES = {
+    'lpms-b2': ['lpms-b2'],
+    'lpms-u3': ['lpms-cu3', 'lpms-urs3', 'lpms-uttl3'],
+    'lpms-al3': ['lpms-canal3', 'lpms-rs232al3', 'lpms-ttlal3'],
+    'lpms-ig1': ['lpms-ig1-'],
+    'lpms-ig1p': ['lpms-ig1p'],
+    'lpms-ig1w': ['lpms-ig1w'],
+    'lpms-nav3': ['lpms-nav3'],
+    'lpms-curs3': ['lpms-curs3'],
+    'lpms-inc1': ['lpms-inc1'],
+};
+
+const SHOP_COUNTRIES = [
+    ['US','United States'],['CA','Canada'],
+];
+
+function shopFmtMoney(cents, currency) {
+    const amount = (cents / 100).toFixed(2);
+    const cur = (currency || 'usd').toUpperCase();
+    const sym = { USD: '$', EUR: '€', GBP: '£', JPY: '¥' }[cur] || '';
+    return sym ? sym + amount : amount + ' ' + cur;
+}
+
+// ---- Cart state ----
+function getCart() {
+    try { return JSON.parse(localStorage.getItem('susi_cart') || '[]'); } catch (e) { return []; }
+}
+function setCart(c) { localStorage.setItem('susi_cart', JSON.stringify(c)); renderCartBadge(); renderCart(); }
+function addToCart(sku, qty) {
+    qty = Math.max(1, parseInt(qty, 10) || 1);
+    const cart = getCart();
+    const row = cart.find(r => r.sku === sku);
+    if (row) row.qty += qty; else cart.push({ sku, qty });
+    setCart(cart);
+    toast('Added to cart', 'success');
+}
+function setCartQty(sku, qty) {
+    qty = parseInt(qty, 10);
+    let cart = getCart();
+    if (!isFinite(qty) || qty <= 0) cart = cart.filter(r => r.sku !== sku);
+    else cart = cart.map(r => r.sku === sku ? { ...r, qty } : r);
+    setCart(cart);
+}
+function removeFromCart(sku) { setCart(getCart().filter(r => r.sku !== sku)); }
+
+function renderCartBadge() {
+    const total = getCart().reduce((s, r) => s + r.qty, 0);
+    const b = document.getElementById('cartBadge');
+    if (!b) return;
+    if (total > 0) { b.style.display = ''; b.textContent = total; } else { b.style.display = 'none'; }
+}
+function renderCart() {
+    const cart = getCart();
+    const body = document.getElementById('cartBody');
+    const btn = document.getElementById('checkoutBtn');
+    if (!body || !btn) return;
+    if (!cart.length) {
+        body.innerHTML = '<div class="empty-state" style="padding:32px 12px;">Your cart is empty.</div>';
+        document.getElementById('cartTotal').textContent = shopFmtMoney(0, 'usd');
+        btn.disabled = true;
+        const ship = document.getElementById('cartShipRow');
+        if (ship) ship.style.display = 'none';
+        return;
+    }
+    btn.disabled = false;
+    let subtotal = 0;
+    let currency = 'usd';
+    const html = cart.map(r => {
+        const p = shopProductBySku.get(r.sku);
+        if (!p) {
+            return '<div class="cart-item"><div></div><div>Unknown SKU: ' + escHtml(r.sku) + ' <a href="#" onclick="removeFromCart(\'' + escHtml(r.sku) + '\');return false;">remove</a></div><div></div></div>';
+        }
+        subtotal += p.price_cents * r.qty;
+        currency = p.currency;
+        const img = p.image_url ? '<img src="' + escHtml(p.image_url) + '" alt="">' : '';
+        return '<div class="cart-item">'
+            + '<div class="cart-item-img">' + img + '</div>'
+            + '<div>'
+            +   '<div class="cart-item-title">' + escHtml(p.title) + '</div>'
+            +   '<div class="cart-item-meta">'
+            +     '<input type="number" min="1" value="' + r.qty + '" onchange="setCartQty(\'' + escHtml(r.sku) + '\', this.value)">'
+            +     '<button class="btn danger" onclick="removeFromCart(\'' + escHtml(r.sku) + '\')" style="padding:3px 8px;font-size:12px;">remove</button>'
+            +   '</div>'
+            + '</div>'
+            + '<div class="cart-item-price">' + escHtml(shopFmtMoney(p.price_cents * r.qty, p.currency)) + '</div>'
+            + '</div>';
+    }).join('');
+    body.innerHTML = html;
+    document.getElementById('cartTotal').textContent = shopFmtMoney(subtotal, currency);
+    const shipRow = document.getElementById('cartShipRow');
+    if (shipRow) shipRow.style.display = '';
+    ensureCountrySelect();
+}
+
+function ensureCountrySelect() {
+    const sel = document.getElementById('cartCountry');
+    if (!sel || sel.options.length) return;
+    const saved = localStorage.getItem('susi_ship_country') || 'US';
+    sel.innerHTML = SHOP_COUNTRIES.map(([c, n]) => '<option value="' + c + '"' + (c === saved ? ' selected' : '') + '>' + n + '</option>').join('');
+}
+function persistShipCountry() {
+    const sel = document.getElementById('cartCountry');
+    if (sel) localStorage.setItem('susi_ship_country', sel.value);
+}
+
+function openCart() {
+    document.getElementById('cartDrawer').classList.add('open');
+    document.getElementById('cartOverlay').classList.add('open');
+    const err = document.getElementById('cartError');
+    if (err) err.style.display = 'none';
+    renderCart();
+}
+function closeCart() {
+    document.getElementById('cartDrawer').classList.remove('open');
+    document.getElementById('cartOverlay').classList.remove('open');
+}
+
+async function checkout() {
+    const cart = getCart();
+    if (!cart.length) return;
+    const country = (document.getElementById('cartCountry') || {}).value || 'US';
+    const btn = document.getElementById('checkoutBtn');
+    const err = document.getElementById('cartError');
+    err.style.display = 'none';
+    btn.disabled = true;
+    btn.textContent = 'Redirecting…';
+    try {
+        const resp = await fetch(SHOP_API + '/checkout', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ items: cart, destination_country: country }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status));
+        if (!data.url) throw new Error('Missing redirect URL');
+        window.location = data.url;
+    } catch (e) {
+        err.textContent = e.message || 'Checkout failed';
+        err.style.display = '';
+        btn.disabled = false;
+        btn.textContent = 'Checkout';
+    }
+}
+
+// ---- Shop data ----
+async function loadShopProducts() {
+    if (shopProducts.length) return; // cache: products rarely change in a session
+    try {
+        const resp = await fetch(SHOP_API + '/products');
+        if (!resp.ok) return;
+        const data = await resp.json();
+        shopProducts = data.products || [];
+        shopProductBySku = new Map(shopProducts.map(p => [p.sku, p]));
+    } catch (e) {
+        shopProducts = []; shopProductBySku = new Map();
+    }
+}
+
+// ---- Shop renderers ----
+function renderShopGrid() {
+    currentSlug = '__shop__';
+    const c = document.getElementById('content');
+    const layout = document.getElementById('layout');
+    if (layout) layout.classList.add('no-toc');
+    document.title = 'Shop — Xikaku';
+    renderSidebar();
+    if (!shopProducts.length) {
+        c.innerHTML = '<h1>Shop</h1><div class="empty-state"><p>Coming soon.</p></div>';
+        return;
+    }
+    const cards = shopProducts.map(p => {
+        const img = p.image_url ? '<img src="' + escHtml(p.image_url) + '" alt="">' : '<div>no image</div>';
+        return '<a class="shop-card" href="/shop/' + encodeURIComponent(p.sku) + '">'
+            + '<div class="shop-card-img">' + img + '</div>'
+            + '<div class="shop-card-body">'
+            +   '<div class="shop-card-title">' + escHtml(p.title) + '</div>'
+            +   '<div class="shop-card-price">' + escHtml(shopFmtMoney(p.price_cents, p.currency)) + '</div>'
+            +   '<div class="shop-card-actions">'
+            +     '<button class="btn primary" onclick="event.stopPropagation();event.preventDefault();addToCart(\'' + escHtml(p.sku) + '\', 1)">Add to cart</button>'
+            +   '</div>'
+            + '</div>'
+            + '</a>';
+    }).join('');
+    c.innerHTML = '<h1>Shop</h1>'
+        + '<p style="color:var(--text2);">Order Xikaku sensors directly. Shipped from our Los Angeles office.</p>'
+        + '<div class="shop-grid">' + cards + '</div>';
+}
+
+function renderShopDetail(sku) {
+    currentSlug = '__shop__';
+    const c = document.getElementById('content');
+    const layout = document.getElementById('layout');
+    if (layout) layout.classList.add('no-toc');
+    const p = shopProductBySku.get(sku);
+    if (!p) {
+        c.innerHTML = '<h1>Product not found</h1><p><a href="/shop">&larr; Back to shop</a></p>';
+        return;
+    }
+    document.title = p.title + ' — Xikaku';
+    renderSidebar();
+    const img = p.image_url ? '<img src="' + escHtml(p.image_url) + '" alt="">' : 'no image';
+    const desc = renderMarkdown(p.description_md || '');
+    c.innerHTML =
+        '<p style="margin-top:0;"><a href="/shop">&larr; Back to shop</a></p>'
+        + '<div class="shop-detail">'
+        +   '<div class="shop-detail-img">' + img + '</div>'
+        +   '<div>'
+        +     '<h1 style="margin-top:0;">' + escHtml(p.title) + '</h1>'
+        +     '<p style="font-size:18px;color:var(--text1);margin:0 0 16px;">' + escHtml(shopFmtMoney(p.price_cents, p.currency)) + '</p>'
+        +     '<div class="content">' + desc + '</div>'
+        +     '<div class="shop-detail-buy">'
+        +       '<input id="detailQty" type="number" min="1" value="1">'
+        +       '<button class="btn primary" onclick="addToCart(\'' + escHtml(p.sku) + '\', document.getElementById(\'detailQty\').value)">Add to cart</button>'
+        +     '</div>'
+        +   '</div>'
+        + '</div>';
+}
+
+function renderShopSuccess() {
+    currentSlug = '__shop__';
+    const c = document.getElementById('content');
+    const layout = document.getElementById('layout');
+    if (layout) layout.classList.add('no-toc');
+    document.title = 'Order placed — Xikaku';
+    renderSidebar();
+    const params = new URLSearchParams(location.search);
+    const sid = params.get('session_id') || '';
+    localStorage.removeItem('susi_cart');
+    renderCartBadge();
+    c.innerHTML =
+        '<div class="empty-state" style="padding:80px 20px;">'
+        +   '<h1>Thank you!</h1>'
+        +   '<p>Your order has been placed. A receipt will arrive in your inbox shortly.</p>'
+        +   (sid ? '<p style="color:var(--text2);font-size:12px;">Ref: ' + escHtml(sid) + '</p>' : '')
+        +   '<p><a href="/shop">Continue shopping</a> &middot; <a href="/site">Home</a></p>'
+        + '</div>';
+}
+
+function renderShopCancel() {
+    currentSlug = '__shop__';
+    const c = document.getElementById('content');
+    const layout = document.getElementById('layout');
+    if (layout) layout.classList.add('no-toc');
+    document.title = 'Checkout cancelled — Xikaku';
+    renderSidebar();
+    c.innerHTML =
+        '<div class="empty-state" style="padding:80px 20px;">'
+        +   '<h1>Checkout cancelled</h1>'
+        +   '<p>Your cart is still saved. No charge was made.</p>'
+        +   '<p><button class="btn primary" onclick="openCart()">Review cart</button> &nbsp; <a href="/shop">Back to shop</a></p>'
+        + '</div>';
+}
+
+// ---- Buy callout on sensor pages ----
+function injectBuyCallout(slug) {
+    const prefixes = SLUG_TO_SKU_PREFIXES[slug];
+    if (!prefixes || !shopProducts.length) return;
+    const matches = shopProducts
+        .filter(p => p.active && prefixes.some(pref => p.sku.startsWith(pref)))
+        .sort((a, b) => a.ord - b.ord);
+    if (!matches.length) return;
+    const c = document.getElementById('content');
+    if (!c) return;
+    const cards = matches.map(p => {
+        const img = p.image_url ? '<img src="' + escHtml(p.image_url) + '" alt="">' : '';
+        return '<a class="buy-card" href="/shop/' + encodeURIComponent(p.sku) + '">'
+            + '<div class="buy-card-img">' + img + '</div>'
+            + '<div class="buy-card-body">'
+            +   '<div class="buy-card-title">' + escHtml(p.title) + '</div>'
+            +   '<div class="buy-card-price">' + escHtml(shopFmtMoney(p.price_cents, p.currency)) + '</div>'
+            + '</div>'
+            + '</a>';
+    }).join('');
+    c.insertAdjacentHTML('beforeend',
+        '<div class="buy-callout">'
+        + '<h2>Available variants</h2>'
+        + '<div class="buy-grid">' + cards + '</div>'
+        + '</div>'
+    );
+}
+
+// ---- Email obfuscation + contact form ----
+function revealEmailObfs(root) {
+    const els = root.querySelectorAll('span.email-obf[data-u][data-d]');
+    els.forEach(el => {
+        let revealed = false;
+        const reveal = () => {
+            if (revealed) return;
+            revealed = true;
+            try {
+                const u = atob(el.getAttribute('data-u'));
+                const d = atob(el.getAttribute('data-d'));
+                const addr = u + '@' + d;
+                const a = document.createElement('a');
+                a.href = 'mailto:' + addr;
+                a.textContent = addr;
+                a.className = 'email-obf';
+                el.replaceWith(a);
+            } catch (e) {}
+        };
+        el.addEventListener('click', reveal);
+        el.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); reveal(); } });
+        el.addEventListener('mouseenter', reveal, { once: true });
+    });
+}
+
+let contactConfigPromise = null;
+function loadContactConfig() {
+    if (!contactConfigPromise) {
+        contactConfigPromise = fetch(API + '/contact/config')
+            .then(r => r.ok ? r.json() : { enabled: false, turnstile_site_key: '' })
+            .catch(() => ({ enabled: false, turnstile_site_key: '' }));
+    }
+    return contactConfigPromise;
+}
+
+let turnstileScriptPromise = null;
+function loadTurnstileScript() {
+    if (!turnstileScriptPromise) {
+        turnstileScriptPromise = new Promise((resolve, reject) => {
+            if (window.turnstile) { resolve(); return; }
+            const s = document.createElement('script');
+            s.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+            s.async = true; s.defer = true;
+            s.onload = () => resolve();
+            s.onerror = () => reject(new Error('Turnstile script failed to load'));
+            document.head.appendChild(s);
+        });
+    }
+    return turnstileScriptPromise;
+}
+
+function mountContactForms(root) {
+    const slots = root.querySelectorAll('div[data-contact-form]');
+    if (!slots.length) return;
+    loadContactConfig().then(cfg => {
+        slots.forEach(slot => buildContactForm(slot, cfg));
+    });
+}
+
+function buildContactForm(slot, cfg) {
+    if (!cfg.enabled) {
+        slot.innerHTML = '<div class="empty-state" style="padding:14px;font-size:13px;">Contact form is currently unavailable. Please email us directly.</div>';
+        return;
+    }
+    slot.innerHTML =
+        '<form class="contact-form" novalidate>'
+        + '<label>Your name<input type="text" name="name" required maxlength="200" autocomplete="name"></label>'
+        + '<label>Email address<input type="email" name="email" required maxlength="320" autocomplete="email"></label>'
+        + '<label>Subject<input type="text" name="subject" maxlength="200"></label>'
+        + '<label>Message<textarea name="message" required minlength="10" maxlength="8000"></textarea></label>'
+        + '<label class="hp-field" aria-hidden="true"><input type="text" name="website" tabindex="-1" autocomplete="off"></label>'
+        + '<div class="turnstile-slot"></div>'
+        + '<div class="row-actions">'
+        +   '<button type="submit" class="btn primary">Send message</button>'
+        +   '<span class="status"></span>'
+        + '</div>'
+        + '</form>';
+    const form = slot.querySelector('form');
+    const status = form.querySelector('.status');
+    const tsSlot = form.querySelector('.turnstile-slot');
+    let tsWidgetId = null;
+    let tsToken = '';
+
+    if (cfg.turnstile_site_key) {
+        loadTurnstileScript().then(() => {
+            const renderWidget = () => {
+                if (!window.turnstile) return;
+                const tsTheme = document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+                tsWidgetId = window.turnstile.render(tsSlot, {
+                    sitekey: cfg.turnstile_site_key,
+                    theme: tsTheme,
+                    callback: t => { tsToken = t || ''; },
+                    'error-callback': () => { tsToken = ''; },
+                    'expired-callback': () => { tsToken = ''; },
+                });
+            };
+            // Turnstile attaches a global ready hook when the script finishes.
+            if (window.turnstile && window.turnstile.render) renderWidget();
+            else if (window.turnstile && window.turnstile.ready) window.turnstile.ready(renderWidget);
+            else setTimeout(renderWidget, 200);
+        }).catch(() => {
+            tsSlot.innerHTML = '<span class="status err">Captcha failed to load — try refreshing.</span>';
+        });
+    } else {
+        tsSlot.style.display = 'none';
+    }
+
+    form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        status.className = 'status';
+        status.textContent = '';
+        const fd = new FormData(form);
+        const payload = {
+            name: (fd.get('name') || '').toString(),
+            email: (fd.get('email') || '').toString(),
+            subject: (fd.get('subject') || '').toString(),
+            message: (fd.get('message') || '').toString(),
+            website: (fd.get('website') || '').toString(),
+            turnstile_token: tsToken,
+        };
+        if (cfg.turnstile_site_key && !tsToken) {
+            status.className = 'status err';
+            status.textContent = 'Please complete the captcha first.';
+            return;
+        }
+        const submitBtn = form.querySelector('button[type=submit]');
+        submitBtn.disabled = true;
+        try {
+            const resp = await fetch(API + '/contact', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            if (resp.ok) {
+                form.reset();
+                if (tsWidgetId !== null && window.turnstile) {
+                    try { window.turnstile.reset(tsWidgetId); } catch (e) {}
+                }
+                tsToken = '';
+                status.className = 'status ok';
+                status.textContent = 'Thanks — your message is on its way.';
+            } else {
+                const d = await resp.json().catch(() => ({}));
+                status.className = 'status err';
+                status.textContent = d.error || ('Could not send (HTTP ' + resp.status + ')');
+                if (tsWidgetId !== null && window.turnstile) {
+                    try { window.turnstile.reset(tsWidgetId); } catch (e) {}
+                }
+                tsToken = '';
+            }
+        } catch (err) {
+            status.className = 'status err';
+            status.textContent = 'Network error — please try again.';
+        } finally {
+            submitBtn.disabled = false;
+        }
+    });
+}
+
+// ---- Routing for shop ----
+function shopRouteFromLocation() {
+    const path = location.pathname || '';
+    if (path === '/shop' || path === '/shop/') return { kind: 'grid' };
+    if (path === '/shop/success') return { kind: 'success' };
+    if (path === '/shop/cancel') return { kind: 'cancel' };
+    const m = path.match(/^\/shop\/([^\/]+)$/);
+    if (m) return { kind: 'detail', sku: decodeURIComponent(m[1]) };
+    return null;
+}
+
+// Rewrite static "/site" home-links so on xikaku.com the brand and "Home"
+// links point to "/" directly instead of triggering a 301 hop through nginx.
+document.querySelectorAll('a[href="/site"]').forEach(a => { a.setAttribute('href', siteRootHref()); });
+
+(async () => {
+    await resolveAdminStatus();
+    await route();
+    renderCartBadge();
+})();
+</script>
+
+<div id="historyModal" class="admin-modal">
+    <div class="admin-modal-inner">
+        <div class="admin-modal-head">
+            <h3>Page history</h3>
+            <button class="btn" onclick="closeHistory()">Close</button>
+        </div>
+        <div id="historyBody" class="admin-modal-body"></div>
+    </div>
+</div>
+
+<div id="assetsModal" class="admin-modal">
+    <div class="admin-modal-inner">
+        <div class="admin-modal-head">
+            <h3>Asset library</h3>
+            <button class="btn" onclick="closeAssets()">Close</button>
+        </div>
+        <div id="assetsBody" class="admin-modal-body"></div>
+    </div>
+</div>
+
+</body>
+</html>

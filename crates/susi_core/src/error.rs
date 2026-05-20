@@ -29,6 +29,9 @@ pub enum LicenseError {
     #[error("License revoked")]
     Revoked,
 
+    #[error("Machine deactivated by administrator")]
+    Deactivated,
+
     #[error("License not found")]
     NotFound,
 
@@ -52,6 +55,9 @@ pub enum LicenseError {
 
     #[error("Certificate does not termiante at the trusted CA")]
     CertificateChainNotTrusted,
+    
+    #[error("Workspace graph version conflict (current={current})")]
+    GraphConflict { current: u32 },
 
     #[error("{0}")]
     Other(String),

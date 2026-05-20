@@ -26,12 +26,9 @@ db = ["rusqlite"]
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
+wmi = "0.18"
 windows = { version = "0.58", features = [
     "Win32_Devices_DeviceAndDriverInstallation",
-    "Win32_NetworkManagement_IpHelper",
-    "Win32_NetworkManagement_Ndis",
-    "Win32_Networking_WinSock",
-    "Win32_System_SystemInformation",
     "Win32_Storage_FileSystem",
     "Win32_Security",
     "Win32_System_IO",

@@ -74,6 +74,7 @@
 //! [`TestServer::admin_token`] logs in and clears the forced-password-change
 //! flag so that all admin API endpoints become accessible.
 
+use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
@@ -81,6 +82,7 @@ use reqwest::blocking::Client;
 use serde_json::{json, Value};
 use susi_client::{binary_signing, LicenseClient, LicenseStatus};
 use susi_core::crypto::{generate_keypair, private_key_to_pem, public_key_to_pem};
+use totp_rs::{Algorithm, Secret, TOTP};
 
 // ---------------------------------------------------------------------------
 // TestServer harness
@@ -196,6 +198,40 @@ impl TestServer {
             resp.text().unwrap_or_default()
         );
 
+        // Set up 2FA (required before admin endpoints accept requests).
+        let resp = client
+            .post(format!("{}/auth/setup-2fa", self.api_url))
+            .bearer_auth(&token)
+            .send()
+            .expect("setup-2fa");
+        assert!(
+            resp.status().is_success(),
+            "setup-2fa failed: {}",
+            resp.text().unwrap_or_default()
+        );
+        let secret_b32 = resp.json::<Value>().expect("setup-2fa json")["secret"]
+            .as_str()
+            .expect("secret field")
+            .to_string();
+
+        let secret_bytes = Secret::Encoded(secret_b32).to_bytes().expect("decode secret");
+        let totp = TOTP::new(Algorithm::SHA1, 6, 1, 30, secret_bytes,
+            Some("Susi License Server".into()), "admin".into())
+            .expect("totp");
+        let totp_code = totp.generate_current().expect("generate totp");
+
+        let resp = client
+            .post(format!("{}/auth/verify-2fa", self.api_url))
+            .bearer_auth(&token)
+            .json(&json!({"totp_code": totp_code}))
+            .send()
+            .expect("verify-2fa");
+        assert!(
+            resp.status().is_success(),
+            "verify-2fa failed: {}",
+            resp.text().unwrap_or_default()
+        );
+
         token
     }
 
@@ -245,8 +281,23 @@ fn free_port() -> u16 {
 // Tests
 // ---------------------------------------------------------------------------
 
+// Real fingerprint lookup fails on some CI runners (e.g. GitHub's
+// ubuntu-latest where /sys/block/<disk>/serial is empty), which would
+// cause every verify_signed call to fall through to LicenseStatus::Error
+// regardless of actual signature validity. The tests do not care about
+// machine-binding — inject a stable synthetic code via the cache.
+const TEST_MACHINE_CODE: &str =
+    "0000000000000000000000000000000000000000000000000000000000000000";
+
+fn test_machine_code_cache() -> PathBuf {
+    let path = std::env::temp_dir().join("susi_client_test_machine_code");
+    let _ = std::fs::write(&path, TEST_MACHINE_CODE);
+    path
+}
+
+
 /// Full happy-path: activate a `require_signed_binary=false` license via the
-/// server, then verify it locally through [`LicenseClient::verify_and_refresh`].
+/// server, then verify it locally through [`LicenseClient::activate`].
 ///
 /// This is the baseline test that must pass on every machine without any
 /// certificate setup.
@@ -258,16 +309,17 @@ fn test_activate_and_refresh_unsigned_ok() {
 
     let license_path = server._dir.path().join("license.json");
     let client = LicenseClient::with_server(&server.public_key_pem, server.api_url.clone())
-        .expect("LicenseClient");
+        .expect("LicenseClient")
+        .with_machine_code_cache(test_machine_code_cache());
 
-    let status = client.verify_and_refresh(&license_path, &license_key, None);
+    let status = client.activate(&license_path, &license_key, None);
     assert!(status.is_valid(), "expected Valid, got: {:?}", status);
     assert!(status.has_feature("imu_optical_fusion"));
     assert!(!status.has_feature("vehicular_fusion"));
 }
 
-/// Calling [`LicenseClient::verify_and_refresh`] a second time contacts the
-/// server again to renew the lease.  Both calls must return `Valid`.
+/// Calling [`LicenseClient::verify_and_refresh`] after [`LicenseClient::activate`]
+/// to renew the lease.  Both calls must return `Valid`.
 #[test]
 fn test_lease_renewal_via_server() {
     let server = TestServer::start();
@@ -276,9 +328,10 @@ fn test_lease_renewal_via_server() {
 
     let license_path = server._dir.path().join("license.json");
     let client = LicenseClient::with_server(&server.public_key_pem, server.api_url.clone())
-        .expect("LicenseClient");
+        .expect("LicenseClient")
+        .with_machine_code_cache(test_machine_code_cache());
 
-    let status = client.verify_and_refresh(&license_path, &license_key, None);
+    let status = client.activate(&license_path, &license_key, None);
     assert!(status.is_valid(), "first check: {:?}", status);
 
     let status = client.verify_and_refresh(&license_path, &license_key, None);
@@ -334,6 +387,17 @@ fn test_fallback_to_cached_file() {
         .json(&json!({"current_password": "changeme", "new_password": "testpassword1"}))
         .send().unwrap();
 
+    let resp = http.post(format!("{}/auth/setup-2fa", api_url))
+        .bearer_auth(&token).send().unwrap();
+    let secret_b32 = resp.json::<Value>().unwrap()["secret"].as_str().unwrap().to_string();
+    let secret_bytes = Secret::Encoded(secret_b32).to_bytes().unwrap();
+    let totp = TOTP::new(Algorithm::SHA1, 6, 1, 30, secret_bytes,
+        Some("Susi License Server".into()), "admin".into()).unwrap();
+    http.post(format!("{}/auth/verify-2fa", api_url))
+        .bearer_auth(&token)
+        .json(&json!({"totp_code": totp.generate_current().unwrap()}))
+        .send().unwrap();
+
     let resp = http.post(format!("{}/licenses", api_url))
         .bearer_auth(&token)
         .json(&json!({"customer": "Corp", "days": 30, "require_signed_binary": false}))
@@ -343,8 +407,10 @@ fn test_fallback_to_cached_file() {
 
     // Prime the on-disk cache.
     let license_path = dir.path().join("license.json");
-    let client = LicenseClient::with_server(&public_pem, api_url.clone()).unwrap();
-    let status = client.verify_and_refresh(&license_path, &license_key, None);
+    let client = LicenseClient::with_server(&public_pem, api_url.clone())
+        .unwrap()
+        .with_machine_code_cache(test_machine_code_cache());
+    let status = client.activate(&license_path, &license_key, None);
     assert!(status.is_valid(), "initial: {:?}", status);
 
     // Kill server — dir (and cached file) remain alive.
@@ -352,7 +418,9 @@ fn test_fallback_to_cached_file() {
     child.wait().ok();
 
     // A second client aimed at the now-dead server must fall back to the file.
-    let client2 = LicenseClient::with_server(&public_pem, api_url).unwrap();
+    let client2 = LicenseClient::with_server(&public_pem, api_url)
+        .unwrap()
+        .with_machine_code_cache(test_machine_code_cache());
     let status = client2.verify_and_refresh(&license_path, &license_key, None);
     assert!(status.is_valid(), "fallback: expected Valid from cache, got: {:?}", status);
 }
@@ -378,7 +446,7 @@ fn test_require_signed_binary_enforcement() {
     let license_key = server.create_license(&token, true);
 
     // Activate manually to inspect the raw SignedLicense.
-    let machine_code = LicenseClient::get_machine_code().expect("machine code");
+    let machine_code = TEST_MACHINE_CODE;
     let resp = server
         .http()
         .post(format!("{}/activate", server.api_url))
@@ -402,7 +470,9 @@ fn test_require_signed_binary_enforcement() {
     );
 
     // Local verification result depends on whether the test binary is signed.
-    let client = LicenseClient::new(&server.public_key_pem).expect("LicenseClient");
+    let client = LicenseClient::new(&server.public_key_pem)
+        .expect("LicenseClient")
+        .with_machine_code_cache(test_machine_code_cache());
     let status = client.verify_signed(&signed);
 
     if binary_signing::is_binary_signed() {
@@ -469,7 +539,7 @@ fn test_update_require_signed_binary() {
     assert_eq!(body["require_signed_binary"], false, "API response must reflect update");
 
     // Re-activate and inspect the fresh payload.
-    let machine_code = LicenseClient::get_machine_code().unwrap();
+    let machine_code = TEST_MACHINE_CODE;
     let signed: susi_core::SignedLicense = http
         .post(format!("{}/activate", server.api_url))
         .json(&json!({"license_key": key, "machine_code": machine_code}))
@@ -483,7 +553,9 @@ fn test_update_require_signed_binary() {
     );
 
     // Local check: unsigned binary is now accepted.
-    let client = LicenseClient::new(&server.public_key_pem).unwrap();
+    let client = LicenseClient::new(&server.public_key_pem)
+        .unwrap()
+        .with_machine_code_cache(test_machine_code_cache());
     let status = client.verify_signed(&signed);
     assert!(status.is_valid(), "expected Valid after update, got: {:?}", status);
 }

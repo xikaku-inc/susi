@@ -1,13 +1,49 @@
 services:
   susi-server:
+    # Image-first by design: AWS Lightsail (1.9 GiB RAM) can build susi
+    # with heavy swap thrashing but it's slow and risks OOM. deploy.sh
+    # builds locally and ships the image via `docker save | scp | docker
+    # load`. The `build: .` directive is kept so local dev can still
+    # `docker compose build` to rebuild on a beefy box.
+    image: susi:latest
     build: .
     container_name: susi-server
     restart: unless-stopped
+    # Bind to loopback only — port is reachable from the on-host nginx
+    # reverse proxy but never directly from the public internet.
     ports:
-      - "3100:3100"
+      - "127.0.0.1:3100:3100"
     environment:
       - SUSI_ADMIN_KEY=${SUSI_ADMIN_KEY:?Set SUSI_ADMIN_KEY in .env}
       - RUST_LOG=info
+      # Magic-link login (leave SUSI_SMTP_HOST empty to disable)
+      - SUSI_SMTP_HOST=${SUSI_SMTP_HOST:-}
+      - SUSI_SMTP_PORT=${SUSI_SMTP_PORT:-587}
+      - SUSI_SMTP_USER=${SUSI_SMTP_USER:-}
+      - SUSI_SMTP_PASSWORD=${SUSI_SMTP_PASSWORD:-}
+      - SUSI_SMTP_FROM_NAME=${SUSI_SMTP_FROM_NAME:-Susi}
+      - SUSI_SMTP_FROM_ADDR=${SUSI_SMTP_FROM_ADDR:-}
+      - SUSI_MAGIC_LINK_BASE_URL=${SUSI_MAGIC_LINK_BASE_URL:-}
+      # FusionHub relay URL handed to workspace members on federation fetch.
+      # Empty disables the relay (members fall back to FUSIONHUB_RELAY_URL
+      # set locally on each member, or direct TCP only).
+      - SUSI_RELAY_URL=${SUSI_RELAY_URL:-}
+      # Shop / Stripe (keys live in /opt/susi/.env on the host)
+      - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY:-}
+      - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET:-}
+      - SUSI_SHOP_BASE_URL=${SUSI_SHOP_BASE_URL:-}
+      - SUSI_SHOP_NOTIFY_ADDR=${SUSI_SHOP_NOTIFY_ADDR:-}
+      # Contact form (empty contact-to-addr disables; turnstile keys optional)
+      - SUSI_CONTACT_TO_ADDR=${SUSI_CONTACT_TO_ADDR:-}
+      - SUSI_TURNSTILE_SECRET=${SUSI_TURNSTILE_SECRET:-}
+      - SUSI_TURNSTILE_SITE_KEY=${SUSI_TURNSTILE_SITE_KEY:-}
+      # S3 for workspace recordings. Empty SUSI_S3_BUCKET disables the
+      # recording endpoints (they respond 503). AWS SDK reads
+      # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY automatically.
+      - SUSI_S3_BUCKET=${SUSI_S3_BUCKET:-}
+      - SUSI_S3_REGION=${SUSI_S3_REGION:-}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
     volumes:
       - susi-data:/data
     healthcheck:

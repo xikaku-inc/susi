@@ -1,13 +1,46 @@
 services:
   susi-server-staging:
+    # Same image as production — staging differs only in env vars and
+    # the data volume. See production compose for the rationale.
+    image: susi:latest
     build: .
     container_name: susi-server-staging
     restart: unless-stopped
+    # Bind to loopback only — nginx on the same host proxies
+    # staging.susi.lp-research.com (TLS) here; 3101 is never public.
     ports:
-      - "3101:3100"
+      - "127.0.0.1:3101:3100"
     environment:
       - SUSI_ADMIN_KEY=${SUSI_ADMIN_KEY:?Set SUSI_ADMIN_KEY in .env}
       - RUST_LOG=info
+      # Magic-link login (leave SUSI_SMTP_HOST empty to disable)
+      - SUSI_SMTP_HOST=${SUSI_SMTP_HOST:-}
+      - SUSI_SMTP_PORT=${SUSI_SMTP_PORT:-587}
+      - SUSI_SMTP_USER=${SUSI_SMTP_USER:-}
+      - SUSI_SMTP_PASSWORD=${SUSI_SMTP_PASSWORD:-}
+      - SUSI_SMTP_FROM_NAME=${SUSI_SMTP_FROM_NAME:-Susi Staging}
+      - SUSI_SMTP_FROM_ADDR=${SUSI_SMTP_FROM_ADDR:-}
+      # Always staging — don't let the shared .env leak the production URL into magic-link emails
+      - SUSI_MAGIC_LINK_BASE_URL=https://staging.susi.lp-research.com
+      # FusionHub relay URL handed to workspace members on federation fetch.
+      # Empty disables the relay (members fall back to FUSIONHUB_RELAY_URL
+      # set locally on each member, or direct TCP only).
+      - SUSI_RELAY_URL=${SUSI_RELAY_URL:-}
+      # Shop / Stripe (test keys live in /opt/susi/.env on the host)
+      - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY:-}
+      - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET:-}
+      - SUSI_SHOP_BASE_URL=${SUSI_SHOP_BASE_URL:-https://staging.susi.lp-research.com}
+      - SUSI_SHOP_NOTIFY_ADDR=${SUSI_SHOP_NOTIFY_ADDR:-}
+      # Contact form (empty contact-to-addr disables; turnstile keys optional)
+      - SUSI_CONTACT_TO_ADDR=${SUSI_CONTACT_TO_ADDR:-}
+      - SUSI_TURNSTILE_SECRET=${SUSI_TURNSTILE_SECRET:-}
+      - SUSI_TURNSTILE_SITE_KEY=${SUSI_TURNSTILE_SITE_KEY:-}
+      # S3 for workspace recordings (shares the production bucket; objects
+      # are namespaced under workspaces/{id}/recordings/ either way).
+      - SUSI_S3_BUCKET=${SUSI_S3_BUCKET:-}
+      - SUSI_S3_REGION=${SUSI_S3_REGION:-}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
     volumes:
       - susi-data-staging:/data
     healthcheck:

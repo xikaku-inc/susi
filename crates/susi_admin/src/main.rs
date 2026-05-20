@@ -56,9 +56,9 @@ enum Commands {
         /// Grace period in hours after lease expiry
         #[arg(long, default_value_t = DEFAULT_LEASE_GRACE_HOURS)]
         lease_grace: u32,
-        /// Allow unsigned binaries (default: binary signing required)
+        /// Require binary to be code-signed (default: off)
         #[arg(long)]
-        no_require_signed_binary: bool,
+        require_signed_binary: bool,
         /// Path to SQLite database
         #[arg(long, default_value = "licenses.db")]
         db: String,
@@ -158,9 +158,9 @@ fn main() -> Result<()> {
             max_machines,
             lease_duration,
             lease_grace,
-            no_require_signed_binary,
+            require_signed_binary,
             db,
-        } => cmd_create(&product, &customer, expires, days, perpetual, &features, max_machines, lease_duration, lease_grace, !no_require_signed_binary, &db),
+        } => cmd_create(&product, &customer, expires, days, perpetual, &features, max_machines, lease_duration, lease_grace, require_signed_binary, &db),
         Commands::Export {
             key,
             machine_code,
@@ -543,6 +543,7 @@ fn cmd_export_token(
         features: license.features.clone(),
         machine_codes: vec![activation_code],
         lease_expires: None,
+        lease_grace_period: None,
         require_signed_binary: license.require_signed_binary,
     };
 

@@ -20,6 +20,7 @@ log = { workspace = true }
 env_logger = { workspace = true }
 axum = { version = "0.8", features = ["multipart"] }
 tower-http = { version = "0.6", features = ["cors"] }
+tokio-util = { version = "0.7", features = ["io"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 rsa = { version = "0.9", features = ["pem"] }
 pkcs8 = { version = "0.10", features = ["pem"] }
@@ -32,6 +33,19 @@ jsonwebtoken = "9"
 totp-rs = { version = "5", features = ["qr"] }
 rand = "0.8"
 uuid = { version = "1", features = ["v4"] }
+sha2 = "0.10"
+hex = "0.4"
+lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "builder", "smtp-transport"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+hmac = "0.12"
+url = "2"
+printpdf = { version = "0.7", default-features = false, features = ["embedded_images"] }
+ammonia = "4"
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+# S3 storage for workspace recordings. Susi only generates presigned URLs +
+# does HeadObject/DeleteObject; bytes never traverse the susi server.
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-s3 = { version = "1", features = ["behavior-version-latest"] }
 
 [dev-dependencies]
 susi_client = { path = "../susi_client" }
@@ -39,3 +53,4 @@ susi_core = { path = "../susi_core" }
 reqwest = { workspace = true }
 tempfile = "3"
 rcgen = "0.13"
+totp-rs = { version = "5", features = ["gen_secret"] }

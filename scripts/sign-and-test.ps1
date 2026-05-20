@@ -23,7 +23,7 @@ $ErrorActionPreference = "Stop"
 
 # ---- Build tests (no run) -----------------------------------------------
 Write-Host "Building integration tests..."
-$buildOutput = cargo test --no-run --test integration --message-format=json 2>&1
+$buildOutput = cargo test --no-run --test integration --message-format=json
 
 # Parse JSON lines to find the test executable
 $testBinary = $buildOutput |

@@ -2,27 +2,41 @@
 set -euo pipefail
 
 # ===========================================================================
-# Susi Server — EC2 Deployment Script
+# Susi Server — EC2 / Lightsail deployment (image-based)
 #
 # Usage:
-#   ./deploy.sh <EC2_HOST> [SSH_KEY_PATH] [--staging]
+#   ./deploy.sh <user@host> [SSH_KEY_PATH] [--staging]
 #
 # Example:
-#   ./deploy.sh ubuntu@54.123.45.67 ~/.ssh/my-key.pem
-#   ./deploy.sh ubuntu@54.123.45.67 ~/.ssh/my-key.pem --staging
+#   ./deploy.sh ubuntu@3.114.50.38 ~/.ssh/lightsail.pem
+#   ./deploy.sh ubuntu@3.114.50.38 ~/.ssh/lightsail.pem --staging
 #
-# Prerequisites on your EC2 instance:
-#   - Docker & Docker Compose installed
-#   - SSH access configured
+# What it does:
+#   1. Builds the susi-server Docker image LOCALLY. On-server builds on
+#      Lightsail's 1.9 GiB box hit ~1.7 GiB swap and run several times
+#      slower than they would on a beefy laptop — and risk OOM. Same
+#      pattern fusionhub already uses.
+#   2. Saves the image to a gzipped tarball and scps it to the server.
+#   3. rsyncs the deployment files (compose files) into /opt/susi.
+#   4. Generates .env (SUSI_ADMIN_KEY) + RSA keypair on first deploy.
+#   5. `docker load` of the shipped image + `docker compose up -d` (no
+#      `--build` flag — uses the loaded image directly).
 #
-# What this script does:
-#   1. Copies the project to the EC2 instance
-#   2. Generates a private key if none exists on the server
-#   3. Builds and starts the container
+# Local prereqs:
+#   - docker (build host), rsync, ssh, openssl, gzip.
+#   - On Windows: run from WSL — Git Bash lacks rsync. SSH key must be
+#     in WSL's home (~/.ssh/...) with chmod 600.
+#
+# Remote prereqs:
+#   - Docker + Docker Compose v2.
+#   - nginx + Let's Encrypt cert for susi.lp-research.com /
+#     staging.susi.lp-research.com (terminates TLS, proxies to
+#     127.0.0.1:3100 / :3101).
 #
 # Staging mode (--staging):
-#   Deploys to port 3101 with a separate database volume.
-#   Use this to test before deploying to production.
+#   Deploys to port 3101 with a separate database volume. Use it to
+#   test before deploying to production. Both modes ship the *same*
+#   image — they differ only in compose file + env + volume.
 # ===========================================================================
 
 STAGING=false
@@ -37,6 +51,8 @@ done
 HOST="${POSITIONAL[0]:?Usage: ./deploy.sh <user@host> [ssh-key-path] [--staging]}"
 SSH_KEY="${POSITIONAL[1]:-}"
 REMOTE_DIR="/opt/susi"
+IMAGE_TAG="susi:latest"
+IMAGE_TAR="/tmp/susi-image.tar.gz"
 
 if $STAGING; then
     COMPOSE_FILE="docker-compose.staging.yml"
@@ -56,21 +72,35 @@ if [ -n "$SSH_KEY" ]; then
 fi
 
 ssh_cmd() { ssh $SSH_OPTS "$HOST" "$@"; }
-scp_cmd() { scp $SSH_OPTS "$@"; }
 
 echo "==> Deploying $LABEL to $HOST"
+
+echo "==> Building $IMAGE_TAG locally"
+docker build -t "$IMAGE_TAG" .
+
+echo "==> Saving + compressing image"
+docker save "$IMAGE_TAG" | gzip > "$IMAGE_TAR"
+ls -lh "$IMAGE_TAR"
+
+echo "==> Shipping image (~$(du -h "$IMAGE_TAR" | cut -f1) over the wire)"
+scp $SSH_OPTS "$IMAGE_TAR" "$HOST:/tmp/"
+
 echo "==> Preparing remote directory"
 ssh_cmd "sudo mkdir -p $REMOTE_DIR && sudo chown \$(whoami) $REMOTE_DIR"
 
-echo "==> Syncing project files"
+echo "==> Syncing deployment files (compose)"
+# Minimal whitelist — the binary lives inside the image, sources aren't
+# needed on the server. Keep the rsync small so the box doesn't spend
+# minutes pushing crates/ that no one reads.
 if command -v rsync &>/dev/null; then
-    rsync -az --exclude target --exclude '*.db' --exclude '*.pem' \
-          --exclude keys --exclude license.json --exclude .git \
-          -e "ssh $SSH_OPTS" \
-          ./ "$HOST:$REMOTE_DIR/"
+    rsync -az -e "ssh $SSH_OPTS" \
+        docker-compose.yml \
+        docker-compose.staging.yml \
+        "$HOST:$REMOTE_DIR/"
 else
-    tar czf - --exclude=target --exclude='*.db' --exclude='*.pem' \
-              --exclude=keys --exclude=license.json --exclude=.git . | \
+    # Fallback: tar over ssh. Less efficient but works on machines
+    # without rsync.
+    tar czf - docker-compose.yml docker-compose.staging.yml | \
         ssh_cmd "cd $REMOTE_DIR && tar xzf -"
 fi
 
@@ -99,12 +129,16 @@ ssh_cmd "
     fi
 "
 
-echo "==> Building and starting $LABEL container"
+echo "==> Loading image + starting $LABEL container"
 ssh_cmd "
     set -e
     cd $REMOTE_DIR
 
-    docker compose -f $COMPOSE_FILE up -d --build
+    echo '  Loading $IMAGE_TAG from /tmp/susi-image.tar.gz...'
+    gunzip -c /tmp/susi-image.tar.gz | docker load
+    rm -f /tmp/susi-image.tar.gz
+
+    docker compose -f $COMPOSE_FILE up -d
 
     if [ -f $REMOTE_DIR/_private.pem ]; then
         VOLUME_DIR=\$(docker volume inspect $VOLUME_NAME --format '{{.Mountpoint}}')
@@ -117,6 +151,9 @@ ssh_cmd "
         echo 'Keys copied into volume and server restarted.'
     fi
 "
+
+# Clean up local tarball — it's idempotent to regenerate next deploy.
+rm -f "$IMAGE_TAR"
 
 echo ""
 echo "==> Deployment complete! ($LABEL)"
