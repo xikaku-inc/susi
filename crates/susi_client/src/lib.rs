@@ -179,19 +179,32 @@ impl LicenseClient {
     }
 
      /// Verify a SignedLicense object (e.g. received from server or loaded from disk).
-     /// Use local machine code for machine check.
+    /// Use local machine code for machine check.
     pub fn verify_signed(&self, signed: &SignedLicense) -> LicenseStatus {
-        match self.current_machine_code() {
-            Ok(local_code) => {
-                return self.verify_signed_with_activation_code(signed, &local_code);
+        let payload = match verify_license(&self.public_key, signed) {
+            Ok(p) => p,
+            Err(LicenseError::InvalidSignature) => return LicenseStatus::InvalidSignature,
+            Err(e) => return LicenseStatus::Error(format!("Verification error: {}", e)),
+        };
+
+        // Only resolve the hardware fingerprint when the license actually pins
+        // to specific machines. A transient WMI / disk-serial failure must not
+        // invalidate a generic, unrestricted license.
+        let activation_code = if payload.machine_codes.is_empty() {
+            String::new()
+        } else {
+            match self.current_machine_code() {
+                Ok(c) => c,
+                Err(e) => {
+                    return LicenseStatus::Error(format!(
+                        "Could not compute machine fingerprint: {}",
+                        e
+                    ));
+                }
             }
-            Err(e) => {
-                return LicenseStatus::Error(format!(
-                    "Could not compute machine fingerprint: {}",
-                    e
-                ));
-            }
-        }
+        };
+
+        self.evaluate_payload(payload, &activation_code)
     }
 
     /// Verify a SignedLicense object (e.g. received from server or loaded from disk).
@@ -202,15 +215,17 @@ impl LicenseClient {
             Err(LicenseError::InvalidSignature) => return LicenseStatus::InvalidSignature,
             Err(e) => return LicenseStatus::Error(format!("Verification error: {}", e)),
         };
+        self.evaluate_payload(payload, activation_code)
+    }
 
+    fn evaluate_payload(&self, payload: LicensePayload, activation_code: &str) -> LicenseStatus {
         if payload.is_expired() {
             return LicenseStatus::Expired {
                 expired_at: payload.expires.unwrap(),
             };
         }
 
-        // Check machine code if the payload has machine restrictions
-        if !payload.is_machine_authorized(&activation_code) {
+        if !payload.is_machine_authorized(activation_code) {
             return LicenseStatus::InvalidMachine {
                 expected: payload.machine_codes.clone(),
                 actual: activation_code.to_string(),
