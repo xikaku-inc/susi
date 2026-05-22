@@ -73,7 +73,7 @@ pub fn generate(
     let invoice_number = invoice
         .get("number").and_then(|v| v.as_str())
         .map(String::from)
-        .unwrap_or_else(|| order_id.map(|i| format!("XK-{:04}", i)).unwrap_or_else(|| "—".into()));
+        .unwrap_or_else(|| order_id.map(|i| format!("XK-{:04}", i)).unwrap_or_else(|| "-".into()));
 
     let date = invoice.get("created").and_then(|v| v.as_i64())
         .or_else(|| obj.get("created").and_then(|v| v.as_i64()))
