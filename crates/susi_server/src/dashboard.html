@@ -2929,15 +2929,12 @@ async function loadUsers() {
                 : '<span class="badge role-pill" style="background:var(--bg3);color:var(--text2);">user</span>';
             // esc(JSON.stringify(x)) is HTML-safe for both the " and ' in the
             // inline onclick attribute. A bare JSON.stringify would break the
-            // attribute quoting, which silently stopped the Edit button from
-            // firing.
+            // attribute quoting, which silently stopped the Edit action from
+            // firing when dispatched from the dropdown.
             const emailArg = u.email ? esc(JSON.stringify(u.email)) : "''";
-            const emailInner = u.email
+            const emailCell = u.email
                 ? '<span class="email-value">' + esc(u.email) + '</span>'
-                  + '<button class="small secondary" onclick="setUserEmail(\'' + esc(u.username) + '\',' + emailArg + ')">Edit</button>'
-                : '<span class="email-value" style="color:var(--text2);font-size:11px;">(none)</span>'
-                  + '<button class="small secondary" onclick="setUserEmail(\'' + esc(u.username) + '\',\'\')">Set</button>';
-            const emailCell = '<span class="email-cell">' + emailInner + '</span>';
+                : '<span class="email-value" style="color:var(--text2);font-size:11px;">(none)</span>';
             // Resend appears for any user still on must_change_password=1 and
             // with an email on file — covers both pending and expired-invite cases.
             const canResend = !isSelf && u.must_change_password && u.email;
@@ -2947,12 +2944,23 @@ async function loadUsers() {
                 ? '<button onclick="resendInvitation(\'' + uname + '\')">' +
                   (u.pending_invitation ? 'Resend invite' : 'Send invite') + '</button>'
                 : '';
+            const emailItem = '<button onclick="setUserEmail(\'' + uname + '\',' + emailArg + ')">' +
+                              (u.email ? 'Edit email' : 'Set email') + '</button>';
+            // Self row keeps a minimal Actions menu (just email management) so
+            // admins can still update their own email here without exposing the
+            // destructive items that would lock them out of their account.
             const actions = isSelf
-                ? '<span style="color:var(--text2);font-size:11px;">You</span>'
+                ? '<span class="dropdown" onclick="event.stopPropagation();">' +
+                    '<button class="small secondary" onclick="toggleDropdown(event,\'' + menuId + '\')">Actions &#9662;</button>' +
+                    '<div id="' + menuId + '" class="dropdown-menu" style="display:none;">' +
+                      emailItem +
+                    '</div>' +
+                  '</span>'
                 : '<span class="dropdown" onclick="event.stopPropagation();">' +
                     '<button class="small secondary" onclick="toggleDropdown(event,\'' + menuId + '\')">Actions &#9662;</button>' +
                     '<div id="' + menuId + '" class="dropdown-menu" style="display:none;">' +
                       '<button onclick="renameUser(\'' + uname + '\')">Rename</button>' +
+                      emailItem +
                       resendItem +
                       '<button onclick="resetUserPassword(\'' + uname + '\')">Reset password</button>' +
                       '<div class="divider"></div>' +
