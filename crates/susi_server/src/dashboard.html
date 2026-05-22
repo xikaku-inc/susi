@@ -431,14 +431,16 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
 
 .dropdown { position: relative; display: inline-block; }
 .dropdown-menu {
-    position: absolute;
-    right: 0;
-    top: calc(100% + 4px);
+    /* Fixed positioning escapes scrollable modal containers that would
+       otherwise clip the menu (overflow:auto on .modal-body and the
+       per-table scroll wrappers). Coordinates are set by toggleDropdown()
+       from the trigger's bounding rect. */
+    position: fixed;
     background: var(--bg2);
     border: 1px solid var(--border);
     border-radius: var(--radius);
     box-shadow: 0 4px 16px rgba(0,0,0,0.25);
-    z-index: 100;
+    z-index: 1000;
     min-width: 160px;
     padding: 4px 0;
 }
@@ -3683,7 +3685,26 @@ function toggleDropdown(event, id) {
         if (el.id !== id) el.style.display = 'none';
     });
     const m = document.getElementById(id);
-    if (m) m.style.display = (m.style.display === 'block') ? 'none' : 'block';
+    if (!m) return;
+    if (m.style.display === 'block') {
+        m.style.display = 'none';
+        return;
+    }
+    // Render hidden first so offsetWidth/Height is measurable, then position
+    // right-aligned under the trigger. Flip above when there's no room below.
+    m.style.visibility = 'hidden';
+    m.style.display = 'block';
+    const trigger = event.currentTarget;
+    const tr = trigger.getBoundingClientRect();
+    const mw = m.offsetWidth;
+    const mh = m.offsetHeight;
+    const left = Math.max(8, Math.min(tr.right - mw, window.innerWidth - mw - 8));
+    const top = (tr.bottom + 4 + mh > window.innerHeight)
+        ? Math.max(8, tr.top - 4 - mh)
+        : tr.bottom + 4;
+    m.style.left = left + 'px';
+    m.style.top = top + 'px';
+    m.style.visibility = '';
 }
 document.addEventListener('click', () => {
     document.querySelectorAll('.dropdown-menu').forEach(el => { el.style.display = 'none'; });
