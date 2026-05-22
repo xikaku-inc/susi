@@ -13,14 +13,14 @@ services:
     environment:
       - SUSI_ADMIN_KEY=${SUSI_ADMIN_KEY:?Set SUSI_ADMIN_KEY in .env}
       - RUST_LOG=info
-      # Magic-link login (leave SUSI_SMTP_HOST empty to disable)
+      # Sign-in code login (leave SUSI_SMTP_HOST empty to disable)
       - SUSI_SMTP_HOST=${SUSI_SMTP_HOST:-}
       - SUSI_SMTP_PORT=${SUSI_SMTP_PORT:-587}
       - SUSI_SMTP_USER=${SUSI_SMTP_USER:-}
       - SUSI_SMTP_PASSWORD=${SUSI_SMTP_PASSWORD:-}
       - SUSI_SMTP_FROM_NAME=${SUSI_SMTP_FROM_NAME:-Susi Staging}
       - SUSI_SMTP_FROM_ADDR=${SUSI_SMTP_FROM_ADDR:-}
-      # Always staging — don't let the shared .env leak the production URL into magic-link emails
+      # Always staging — don't let the shared .env leak the production URL into password-reset / invitation emails
       - SUSI_MAGIC_LINK_BASE_URL=https://staging.susi.lp-research.com
       # FusionHub relay URL handed to workspace members on federation fetch.
       # Empty disables the relay (members fall back to FUSIONHUB_RELAY_URL

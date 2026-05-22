@@ -64,51 +64,42 @@ impl EmailService {
         Ok(Self { cfg, transport })
     }
 
-    pub async fn send_magic_link(
+    pub async fn send_signin_code(
         &self,
         to_addr: &str,
         username: &str,
-        link: &str,
+        code: &str,
         ttl_minutes: i64,
-        device_label: &str,
-        ip: &str,
     ) -> Result<()> {
         let to: Mailbox = to_addr
             .parse()
             .with_context(|| format!("Invalid recipient address: {}", to_addr))?;
 
-        let subject = format!("Susi: sign in from a new device ({} min)", ttl_minutes);
+        let subject = format!("Susi by LP-Research: your sign-in code ({} min)", ttl_minutes);
         let text = format!(
-            "Hi {user},\n\n\
-             You (or someone) just tried to sign in to the Susi license server from a new device:\n\
-             \n    Device: {dev}\n    IP:     {ip}\n\n\
-             If this was you, click the link below within {ttl} minutes to authorize this device:\n\n\
-             {link}\n\n\
-             If this wasn't you, you can ignore this email — the link will expire and no sign-in will happen.\n\n\
-             — Susi\n",
-            user = username, dev = device_label, ip = ip, ttl = ttl_minutes, link = link
+            "Your sign-in code\n\n    {code}\n\n\
+             Hi {user},\n\n\
+             You recently tried to sign in to Susi by LP-Research from a new device. \
+             Enter the code above in the browser tab where you started signing in to complete sign-in.\n\n\
+             The code expires in {ttl} minutes. If this wasn't you, you can ignore this email - no sign-in will happen.\n\n\
+             - Xikaku / LP-Research\n",
+            code = code, user = username, ttl = ttl_minutes
         );
 
         let html = format!(
-            "<div style=\"font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:540px;color:#1a1d23;line-height:1.55;\">\
-                <p style=\"margin:0 0 14px;\">Hi {user},</p>\
-                <p style=\"margin:0 0 14px;\">Someone just tried to sign in to the Susi license server from a new device:</p>\
-                <table style=\"border-collapse:collapse;margin:0 0 18px;\">\
-                    <tr><td style=\"padding:3px 18px 3px 0;color:#5c6470;\">Device</td><td style=\"padding:3px 0;font-weight:600;\">{dev}</td></tr>\
-                    <tr><td style=\"padding:3px 18px 3px 0;color:#5c6470;\">IP</td><td style=\"padding:3px 0;font-weight:600;\">{ip}</td></tr>\
-                </table>\
-                <p style=\"margin:0 0 16px;\">If this was you, click the button below within <strong>{ttl} minutes</strong> to authorize this device:</p>\
-                <p style=\"margin:0 0 20px;\"><a href=\"{link}\" style=\"display:inline-block;padding:11px 22px;background:#2563eb;color:#ffffff;text-decoration:none;border-radius:8px;font-weight:600;\">Sign in</a></p>\
-                <p style=\"margin:0 0 6px;font-size:13px;\">Or paste this into your browser:</p>\
-                <p style=\"margin:0 0 20px;font-size:13px;word-break:break-all;\"><a href=\"{link}\" style=\"color:#2563eb;text-decoration:none;\">{link}</a></p>\
-                <p style=\"margin:0 0 4px;font-size:13px;\">If this wasn't you, you can ignore this email — the link will expire and no sign-in will happen.</p>\
-                <p style=\"margin:16px 0 0;font-size:13px;\">— Susi</p>\
+            "<div style=\"font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:540px;margin:0 auto;color:#1a1d23;line-height:1.55;text-align:center;\">\
+                <h2 style=\"margin:0 0 18px;font-weight:600;font-size:22px;\">Your sign-in code</h2>\
+                <div style=\"margin:0 0 26px;padding:22px 12px;background:#f3f4f6;border-radius:10px;font-family:'SF Mono','Fira Code','Consolas',monospace;font-size:34px;font-weight:600;letter-spacing:10px;color:#1a1d23;\">{code}</div>\
+                <div style=\"text-align:left;\">\
+                    <p style=\"margin:0 0 14px;\">Hi {user},</p>\
+                    <p style=\"margin:0 0 14px;\">You recently tried to sign in to Susi by LP-Research from a new device. Enter the code above in the browser tab where you started signing in to complete sign-in.</p>\
+                    <p style=\"margin:0 0 4px;font-size:13px;\">The code expires in {ttl} minutes. If this wasn't you, you can ignore this email - no sign-in will happen.</p>\
+                    <p style=\"margin:16px 0 0;font-size:13px;\">- Xikaku / LP-Research</p>\
+                </div>\
              </div>",
+            code = html_escape(code),
             user = html_escape(username),
-            dev = html_escape(device_label),
-            ip = html_escape(ip),
             ttl = ttl_minutes,
-            link = html_escape(link),
         );
 
         let email = Message::builder()
@@ -128,7 +119,7 @@ impl EmailService {
                             .body(html),
                     ),
             )
-            .context("Failed to build magic-link email")?;
+            .context("Failed to build sign-in code email")?;
 
         self.transport
             .send(email)
@@ -149,27 +140,33 @@ impl EmailService {
             .parse()
             .with_context(|| format!("Invalid recipient address: {}", to_addr))?;
 
-        let subject = format!("Susi: password reset link ({} min)", ttl_minutes);
+        let subject = format!("Susi by LP-Research: password reset link ({} min)", ttl_minutes);
         let text = format!(
-            "Hi {user},\n\n\
-             Someone requested a password reset for your Susi account from IP {ip}.\n\n\
+            "Reset your password\n\n\
+             Hi {user},\n\n\
+             Someone requested a password reset for your Susi by LP-Research account from IP {ip}.\n\n\
              If this was you, click the link below within {ttl} minutes to set a new password:\n\n\
              {link}\n\n\
-             If this wasn't you, you can ignore this email — your password stays unchanged.\n\n\
-             — Susi\n",
+             If this wasn't you, you can ignore this email - your password stays unchanged.\n\n\
+             - Xikaku / LP-Research\n",
             user = username, ip = ip, ttl = ttl_minutes, link = link
         );
 
         let html = format!(
-            "<div style=\"font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:540px;color:#1a1d23;line-height:1.55;\">\
-                <p style=\"margin:0 0 14px;\">Hi {user},</p>\
-                <p style=\"margin:0 0 16px;\">Someone requested a password reset for your Susi account from IP <strong>{ip}</strong>.</p>\
-                <p style=\"margin:0 0 16px;\">If this was you, click the button below within <strong>{ttl} minutes</strong> to set a new password:</p>\
-                <p style=\"margin:0 0 20px;\"><a href=\"{link}\" style=\"display:inline-block;padding:11px 22px;background:#2563eb;color:#ffffff;text-decoration:none;border-radius:8px;font-weight:600;\">Reset password</a></p>\
-                <p style=\"margin:0 0 6px;font-size:13px;\">Or paste this into your browser:</p>\
-                <p style=\"margin:0 0 20px;font-size:13px;word-break:break-all;\"><a href=\"{link}\" style=\"color:#2563eb;text-decoration:none;\">{link}</a></p>\
-                <p style=\"margin:0 0 4px;font-size:13px;\">If this wasn't you, you can ignore this email — your password stays unchanged.</p>\
-                <p style=\"margin:16px 0 0;font-size:13px;\">— Susi</p>\
+            "<div style=\"font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:540px;margin:0 auto;color:#1a1d23;line-height:1.55;text-align:center;\">\
+                <h2 style=\"margin:0 0 22px;font-weight:600;font-size:22px;\">Reset your password</h2>\
+                <div style=\"text-align:left;\">\
+                    <p style=\"margin:0 0 14px;\">Hi {user},</p>\
+                    <p style=\"margin:0 0 16px;\">Someone requested a password reset for your <strong>Susi by LP-Research</strong> account from IP <strong>{ip}</strong>.</p>\
+                    <p style=\"margin:0 0 16px;\">If this was you, click the button below within <strong>{ttl} minutes</strong> to set a new password:</p>\
+                </div>\
+                <p style=\"margin:0 0 22px;\"><a href=\"{link}\" style=\"display:inline-block;padding:11px 22px;background:#2563eb;color:#ffffff;text-decoration:none;border-radius:8px;font-weight:600;\">Reset password</a></p>\
+                <div style=\"text-align:left;\">\
+                    <p style=\"margin:0 0 6px;font-size:13px;\">Or paste this into your browser:</p>\
+                    <p style=\"margin:0 0 18px;font-size:13px;word-break:break-all;\"><a href=\"{link}\" style=\"color:#2563eb;text-decoration:none;\">{link}</a></p>\
+                    <p style=\"margin:0 0 4px;font-size:13px;\">If this wasn't you, you can ignore this email - your password stays unchanged.</p>\
+                    <p style=\"margin:16px 0 0;font-size:13px;\">- Xikaku / LP-Research</p>\
+                </div>\
              </div>",
             user = html_escape(username),
             ip = html_escape(ip),
@@ -195,6 +192,75 @@ impl EmailService {
                     ),
             )
             .context("Failed to build password-reset email")?;
+
+        self.transport
+            .send(email)
+            .await
+            .context("SMTP send failed")?;
+        Ok(())
+    }
+
+    /// Welcome email for an admin-created account. Embeds a one-shot link to
+    /// `/#/reset/<token>` where the invitee picks their initial password.
+    /// `ttl_hours` is shown in the body so the recipient knows the window.
+    pub async fn send_invitation(
+        &self,
+        to_addr: &str,
+        username: &str,
+        link: &str,
+        ttl_hours: i64,
+    ) -> Result<()> {
+        let to: Mailbox = to_addr
+            .parse()
+            .with_context(|| format!("Invalid recipient address: {}", to_addr))?;
+
+        let subject = "You've been invited to Susi by LP-Research".to_string();
+        let text = format!(
+            "You've been invited to Susi by LP-Research\n\n\
+             Hi {user},\n\n\
+             A Susi by LP-Research account has been created for you. \
+             Click the link below within {ttl} hours to set your password and sign in:\n\n\
+             {link}\n\n\
+             If you weren't expecting this invitation, you can ignore this email - \
+             the link will expire and no account access will be granted.\n\n\
+             - Xikaku / LP-Research\n",
+            user = username, ttl = ttl_hours, link = link
+        );
+
+        let html = format!(
+            "<div style=\"font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:540px;margin:0 auto;color:#1a1d23;line-height:1.55;text-align:center;\">\
+                <h2 style=\"margin:0 0 22px;font-weight:600;font-size:22px;\">You've been invited to Susi by LP-Research</h2>\
+                <div style=\"text-align:left;\">\
+                    <p style=\"margin:0 0 14px;\">Hi {user},</p>\
+                    <p style=\"margin:0 0 14px;\">A Susi by LP-Research account has been created for you. Click the link below within {ttl} hours to set your password and sign in:</p>\
+                    <p style=\"margin:0 0 18px;font-size:13px;word-break:break-all;\"><a href=\"{link}\" style=\"color:#2563eb;text-decoration:none;\">{link}</a></p>\
+                    <p style=\"margin:0 0 4px;font-size:13px;\">If you weren't expecting this invitation, you can ignore this email - the link will expire and no account access will be granted.</p>\
+                    <p style=\"margin:16px 0 0;font-size:13px;\">- Xikaku / LP-Research</p>\
+                </div>\
+             </div>",
+            user = html_escape(username),
+            ttl = ttl_hours,
+            link = html_escape(link),
+        );
+
+        let email = Message::builder()
+            .from(self.cfg.from.clone())
+            .to(to)
+            .subject(subject)
+            .multipart(
+                lettre::message::MultiPart::alternative()
+                    .singlepart(
+                        lettre::message::SinglePart::builder()
+                            .header(ContentType::TEXT_PLAIN)
+                            .body(text),
+                    )
+                    .singlepart(
+                        lettre::message::SinglePart::builder()
+                            .header(ContentType::TEXT_HTML)
+                            .body(html),
+                    ),
+            )
+            .context("Failed to build invitation email")?;
 
         self.transport
             .send(email)

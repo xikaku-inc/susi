@@ -28,7 +28,7 @@
 - **Public contact form** — Cloudflare Turnstile + honeypot + per-IP rate limit, served at the `/site` chrome
 
 ### Auth & ops
-- **Multi-user dashboard** with Argon2id passwords, **TOTP 2FA + backup codes**, **magic-link login**, **trusted-device list**, **password reset via email**, and **API tokens** for headless clients
+- **Multi-user dashboard** with Argon2id passwords, **TOTP 2FA + backup codes**, **emailed sign-in code for new devices**, **trusted-device list**, **password reset via email**, and **API tokens** for headless clients
 - **Optional activation server** — HTTP server for online activation, lease renewal, and machine management
 - **One-command deploy** — Docker + Compose with separate production / staging environments
 - **Cross-platform clients** — Linux, Windows, macOS
@@ -587,7 +587,7 @@ The server uses JWT-based authentication with multi-user support. Each team memb
 | Method | Endpoint | Auth | Description |
 |---|---|---|---|
 | `POST` | `/api/v1/auth/login` | None | Login with username + password (+ TOTP if enabled) |
-| `POST` | `/api/v1/auth/magic` | None | Exchange a magic-link token for a JWT |
+| `POST` | `/api/v1/auth/signin-code` | None | Exchange an emailed 6-digit sign-in code for a JWT |
 | `POST` | `/api/v1/auth/forgot-password` | None | Request a password-reset email (accepts username or email) |
 | `POST` | `/api/v1/auth/reset-password` | None | Submit a new password against a reset token |
 | `GET` | `/api/v1/auth/status` | JWT | Check session status, get username and 2FA/password state |
@@ -596,7 +596,7 @@ The server uses JWT-based authentication with multi-user support. Each team memb
 | `POST` | `/api/v1/auth/verify-2fa` | JWT | Verify TOTP code to enable 2FA |
 | `POST` | `/api/v1/auth/disable-2fa` | JWT | Disable 2FA (requires valid TOTP code) |
 | `POST` | `/api/v1/auth/regenerate-backup-codes` | JWT | Issue a fresh set of one-shot backup codes |
-| `PUT` | `/api/v1/auth/me/email` | JWT | Set own contact email (used for magic-link / reset) |
+| `PUT` | `/api/v1/auth/me/email` | JWT | Set own contact email (used for sign-in code / password reset) |
 | `GET` | `/api/v1/auth/me/devices` | JWT | List trusted devices |
 | `DELETE` | `/api/v1/auth/me/devices/{fp}` | JWT | Revoke a trusted device |
 | `POST` | `/api/v1/auth/api-tokens` | JWT | Create a personal API token (`susi_pat_…`) |
@@ -614,7 +614,7 @@ The server uses JWT-based authentication with multi-user support. Each team memb
 - Passwords are hashed with **Argon2id**
 - Sessions use **HS256 JWT tokens** with 24-hour expiry
 - 2FA uses **TOTP** with one-shot **backup codes**, plus **trusted-device fingerprints** so a known browser doesn't re-prompt every login
-- **Magic-link** login lets a user authenticate by clicking a link sent to their registered email (15-minute TTL); enabled when SMTP is configured
+- **Emailed sign-in code** is required the first time a user signs in from a new device — a 6-digit code is sent to the registered email (15-minute TTL); enabled when SMTP is configured
 - **Password reset** sends a time-limited token to the user's email
 - New users and password resets force a password change on next login
 - Login, shop checkout, Stripe webhook, and the contact form are each rate-limited per source IP (sliding window). When fronted by the on-host nginx proxy, `X-Forwarded-For` is honoured so the limiter sees the real client
@@ -953,7 +953,7 @@ The container reads optional integrations from `/opt/susi/.env`. The deploy scri
 # /opt/susi/.env  (chmod 600)
 SUSI_ADMIN_KEY=<generated-by-deploy.sh>
 
-# Magic-link / password-reset / outbound mail (Gmail SMTP relay shown)
+# Sign-in code / password-reset / outbound mail (Gmail SMTP relay shown)
 SUSI_SMTP_HOST=smtp.gmail.com
 SUSI_SMTP_PORT=587
 SUSI_SMTP_USER=you@example.com
@@ -1158,7 +1158,7 @@ Key dependencies:
 - [`argon2`](https://crates.io/crates/argon2) — Argon2id password hashing (susi_server only)
 - [`jsonwebtoken`](https://crates.io/crates/jsonwebtoken) — JWT session tokens (susi_server only)
 - [`totp-rs`](https://crates.io/crates/totp-rs) — TOTP 2FA (susi_server only)
-- [`lettre`](https://crates.io/crates/lettre) — SMTP client for magic-link / order / contact email (susi_server only)
+- [`lettre`](https://crates.io/crates/lettre) — SMTP client for sign-in code / order / contact email (susi_server only)
 - [`hmac`](https://crates.io/crates/hmac) — Stripe webhook signature verification (susi_server only)
 - [`printpdf`](https://crates.io/crates/printpdf) — paid-invoice PDF generation (susi_server only)
 - [`ammonia`](https://crates.io/crates/ammonia) — HTML sanitizer for admin-authored content in customer email (susi_server only)

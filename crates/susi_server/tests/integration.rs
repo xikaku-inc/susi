@@ -626,3 +626,109 @@ fn test_cpp_client_against_server() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Admin invite flow
+// ---------------------------------------------------------------------------
+
+/// Admin-created user with an explicit `password` field (manual fallback):
+/// account works immediately, no invitation is sent.
+#[test]
+fn test_create_user_with_explicit_password_skips_invite() {
+    let server = TestServer::start();
+    let token = server.admin_token();
+
+    let resp = server
+        .http()
+        .post(format!("{}/auth/users", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({
+            "username": "manual_alice",
+            "email": "manual_alice@example.com",
+            "role": "user",
+            "password": "manualpw123",
+        }))
+        .send()
+        .expect("create user");
+    assert!(resp.status().is_success(), "create user: {}", resp.text().unwrap_or_default());
+    let body = resp.json::<Value>().expect("create user json");
+    assert_eq!(body["invitation_sent"], json!(false));
+
+    // The user can immediately log in with that password.
+    let resp = server
+        .http()
+        .post(format!("{}/auth/login", server.api_url))
+        .json(&json!({"username": "manual_alice", "password": "manualpw123"}))
+        .send()
+        .expect("login");
+    assert!(resp.status().is_success(), "login: {}", resp.text().unwrap_or_default());
+}
+
+/// Without SMTP configured, asking for the invite path (no password) returns
+/// 503 with a clear hint rather than silently creating an unreachable user.
+#[test]
+fn test_create_user_without_password_requires_smtp() {
+    let server = TestServer::start();
+    let token = server.admin_token();
+
+    let resp = server
+        .http()
+        .post(format!("{}/auth/users", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({
+            "username": "invite_bob",
+            "email": "invite_bob@example.com",
+            "role": "user",
+        }))
+        .send()
+        .expect("create user");
+    assert_eq!(resp.status().as_u16(), 503);
+    let body = resp.json::<Value>().expect("error json");
+    assert!(
+        body["error"].as_str().unwrap_or("").contains("Email is not configured"),
+        "unexpected error: {}",
+        body
+    );
+
+    // Verify no user row was created.
+    let users = server
+        .http()
+        .get(format!("{}/auth/users", server.api_url))
+        .bearer_auth(&token)
+        .send()
+        .expect("list users")
+        .json::<Value>()
+        .expect("users json");
+    let arr = users.as_array().expect("users is array");
+    assert!(!arr.iter().any(|u| u["username"] == "invite_bob"));
+}
+
+/// Resending an invitation when SMTP isn't configured surfaces the same 503.
+#[test]
+fn test_resend_invitation_requires_smtp() {
+    let server = TestServer::start();
+    let token = server.admin_token();
+
+    server
+        .http()
+        .post(format!("{}/auth/users", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({
+            "username": "manual_carol",
+            "email": "manual_carol@example.com",
+            "role": "user",
+            "password": "manualpw123",
+        }))
+        .send()
+        .expect("create user")
+        .error_for_status()
+        .expect("create user ok");
+
+    let resp = server
+        .http()
+        .post(format!("{}/auth/users/manual_carol/resend-invitation", server.api_url))
+        .bearer_auth(&token)
+        .send()
+        .expect("resend");
+    assert_eq!(resp.status().as_u16(), 503);
+}

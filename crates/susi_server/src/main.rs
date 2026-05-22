@@ -54,14 +54,16 @@ struct Cli {
     #[arg(long, default_value = "/data")]
     data_dir: String,
 
-    // -------- SMTP / magic-link settings --------
+    // -------- SMTP / sign-in code settings --------
     //
-    // If `smtp_host` is empty, magic-link verification is disabled entirely
-    // and new devices are accepted without email confirmation (bootstrap mode).
-    // Enabling requires `smtp_host`, `smtp_user`, `smtp_password`, and
-    // `magic_link_base_url` to all be set.
+    // If `smtp_host` is empty, sign-in-code verification is disabled
+    // entirely and new devices are accepted without email confirmation
+    // (bootstrap mode). Enabling requires `smtp_host`, `smtp_user`,
+    // `smtp_password`, and `magic_link_base_url` to all be set
+    // (`magic_link_base_url` is still consulted for password-reset and
+    // invitation links, which remain link-based).
 
-    /// SMTP relay host (e.g. smtp.gmail.com). Empty = disable magic-link.
+    /// SMTP relay host (e.g. smtp.gmail.com). Empty = disable sign-in code.
     #[arg(long, env = "SUSI_SMTP_HOST", default_value = "")]
     smtp_host: String,
 
@@ -85,8 +87,10 @@ struct Cli {
     #[arg(long, env = "SUSI_SMTP_FROM_ADDR", default_value = "")]
     smtp_from_addr: String,
 
-    /// Public base URL where the dashboard is reachable. Used to build magic
-    /// links in outbound email. Must include scheme, e.g. `https://susi.lp-research.com`.
+    /// Public base URL where the dashboard is reachable. Used to build the
+    /// password-reset and invitation links in outbound email (sign-in itself
+    /// uses a code, not a link). Must include scheme, e.g.
+    /// `https://susi.lp-research.com`.
     #[arg(long, env = "SUSI_MAGIC_LINK_BASE_URL", default_value = "")]
     magic_link_base_url: String,
 
@@ -169,9 +173,9 @@ struct AppState {
     s3: Option<s3::S3Storage>,
 }
 
-// Magic-link TTL: long enough for a user to switch to their mail client and
-// back, short enough that a leaked link is useless a few minutes later.
-const MAGIC_LINK_TTL_MINUTES: i64 = 15;
+// Sign-in code TTL: long enough for a user to switch to their mail client and
+// back, short enough that a leaked code is useless a few minutes later.
+const SIGNIN_CODE_TTL_MINUTES: i64 = 15;
 
 
 // Sliding-window rate limit on /api/v1/auth/login — throttles brute force
@@ -906,6 +910,26 @@ fn random_magic_token() -> String {
     hex::encode(bytes)
 }
 
+// Generate a 6-digit numeric sign-in code (zero-padded). 20 bits of entropy
+// is intentional — short enough to type by hand from an email, gated by IP
+// rate limiting + per-user scoping so brute force is impractical.
+fn random_signin_code() -> String {
+    let n: u32 = rand::thread_rng().gen_range(0..1_000_000);
+    format!("{:06}", n)
+}
+
+// Scope the stored token hash by username so two concurrent users picking
+// the same 6-digit code don't collide in `login_tokens`. The prefix is a
+// domain tag so this can't be confused with `hash_token` digests.
+fn hash_signin_code(username: &str, code: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(b"susi-signin:");
+    h.update(username.as_bytes());
+    h.update(b":");
+    h.update(code.as_bytes());
+    hex::encode(h.finalize())
+}
+
 fn mask_email(addr: &str) -> String {
     // "klaus@lp-research.com" -> "k***@lp-research.com" — shown to the user so
     // they can confirm they're checking the right inbox without leaking the
@@ -918,7 +942,67 @@ fn mask_email(addr: &str) -> String {
     }
 }
 
-fn magic_link_disabled(state: &AppState) -> bool {
+/// Collapse a raw `navigator.userAgent` string into a short "Browser N / OS"
+/// label suitable for the trusted-devices list and sign-in code emails.
+/// Reduces the noise the user sees and also drops the `Chrome/N.N.N.N`
+/// pattern that Gmail otherwise auto-linkifies as an IPv4 address.
+/// Falls back to a length-capped copy of the raw input when no known
+/// browser/OS tokens match.
+fn summarize_user_agent(raw: &str) -> String {
+    let s = raw.trim();
+    if s.is_empty() {
+        return "(unknown device)".to_string();
+    }
+
+    let browser = if let Some(v) = ua_version_after(s, "Edg/") {
+        Some(format!("Edge {}", v))
+    } else if let Some(v) = ua_version_after(s, "OPR/") {
+        Some(format!("Opera {}", v))
+    } else if let Some(v) = ua_version_after(s, "Firefox/") {
+        Some(format!("Firefox {}", v))
+    } else if let Some(v) = ua_version_after(s, "Chrome/") {
+        Some(format!("Chrome {}", v))
+    } else if s.contains("Safari/") {
+        ua_version_after(s, "Version/").map(|v| format!("Safari {}", v))
+    } else {
+        None
+    };
+
+    let os = if s.contains("Windows NT") {
+        Some("Windows")
+    } else if s.contains("iPhone OS") || s.contains("iPad") {
+        Some("iOS")
+    } else if s.contains("Mac OS X") {
+        Some("macOS")
+    } else if s.contains("Android") {
+        Some("Android")
+    } else if s.contains("Linux") {
+        Some("Linux")
+    } else {
+        None
+    };
+
+    match (browser, os) {
+        (Some(b), Some(o)) => format!("{} / {}", b, o),
+        (Some(b), None) => b,
+        (None, Some(o)) => o.to_string(),
+        (None, None) => s.chars().take(80).collect(),
+    }
+}
+
+/// Return the major-version digits found immediately after `marker` (e.g.
+/// `"Chrome/"` -> `"148"`). Stops at the first non-digit so `148.0.0.0`
+/// collapses to `148`.
+fn ua_version_after(ua: &str, marker: &str) -> Option<String> {
+    let rest = ua.split(marker).nth(1)?;
+    let major: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    (!major.is_empty()).then_some(major)
+}
+
+fn signin_code_disabled(state: &AppState) -> bool {
+    // The base URL is still consulted because password-reset + invitation
+    // mails (issued from the same SMTP path) need it. Without an outbound
+    // URL the whole email-bound auth surface is off.
     state.email.is_none() || state.magic_link_base_url.is_empty()
 }
 
@@ -930,6 +1014,11 @@ async fn handle_login(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let ip = client_ip(peer, &headers);
     check_login_rate_limit(&state, ip)?;
+
+    // Collapse the raw browser UA into a short "Browser N / OS" label once,
+    // up front. Used by the DB token row, the trusted-devices entry, and the
+    // sign-in code email so all three show the same readable string.
+    let device_label = summarize_user_agent(&req.device_label);
 
     // Phase 1 — password check. Pull every DB row we need under one lock, drop
     // the lock, then run Argon2 verify off-thread so the ~50 ms CPU spend
@@ -954,15 +1043,15 @@ async fn handle_login(
     // Phase 2 — decide what the new-device gate demands.
     //
     //   known device                → password only, issue JWT
-    //   new device + email + SMTP   → require magic link (and TOTP if enabled)
+    //   new device + email + SMTP   → require sign-in code (and TOTP if enabled)
     //   new device + no email/SMTP  → bootstrap: just issue JWT, but log warning
     if !device_known {
-        let magic_disabled = magic_link_disabled(&state);
-        if let (Some(email_addr), false) = (user_email.as_ref(), magic_disabled) {
-            // Issue magic link. Do NOT issue JWT yet — the user has to click
-            // the link in their inbox, which proves email control.
-            let raw_token = random_magic_token();
-            let token_hash = hash_token(&raw_token);
+        let code_disabled = signin_code_disabled(&state);
+        if let (Some(email_addr), false) = (user_email.as_ref(), code_disabled) {
+            // Issue a 6-digit sign-in code. Do NOT issue JWT yet — the user
+            // has to type the code back, which proves email control.
+            let code = random_signin_code();
+            let token_hash = hash_signin_code(&req.username, &code);
             {
                 let db = state.db.lock().unwrap();
                 let _ = db.purge_old_login_tokens();
@@ -970,17 +1059,11 @@ async fn handle_login(
                     &token_hash,
                     &req.username,
                     &req.device_fp,
-                    &req.device_label,
-                    MAGIC_LINK_TTL_MINUTES * 60,
+                    &device_label,
+                    SIGNIN_CODE_TTL_MINUTES * 60,
                 )
                 .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
             }
-
-            let link = format!(
-                "{}/#/magic/{}",
-                state.magic_link_base_url.trim_end_matches('/'),
-                raw_token
-            );
 
             // Fire off the email. We log but don't leak failures back to the
             // caller — telling an unauthenticated client that an address is
@@ -988,26 +1071,26 @@ async fn handle_login(
             let email_service = state.email.clone().expect("checked above");
             let to = email_addr.clone();
             let uname = req.username.clone();
-            let device_label = if req.device_label.is_empty() {
-                "(unknown device)".to_string()
-            } else {
-                req.device_label.clone()
-            };
-            let ip_str = ip.to_string();
+            let code_for_email = code.clone();
             tokio::spawn(async move {
                 if let Err(e) = email_service
-                    .send_magic_link(&to, &uname, &link, MAGIC_LINK_TTL_MINUTES, &device_label, &ip_str)
+                    .send_signin_code(
+                        &to,
+                        &uname,
+                        &code_for_email,
+                        SIGNIN_CODE_TTL_MINUTES,
+                    )
                     .await
                 {
-                    log::error!("Failed to send magic-link email to {}: {:#}", to, e);
+                    log::error!("Failed to send sign-in code email to {}: {:#}", to, e);
                 }
             });
 
             return Ok(Json(serde_json::json!({
-                "magic_link_sent": true,
+                "signin_code_sent": true,
                 "email_hint": mask_email(email_addr),
-                "ttl_minutes": MAGIC_LINK_TTL_MINUTES,
-                "totp_required_after_magic": totp_enabled,
+                "ttl_minutes": SIGNIN_CODE_TTL_MINUTES,
+                "totp_required_after_code": totp_enabled,
             })));
         }
 
@@ -1016,7 +1099,7 @@ async fn handle_login(
             "New-device login for user '{}' accepted without email verification (email set: {}, smtp enabled: {})",
             req.username,
             user_email.is_some(),
-            !magic_link_disabled(&state),
+            !signin_code_disabled(&state),
         );
     }
 
@@ -1041,7 +1124,7 @@ async fn handle_login(
         if device_known {
             let _ = db.touch_device(&req.username, &req.device_fp);
         } else {
-            let _ = db.register_device(&req.username, &req.device_fp, &req.device_label);
+            let _ = db.register_device(&req.username, &req.device_fp, &device_label);
         }
     }
 
@@ -1086,8 +1169,8 @@ fn verify_totp_code(
 }
 
 // Verify either a 6-digit TOTP or a backup code. Backup codes are consumed
-// on success. Used by login + magic-exchange, where the user may have lost
-// their authenticator.
+// on success. Used by login + sign-in code exchange, where the user may
+// have lost their authenticator.
 fn verify_totp_or_backup(
     state: &AppState,
     username: &str,
@@ -1166,35 +1249,42 @@ fn hash_backup_code(code: &str) -> Result<String, (StatusCode, Json<ErrorRespons
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))
 }
 
-// Exchange a magic-link token for a JWT. Also registers the device as trusted.
+// Exchange a sign-in code for a JWT. Also registers the device as trusted.
+// `username` is required so the lookup can be scoped per user — two users
+// can hold the same 6-digit code in flight without colliding.
 #[derive(Deserialize)]
-struct MagicExchangeRequest {
-    token: String,
+struct SigninCodeRequest {
+    username: String,
+    code: String,
     #[serde(default)]
     totp_code: Option<String>,
 }
 
-async fn handle_magic_exchange(
+async fn handle_signin_code_exchange(
     State(state): State<Arc<AppState>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
-    Json(req): Json<MagicExchangeRequest>,
+    Json(req): Json<SigninCodeRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let ip = client_ip(peer, &headers);
     check_login_rate_limit(&state, ip)?;
 
-    let token_hash = hash_token(&req.token);
+    // Strip any spaces / dashes the user may have typed when copying the
+    // code out of the email.
+    let code: String = req.code.chars().filter(|c| c.is_ascii_digit()).collect();
+    let token_hash = hash_signin_code(&req.username, &code);
 
-    // Peek first so we can surface a TOTP prompt without consuming the token.
-    // Consuming on the first call would leave a TOTP-enabled user stuck if
-    // they clicked the link and then had to fetch their auth-app code.
+    // Peek first so we can surface a TOTP prompt without consuming the
+    // code. Consuming on the first call would leave a TOTP-enabled user
+    // stuck if they entered the code and then had to fetch their auth-app
+    // code.
     let row = {
         let db = state.db.lock().unwrap();
         db.peek_login_token(&token_hash)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
     };
     let row = row.ok_or_else(|| {
-        error_response(StatusCode::UNAUTHORIZED, "Link is invalid, already used, or expired")
+        error_response(StatusCode::UNAUTHORIZED, "Code is invalid, already used, or expired")
     })?;
 
     let (must_change, role, totp_enabled) = {
@@ -1206,19 +1296,18 @@ async fn handle_magic_exchange(
         )
     };
     if totp_enabled {
-        let Some(code) = req.totp_code.as_deref() else {
+        let Some(tcode) = req.totp_code.as_deref() else {
             return Ok(Json(serde_json::json!({
                 "error": "TOTP code required",
                 "totp_required": true,
-                "token": req.token,
             })));
         };
-        verify_totp_or_backup(&state, &row.username, code)?;
+        verify_totp_or_backup(&state, &row.username, tcode)?;
     }
 
-    // All gates passed — NOW consume the token (atomic flip; guards against
-    // a concurrent second click). Anything below this point must succeed,
-    // since after consumption a retry would fail.
+    // All gates passed — NOW consume the code (atomic flip; guards against
+    // a concurrent second submission). Anything below this point must
+    // succeed, since after consumption a retry would fail.
     let consumed = {
         let db = state.db.lock().unwrap();
         db.consume_login_token(&token_hash)
@@ -1227,7 +1316,7 @@ async fn handle_magic_exchange(
     if consumed.is_none() {
         return Err(error_response(
             StatusCode::UNAUTHORIZED,
-            "Link is invalid, already used, or expired",
+            "Code is invalid, already used, or expired",
         ));
     }
 
@@ -1265,7 +1354,7 @@ async fn handle_auth_status(
         "username": principal.username,
         "role": role,
         "email": email,
-        "magic_link_enabled": !magic_link_disabled(&state),
+        "signin_code_enabled": !signin_code_disabled(&state),
         "must_enable_totp": must_enable_totp,
         "backup_codes_remaining": backup_codes_remaining,
     })))
@@ -1323,9 +1412,10 @@ async fn handle_change_password(
 //    proved control of the inbox).
 //
 // Reset tokens are stored in `login_tokens` with kind='reset' so they can't
-// be replayed against the magic-link-sign-in endpoint.
+// be replayed against the sign-in code endpoint.
 
 const PASSWORD_RESET_TTL_MINUTES: i64 = 30;
+const INVITE_TTL_HOURS: i64 = 24 * 7;
 
 #[derive(Deserialize)]
 struct ForgotPasswordRequest {
@@ -1349,7 +1439,7 @@ async fn handle_forgot_password(
     if identifier.is_empty() {
         return Ok(ok());
     }
-    if magic_link_disabled(&state) {
+    if signin_code_disabled(&state) {
         return Ok(ok());
     }
 
@@ -2171,20 +2261,40 @@ async fn handle_clear_machine_tombstone(
 async fn handle_list_users(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-) -> Result<Json<Vec<susi_core::db::UserInfo>>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
     let db = state.db.lock().unwrap();
     let users = db
         .list_users()
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
-    Ok(Json(users))
+    let out = users
+        .into_iter()
+        .map(|u| {
+            let pending = db.has_pending_invitation(&u.username).unwrap_or(false);
+            serde_json::json!({
+                "username": u.username,
+                "role": u.role,
+                "totp_enabled": u.totp_enabled,
+                "must_change_password": u.must_change_password,
+                "created_at": u.created_at,
+                "email": u.email,
+                "pending_invitation": pending,
+            })
+        })
+        .collect();
+    Ok(Json(out))
 }
 
 #[derive(Deserialize)]
 struct CreateUserRequest {
     username: String,
-    password: String,
+    /// Optional. When absent, the user is created with an unusable random
+    /// password and an invitation email is sent — the recommended flow.
+    /// When set (admin chose "set password manually"), no email is sent and
+    /// the admin must courier the temp password out-of-band.
+    #[serde(default)]
+    password: Option<String>,
     #[serde(default = "default_user_role")]
     role: String,
     email: String,
@@ -2192,6 +2302,50 @@ struct CreateUserRequest {
 
 fn default_user_role() -> String {
     "user".to_string()
+}
+
+/// Mint a one-time invitation link for `username` and email it. Replaces any
+/// outstanding reset/invite tokens for that user so only the freshest link
+/// works. Caller is expected to have held the DB lock briefly *before* this
+/// — we re-acquire it here and drop it before spawning the SMTP task.
+async fn issue_and_send_invitation(
+    state: &AppState,
+    username: &str,
+    email_addr: &str,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    let raw_token = random_magic_token();
+    let token_hash = hash_token(&raw_token);
+    {
+        let db = state.db.lock().unwrap();
+        let _ = db.purge_old_login_tokens();
+        db.invalidate_setup_tokens(username)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+        db.insert_invitation_token(&token_hash, username, INVITE_TTL_HOURS * 3600)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    }
+
+    let link = format!(
+        "{}/#/reset/{}",
+        state.magic_link_base_url.trim_end_matches('/'),
+        raw_token
+    );
+    let Some(email_service) = state.email.clone() else {
+        return Err(error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Email is not configured on this server - cannot send invitation",
+        ));
+    };
+    let to = email_addr.to_string();
+    let uname = username.to_string();
+    tokio::spawn(async move {
+        if let Err(e) = email_service
+            .send_invitation(&to, &uname, &link, INVITE_TTL_HOURS)
+            .await
+        {
+            log::error!("Failed to send invitation email to {}: {:#}", to, e);
+        }
+    });
+    Ok(())
 }
 
 async fn handle_create_user(
@@ -2206,28 +2360,89 @@ async fn handle_create_user(
     if username.is_empty() || username.len() > 64 {
         return Err(error_response(StatusCode::BAD_REQUEST, "Username must be 1-64 characters"));
     }
-    if req.password.len() < 8 {
-        return Err(error_response(StatusCode::BAD_REQUEST, "Password must be at least 8 characters"));
-    }
     if !matches!(req.role.as_str(), "admin" | "user") {
         return Err(error_response(StatusCode::BAD_REQUEST, "Role must be admin or user"));
     }
     let email = normalize_email(&req.email)?
         .ok_or_else(|| error_response(StatusCode::BAD_REQUEST, "Email is required"))?;
 
-    let pw_hash = hash_password(&req.password).await?;
-    let db = state.db.lock().unwrap();
-    db.create_user(username, &pw_hash, &req.role)
-        .map_err(|e| error_response(StatusCode::CONFLICT, &e.to_string()))?;
-    db.set_user_email(username, Some(&email))
-        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    // Two paths: explicit manual password from admin, or invite-by-email
+    // (default). Manual path needs the usual length floor; invite path stores
+    // a random unusable hash so password login is impossible until the
+    // invitee sets one via the reset link.
+    let (pw_hash, send_invite) = match req.password.as_deref().map(str::trim) {
+        Some(p) if !p.is_empty() => {
+            if p.len() < 8 {
+                return Err(error_response(StatusCode::BAD_REQUEST, "Password must be at least 8 characters"));
+            }
+            (hash_password(p).await?, false)
+        }
+        _ => {
+            if signin_code_disabled(&state) {
+                return Err(error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Email is not configured - pass a password to create users without invitation email",
+                ));
+            }
+            // Random secret the admin never sees. Hashing matches every other
+            // password path so a brute-force attempt on this row is as
+            // expensive as any other.
+            let mut bytes = [0u8; 32];
+            rand::thread_rng().fill_bytes(&mut bytes);
+            let random = hex::encode(bytes);
+            (hash_password(&random).await?, true)
+        }
+    };
+
+    {
+        let db = state.db.lock().unwrap();
+        db.create_user(username, &pw_hash, &req.role)
+            .map_err(|e| error_response(StatusCode::CONFLICT, &e.to_string()))?;
+        db.set_user_email(username, Some(&email))
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    }
+
+    if send_invite {
+        issue_and_send_invitation(&state, username, &email).await?;
+    }
 
     Ok(Json(serde_json::json!({
         "status": "OK",
         "username": username,
         "role": req.role,
         "email": email,
+        "invitation_sent": send_invite,
     })))
+}
+
+async fn handle_resend_invitation(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(username): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    require_admin_full(&state, &principal)?;
+
+    if signin_code_disabled(&state) {
+        return Err(error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Email is not configured on this server",
+        ));
+    }
+
+    let email_addr = {
+        let db = state.db.lock().unwrap();
+        if !db.user_exists(&username).unwrap_or(false) {
+            return Err(error_response(StatusCode::NOT_FOUND, "User not found"));
+        }
+        db.get_user_email(&username)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+            .ok_or_else(|| error_response(StatusCode::BAD_REQUEST, "User has no email on file"))?
+    };
+
+    issue_and_send_invitation(&state, &username, &email_addr).await?;
+
+    Ok(Json(serde_json::json!({ "status": "OK", "invitation_sent": true })))
 }
 
 async fn handle_delete_user(
@@ -2455,7 +2670,7 @@ fn normalize_email(raw: &str) -> Result<Option<String>, (StatusCode, Json<ErrorR
     if trimmed.is_empty() {
         return Ok(None);
     }
-    // Very light validation — the real check is "does the magic link arrive".
+    // Very light validation — the real check is "does the sign-in email arrive".
     // We just catch obvious typos so we don't store garbage.
     if !trimmed.contains('@') || trimmed.contains(' ') || trimmed.len() > 254 {
         return Err(error_response(StatusCode::BAD_REQUEST, "Invalid email address"));
@@ -3880,7 +4095,7 @@ async fn handle_put_workspace_graph(
             StatusCode::CONFLICT,
             Json(ErrorResponse {
                 error: format!(
-                    "Graph version conflict — current is {}; reload and reapply",
+                    "Graph version conflict - current is {}; reload and reapply",
                     current
                 ),
             }),
@@ -4229,11 +4444,11 @@ async fn main() -> Result<()> {
         .with_context(|| format!("Failed to create docs dir at {}", docs_dir.display()))?;
 
     let email_service = if cli.smtp_host.is_empty() {
-        log::info!("SMTP not configured (--smtp-host empty) — magic-link login disabled");
+        log::info!("SMTP not configured (--smtp-host empty) — sign-in code login disabled");
         None
     } else if cli.smtp_user.is_empty() || cli.smtp_password.is_empty() || cli.smtp_from_addr.is_empty() {
         log::warn!(
-            "--smtp-host set but --smtp-user / --smtp-password / --smtp-from-addr not all set; magic-link disabled"
+            "--smtp-host set but --smtp-user / --smtp-password / --smtp-from-addr not all set; sign-in code disabled"
         );
         None
     } else {
@@ -4255,14 +4470,14 @@ async fn main() -> Result<()> {
                 Some(svc)
             }
             Err(e) => {
-                log::error!("Failed to init SMTP transport: {:#} — magic-link disabled", e);
+                log::error!("Failed to init SMTP transport: {:#} — sign-in code disabled", e);
                 None
             }
         }
     };
 
     if email_service.is_some() && cli.magic_link_base_url.is_empty() {
-        log::warn!("SMTP is configured but --magic-link-base-url is empty; magic-link login will NOT be enforced");
+        log::warn!("SMTP is configured but --magic-link-base-url is empty; sign-in code login will NOT be enforced");
     }
 
     if cli.stripe_secret_key.is_empty() {
@@ -4394,7 +4609,7 @@ async fn main() -> Result<()> {
         .route("/api/v1/features", get(handle_features))
         // Auth endpoints
         .route("/api/v1/auth/login", post(handle_login))
-        .route("/api/v1/auth/magic", post(handle_magic_exchange))
+        .route("/api/v1/auth/signin-code", post(handle_signin_code_exchange))
         .route("/api/v1/auth/forgot-password", post(handle_forgot_password))
         .route("/api/v1/auth/reset-password", post(handle_reset_password_submit))
         .route("/api/v1/auth/status", get(handle_auth_status))
@@ -4418,6 +4633,7 @@ async fn main() -> Result<()> {
         .route("/api/v1/auth/users/{username}/email", axum::routing::put(handle_set_user_email))
         .route("/api/v1/auth/users/{username}/rename", post(handle_rename_user))
         .route("/api/v1/auth/users/{username}/reset-password", post(handle_reset_user_password))
+        .route("/api/v1/auth/users/{username}/resend-invitation", post(handle_resend_invitation))
         // Public client endpoints
         .route("/api/v1/activate", post(handle_activate))
         .route("/api/v1/verify", post(handle_verify))
@@ -4616,4 +4832,57 @@ async fn main() -> Result<()> {
         .context("Server error")?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn summarize_chrome_on_windows() {
+        let ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+                  (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36";
+        assert_eq!(summarize_user_agent(ua), "Chrome 148 / Windows");
+        // No "148.0.0.0" pattern that Gmail would auto-linkify as an IP.
+        assert!(!summarize_user_agent(ua).contains("148.0.0.0"));
+    }
+
+    #[test]
+    fn summarize_edge_takes_precedence_over_chrome() {
+        let ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+                  (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36 Edg/148.0.2783.54";
+        assert_eq!(summarize_user_agent(ua), "Edge 148 / Windows");
+    }
+
+    #[test]
+    fn summarize_firefox_on_macos() {
+        let ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.6; rv:132.0) Gecko/20100101 Firefox/132.0";
+        assert_eq!(summarize_user_agent(ua), "Firefox 132 / macOS");
+    }
+
+    #[test]
+    fn summarize_safari_uses_version_marker() {
+        let ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6) AppleWebKit/605.1.15 \
+                  (KHTML, like Gecko) Version/17.6 Safari/605.1.15";
+        assert_eq!(summarize_user_agent(ua), "Safari 17 / macOS");
+    }
+
+    #[test]
+    fn summarize_chrome_on_android() {
+        let ua = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 \
+                  (KHTML, like Gecko) Chrome/148.0.0.0 Mobile Safari/537.36";
+        assert_eq!(summarize_user_agent(ua), "Chrome 148 / Android");
+    }
+
+    #[test]
+    fn summarize_empty_input_falls_back() {
+        assert_eq!(summarize_user_agent(""), "(unknown device)");
+        assert_eq!(summarize_user_agent("   "), "(unknown device)");
+    }
+
+    #[test]
+    fn summarize_garbage_input_returns_trimmed_copy() {
+        let custom = "MacBook in office";
+        assert_eq!(summarize_user_agent(custom), custom);
+    }
 }
