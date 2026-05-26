@@ -1324,13 +1324,68 @@ impl LicenseDb {
         Ok(())
     }
 
-    /// Validate a password-reset token and mark it consumed. Returns the
-    /// username on success. Single-use; only matches `kind = 'reset'` rows.
+    /// Mint an admin-initiated invitation token. Same single-use semantics as
+    /// a password-reset token, but stored with `kind = 'invite'` so welcome
+    /// emails, longer TTLs, and pending-invite UI can be distinguished from
+    /// user-initiated resets in audit.
+    pub fn insert_invitation_token(
+        &self,
+        token_hash: &str,
+        username: &str,
+        ttl_seconds: i64,
+    ) -> Result<(), LicenseError> {
+        let now = Utc::now();
+        let expires = now + Duration::seconds(ttl_seconds);
+        self.conn
+            .execute(
+                "INSERT INTO login_tokens (token_hash, username, device_fp, device_label, created_at, expires_at, kind)
+                 VALUES (?1, ?2, '', '', ?3, ?4, 'invite')",
+                params![token_hash, username, now.to_rfc3339(), expires.to_rfc3339()],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB insert: {}", e)))?;
+        Ok(())
+    }
+
+    /// Invalidate every outstanding reset/invite token for a user — used
+    /// when re-issuing an invitation so the previous link stops working.
+    pub fn invalidate_setup_tokens(&self, username: &str) -> Result<(), LicenseError> {
+        let now = Utc::now().to_rfc3339();
+        self.conn
+            .execute(
+                "UPDATE login_tokens SET used_at = ?1
+                 WHERE username = ?2 AND used_at IS NULL AND kind IN ('reset','invite')",
+                params![now, username],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))?;
+        Ok(())
+    }
+
+    /// True iff the user has at least one unused, unexpired invitation token.
+    /// Used by the admin UI to show a "Pending invite" badge.
+    pub fn has_pending_invitation(&self, username: &str) -> Result<bool, LicenseError> {
+        let now = Utc::now().to_rfc3339();
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM login_tokens
+                 WHERE username = ?1 AND kind = 'invite' AND used_at IS NULL AND expires_at > ?2",
+                params![username, now],
+                |r| r.get(0),
+            )
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?;
+        Ok(count > 0)
+    }
+
+    /// Validate a password-reset or invitation token and mark it consumed.
+    /// Returns the username on success. Single-use; matches `kind IN
+    /// ('reset','invite')` so the same `/#/reset/<token>` flow lets a new
+    /// user set their initial password and a returning user reset theirs.
     pub fn consume_password_reset_token(&self, token_hash: &str) -> Result<Option<String>, LicenseError> {
         let row: Option<(String, String, Option<String>)> = self
             .conn
             .query_row(
-                "SELECT username, expires_at, used_at FROM login_tokens WHERE token_hash = ?1 AND kind = 'reset'",
+                "SELECT username, expires_at, used_at FROM login_tokens
+                 WHERE token_hash = ?1 AND kind IN ('reset','invite')",
                 params![token_hash],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
@@ -1353,7 +1408,8 @@ impl LicenseDb {
         let now = Utc::now().to_rfc3339();
         let n = self.conn
             .execute(
-                "UPDATE login_tokens SET used_at = ?1 WHERE token_hash = ?2 AND used_at IS NULL AND kind = 'reset'",
+                "UPDATE login_tokens SET used_at = ?1
+                 WHERE token_hash = ?2 AND used_at IS NULL AND kind IN ('reset','invite')",
                 params![now, token_hash],
             )
             .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))?;
@@ -5249,6 +5305,65 @@ mod tests {
         db.upsert_workspace_peer("ws-1", "hostA", "https://a", "", "", "alice").unwrap();
         assert!(!db.delete_workspace_peer("ws-other", "hostA").unwrap());
         assert_eq!(db.list_workspace_peers("ws-1").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_invitation_token_roundtrip() {
+        let db = test_db();
+        db.seed_admin("hash").unwrap();
+        db.create_user("alice", "unusable-random-hash", "user").unwrap();
+
+        assert!(!db.has_pending_invitation("alice").unwrap());
+        db.insert_invitation_token("inv-1", "alice", 7 * 24 * 3600).unwrap();
+        assert!(db.has_pending_invitation("alice").unwrap());
+
+        // Same consume function handles both kinds — invitee uses the
+        // existing /#/reset/<token> endpoint to pick their initial password.
+        let user = db.consume_password_reset_token("inv-1").unwrap();
+        assert_eq!(user.as_deref(), Some("alice"));
+
+        // Single-use.
+        assert!(db.consume_password_reset_token("inv-1").unwrap().is_none());
+        // Consumed → no longer "pending".
+        assert!(!db.has_pending_invitation("alice").unwrap());
+    }
+
+    #[test]
+    fn test_resend_invalidates_prior_token() {
+        let db = test_db();
+        db.seed_admin("hash").unwrap();
+        db.create_user("bob", "h", "user").unwrap();
+
+        db.insert_invitation_token("old", "bob", 3600).unwrap();
+        // Admin resends — must invalidate the old link before minting the new one.
+        db.invalidate_setup_tokens("bob").unwrap();
+        db.insert_invitation_token("new", "bob", 3600).unwrap();
+
+        assert!(db.consume_password_reset_token("old").unwrap().is_none());
+        assert_eq!(db.consume_password_reset_token("new").unwrap().as_deref(), Some("bob"));
+    }
+
+    #[test]
+    fn test_invitation_expired_is_not_pending() {
+        let db = test_db();
+        db.seed_admin("hash").unwrap();
+        db.create_user("carol", "h", "user").unwrap();
+
+        db.insert_invitation_token("stale", "carol", -1).unwrap();
+        assert!(!db.has_pending_invitation("carol").unwrap());
+        assert!(db.consume_password_reset_token("stale").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_reset_token_still_works_via_consume() {
+        // Sanity: the existing forgot-password path (kind='reset') keeps
+        // working through the now-broader consume_password_reset_token.
+        let db = test_db();
+        db.seed_admin("hash").unwrap();
+        db.create_user("dave", "h", "user").unwrap();
+
+        db.insert_password_reset_token("rh", "dave", 600).unwrap();
+        assert_eq!(db.consume_password_reset_token("rh").unwrap().as_deref(), Some("dave"));
     }
 
     #[test]

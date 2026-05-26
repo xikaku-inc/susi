@@ -321,7 +321,7 @@ pub async fn handle_create_checkout_session(
     ));
     form.push((
         "invoice_creation[invoice_data][footer]".into(),
-        "LP-Research Inc. — Tokyo, Japan. Questions? support@lp-research.com".into(),
+        "LP-Research Inc. - Tokyo, Japan. Questions? support@lp-research.com".into(),
     ));
 
     for (i, (sku, title, price_cents, currency, tax_code, qty)) in resolved.iter().enumerate() {
@@ -563,7 +563,7 @@ pub async fn handle_stripe_webhook(
         if let Some(svc) = &state.email {
             if !admin_recipients.is_empty() {
                 let summary = format_order_summary(&event, &line_items, order_id);
-                let subject = format!("[Xikaku] New order — {}", summary.0);
+                let subject = format!("[Xikaku] New order - {}", summary.0);
                 let body = summary.1;
                 for to in admin_recipients {
                     let svc = svc.clone();
@@ -690,12 +690,12 @@ fn build_customer_confirmation(
     let amount_shipping = total_details.get("amount_shipping").and_then(|v| v.as_i64()).unwrap_or(0);
     let amount_tax = total_details.get("amount_tax").and_then(|v| v.as_i64()).unwrap_or(0);
 
-    let order_label = order_id.map(|i| format!("#{}", i)).unwrap_or_else(|| "—".into());
+    let order_label = order_id.map(|i| format!("#{}", i)).unwrap_or_else(|| "-".into());
 
     let support = get_setting_str(state, SETTING_SUPPORT_CONTACT);
     let extra_html = get_setting_str(state, SETTING_CUSTOMER_THANK_YOU);
 
-    let subject = format!("Thanks for your order — Xikaku {}", order_label);
+    let subject = format!("Thanks for your order - Xikaku {}", order_label);
 
     // -------- Plain text --------
     let mut text = String::new();
@@ -711,7 +711,7 @@ fn build_customer_confirmation(
             let qty = li.get("quantity").and_then(|v| v.as_i64()).unwrap_or(1);
             let desc = li.get("description").and_then(|v| v.as_str()).unwrap_or("(item)");
             let amt = li.get("amount_total").and_then(|v| v.as_i64()).unwrap_or(0);
-            text.push_str(&format!("  {} × {}  —  {}\n", qty, desc, fmt_money(amt, currency)));
+            text.push_str(&format!("  {} × {}  -  {}\n", qty, desc, fmt_money(amt, currency)));
         }
     }
     text.push_str("\n");
@@ -741,7 +741,7 @@ fn build_customer_confirmation(
     if !support.is_empty() {
         text.push_str(&format!("Questions? Reach us at {}.\n\n", support));
     }
-    text.push_str("— The Xikaku team\n");
+    text.push_str("- The Xikaku team\n");
 
     // -------- HTML --------
     let mut item_rows = String::new();
@@ -829,7 +829,7 @@ fn build_customer_confirmation(
            <h1 style=\"font-size:22px;margin:0 0 6px;\">Thank you for your order</h1>\
            <p style=\"color:#5c6470;margin:0 0 20px;\">Order {order} · {date}</p>\
            <p>Hi {name_html},</p>\
-           <p>Thanks for your purchase from Xikaku — we've received your order and are getting it ready.</p>\
+           <p>Thanks for your purchase from Xikaku - we've received your order and are getting it ready.</p>\
            {extra_block}\
            <h2 style=\"font-size:14px;margin:28px 0 8px;\">Items</h2>\
            <table style=\"width:100%;border-collapse:collapse;\">\
@@ -847,7 +847,7 @@ fn build_customer_confirmation(
            </p>\
            <p style=\"color:#5c6470;font-size:12px;margin-top:18px;\">A PDF invoice is attached to this email for your records.</p>\
            {support_block}\
-           <p style=\"color:#5c6470;font-size:12px;margin-top:32px;\">— The Xikaku team</p>\
+           <p style=\"color:#5c6470;font-size:12px;margin-top:32px;\">- The Xikaku team</p>\
          </div></body></html>",
         logo_cid = LOGO_CID,
         order = order_label,
@@ -1019,11 +1019,11 @@ fn format_order_summary(event: &Value, line_items: &[Value], order_id: Option<i6
     let amount_discount = total_details.get("amount_discount").and_then(|v| v.as_i64()).unwrap_or(0);
 
     let display_name = if !name.is_empty() { name } else { email };
-    let short = format!("{} — {}", fmt_money(amount_total, currency), display_name);
+    let short = format!("{} - {}", fmt_money(amount_total, currency), display_name);
 
     let mut out = String::new();
     out.push_str(&format!("New order #{} from {} <{}>\n",
-        order_id.map(|i| i.to_string()).unwrap_or_else(|| "—".into()),
+        order_id.map(|i| i.to_string()).unwrap_or_else(|| "-".into()),
         if !name.is_empty() { name } else { "(no name)" },
         email,
     ));
@@ -1052,7 +1052,7 @@ fn format_order_summary(event: &Value, line_items: &[Value], order_id: Option<i6
 
     out.push_str("\n--- Items ---\n");
     if line_items.is_empty() {
-        out.push_str("(line items unavailable — see Stripe dashboard)\n");
+        out.push_str("(line items unavailable - see Stripe dashboard)\n");
     } else {
         for li in line_items {
             let qty = li.get("quantity").and_then(|v| v.as_i64()).unwrap_or(1);
@@ -1066,9 +1066,9 @@ fn format_order_summary(event: &Value, line_items: &[Value], order_id: Option<i6
                 }
             }).unwrap_or_default();
             if sku.is_empty() {
-                out.push_str(&format!("  {} × {}  —  {}\n", qty, desc, fmt_money(amt, cur)));
+                out.push_str(&format!("  {} × {}  -  {}\n", qty, desc, fmt_money(amt, cur)));
             } else {
-                out.push_str(&format!("  {} × {} ({})  —  {}\n", qty, desc, sku, fmt_money(amt, cur)));
+                out.push_str(&format!("  {} × {} ({})  -  {}\n", qty, desc, sku, fmt_money(amt, cur)));
             }
         }
     }
@@ -1528,7 +1528,7 @@ fn build_shipped_email(
             }
         }
     }
-    text.push_str("\nThanks for buying from Xikaku!\n— The Xikaku team\n");
+    text.push_str("\nThanks for buying from Xikaku!\n- The Xikaku team\n");
 
     let track_btn = match &url {
         Some(u) => format!(
@@ -1560,7 +1560,7 @@ fn build_shipped_email(
            </table>\
            {track_btn}\
            {items_block}\
-           <p style=\"color:#5c6470;font-size:13px;margin-top:32px;\">Thanks for buying from Xikaku!<br>— The Xikaku team</p>\
+           <p style=\"color:#5c6470;font-size:13px;margin-top:32px;\">Thanks for buying from Xikaku!<br>- The Xikaku team</p>\
          </div></body></html>",
         id = id,
         carrier_html = html_escape_local(carrier),

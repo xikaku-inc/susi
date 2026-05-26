@@ -431,14 +431,16 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
 
 .dropdown { position: relative; display: inline-block; }
 .dropdown-menu {
-    position: absolute;
-    right: 0;
-    top: calc(100% + 4px);
+    /* Fixed positioning escapes scrollable modal containers that would
+       otherwise clip the menu (overflow:auto on .modal-body and the
+       per-table scroll wrappers). Coordinates are set by toggleDropdown()
+       from the trigger's bounding rect. */
+    position: fixed;
     background: var(--bg2);
     border: 1px solid var(--border);
     border-radius: var(--radius);
     box-shadow: 0 4px 16px rgba(0,0,0,0.25);
-    z-index: 100;
+    z-index: 1000;
     min-width: 160px;
     padding: 4px 0;
 }
@@ -1544,32 +1546,43 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
     </div>
 </div>
 
-<!-- Magic-link "check your email" overlay -->
-<div id="magicLinkOverlay" class="auth-overlay">
+<!-- Sign-in code entry overlay (shown after /auth/login when a new device
+     needs email verification). The user types the 6-digit code from their
+     inbox. If 2FA is enabled, the TOTP row appears on the next submit. -->
+<div id="signinCodeOverlay" class="auth-overlay">
     <div class="auth-card">
-        <h2>Check your email</h2>
-        <div class="subtitle" id="magicLinkHint">We sent a sign-in link to your inbox.</div>
+        <h2 id="signinCodeTitle">Enter your sign-in code</h2>
+        <div class="subtitle" id="signinCodeHint">We sent a sign-in code to your inbox.</div>
         <p style="color:var(--text2);font-size:13px;line-height:1.5;margin-top:12px;">
-            Click the link in the email to authorize this device. The link expires in <span id="magicLinkTtl">15</span> minutes.
-            You can close this tab — the link will open the dashboard directly.
+            The code expires in <span id="signinCodeTtl">15</span> minutes.
         </p>
+        <div id="signinCodeError" class="auth-error"></div>
+        <div class="form-row">
+            <label>6-digit code</label>
+            <input type="text" id="signinCodeInput" placeholder="000000" maxlength="7" inputmode="numeric" autocomplete="one-time-code" style="font-family:'SF Mono','Fira Code','Consolas',monospace;letter-spacing:6px;text-align:center;font-size:18px;" onkeydown="if(event.key==='Enter')submitSigninCode()">
+        </div>
+        <div id="signinCodeTotpRow" class="form-row" style="display:none;">
+            <label>2FA Code <span style="font-weight:400;color:var(--text2);font-size:11px;">(or a backup code)</span></label>
+            <input type="text" id="signinCodeTotp" placeholder="6-digit code, or XXXXX-XXXXX" maxlength="20" autocomplete="one-time-code" onkeydown="if(event.key==='Enter')submitSigninCode()">
+        </div>
         <div class="form-actions">
-            <button class="secondary" onclick="document.getElementById('magicLinkOverlay').classList.remove('visible');showLogin();">Back to sign in</button>
+            <button onclick="submitSigninCode()">Sign in</button>
+            <button class="secondary" onclick="document.getElementById('signinCodeOverlay').classList.remove('visible');showLogin();">Back to sign in</button>
         </div>
     </div>
 </div>
 
-<!-- Magic-link exchange overlay (shown when user lands on /#/magic/<token>) -->
-<div id="magicExchangeOverlay" class="auth-overlay">
+<!-- Password-reset "check your inbox" notice (kept link-based — the email
+     contains a /#/reset/<token> link, not a code). -->
+<div id="resetSentOverlay" class="auth-overlay">
     <div class="auth-card">
-        <h2 id="magicExchangeTitle">Signing you in...</h2>
-        <div id="magicExchangeError" class="auth-error"></div>
-        <div id="magicExchangeTotpRow" class="form-row" style="display:none;">
-            <label>2FA Code <span style="font-weight:400;color:var(--text2);font-size:11px;">(or a backup code)</span></label>
-            <input type="text" id="magicExchangeTotp" placeholder="6-digit code, or XXXXX-XXXXX" maxlength="20" autocomplete="one-time-code" onkeydown="if(event.key==='Enter')completeMagicExchange()">
-        </div>
-        <div id="magicExchangeActions" class="form-actions" style="display:none;">
-            <button onclick="completeMagicExchange()">Sign in</button>
+        <h2>Check your email</h2>
+        <div class="subtitle">If an email is on file for that account, a reset link is on its way.</div>
+        <p style="color:var(--text2);font-size:13px;line-height:1.5;margin-top:12px;">
+            Click the link in the email to set a new password. The link expires in 30 minutes.
+        </p>
+        <div class="form-actions">
+            <button class="secondary" onclick="document.getElementById('resetSentOverlay').classList.remove('visible');showLogin();">Back to sign in</button>
         </div>
     </div>
 </div>
@@ -1593,6 +1606,9 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
             <input type="password" id="cpConfirm" placeholder="Confirm password" onkeydown="if(event.key==='Enter')submitChangePassword()">
         </div>
         <button onclick="submitChangePassword()">Change Password</button>
+        <div style="text-align:center;margin-top:12px;font-size:12px;">
+            <a href="#" onclick="event.preventDefault();logout();" style="color:var(--text2);">Sign in as a different user</a>
+        </div>
     </div>
 </div>
 
@@ -1641,16 +1657,22 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
             </div>
             <div style="border-top:1px solid var(--border);padding-top:16px;">
                 <h3 style="font-size:14px;margin-bottom:12px;">Add User</h3>
-                <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
                     <input type="text" id="newUsername" placeholder="Username" style="flex:1;min-width:120px;">
                     <input type="email" id="newUserEmail" placeholder="Email" style="flex:1;min-width:160px;" required>
-                    <input type="password" id="newPassword" placeholder="Password (min 8)" style="flex:1;min-width:120px;">
                     <select id="newUserRole" style="width:90px;">
                         <option value="user">User</option>
                         <option value="admin">Admin</option>
                     </select>
-                    <button onclick="createUser()" style="width:auto;">Add</button>
+                    <button onclick="createUser()" style="width:auto;">Send invitation</button>
                 </div>
+                <details style="margin-top:10px;">
+                    <summary style="font-size:12px;color:var(--text2);cursor:pointer;">Advanced: set a password manually (no email sent)</summary>
+                    <div style="display:flex;gap:8px;align-items:center;margin-top:10px;">
+                        <input type="password" id="newPassword" placeholder="Password (min 8)" style="flex:1;min-width:160px;">
+                        <span style="font-size:11px;color:var(--text2);">Use only if SMTP isn't configured. Plaintext must be couriered to the user.</span>
+                    </div>
+                </details>
             </div>
         </div>
         <div class="form-actions">
@@ -1725,7 +1747,7 @@ let currentUsername = '';
 
 // Stable per-browser identifier. Generated once and persisted in localStorage;
 // clearing site data = new device on next login (by design — it re-triggers
-// the magic-link check). Not a security signal on its own, just a marker.
+// the sign-in-code check). Not a security signal on its own, just a marker.
 function getDeviceFp() {
     let fp = localStorage.getItem('device_fp');
     if (!fp) {
@@ -1780,51 +1802,22 @@ if (window.matchMedia) {
     });
 }
 
-// Declared before init() so startMagicExchange() can write to it on the
-// magic-link path. `let` bindings are in the TDZ until this line executes;
-// writing from an early IIFE would throw ReferenceError and silently kill the
-// whole magic flow.
-let pendingMagicToken = '';
+// Username captured from the login form so the sign-in-code submit can
+// re-send it (the /auth/signin-code lookup is scoped per user).
+let pendingSigninUsername = '';
 
-// Intercept magic-link landings (#/magic/<token>). Runs on both initial
-// page load AND on hashchange — the latter matters when the email link
-// opens in an already-open tab, which only fires hashchange (not a full
-// reload). Returns true if a magic token was found and consumed.
-function tryHandleMagicLink() {
-    const magicMatch = window.location.hash.match(/^#\/magic\/([A-Za-z0-9]+)/);
-    if (!magicMatch) return false;
-    // Clear any stale overlays from the tab's prior state (login prompt,
-    // change-password prompt from an old session) so the magic-exchange
-    // overlay is the only thing showing.
-    ['loginOverlay', 'changePasswordOverlay', 'forgotPasswordOverlay', 'resetPasswordOverlay'].forEach(id => {
-        const el = document.getElementById(id);
-        if (el) el.classList.remove('visible');
-    });
-    // Clear the hash so reloading the page doesn't try to reuse the token.
-    history.replaceState(null, '', window.location.pathname + window.location.search);
-    startMagicExchange(magicMatch[1]).catch(e => {
-        console.error('Magic-link exchange crashed:', e);
-        const err = document.getElementById('magicExchangeError');
-        if (err) {
-            document.getElementById('magicExchangeOverlay').classList.add('visible');
-            document.getElementById('magicExchangeTitle').textContent = 'Sign-in failed';
-            err.textContent = 'Something went wrong. Reload and try again.';
-            err.classList.add('visible');
-        }
-    });
-    return true;
-}
-
-// Intercept password-reset landings (#/reset/<token>). Same dual-fire
-// reasoning as tryHandleMagicLink. Returns true if a reset token was
-// captured. The actual submit happens when the user fills in the new
-// password and clicks the button.
+// Intercept password-reset landings (#/reset/<token>). Runs on both
+// initial page load AND on hashchange — the latter matters when the
+// email link opens in an already-open tab, which only fires hashchange
+// (not a full reload). Returns true if a reset token was captured. The
+// actual submit happens when the user fills in the new password and
+// clicks the button.
 let pendingResetToken = '';
 function tryHandleResetLink() {
     const resetMatch = window.location.hash.match(/^#\/reset\/([A-Za-z0-9]+)/);
     if (!resetMatch) return false;
     pendingResetToken = resetMatch[1];
-    ['loginOverlay', 'changePasswordOverlay', 'forgotPasswordOverlay', 'magicExchangeOverlay'].forEach(id => {
+    ['loginOverlay', 'changePasswordOverlay', 'forgotPasswordOverlay', 'signinCodeOverlay', 'resetSentOverlay'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.classList.remove('visible');
     });
@@ -1840,14 +1833,11 @@ function tryHandleResetLink() {
 (function init() {
     authToken = localStorage.getItem('auth_token') || '';
 
-    if (tryHandleMagicLink()) return;
     if (tryHandleResetLink()) return;
 
     window.addEventListener('hashchange', () => {
         // An email link that opens in an already-open tab only fires
-        // hashchange, not a full reload. Catch #/magic/<token> and
-        // #/reset/<token> here too.
-        if (tryHandleMagicLink()) return;
+        // hashchange, not a full reload. Catch #/reset/<token> here too.
         if (tryHandleResetLink()) return;
         route();
     });
@@ -1952,12 +1942,18 @@ async function submitLogin() {
         });
         const data = await resp.json();
 
-        if (data.magic_link_sent) {
+        if (data.signin_code_sent) {
+            pendingSigninUsername = username;
             document.getElementById('loginOverlay').classList.remove('visible');
-            const hint = data.email_hint ? 'We sent a sign-in link to ' + data.email_hint + '.' : 'We sent a sign-in link to your inbox.';
-            document.getElementById('magicLinkHint').textContent = hint;
-            document.getElementById('magicLinkTtl').textContent = data.ttl_minutes || 15;
-            document.getElementById('magicLinkOverlay').classList.add('visible');
+            const hint = data.email_hint ? 'We sent a sign-in code to ' + data.email_hint + '.' : 'We sent a sign-in code to your inbox.';
+            document.getElementById('signinCodeHint').textContent = hint;
+            document.getElementById('signinCodeTtl').textContent = data.ttl_minutes || 15;
+            document.getElementById('signinCodeError').classList.remove('visible');
+            document.getElementById('signinCodeInput').value = '';
+            document.getElementById('signinCodeTotp').value = '';
+            document.getElementById('signinCodeTotpRow').style.display = 'none';
+            document.getElementById('signinCodeOverlay').classList.add('visible');
+            setTimeout(() => document.getElementById('signinCodeInput').focus(), 50);
             return;
         }
 
@@ -1979,13 +1975,17 @@ async function submitLogin() {
         localStorage.setItem('auth_token', authToken);
         totpEnabled = data.totp_enabled;
         userRole = data.role || 'user';
+        mustEnableTotp = userRole === 'admin' && !totpEnabled;
 
+        document.getElementById('loginOverlay').classList.remove('visible');
         if (data.must_change_password) {
-            document.getElementById('loginOverlay').classList.remove('visible');
             showChangePassword();
         } else {
-            document.getElementById('loginOverlay').classList.remove('visible');
             enterDashboard();
+            if (mustEnableTotp) {
+                toast('Admin accounts must enable 2FA. Complete enrollment now.', 'error');
+                show2FAModal(true);
+            }
         }
     } catch (e) {
         errEl.textContent = 'Connection failed: ' + e.message;
@@ -1993,30 +1993,32 @@ async function submitLogin() {
     }
 }
 
-// -- Magic-link exchange --
-// pendingMagicToken is declared near the top of the script so the init IIFE
-// can trigger startMagicExchange without hitting its TDZ.
-
-async function startMagicExchange(token) {
-    pendingMagicToken = token;
-    document.getElementById('magicExchangeOverlay').classList.add('visible');
-    document.getElementById('magicExchangeError').classList.remove('visible');
-    document.getElementById('magicExchangeTotpRow').style.display = 'none';
-    document.getElementById('magicExchangeActions').style.display = 'none';
-    document.getElementById('magicExchangeTitle').textContent = 'Signing you in...';
-    await completeMagicExchange();
-}
-
-async function completeMagicExchange() {
-    const errEl = document.getElementById('magicExchangeError');
+// -- Sign-in code exchange --
+// Submits the 6-digit code the user got by email (plus optional TOTP) to
+// /auth/signin-code. The lookup is scoped by username, so we re-send the
+// username captured from the login form.
+async function submitSigninCode() {
+    const errEl = document.getElementById('signinCodeError');
     errEl.classList.remove('visible');
 
-    const body = { token: pendingMagicToken };
-    const totp = document.getElementById('magicExchangeTotp').value.trim();
+    const code = document.getElementById('signinCodeInput').value.trim();
+    if (!code) {
+        errEl.textContent = 'Enter the code from your email';
+        errEl.classList.add('visible');
+        return;
+    }
+    if (!pendingSigninUsername) {
+        errEl.textContent = 'Session expired — sign in again';
+        errEl.classList.add('visible');
+        return;
+    }
+
+    const body = { username: pendingSigninUsername, code };
+    const totp = document.getElementById('signinCodeTotp').value.trim();
     if (totp) body.totp_code = totp;
 
     try {
-        const resp = await fetch(API + '/auth/magic', {
+        const resp = await fetch(API + '/auth/signin-code', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
@@ -2024,38 +2026,39 @@ async function completeMagicExchange() {
         const data = await resp.json();
 
         if (data.totp_required) {
-            document.getElementById('magicExchangeTitle').textContent = 'Enter your 2FA code';
-            document.getElementById('magicExchangeTotpRow').style.display = '';
-            document.getElementById('magicExchangeActions').style.display = '';
-            document.getElementById('magicExchangeTotp').focus();
+            document.getElementById('signinCodeTotpRow').style.display = '';
+            errEl.textContent = 'Enter your 2FA code';
+            errEl.classList.add('visible');
+            document.getElementById('signinCodeTotp').focus();
             return;
         }
         if (!resp.ok) {
-            document.getElementById('magicExchangeTitle').textContent = 'Sign-in failed';
-            errEl.textContent = data.error || 'Invalid or expired link';
+            errEl.textContent = data.error || 'Invalid or expired code';
             errEl.classList.add('visible');
-            document.getElementById('magicExchangeActions').style.display = '';
             return;
         }
 
-        // Success — store the UUID of this device server-side for next time.
-        // (Server already called register_device under our fingerprint; we
-        // just finish the client-side session.)
+        // Success — the server already registered this device under our
+        // fingerprint, so finish the client-side session.
         authToken = data.token;
         localStorage.setItem('auth_token', authToken);
         userRole = data.role || 'user';
-        // Strip the token from the URL so a refresh doesn't re-trigger.
-        history.replaceState(null, '', window.location.pathname + window.location.search);
-        document.getElementById('magicExchangeOverlay').classList.remove('visible');
+        totpEnabled = !!data.totp_enabled;
+        mustEnableTotp = userRole === 'admin' && !totpEnabled;
+        pendingSigninUsername = '';
+        document.getElementById('signinCodeOverlay').classList.remove('visible');
         if (data.must_change_password) {
             showChangePassword();
         } else {
             enterDashboard();
+            if (mustEnableTotp) {
+                toast('Admin accounts must enable 2FA. Complete enrollment now.', 'error');
+                show2FAModal(true);
+            }
         }
     } catch (e) {
         errEl.textContent = 'Connection failed: ' + e.message;
         errEl.classList.add('visible');
-        document.getElementById('magicExchangeActions').style.display = '';
     }
 }
 
@@ -2095,7 +2098,7 @@ async function submitChangePassword() {
         document.getElementById('changePasswordOverlay').classList.remove('visible');
         toast('Password changed successfully', 'success');
         // Re-sync auth state from the server. enterDashboard() alone leaves
-        // mustEnableTotp/currentUsername/totpEnabled stale (magic-exchange
+        // mustEnableTotp/currentUsername/totpEnabled stale (sign-in code
         // never populated them), which makes the admin /licenses 403 get
         // misrouted as another change-password prompt — the loop the user hit.
         await checkAuthStatus();
@@ -2128,10 +2131,7 @@ async function submitForgotPassword() {
             body: JSON.stringify({ identifier }),
         });
         document.getElementById('forgotPasswordOverlay').classList.remove('visible');
-        document.getElementById('magicLinkHint').textContent =
-            'If an email is on file for that account, a reset link is on its way.';
-        document.getElementById('magicLinkTtl').textContent = '30';
-        document.getElementById('magicLinkOverlay').classList.add('visible');
+        document.getElementById('resetSentOverlay').classList.add('visible');
     } catch (e) {
         errEl.textContent = 'Connection failed: ' + e.message;
         errEl.classList.add('visible');
@@ -2233,6 +2233,7 @@ function logout() {
     document.getElementById('licenseTableBody').innerHTML = '<tr><td colspan="7" class="empty-state"><p>Loading...</p></td></tr>';
     closeDetail();
     document.getElementById('loginOverlay').classList.remove('visible');
+    document.getElementById('changePasswordOverlay').classList.remove('visible');
     location.hash = '';
     renderNav();
     route();
@@ -2733,16 +2734,22 @@ function show2FAModal(force) {
         content.innerHTML =
             '<p style="margin-bottom:8px;">Your admin account must have two-factor authentication enabled.</p>' +
             '<p style="font-size:12px;color:var(--text2);margin-bottom:14px;">You can&#39;t access admin features until you complete enrollment.</p>' +
-            '<button onclick="setup2FA()">Enable 2FA</button>';
+            '<div style="display:flex;gap:8px;align-items:center;">' +
+            '<button onclick="setup2FA()">Enable 2FA</button>' +
+            '<button class="secondary" onclick="logout()">Sign out</button>' +
+            '</div>';
     } else {
         content.innerHTML =
             '<p style="margin-bottom:14px;">Two-factor authentication is <strong style="color:var(--text2);">disabled</strong>.</p>' +
             '<button onclick="setup2FA()">Enable 2FA</button>';
     }
+    const actions = document.querySelector('#tfaModal .form-actions');
+    if (actions) actions.style.display = (force && !totpEnabled) ? 'none' : '';
     document.getElementById('tfaModal').classList.add('visible');
 }
 
 function closeTFAModal() {
+    if (mustEnableTotp && !totpEnabled) return;
     document.getElementById('tfaModal').classList.remove('visible');
 }
 
@@ -2910,27 +2917,58 @@ async function loadUsers() {
         const tbody = document.getElementById('usersTableBody');
         tbody.innerHTML = users.map(u => {
             const isSelf = u.username === currentUsername;
-            const status = u.must_change_password ? '<span style="color:var(--yellow);">Must change password</span>' : '<span style="color:var(--green);">Active</span>';
+            let status;
+            if (u.pending_invitation) {
+                status = '<span style="color:var(--accent);">Invited (pending)</span>';
+            } else if (u.must_change_password) {
+                status = '<span style="color:var(--yellow);">Must change password</span>';
+            } else {
+                status = '<span style="color:var(--green);">Active</span>';
+            }
             const tfa = u.totp_enabled ? '<span style="color:var(--green);">Enabled</span>' : '<span style="color:var(--text2);">Off</span>';
             const roleBadge = u.role === 'admin'
                 ? '<span class="badge role-pill" style="background:rgba(108,140,255,0.15);color:var(--accent);">admin</span>'
                 : '<span class="badge role-pill" style="background:var(--bg3);color:var(--text2);">user</span>';
             // esc(JSON.stringify(x)) is HTML-safe for both the " and ' in the
             // inline onclick attribute. A bare JSON.stringify would break the
-            // attribute quoting, which silently stopped the Edit button from
-            // firing.
+            // attribute quoting, which silently stopped the Edit action from
+            // firing when dispatched from the dropdown.
             const emailArg = u.email ? esc(JSON.stringify(u.email)) : "''";
-            const emailInner = u.email
+            const emailCell = u.email
                 ? '<span class="email-value">' + esc(u.email) + '</span>'
-                  + '<button class="small secondary" onclick="setUserEmail(\'' + esc(u.username) + '\',' + emailArg + ')">Edit</button>'
-                : '<span class="email-value" style="color:var(--text2);font-size:11px;">(none)</span>'
-                  + '<button class="small secondary" onclick="setUserEmail(\'' + esc(u.username) + '\',\'\')">Set</button>';
-            const emailCell = '<span class="email-cell">' + emailInner + '</span>';
+                : '<span class="email-value" style="color:var(--text2);font-size:11px;">(none)</span>';
+            // Resend appears for any user still on must_change_password=1 and
+            // with an email on file — covers both pending and expired-invite cases.
+            const canResend = !isSelf && u.must_change_password && u.email;
+            const uname = esc(u.username);
+            const menuId = 'user-menu-' + u.username.replace(/[^a-zA-Z0-9_-]/g, '_');
+            const resendItem = canResend
+                ? '<button onclick="resendInvitation(\'' + uname + '\')">' +
+                  (u.pending_invitation ? 'Resend invite' : 'Send invite') + '</button>'
+                : '';
+            const emailItem = '<button onclick="setUserEmail(\'' + uname + '\',' + emailArg + ')">' +
+                              (u.email ? 'Edit email' : 'Set email') + '</button>';
+            // Self row keeps a minimal Actions menu (just email management) so
+            // admins can still update their own email here without exposing the
+            // destructive items that would lock them out of their account.
             const actions = isSelf
-                ? '<span style="color:var(--text2);font-size:11px;">You</span>'
-                : '<button class="small secondary" onclick="renameUser(\'' + esc(u.username) + '\')">Rename</button>' +
-                  '<button class="small secondary" onclick="resetUserPassword(\'' + esc(u.username) + '\')">Reset PW</button>' +
-                  '<button class="small danger" onclick="deleteUser(\'' + esc(u.username) + '\')">Delete</button>';
+                ? '<span class="dropdown" onclick="event.stopPropagation();">' +
+                    '<button class="small secondary" onclick="toggleDropdown(event,\'' + menuId + '\')">Actions &#9662;</button>' +
+                    '<div id="' + menuId + '" class="dropdown-menu" style="display:none;">' +
+                      emailItem +
+                    '</div>' +
+                  '</span>'
+                : '<span class="dropdown" onclick="event.stopPropagation();">' +
+                    '<button class="small secondary" onclick="toggleDropdown(event,\'' + menuId + '\')">Actions &#9662;</button>' +
+                    '<div id="' + menuId + '" class="dropdown-menu" style="display:none;">' +
+                      '<button onclick="renameUser(\'' + uname + '\')">Rename</button>' +
+                      emailItem +
+                      resendItem +
+                      '<button onclick="resetUserPassword(\'' + uname + '\')">Reset password</button>' +
+                      '<div class="divider"></div>' +
+                      '<button class="danger" onclick="deleteUser(\'' + uname + '\')">Delete</button>' +
+                    '</div>' +
+                  '</span>';
             return '<tr><td>' + esc(u.username) + '</td><td>' + roleBadge + '</td><td class="col-email">' + emailCell + '</td><td>' + tfa + '</td><td>' + status + '</td><td class="col-actions">' + actions + '</td></tr>';
         }).join('');
     } catch (e) {
@@ -2945,9 +2983,14 @@ async function createUser() {
     const role = document.getElementById('newUserRole').value;
     if (!username) { toast('Username is required', 'error'); return; }
     if (!email) { toast('Email is required', 'error'); return; }
-    if (password.length < 8) { toast('Password must be at least 8 characters', 'error'); return; }
+    // Password is now optional. Only validate length when admin actually typed one.
+    if (password && password.length < 8) {
+        toast('Password must be at least 8 characters', 'error');
+        return;
+    }
 
-    const body = { username, email, password, role };
+    const body = { username, email, role };
+    if (password) body.password = password;
     try {
         const resp = await fetch(API + '/auth/users', {
             method: 'POST',
@@ -2959,11 +3002,34 @@ async function createUser() {
             toast('Error: ' + data.error, 'error');
             return;
         }
+        const data = await resp.json();
         document.getElementById('newUsername').value = '';
         document.getElementById('newUserEmail').value = '';
         document.getElementById('newPassword').value = '';
         document.getElementById('newUserRole').value = 'user';
-        toast('User "' + username + '" created', 'success');
+        const msg = data.invitation_sent
+            ? 'Invitation sent to ' + email
+            : 'User "' + username + '" created';
+        toast(msg, 'success');
+        await loadUsers();
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function resendInvitation(username) {
+    if (!confirm('Send a new invitation email to ' + username + '? Any previous link will stop working.')) return;
+    try {
+        const resp = await fetch(API + '/auth/users/' + encodeURIComponent(username) + '/resend-invitation', {
+            method: 'POST',
+            headers: authHeaders(),
+        });
+        if (!resp.ok) {
+            const data = await resp.json();
+            toast('Error: ' + data.error, 'error');
+            return;
+        }
+        toast('Invitation sent to ' + username, 'success');
         await loadUsers();
     } catch (e) {
         toast('Failed: ' + e.message, 'error');
@@ -3528,7 +3594,7 @@ async function showWsDetail(id) {
         document.getElementById('wsDetailProduct').textContent = ws.product || '-';
         document.getElementById('wsDetailDesc').textContent = ws.description || '-';
         document.getElementById('wsDetailCreatedBy').textContent = ws.created_by;
-        document.getElementById('wsDetailRole').textContent = ws.role;
+        document.getElementById('wsDetailRole').textContent = ws.role ? ws.role.charAt(0).toUpperCase() + ws.role.slice(1) : '';
 
         // Members
         const members = ws.members || [];
@@ -3619,7 +3685,26 @@ function toggleDropdown(event, id) {
         if (el.id !== id) el.style.display = 'none';
     });
     const m = document.getElementById(id);
-    if (m) m.style.display = (m.style.display === 'block') ? 'none' : 'block';
+    if (!m) return;
+    if (m.style.display === 'block') {
+        m.style.display = 'none';
+        return;
+    }
+    // Render hidden first so offsetWidth/Height is measurable, then position
+    // right-aligned under the trigger. Flip above when there's no room below.
+    m.style.visibility = 'hidden';
+    m.style.display = 'block';
+    const trigger = event.currentTarget;
+    const tr = trigger.getBoundingClientRect();
+    const mw = m.offsetWidth;
+    const mh = m.offsetHeight;
+    const left = Math.max(8, Math.min(tr.right - mw, window.innerWidth - mw - 8));
+    const top = (tr.bottom + 4 + mh > window.innerHeight)
+        ? Math.max(8, tr.top - 4 - mh)
+        : tr.bottom + 4;
+    m.style.left = left + 'px';
+    m.style.top = top + 'px';
+    m.style.visibility = '';
 }
 document.addEventListener('click', () => {
     document.querySelectorAll('.dropdown-menu').forEach(el => { el.style.display = 'none'; });

@@ -124,7 +124,7 @@ pub async fn handle_submit(
         if !verify_turnstile(&state.http, &state.turnstile_secret, &req.turnstile_token, ip).await {
             return Err(error_response(
                 StatusCode::BAD_REQUEST,
-                "Captcha verification failed — please retry",
+                "Captcha verification failed - please retry",
             ));
         }
     }
@@ -163,7 +163,7 @@ pub async fn handle_submit(
         log::error!("Contact form email send failed: {:#}", e);
         return Err(error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "Could not deliver your message — please email us directly",
+            "Could not deliver your message - please email us directly",
         ));
     }
 
