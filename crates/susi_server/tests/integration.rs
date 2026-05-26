@@ -662,7 +662,7 @@ fn test_ca_pinning_enforcement() {
 
     let server = TestServer::start_with_trusted_ca(&ca_pem);
     let token = server.admin_token();
-    let license_key = server.create_license(&token, false);
+    let license_key = server.create_license(&token, true);
     let machine_code = TEST_MACHINE_CODE;
 
     let http = server.http();
@@ -676,7 +676,7 @@ fn test_ca_pinning_enforcement() {
         }))
         .send()
         .expect("request");
-    assert_eq!(resp.status().as_u16(), 403, "no chain should be rejected");
+    assert_eq!(resp.status().as_u16(), 403, "request without chain should be rejected");
     let body = resp.text().unwrap_or_default();
     assert!(body.contains("certificate chain required"), "got: {}", body);
 

@@ -348,6 +348,7 @@ impl LicenseClient {
             Err(LicenseError::MachineLimitReached(max)) => {
                 LicenseStatus::Error(format!("Machine limit reached: {}", max))
             }
+            Err(LicenseError::CertificateChainNotTrusted) => LicenseStatus::UnsignedBinary,
             Err(e) => LicenseStatus::Error(format!("Activation failed: {}", e)),
         }
     }
