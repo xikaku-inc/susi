@@ -1889,13 +1889,15 @@ async fn handle_activate(
             return Err(error_response(StatusCode::FORBIDDEN, "License has expired"));
         }
 
-        if let Some(ca_der) = &state.trusted_signing_ca {
-            let chain = decode_cert_chain(req.signing_cert_chain.as_deref())?;
-            if !verify_chain_to_ca(&chain, ca_der) {
-                return Err(error_response(
-                    StatusCode::FORBIDDEN,
-                    "Binary signing certificate chain does not terminate at the trusted CA",
-                ));
+        if license.require_signed_binary {
+            if let Some(ca_der) = &state.trusted_signing_ca {
+                let chain = decode_cert_chain(req.signing_cert_chain.as_deref())?;
+                if !verify_chain_to_ca(&chain, ca_der) {
+                    return Err(error_response(
+                        StatusCode::FORBIDDEN,
+                        "Binary signing certificate chain does not terminate at the trusted CA",
+                    ));
+                }
             }
         }
 
@@ -1965,13 +1967,15 @@ async fn handle_verify(
             return Err(error_response(StatusCode::FORBIDDEN, "License has expired"));
         }
 
-        if let Some(ca_der) = &state.trusted_signing_ca {
-            let chain = decode_cert_chain(req.signing_cert_chain.as_deref())?;
-            if !verify_chain_to_ca(&chain, ca_der) {
-                return Err(error_response(
-                    StatusCode::FORBIDDEN,
-                    "Binary signing certificate chain does not terminate at the trusted CA",
-                ));
+        if license.require_signed_binary {
+            if let Some(ca_der) = &state.trusted_signing_ca {
+                let chain = decode_cert_chain(req.signing_cert_chain.as_deref())?;
+                if !verify_chain_to_ca(&chain, ca_der) {
+                    return Err(error_response(
+                        StatusCode::FORBIDDEN,
+                        "Binary signing certificate chain does not terminate at the trusted CA",
+                    ));
+                }
             }
         }
 

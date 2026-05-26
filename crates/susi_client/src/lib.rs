@@ -361,10 +361,18 @@ impl LicenseClient {
             .map_err(|e| LicenseError::Other(format!("Fingerprint error: {}", e)))?;
 
         let url = format!("{}/verify", server_url.trim_end_matches('/'));
-        let body = serde_json::json!({
+        let chain = binary_signing::extract_signing_cert_chain();
+        let mut body = serde_json::json!({
             "license_key": license_key,
             "machine_code": machine_code,
         });
+        if !chain.is_empty() {
+            use base64::Engine;
+            let chain_b64: Vec<String> = chain.iter()
+                .map(|der| base64::engine::general_purpose::STANDARD.encode(der))
+                .collect();
+            body["signing_cert_chain"] = serde_json::json!(chain_b64);
+        }
 
         let response = reqwest::Client::new()
             .post(&url)
@@ -397,6 +405,7 @@ impl LicenseClient {
             403 if msg.contains("revoked") => LicenseError::Revoked,
             403 if msg.contains("not authorized") => LicenseError::Deactivated,
             403 if msg.contains("expired") => LicenseError::Expired(msg),
+            403 if msg.contains("certificate chain") => LicenseError::CertificateChainNotTrusted,
             _ => LicenseError::Other(format!("Server returned {}: {}", status, msg)),
         })
     }

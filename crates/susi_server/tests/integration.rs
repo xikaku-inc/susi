@@ -663,8 +663,7 @@ fn test_ca_pinning_enforcement() {
     let server = TestServer::start_with_trusted_ca(&ca_pem);
     let token = server.admin_token();
     let license_key = server.create_license(&token, false);
-    let machine_code = susi_client::LicenseClient::get_machine_code()
-        .expect("machine code");
+    let machine_code = TEST_MACHINE_CODE;
 
     let http = server.http();
     let activate_url = format!("{}/activate", server.api_url);
