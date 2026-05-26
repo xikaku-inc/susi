@@ -930,10 +930,23 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
                     <div class="field-label">Features</div>
                     <div id="editFeaturesContainer" class="feature-checkboxes"></div>
                 </div>
-                <div class="detail-field" style="grid-column:1/-1;">
-                    <label style="cursor:pointer;display:flex;align-items:center;gap:8px;font-size:12px;"><input type="checkbox" id="editRequireSignedBinary"> Require signed binary</label>
-                </div>
             </div>
+            <details class="detail-advanced">
+                <summary class="detail-section-title">Advanced Options</summary>
+                <div class="detail-grid" style="margin-top:8px;">
+                    <div class="detail-field">
+                        <div class="field-label">Lease Duration (hours, 0 = disable lease)</div>
+                        <input type="number" id="editLeaseDuration" min="0">
+                    </div>
+                    <div class="detail-field">
+                        <div class="field-label">Grace Period (hours)</div>
+                        <input type="number" id="editLeaseGrace" min="0">
+                    </div>
+                    <div class="detail-field" style="grid-column:1/-1;">
+                        <label style="cursor:pointer;display:flex;align-items:center;gap:8px;font-size:12px;"><input type="checkbox" id="editRequireSignedBinary"> Require signed binary</label>
+                    </div>
+                </div>
+            </details>
             <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;">
                 <button class="secondary" onclick="cancelEditLicense()">Cancel</button>
                 <button onclick="saveEditLicense()">Save Changes</button>
@@ -2403,6 +2416,9 @@ function startEditLicense() {
     document.getElementById('editProduct').value = lic.product;
     document.getElementById('editMaxMachines').value = lic.max_machines;
     document.getElementById('editRequireSignedBinary').checked = !!lic.require_signed_binary;
+    document.getElementById('editLeaseDuration').value = lic.lease_duration_hours;
+    document.getElementById('editLeaseGrace').value = lic.lease_grace_hours;
+    document.querySelector('#detailEdit .detail-advanced').open = false;
     const isPerpetual = lic.expires === 'perpetual';
     document.getElementById('editPerpetual').checked = isPerpetual;
     const expiresInput = document.getElementById('editExpires');
@@ -2442,6 +2458,8 @@ async function saveEditLicense() {
         features: features,
         max_machines: parseInt(document.getElementById('editMaxMachines').value) || 0,
         require_signed_binary: document.getElementById('editRequireSignedBinary').checked,
+        lease_duration_hours: (() => { const v = parseInt(document.getElementById('editLeaseDuration').value); return Number.isNaN(v) ? LICENSE_DEFAULTS.leaseDurationHours : v; })(),
+        lease_grace_hours: parseInt(document.getElementById('editLeaseGrace').value) || LICENSE_DEFAULTS.leaseGraceHours,
     };
     if (!body.customer) { toast('Customer is required', 'error'); return; }
     try {

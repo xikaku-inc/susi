@@ -944,14 +944,16 @@ impl LicenseDb {
         features: &[String],
         max_machines: u32,
         require_signed_binary: bool,
+        lease_duration_hours: u32,
+        lease_grace_hours: u32,
     ) -> Result<bool, LicenseError> {
         let features_json = serde_json::to_string(features)?;
         let expires_str = expires.unwrap_or("");
         let rows = self
             .conn
             .execute(
-                "UPDATE licenses SET customer = ?1, product = ?2, expires = ?3, features = ?4, max_machines = ?5, require_signed_binary = ?6 WHERE license_key = ?7",
-                params![customer, product, expires_str, features_json, max_machines, require_signed_binary as i32, license_key],
+                "UPDATE licenses SET customer = ?1, product = ?2, expires = ?3, features = ?4, max_machines = ?5, require_signed_binary = ?6, lease_duration_hours = ?7, lease_grace_hours = ?8 WHERE license_key = ?9",
+                params![customer, product, expires_str, features_json, max_machines, require_signed_binary as i32, lease_duration_hours, lease_grace_hours, license_key],
             )
             .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))?;
         Ok(rows > 0)
