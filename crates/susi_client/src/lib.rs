@@ -306,6 +306,11 @@ impl LicenseClient {
                     let _ = tokio::fs::remove_file(path).await;
                     return LicenseStatus::InvalidLicenseKey;
                 }
+                Err(LicenseError::CertificateChainNotTrusted) => {
+                    log::warn!("Binary not signed correctly - removing cached file");
+                    let _ = tokio::fs::remove_file(path).await;
+                    return LicenseStatus::UnsignedBinary;
+                }
                 Err(e) => {
                     log::warn!("Online license verify failed, using cached file: {}", e);
                 }
@@ -343,6 +348,7 @@ impl LicenseClient {
             Err(LicenseError::MachineLimitReached(max)) => {
                 LicenseStatus::Error(format!("Machine limit reached: {}", max))
             }
+            Err(LicenseError::CertificateChainNotTrusted) => LicenseStatus::UnsignedBinary,
             Err(e) => LicenseStatus::Error(format!("Activation failed: {}", e)),
         }
     }
@@ -356,10 +362,18 @@ impl LicenseClient {
             .map_err(|e| LicenseError::Other(format!("Fingerprint error: {}", e)))?;
 
         let url = format!("{}/verify", server_url.trim_end_matches('/'));
-        let body = serde_json::json!({
+        let chain = binary_signing::extract_signing_cert_chain();
+        let mut body = serde_json::json!({
             "license_key": license_key,
             "machine_code": machine_code,
         });
+        if !chain.is_empty() {
+            use base64::Engine;
+            let chain_b64: Vec<String> = chain.iter()
+                .map(|der| base64::engine::general_purpose::STANDARD.encode(der))
+                .collect();
+            body["signing_cert_chain"] = serde_json::json!(chain_b64);
+        }
 
         let response = reqwest::Client::new()
             .post(&url)
@@ -392,6 +406,7 @@ impl LicenseClient {
             403 if msg.contains("revoked") => LicenseError::Revoked,
             403 if msg.contains("not authorized") => LicenseError::Deactivated,
             403 if msg.contains("expired") => LicenseError::Expired(msg),
+            403 if msg.contains("certificate chain") => LicenseError::CertificateChainNotTrusted,
             _ => LicenseError::Other(format!("Server returned {}: {}", status, msg)),
         })
     }
@@ -415,11 +430,19 @@ impl LicenseClient {
             });
 
         let url = format!("{}/activate", server_url.trim_end_matches('/'));
-        let body = serde_json::json!({
+        let chain = binary_signing::extract_signing_cert_chain();
+        let mut body = serde_json::json!({
             "license_key": license_key,
             "machine_code": machine_code,
             "friendly_name": friendly_name,
         });
+        if !chain.is_empty() {
+            use base64::Engine;
+            let chain_b64: Vec<String> = chain.iter()
+                .map(|der| base64::engine::general_purpose::STANDARD.encode(der))
+                .collect();
+            body["signing_cert_chain"] = serde_json::json!(chain_b64);
+        }
 
         let response = reqwest::Client::new()
             .post(&url)
@@ -455,6 +478,7 @@ impl LicenseClient {
                     .unwrap_or(0);
                 LicenseError::MachineLimitReached(max)
             }
+            403 if msg.contains("certificate chain") => LicenseError::CertificateChainNotTrusted,
             _ => LicenseError::Other(format!("Server returned {}: {}", status, msg)),
         })
     }

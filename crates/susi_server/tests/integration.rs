@@ -561,6 +561,155 @@ fn test_update_require_signed_binary() {
 }
 
 // ---------------------------------------------------------------------------
+// CA pinning integration test
+// ---------------------------------------------------------------------------
+
+/// Helpers for building synthetic DER certificate chains without needing a real
+/// signed binary.  Uses `rcgen` to create a CA cert and a leaf cert signed by it.
+mod cert_helpers {
+    use rcgen::{
+        BasicConstraints, CertificateParams, DnType, IsCa, KeyPair,
+    };
+
+    pub struct CaAndLeaf {
+        pub ca_pem: String,
+        pub leaf_der: Vec<u8>,
+    }
+
+    pub fn make_ca_and_leaf() -> CaAndLeaf {
+        // CA certificate (self-signed)
+        let mut ca_params = CertificateParams::new(vec![]).unwrap();
+        ca_params.distinguished_name.push(DnType::CommonName, "Test CA");
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let ca_key = KeyPair::generate().unwrap();
+        let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+
+        // Leaf certificate signed by the CA
+        let mut leaf_params = CertificateParams::new(vec![]).unwrap();
+        leaf_params.distinguished_name.push(DnType::CommonName, "Test Leaf");
+        leaf_params.is_ca = IsCa::NoCa;
+        let leaf_key = KeyPair::generate().unwrap();
+        let leaf_cert = leaf_params.signed_by(&leaf_key, &ca_cert, &ca_key).unwrap();
+
+        CaAndLeaf {
+            ca_pem: ca_cert.pem(),
+            leaf_der: leaf_cert.der().to_vec(),
+        }
+    }
+
+    /// A self-signed cert that is NOT signed by the test CA.
+    pub fn make_unrelated_cert_der() -> Vec<u8> {
+        let mut params = CertificateParams::new(vec![]).unwrap();
+        params.distinguished_name.push(DnType::CommonName, "Attacker CA");
+        let key = KeyPair::generate().unwrap();
+        params.self_signed(&key).unwrap().der().to_vec()
+    }
+}
+
+impl TestServer {
+    /// Start a server configured with `--trusted-signing-ca <ca_pem>`.
+    fn start_with_trusted_ca(ca_pem: &str) -> Self {
+        let dir = tempfile::tempdir().expect("temp dir");
+
+        let (private_key, public_key) = generate_keypair(2048).expect("keygen");
+        let private_pem = private_key_to_pem(&private_key).expect("private pem");
+        let public_pem = public_key_to_pem(&public_key).expect("public pem");
+
+        let key_path = dir.path().join("private.pem");
+        let db_path  = dir.path().join("licenses.db");
+        let ca_path  = dir.path().join("trusted_ca.pem");
+        std::fs::write(&key_path, &private_pem).expect("write key");
+        std::fs::write(&ca_path, ca_pem).expect("write ca pem");
+
+        let port = free_port();
+        let url = format!("http://127.0.0.1:{}", port);
+        let api_url = format!("{}/api/v1", url);
+
+        let child = Command::new(env!("CARGO_BIN_EXE_susi-server"))
+            .arg("--private-key").arg(&key_path)
+            .arg("--db").arg(&db_path)
+            .arg("--listen").arg(format!("127.0.0.1:{}", port))
+            .arg("--data-dir").arg(dir.path())
+            .arg("--trusted-signing-ca").arg(&ca_path)
+            .spawn()
+            .expect("spawn susi-server");
+
+        let server = TestServer {
+            child, url: url.clone(), api_url, public_key_pem: public_pem, _dir: dir,
+        };
+        server.wait_ready();
+        server
+    }
+}
+
+/// Verifies server-side CA pinning enforcement:
+///
+/// 1. No chain provided → 403
+/// 2. Chain from an unrelated self-signed cert → 403
+/// 3. Leaf cert signed by the trusted CA → 200
+///
+/// The test uses synthetically generated DER certificates (via `rcgen`) so it
+/// works without a real code-signed binary.
+#[test]
+fn test_ca_pinning_enforcement() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use cert_helpers::{make_ca_and_leaf, make_unrelated_cert_der};
+
+    let CaAndLeaf { ca_pem, leaf_der } = make_ca_and_leaf();
+    use cert_helpers::CaAndLeaf;
+
+    let attacker_der = make_unrelated_cert_der();
+
+    let server = TestServer::start_with_trusted_ca(&ca_pem);
+    let token = server.admin_token();
+    let license_key = server.create_license(&token, true);
+    let machine_code = TEST_MACHINE_CODE;
+
+    let http = server.http();
+    let activate_url = format!("{}/activate", server.api_url);
+
+    // Case 1: no chain → 403
+    let resp = http.post(&activate_url)
+        .json(&serde_json::json!({
+            "license_key": license_key,
+            "machine_code": machine_code,
+        }))
+        .send()
+        .expect("request");
+    assert_eq!(resp.status().as_u16(), 403, "request without chain should be rejected");
+    let body = resp.text().unwrap_or_default();
+    assert!(body.contains("certificate chain required"), "got: {}", body);
+
+    // Case 2: unrelated self-signed cert → 403
+    let resp = http.post(&activate_url)
+        .json(&serde_json::json!({
+            "license_key": license_key,
+            "machine_code": machine_code,
+            "signing_cert_chain": [STANDARD.encode(&attacker_der)],
+        }))
+        .send()
+        .expect("request");
+    assert_eq!(resp.status().as_u16(), 403, "attacker cert should be rejected");
+    let body = resp.text().unwrap_or_default();
+    assert!(body.contains("trusted CA"), "got: {}", body);
+
+    // Case 3: leaf signed by the trusted CA → 200
+    let resp = http.post(&activate_url)
+        .json(&serde_json::json!({
+            "license_key": license_key,
+            "machine_code": machine_code,
+            "signing_cert_chain": [STANDARD.encode(&leaf_der)],
+        }))
+        .send()
+        .expect("request");
+    assert_eq!(
+        resp.status().as_u16(), 200,
+        "valid chain should be accepted: {}",
+        resp.text().unwrap_or_default()
+    );
+}
+
+// ---------------------------------------------------------------------------
 // C++ client integration test
 // ---------------------------------------------------------------------------
 
