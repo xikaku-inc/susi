@@ -1,4 +1,6 @@
 use anyhow::{bail, Context, Result};
+use argon2::password_hash::{rand_core::OsRng, SaltString};
+use argon2::{Argon2, PasswordHasher};
 use chrono::{Duration, NaiveDate, Utc};
 use clap::{Parser, Subcommand};
 use susi_core::crypto::{
@@ -140,6 +142,28 @@ enum Commands {
 
     /// Print the hardware fingerprint of this machine
     Fingerprint,
+
+    /// Seed a deterministic user + workspace for FusionHub E2E tests
+    SeedE2eWorkspace {
+        /// Path to SQLite database
+        #[arg(long, default_value = "licenses.db")]
+        db: String,
+        /// Username to create/update
+        #[arg(long, default_value = "fusionhub-e2e@example.test")]
+        username: String,
+        /// Password to set for the user
+        #[arg(long, default_value = "correct-horse-battery-staple")]
+        password: String,
+        /// Workspace id to create/update membership for
+        #[arg(long, default_value = "ws-fusionhub-e2e")]
+        workspace_id: String,
+        /// Workspace display name
+        #[arg(long, default_value = "FusionHub E2E")]
+        workspace_name: String,
+        /// Workspace product label
+        #[arg(long, default_value = "FusionHub")]
+        product: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -185,7 +209,67 @@ fn main() -> Result<()> {
             usb_serial,
         } => cmd_export_token(&key, &private_key, &db, &name, usb_serial),
         Commands::Fingerprint => cmd_fingerprint(),
+        Commands::SeedE2eWorkspace {
+            db,
+            username,
+            password,
+            workspace_id,
+            workspace_name,
+            product,
+        } => cmd_seed_e2e_workspace(
+            &db,
+            &username,
+            &password,
+            &workspace_id,
+            &workspace_name,
+            &product,
+        ),
     }
+}
+
+fn hash_password(password: &str) -> Result<String> {
+    let salt = SaltString::generate(&mut OsRng);
+    Ok(Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .map_err(|e| anyhow::anyhow!("password hash failed: {}", e))?
+        .to_string())
+}
+
+fn cmd_seed_e2e_workspace(
+    db_path: &str,
+    username: &str,
+    password: &str,
+    workspace_id: &str,
+    workspace_name: &str,
+    product: &str,
+) -> Result<()> {
+    let db = LicenseDb::open(db_path)?;
+    let password_hash = hash_password(password)?;
+
+    if !db.user_exists(username)? {
+        db.create_user(username, &password_hash, "user")?;
+    }
+    // create_user intentionally sets must_change_password=1; for the E2E
+    // service account we clear that gate while setting the requested password.
+    db.update_user_password(username, &password_hash)?;
+
+    if db.get_workspace(workspace_id)?.is_none() {
+        db.create_workspace(
+            workspace_id,
+            workspace_name,
+            product,
+            "FusionHub E2E workspace",
+            username,
+        )?;
+    } else {
+        db.add_workspace_member(workspace_id, username, "owner")?;
+    }
+
+    println!(
+        "Seeded E2E workspace '{}' for user '{}'",
+        workspace_id, username
+    );
+    Ok(())
 }
 
 fn cmd_keygen(bits: usize, output_dir: &str) -> Result<()> {
