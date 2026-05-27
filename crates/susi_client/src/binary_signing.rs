@@ -91,6 +91,104 @@ mod windows {
         fn WinVerifyTrust(hwnd: HWND, pgActionID: *mut GUID, pWVTData: *mut WINTRUST_DATA) -> LONG;
     }
 
+    // ---------------------------------------------------------------------------
+    // crypt32.dll FFI — certificate chain extraction from embedded Authenticode
+    // ---------------------------------------------------------------------------
+    type HCERTSTORE = *mut std::ffi::c_void;
+    type HCRYPTMSG  = *mut std::ffi::c_void;
+    #[allow(non_camel_case_types)]
+    type PCCERT_CONTEXT = *const CERT_CONTEXT;
+
+    #[repr(C)]
+    struct CERT_CONTEXT {
+        dw_cert_encoding_type: DWORD,
+        pb_cert_encoded: *mut u8,
+        cb_cert_encoded: DWORD,
+        p_cert_info: *mut std::ffi::c_void,
+        h_cert_store: HCERTSTORE,
+    }
+
+    const CERT_QUERY_OBJECT_FILE: DWORD = 1;
+    const CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED_EMBED: DWORD = 1 << 10;
+    const CERT_QUERY_FORMAT_FLAG_ALL: DWORD = 0x0E;
+    const CERT_CLOSE_STORE_FORCE_FLAG: DWORD = 1;
+
+    #[link(name = "crypt32")]
+    extern "system" {
+        fn CryptQueryObject(
+            dw_object_type: DWORD,
+            pv_object: *const std::ffi::c_void,
+            dw_expected_content_type_flags: DWORD,
+            dw_expected_format_type_flags: DWORD,
+            dw_flags: DWORD,
+            pdw_msg_and_cert_encoding_type: *mut DWORD,
+            pdw_content_type: *mut DWORD,
+            pdw_format_type: *mut DWORD,
+            ph_cert_store: *mut HCERTSTORE,
+            ph_msg: *mut HCRYPTMSG,
+            ppv_context: *mut *const std::ffi::c_void,
+        ) -> i32;
+        fn CertEnumCertificatesInStore(
+            h_cert_store: HCERTSTORE,
+            pprev_cert_context: PCCERT_CONTEXT,
+        ) -> PCCERT_CONTEXT;
+        fn CertCloseStore(h_cert_store: HCERTSTORE, dw_flags: DWORD) -> i32;
+        fn CryptMsgClose(h_crypt_msg: HCRYPTMSG) -> i32;
+    }
+
+    pub fn extract_chain() -> Vec<Vec<u8>> {
+        let exe = match std::env::current_exe() {
+            Ok(p) => p,
+            Err(_) => return vec![],
+        };
+        let wide: Vec<u16> = exe.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+
+        unsafe {
+            let mut cert_store: HCERTSTORE = std::ptr::null_mut();
+            let mut hcrypt_msg: HCRYPTMSG = std::ptr::null_mut();
+            let mut enc_type: DWORD = 0;
+            let mut content_type: DWORD = 0;
+            let mut format_type: DWORD = 0;
+            let mut pv_context: *const std::ffi::c_void = std::ptr::null();
+
+            let ok = CryptQueryObject(
+                CERT_QUERY_OBJECT_FILE,
+                wide.as_ptr() as *const std::ffi::c_void,
+                CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED_EMBED,
+                CERT_QUERY_FORMAT_FLAG_ALL,
+                0,
+                &mut enc_type,
+                &mut content_type,
+                &mut format_type,
+                &mut cert_store,
+                &mut hcrypt_msg,
+                &mut pv_context,
+            );
+
+            if ok == 0 || cert_store.is_null() {
+                if !hcrypt_msg.is_null() { CryptMsgClose(hcrypt_msg); }
+                return vec![];
+            }
+
+            let mut certs: Vec<Vec<u8>> = Vec::new();
+            let mut p_prev: PCCERT_CONTEXT = std::ptr::null();
+            loop {
+                let p_ctx = CertEnumCertificatesInStore(cert_store, p_prev);
+                if p_ctx.is_null() { break; }
+                let cb = (*p_ctx).cb_cert_encoded as usize;
+                let pb = (*p_ctx).pb_cert_encoded;
+                certs.push(std::slice::from_raw_parts(pb, cb).to_vec());
+                p_prev = p_ctx;
+                // CertEnumCertificatesInStore takes ownership of p_prev — do not
+                // call CertFreeCertificateContext on intermediate pointers.
+            }
+
+            if !hcrypt_msg.is_null() { CryptMsgClose(hcrypt_msg); }
+            CertCloseStore(cert_store, CERT_CLOSE_STORE_FORCE_FLAG);
+            certs
+        }
+    }
+
     pub fn check() -> bool {
         let exe = match std::env::current_exe() {
             Ok(p) => p,
@@ -151,6 +249,21 @@ mod macos {
     struct __CFURL(u8);
     type CFURLRef = *const __CFURL;
 
+    type CFURLPathStyle = i64;
+
+    // Additional types for certificate extraction
+    #[repr(C)] struct __CFDictionary(u8);
+    type CFDictionaryRef = *const __CFDictionary;
+    #[repr(C)] struct __CFArray(u8);
+    type CFArrayRef = *const __CFArray;
+    #[repr(C)] struct __CFData(u8);
+    type CFDataRef = *const __CFData;
+    #[repr(C)] struct OpaqueSecCertificate(u8);
+    type SecCertificateRef = *const OpaqueSecCertificate;
+
+    // kSecCSSigningInformation = 0x00000002 — requests the certificate chain
+    const K_SEC_CS_SIGNING_INFORMATION: u32 = 0x00000002;
+
     extern "C" {
         fn SecStaticCodeCreateWithPath(
             path: CFURLRef,
@@ -169,10 +282,84 @@ mod macos {
             buf_len: isize,
             is_directory: u8,
         ) -> CFURLRef;
+        // kSecCodeInfoCertificates is a CFStringRef exported by Security.framework.
+        // CFDictionary uses pointer identity for CF string keys, so it must be
+        // the exact extern symbol — not a hardcoded string constant.
+        static kSecCodeInfoCertificates: *const std::ffi::c_void;
+        fn SecCodeCopySigningInformation(
+            code: SecStaticCodeRef,
+            flags: u32,
+            information: *mut CFDictionaryRef,
+        ) -> OSStatus;
+        fn CFDictionaryGetValue(
+            the_dict: CFDictionaryRef,
+            key: *const std::ffi::c_void,
+        ) -> *const std::ffi::c_void;
+        fn CFArrayGetCount(the_array: CFArrayRef) -> isize;
+        fn CFArrayGetValueAtIndex(the_array: CFArrayRef, idx: isize) -> *const std::ffi::c_void;
+        fn SecCertificateCopyData(certificate: SecCertificateRef) -> CFDataRef;
+        fn CFDataGetBytePtr(the_data: CFDataRef) -> *const u8;
+        fn CFDataGetLength(the_data: CFDataRef) -> isize;
     }
 
     #[link(name = "Security", kind = "framework")]
     extern "C" {}
+
+    pub fn extract_chain() -> Vec<Vec<u8>> {
+        let exe = match std::env::current_exe() {
+            Ok(p) => p,
+            Err(_) => return vec![],
+        };
+        let path_bytes = match exe.to_str() {
+            Some(s) => s.as_bytes(),
+            None => return vec![],
+        };
+
+        unsafe {
+            let url = CFURLCreateFromFileSystemRepresentation(
+                std::ptr::null(),
+                path_bytes.as_ptr(),
+                path_bytes.len() as isize,
+                0,
+            );
+            if url.is_null() { return vec![]; }
+
+            let mut code: SecStaticCodeRef = std::ptr::null_mut();
+            let status = SecStaticCodeCreateWithPath(url, KSE_CS_DEFAULT_FLAGS, &mut code);
+            CFRelease(url as *const _);
+            if status != ERR_SEC_SUCCESS || code.is_null() { return vec![]; }
+
+            let mut info_dict: CFDictionaryRef = std::ptr::null();
+            let status = SecCodeCopySigningInformation(
+                code, K_SEC_CS_SIGNING_INFORMATION, &mut info_dict,
+            );
+            CFRelease(code as *const _);
+            if status != ERR_SEC_SUCCESS || info_dict.is_null() { return vec![]; }
+
+            let certs_val = CFDictionaryGetValue(info_dict, kSecCodeInfoCertificates);
+            if certs_val.is_null() {
+                CFRelease(info_dict as *const _);
+                return vec![];
+            }
+
+            let certs_array = certs_val as CFArrayRef;
+            let count = CFArrayGetCount(certs_array);
+            let mut result: Vec<Vec<u8>> = Vec::with_capacity(count as usize);
+            for i in 0..count {
+                let cert_ref = CFArrayGetValueAtIndex(certs_array, i) as SecCertificateRef;
+                if cert_ref.is_null() { continue; }
+                let data_ref = SecCertificateCopyData(cert_ref);
+                if data_ref.is_null() { continue; }
+                let len = CFDataGetLength(data_ref) as usize;
+                let ptr = CFDataGetBytePtr(data_ref);
+                result.push(std::slice::from_raw_parts(ptr, len).to_vec());
+                CFRelease(data_ref as *const _);
+            }
+
+            CFRelease(info_dict as *const _);
+            result
+        }
+    }
 
     pub fn check() -> bool {
         let exe = match std::env::current_exe() {
@@ -209,6 +396,21 @@ mod macos {
             valid == ERR_SEC_SUCCESS
         }
     }
+}
+
+/// Extract the DER-encoded certificate chain from the running binary's code
+/// signature. Returns the chain leaf-first, or an empty `Vec` if the binary is
+/// unsigned, on Linux, or if extraction fails for any reason.
+///
+/// The returned bytes are suitable for sending to the server for CA pinning
+/// verification via [`crate::LicenseClient`].
+pub fn extract_signing_cert_chain() -> Vec<Vec<u8>> {
+    #[cfg(target_os = "windows")]
+    return windows::extract_chain();
+    #[cfg(target_os = "macos")]
+    return macos::extract_chain();
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    return vec![];
 }
 
 // ---------------------------------------------------------------------------

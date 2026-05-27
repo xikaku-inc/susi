@@ -53,6 +53,9 @@ pub enum LicenseError {
     #[error("Token decryption failed: {0}")]
     TokenDecryptionFailed(String),
 
+    #[error("Certificate does not termiante at the trusted CA")]
+    CertificateChainNotTrusted,
+    
     #[error("Workspace graph version conflict (current={current})")]
     GraphConflict { current: u32 },
 
