@@ -3232,6 +3232,10 @@ async fn handle_upload_release(
     if files.is_empty() {
         return Err(error_response(StatusCode::BAD_REQUEST, "No files uploaded"));
     }
+    docs::safe_tag(&tag)?;
+    for (file_name, _) in &files {
+        docs::safe_filename(file_name)?;
+    }
 
     // Upsert release metadata — re-running a release (e.g. a CI retry) must
     // reuse the existing release_id so doc_pages and assets hanging off this
