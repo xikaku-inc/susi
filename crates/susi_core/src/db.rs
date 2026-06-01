@@ -1843,6 +1843,51 @@ impl LicenseDb {
         Ok(rows)
     }
 
+    /// List every workspace (admin view). `username` is used only to fill in
+    /// the caller's per-workspace role; it is empty where they are not a member.
+    pub fn list_all_workspaces(
+        &self,
+        username: &str,
+    ) -> Result<
+        Vec<(
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+        )>,
+        LicenseError,
+    > {
+        let mut stmt = self.conn
+            .prepare(
+                "SELECT w.id, w.name, w.product, w.description, w.created_by, w.created_at, w.updated_at, COALESCE(wm.role, '')
+                 FROM workspaces w
+                 LEFT JOIN workspace_members wm ON w.id = wm.workspace_id AND wm.username = ?1
+                 ORDER BY w.name"
+            )
+            .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
+        let rows = stmt
+            .query_map(params![username], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
+                    r.get::<_, String>(6)?,
+                    r.get::<_, String>(7)?,
+                ))
+            })
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
     pub fn update_workspace(
         &self,
         id: &str,

@@ -3590,7 +3590,14 @@ async fn handle_list_workspaces(
     require_password_changed(&state, &principal)?;
 
     let db = state.db.lock().unwrap();
-    let rows = db.list_workspaces_for_user(&principal.username)
+    let is_admin = db.get_user_role(&principal.username)
+        .map(|r| r == "admin")
+        .unwrap_or(false);
+    let rows = if is_admin {
+        db.list_all_workspaces(&principal.username)
+    } else {
+        db.list_workspaces_for_user(&principal.username)
+    }
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
     let workspaces: Vec<_> = rows.iter().map(|(id, name, product, desc, created_by, created_at, updated_at, role)| {
