@@ -4,11 +4,11 @@ pub mod workspace;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
+use rsa::RsaPublicKey;
 use susi_core::{
     crypto::{public_key_from_pem, verify_license},
     fingerprint, LicenseError, LicensePayload, SignedLicense,
 };
-use rsa::RsaPublicKey;
 
 /// Run an async future to completion on a fresh current-thread tokio runtime.
 /// Used by the blocking API wrappers. Must NOT be called from inside a tokio
@@ -63,11 +63,17 @@ pub enum LicenseStatus {
 
 impl LicenseStatus {
     pub fn is_valid(&self) -> bool {
-        matches!(self, LicenseStatus::Valid { .. } | LicenseStatus::ValidGracePeriod { .. })
+        matches!(
+            self,
+            LicenseStatus::Valid { .. } | LicenseStatus::ValidGracePeriod { .. }
+        )
     }
 
     pub fn needs_renewal(&self) -> bool {
-        matches!(self, LicenseStatus::ValidGracePeriod { .. } | LicenseStatus::LeaseExpired { .. })
+        matches!(
+            self,
+            LicenseStatus::ValidGracePeriod { .. } | LicenseStatus::LeaseExpired { .. }
+        )
     }
 
     /// Check if a specific feature is available in this license.
@@ -178,7 +184,7 @@ impl LicenseClient {
         self.verify_signed(&signed)
     }
 
-     /// Verify a SignedLicense object (e.g. received from server or loaded from disk).
+    /// Verify a SignedLicense object (e.g. received from server or loaded from disk).
     /// Use local machine code for machine check.
     pub fn verify_signed(&self, signed: &SignedLicense) -> LicenseStatus {
         let payload = match verify_license(&self.public_key, signed) {
@@ -209,7 +215,11 @@ impl LicenseClient {
 
     /// Verify a SignedLicense object (e.g. received from server or loaded from disk).
     /// Use given activation code for machine check.
-    pub fn verify_signed_with_activation_code(&self, signed: &SignedLicense, activation_code: &str) -> LicenseStatus {
+    pub fn verify_signed_with_activation_code(
+        &self,
+        signed: &SignedLicense,
+        activation_code: &str,
+    ) -> LicenseStatus {
         let payload = match verify_license(&self.public_key, signed) {
             Ok(p) => p,
             Err(LicenseError::InvalidSignature) => return LicenseStatus::InvalidSignature,
@@ -234,7 +244,8 @@ impl LicenseClient {
 
         // Check lease expiry; prefer grace hours from the payload over the client default
         if payload.is_lease_expired() {
-            let grace_hours = payload.lease_grace_period
+            let grace_hours = payload
+                .lease_grace_period
                 .map(|h| h as i64)
                 .unwrap_or(susi_core::DEFAULT_LEASE_GRACE_HOURS as i64);
             if payload.is_in_grace_period(grace_hours) {
@@ -271,12 +282,22 @@ impl LicenseClient {
     ///   (offline grace).
     ///
     /// For first-time activation, call [`Self::activate_async`] instead.
-    pub fn verify_and_refresh(&self, path: &Path, license_key: &str, _friendly_name: Option<&str>) -> LicenseStatus {
+    pub fn verify_and_refresh(
+        &self,
+        path: &Path,
+        license_key: &str,
+        _friendly_name: Option<&str>,
+    ) -> LicenseStatus {
         blocking_run(self.verify_and_refresh_async(path, license_key, _friendly_name))
     }
 
     /// Async variant of [`verify_and_refresh`].
-    pub async fn verify_and_refresh_async(&self, path: &Path, license_key: &str, _friendly_name: Option<&str>) -> LicenseStatus {
+    pub async fn verify_and_refresh_async(
+        &self,
+        path: &Path,
+        license_key: &str,
+        _friendly_name: Option<&str>,
+    ) -> LicenseStatus {
         // Absence of a cached license is the canonical signal that this install
         // is not activated here. Never silently /activate in this path.
         if !path.exists() {
@@ -325,17 +346,30 @@ impl LicenseClient {
     /// Explicit activation — user clicked the Activate button. Calls the
     /// server's `/activate` endpoint, claims a machine slot, and writes the
     /// signed license to `path`.
-    pub fn activate(&self, path: &Path, license_key: &str, friendly_name: Option<&str>) -> LicenseStatus {
+    pub fn activate(
+        &self,
+        path: &Path,
+        license_key: &str,
+        friendly_name: Option<&str>,
+    ) -> LicenseStatus {
         blocking_run(self.activate_async(path, license_key, friendly_name))
     }
 
     /// Async variant of [`activate`].
-    pub async fn activate_async(&self, path: &Path, license_key: &str, friendly_name: Option<&str>) -> LicenseStatus {
+    pub async fn activate_async(
+        &self,
+        path: &Path,
+        license_key: &str,
+        friendly_name: Option<&str>,
+    ) -> LicenseStatus {
         let server_url = match &self.server_url {
             Some(u) => u.clone(),
             None => return LicenseStatus::Error("No license server configured".into()),
         };
-        match self.try_online_activate_async(&server_url, license_key, friendly_name).await {
+        match self
+            .try_online_activate_async(&server_url, license_key, friendly_name)
+            .await
+        {
             Ok(signed) => {
                 if let Ok(json) = serde_json::to_string_pretty(&signed) {
                     let _ = tokio::fs::write(path, json).await;
@@ -358,7 +392,8 @@ impl LicenseClient {
         server_url: &str,
         license_key: &str,
     ) -> Result<SignedLicense, LicenseError> {
-        let machine_code = self.current_machine_code()
+        let machine_code = self
+            .current_machine_code()
             .map_err(|e| LicenseError::Other(format!("Fingerprint error: {}", e)))?;
 
         let url = format!("{}/verify", server_url.trim_end_matches('/'));
@@ -369,7 +404,8 @@ impl LicenseClient {
         });
         if !chain.is_empty() {
             use base64::Engine;
-            let chain_b64: Vec<String> = chain.iter()
+            let chain_b64: Vec<String> = chain
+                .iter()
                 .map(|der| base64::engine::general_purpose::STANDARD.encode(der))
                 .collect();
             body["signing_cert_chain"] = serde_json::json!(chain_b64);
@@ -392,8 +428,11 @@ impl LicenseClient {
         }
 
         #[derive(serde::Deserialize)]
-        struct ErrorBody { error: String }
-        let msg = response.json::<ErrorBody>()
+        struct ErrorBody {
+            error: String,
+        }
+        let msg = response
+            .json::<ErrorBody>()
             .await
             .map(|b| b.error)
             .unwrap_or_default();
@@ -417,7 +456,8 @@ impl LicenseClient {
         license_key: &str,
         friendly_name: Option<&str>,
     ) -> Result<SignedLicense, LicenseError> {
-        let machine_code = self.current_machine_code()
+        let machine_code = self
+            .current_machine_code()
             .map_err(|e| LicenseError::Other(format!("Fingerprint error: {}", e)))?;
 
         let friendly_name = friendly_name
@@ -438,7 +478,8 @@ impl LicenseClient {
         });
         if !chain.is_empty() {
             use base64::Engine;
-            let chain_b64: Vec<String> = chain.iter()
+            let chain_b64: Vec<String> = chain
+                .iter()
                 .map(|der| base64::engine::general_purpose::STANDARD.encode(der))
                 .collect();
             body["signing_cert_chain"] = serde_json::json!(chain_b64);
@@ -461,8 +502,11 @@ impl LicenseClient {
         }
 
         #[derive(serde::Deserialize)]
-        struct ErrorBody { error: String }
-        let msg = response.json::<ErrorBody>()
+        struct ErrorBody {
+            error: String,
+        }
+        let msg = response
+            .json::<ErrorBody>()
             .await
             .map(|b| b.error)
             .unwrap_or_default();
@@ -473,7 +517,9 @@ impl LicenseClient {
             403 if msg.contains("removed by an administrator") => LicenseError::Deactivated,
             403 if msg.contains("expired") => LicenseError::Expired(msg),
             403 if msg.contains("Machine limit") => {
-                let max = msg.split("max ").nth(1)
+                let max = msg
+                    .split("max ")
+                    .nth(1)
                     .and_then(|s| s.trim_end_matches(')').parse().ok())
                     .unwrap_or(0);
                 LicenseError::MachineLimitReached(max)
@@ -510,12 +556,17 @@ impl LicenseClient {
                     if status.is_valid() {
                         return status;
                     }
-                    last_error = format!("Token on {} invalid: {:?}", device.mount_path.display(), status);
+                    last_error = format!(
+                        "Token on {} invalid: {:?}",
+                        device.mount_path.display(),
+                        status
+                    );
                 }
                 Err(e) => {
                     last_error = format!(
                         "Token on {} decryption failed: {}",
-                        device.mount_path.display(), e
+                        device.mount_path.display(),
+                        e
                     );
                     continue;
                 }
@@ -525,7 +576,10 @@ impl LicenseClient {
         if last_error.is_empty() {
             LicenseStatus::TokenNotFound
         } else {
-            LicenseStatus::Error(format!("No valid USB token found. Last error: {}", last_error))
+            LicenseStatus::Error(format!(
+                "No valid USB token found. Last error: {}",
+                last_error
+            ))
         }
     }
 
@@ -539,7 +593,9 @@ impl LicenseClient {
 mod tests {
     use super::*;
     use chrono::Duration;
-    use susi_core::crypto::{generate_keypair, private_key_to_pem, public_key_to_pem, sign_license};
+    use susi_core::crypto::{
+        generate_keypair, private_key_to_pem, public_key_to_pem, sign_license,
+    };
 
     fn make_keypair_pems() -> (String, String, rsa::RsaPrivateKey) {
         let (private, public) = generate_keypair(2048).unwrap();
@@ -810,7 +866,9 @@ mod tests {
     async fn test_verify_file_async_not_found() {
         let (_, pub_pem, _) = make_keypair_pems();
         let client = new_test_client(&pub_pem);
-        let status = client.verify_file_async(Path::new("/nonexistent/license.json")).await;
+        let status = client
+            .verify_file_async(Path::new("/nonexistent/license.json"))
+            .await;
         assert!(matches!(status, LicenseStatus::FileNotFound(_)));
     }
 
@@ -826,7 +884,9 @@ mod tests {
         let json = serde_json::to_string_pretty(&signed).unwrap();
         tokio::fs::write(&tmp, &json).await.unwrap();
 
-        let status = client.verify_and_refresh_async(&tmp, "AAAA-BBBB-CCCC-DDDD", None).await;
+        let status = client
+            .verify_and_refresh_async(&tmp, "AAAA-BBBB-CCCC-DDDD", None)
+            .await;
         assert!(status.is_valid());
 
         let _ = tokio::fs::remove_file(&tmp).await;
@@ -887,7 +947,11 @@ mod tests {
         let result = client
             .try_online_activate_async(&url, "ANY-KEY", None)
             .await;
-        assert!(matches!(result, Err(LicenseError::Deactivated)), "got {:?}", result);
+        assert!(
+            matches!(result, Err(LicenseError::Deactivated)),
+            "got {:?}",
+            result
+        );
     }
 
     /// Regression: when the server reports the machine is no longer active
@@ -899,7 +963,8 @@ mod tests {
         let url = spawn_canned_http_response(
             403,
             r#"{"error":"Machine not authorized for this license"}"#,
-        ).await;
+        )
+        .await;
 
         let (_, pub_pem, private) = make_keypair_pems();
         let client = new_test_client_with_server(&pub_pem, url);
@@ -913,9 +978,16 @@ mod tests {
         assert!(tmp.exists());
 
         let status = client.verify_and_refresh_async(&tmp, "ANY-KEY", None).await;
-        assert!(matches!(status, LicenseStatus::Deactivated), "got {:?}", status);
+        assert!(
+            matches!(status, LicenseStatus::Deactivated),
+            "got {:?}",
+            status
+        );
         assert!(!status.is_valid());
-        assert!(!tmp.exists(), "cached license file must be deleted on deactivation");
+        assert!(
+            !tmp.exists(),
+            "cached license file must be deleted on deactivation"
+        );
     }
 
     /// Regression: the defining invariant of the new design. If no cached
@@ -936,7 +1008,11 @@ mod tests {
         let status = client
             .verify_and_refresh_async(&nonexistent, "ANY-KEY", None)
             .await;
-        assert!(matches!(status, LicenseStatus::NotActivated), "got {:?}", status);
+        assert!(
+            matches!(status, LicenseStatus::NotActivated),
+            "got {:?}",
+            status
+        );
         assert!(!status.is_valid());
         // Cache must not have been created as a side effect.
         assert!(!nonexistent.exists());
@@ -962,7 +1038,7 @@ mod tests {
             machine_codes: vec![],
             lease_expires: Some(Utc::now() + Duration::hours(168)),
             lease_grace_period: None,
-            require_signed_binary: false
+            require_signed_binary: false,
         };
         let signed = sign_license(&private, &payload).unwrap();
         let body = serde_json::to_string(&signed).unwrap();
@@ -976,7 +1052,10 @@ mod tests {
 
         let status = client.activate_async(&tmp, "X", None).await;
         assert!(status.is_valid(), "got {:?}", status);
-        assert!(tmp.exists(), "cache file must be written on successful activate");
+        assert!(
+            tmp.exists(),
+            "cache file must be written on successful activate"
+        );
 
         let _ = tokio::fs::remove_file(&tmp).await;
     }
@@ -986,10 +1065,8 @@ mod tests {
     /// to the cached file, so a flaky server doesn't knock everyone offline.
     #[tokio::test]
     async fn test_verify_and_refresh_keeps_cache_on_generic_403() {
-        let url = spawn_canned_http_response(
-            403,
-            r#"{"error":"some unrelated server error"}"#,
-        ).await;
+        let url =
+            spawn_canned_http_response(403, r#"{"error":"some unrelated server error"}"#).await;
 
         let (_, pub_pem, private) = make_keypair_pems();
         let client = new_test_client_with_server(&pub_pem, url);
@@ -1002,7 +1079,11 @@ mod tests {
 
         let status = client.verify_and_refresh_async(&tmp, "ANY-KEY", None).await;
         // Fell back to cached file, which is still valid.
-        assert!(status.is_valid(), "generic 403 should not invalidate cache; got {:?}", status);
+        assert!(
+            status.is_valid(),
+            "generic 403 should not invalidate cache; got {:?}",
+            status
+        );
         assert!(tmp.exists(), "cached license must survive a generic 403");
 
         let _ = tokio::fs::remove_file(&tmp).await;

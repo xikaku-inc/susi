@@ -55,7 +55,7 @@ pub enum LicenseError {
 
     #[error("Certificate does not termiante at the trusted CA")]
     CertificateChainNotTrusted,
-    
+
     #[error("Workspace graph version conflict (current={current})")]
     GraphConflict { current: u32 },
 

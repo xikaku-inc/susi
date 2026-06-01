@@ -58,7 +58,10 @@ fn is_valid_machine_code(s: &str) -> bool {
 }
 
 fn normalize(s: &str) -> String {
-    s.chars().filter(|&c| c != '-').map(|c| c.to_ascii_lowercase()).collect()
+    s.chars()
+        .filter(|&c| c != '-')
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
 }
 
 // ---- Platform-specific implementations ----
@@ -69,17 +72,20 @@ fn get_hardware_ids() -> Result<(String, String), LicenseError> {
     use std::collections::HashMap;
     use wmi::{Variant, WMIConnection};
 
-    let wmi_con = WMIConnection::new()
-        .map_err(|e| LicenseError::Other(format!("WMI: {}", e)))?;
+    let wmi_con = WMIConnection::new().map_err(|e| LicenseError::Other(format!("WMI: {}", e)))?;
 
     let query_first = |query: &str, prop: &str| -> String {
         wmi_con
             .raw_query(query)
             .ok()
-            .and_then(|mut rows: Vec<HashMap<String, Variant>>| {
-                rows.first_mut()?.remove(prop)
+            .and_then(|mut rows: Vec<HashMap<String, Variant>>| rows.first_mut()?.remove(prop))
+            .and_then(|v| {
+                if let Variant::String(s) = v {
+                    Some(s)
+                } else {
+                    None
+                }
             })
-            .and_then(|v| if let Variant::String(s) = v { Some(s) } else { None })
             .unwrap_or_default()
     };
 
@@ -210,7 +216,8 @@ fn strip_partition_suffix(dev: &str) -> String {
             return dev[..p].to_string();
         }
     }
-    dev.trim_end_matches(|c: char| c.is_ascii_digit()).to_string()
+    dev.trim_end_matches(|c: char| c.is_ascii_digit())
+        .to_string()
 }
 
 /// Find a stable ID for `disk` in /dev/disk/by-id/.
@@ -238,10 +245,15 @@ fn disk_id_from_by_id(disk: &str) -> Option<String> {
 
     // Rank: serial > wwn > dm-uuid > anything else
     let rank = |s: &String| -> u8 {
-        if s.contains("serial") { 0 }
-        else if s.starts_with("wwn-") { 1 }
-        else if s.starts_with("dm-uuid") { 2 }
-        else { 3 }
+        if s.contains("serial") {
+            0
+        } else if s.starts_with("wwn-") {
+            1
+        } else if s.starts_with("dm-uuid") {
+            2
+        } else {
+            3
+        }
     };
     candidates.sort_by_key(rank);
     candidates.into_iter().next()
@@ -265,7 +277,10 @@ fn get_hardware_ids() -> Result<(String, String), LicenseError> {
             .unwrap_or_default()
     };
 
-    Ok((ioreg_value("IOPlatformUUID"), ioreg_value("IOPlatformSerialNumber")))
+    Ok((
+        ioreg_value("IOPlatformUUID"),
+        ioreg_value("IOPlatformSerialNumber"),
+    ))
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
@@ -284,7 +299,11 @@ pub fn machine_code_from_string(input: &str) -> String {
 /// Helper module for hex encoding without adding an external dependency.
 mod hex {
     pub fn encode(bytes: impl AsRef<[u8]>) -> String {
-        bytes.as_ref().iter().map(|b| format!("{:02x}", b)).collect()
+        bytes
+            .as_ref()
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect()
     }
 }
 

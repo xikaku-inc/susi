@@ -143,7 +143,10 @@ mod tests {
 
         let result = verify_license(&public, &signed);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), LicenseError::InvalidSignature));
+        assert!(matches!(
+            result.unwrap_err(),
+            LicenseError::InvalidSignature
+        ));
     }
 
     #[test]

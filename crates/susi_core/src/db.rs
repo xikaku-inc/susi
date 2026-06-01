@@ -447,22 +447,22 @@ impl LicenseDb {
         let _ = self.conn.execute_batch(
             "ALTER TABLE licenses ADD COLUMN lease_duration_hours INTEGER NOT NULL DEFAULT 168;
              ALTER TABLE licenses ADD COLUMN lease_grace_hours INTEGER NOT NULL DEFAULT 24;
-             ALTER TABLE machine_activations ADD COLUMN lease_expires_at TEXT NOT NULL DEFAULT '';"
+             ALTER TABLE machine_activations ADD COLUMN lease_expires_at TEXT NOT NULL DEFAULT '';",
         );
         // Add workspace_id to releases for per-workspace scoping
-        let _ = self.conn.execute_batch(
-            "ALTER TABLE releases ADD COLUMN workspace_id TEXT DEFAULT NULL;"
-        );
+        let _ = self
+            .conn
+            .execute_batch("ALTER TABLE releases ADD COLUMN workspace_id TEXT DEFAULT NULL;");
 
         // Add name column to config_revisions
         let _ = self.conn.execute_batch(
-            "ALTER TABLE config_revisions ADD COLUMN name TEXT NOT NULL DEFAULT '';"
+            "ALTER TABLE config_revisions ADD COLUMN name TEXT NOT NULL DEFAULT '';",
         );
 
         // Add role column to users (existing users default to admin)
-        let _ = self.conn.execute_batch(
-            "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'admin';"
-        );
+        let _ = self
+            .conn
+            .execute_batch("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'admin';");
 
         // Tag doc pages / assets with their origin so a new release tag can
         // inherit hand-authored pages from the prior release without dragging
@@ -471,24 +471,24 @@ impl LicenseDb {
         // re-stamps its own pages as 'pipeline'.
         let _ = self.conn.execute_batch(
             "ALTER TABLE doc_pages ADD COLUMN origin TEXT NOT NULL DEFAULT 'user';
-             ALTER TABLE doc_assets ADD COLUMN origin TEXT NOT NULL DEFAULT 'user';"
+             ALTER TABLE doc_assets ADD COLUMN origin TEXT NOT NULL DEFAULT 'user';",
         );
 
         // Add email column to users (nullable — admin sets it per user)
-        let _ = self.conn.execute_batch(
-            "ALTER TABLE users ADD COLUMN email TEXT;"
-        );
+        let _ = self
+            .conn
+            .execute_batch("ALTER TABLE users ADD COLUMN email TEXT;");
 
         // SEO: per-page meta description override (empty = auto-derive from body_md)
         let _ = self.conn.execute_batch(
-            "ALTER TABLE website_pages ADD COLUMN meta_description TEXT NOT NULL DEFAULT '';"
+            "ALTER TABLE website_pages ADD COLUMN meta_description TEXT NOT NULL DEFAULT '';",
         );
 
         // Distinguish device-trust magic links from password-reset links so a
         // sign-in token can't be replayed against the reset endpoint to take
         // over an account.
         let _ = self.conn.execute_batch(
-            "ALTER TABLE login_tokens ADD COLUMN kind TEXT NOT NULL DEFAULT 'device';"
+            "ALTER TABLE login_tokens ADD COLUMN kind TEXT NOT NULL DEFAULT 'device';",
         );
 
         // Peer-side federation scope string. Empty default keeps existing rows
@@ -496,14 +496,16 @@ impl LicenseDb {
         // workspace setups must explicitly set a value on each peer to opt
         // back into federation.
         let _ = self.conn.execute_batch(
-            "ALTER TABLE workspace_peers ADD COLUMN network_id TEXT NOT NULL DEFAULT '';"
+            "ALTER TABLE workspace_peers ADD COLUMN network_id TEXT NOT NULL DEFAULT '';",
         );
 
         // Migrate single-admin table to multi-user table
-        let has_admin_user: bool = self.conn
+        let has_admin_user: bool = self
+            .conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='admin_user'",
-                [], |r| r.get::<_, i64>(0),
+                [],
+                |r| r.get::<_, i64>(0),
             )
             .map(|c| c > 0)
             .unwrap_or(false);
@@ -517,7 +519,7 @@ impl LicenseDb {
 
         // Add require binary signing to licenses table
         let _ = self.conn.execute_batch(
-            "ALTER TABLE licenses ADD COLUMN require_signed_binary INTEGER NOT NULL DEFAULT 0;"
+            "ALTER TABLE licenses ADD COLUMN require_signed_binary INTEGER NOT NULL DEFAULT 0;",
         );
 
         // >> Add new migrations as own execute_batch statements here <<
@@ -700,8 +702,10 @@ impl LicenseDb {
             .conn
             .prepare(&sql)
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
-        let params_iter: Vec<&dyn rusqlite::ToSql> =
-            license_ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        let params_iter: Vec<&dyn rusqlite::ToSql> = license_ids
+            .iter()
+            .map(|s| s as &dyn rusqlite::ToSql)
+            .collect();
         let rows = stmt
             .query_map(&params_iter[..], |row| {
                 Ok((
@@ -718,7 +722,9 @@ impl LicenseDb {
             let Some(activated_at) = DateTime::parse_from_rfc3339(&activated_str)
                 .ok()
                 .map(|d| d.with_timezone(&Utc))
-            else { continue };
+            else {
+                continue;
+            };
             let lease_expires_at = if lease_str.is_empty() {
                 None
             } else {
@@ -882,7 +888,11 @@ impl LicenseDb {
             .optional()
             .map_err(|e| LicenseError::Other(format!("DB tombstone query: {}", e)))?;
 
-        Ok(expires.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc))))
+        Ok(expires.and_then(|s| {
+            DateTime::parse_from_rfc3339(&s)
+                .ok()
+                .map(|d| d.with_timezone(&Utc))
+        }))
     }
 
     /// Drop a tombstone, e.g. when an admin re-adds the machine.
@@ -923,7 +933,10 @@ impl LicenseDb {
             .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?;
         let Some(id) = id else { return Ok(false) };
         self.conn
-            .execute("DELETE FROM machine_activations WHERE license_id = ?1", params![id])
+            .execute(
+                "DELETE FROM machine_activations WHERE license_id = ?1",
+                params![id],
+            )
             .map_err(|e| LicenseError::Other(format!("DB delete machines: {}", e)))?;
         let rows = self
             .conn
@@ -1102,7 +1115,10 @@ impl LicenseDb {
 
     /// Find a username by email (case-insensitive). Returns None if zero or
     /// multiple matches — ambiguous addresses shouldn't grant a password reset.
-    pub fn find_unique_username_by_email(&self, email: &str) -> Result<Option<String>, LicenseError> {
+    pub fn find_unique_username_by_email(
+        &self,
+        email: &str,
+    ) -> Result<Option<String>, LicenseError> {
         let mut stmt = self
             .conn
             .prepare("SELECT username FROM users WHERE LOWER(email) = LOWER(?1) LIMIT 2")
@@ -1135,7 +1151,8 @@ impl LicenseDb {
     // -----------------------------------------------------------------------
 
     pub fn is_device_known(&self, username: &str, fingerprint: &str) -> Result<bool, LicenseError> {
-        let count: i64 = self.conn
+        let count: i64 = self
+            .conn
             .query_row(
                 "SELECT COUNT(*) FROM known_devices WHERE username = ?1 AND fingerprint = ?2",
                 params![username, fingerprint],
@@ -1197,7 +1214,8 @@ impl LicenseDb {
     }
 
     pub fn revoke_device(&self, username: &str, fingerprint: &str) -> Result<bool, LicenseError> {
-        let n = self.conn
+        let n = self
+            .conn
             .execute(
                 "DELETE FROM known_devices WHERE username = ?1 AND fingerprint = ?2",
                 params![username, fingerprint],
@@ -1238,7 +1256,10 @@ impl LicenseDb {
     /// (e.g. a TOTP code) before the server has enough to issue a JWT. If we
     /// consumed up-front, a legitimate user who missed the TOTP prompt would
     /// be stuck with a spent token.
-    pub fn peek_login_token(&self, token_hash: &str) -> Result<Option<LoginTokenRow>, LicenseError> {
+    pub fn peek_login_token(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<LoginTokenRow>, LicenseError> {
         let row: Option<(String, String, String, String, Option<String>)> = self
             .conn
             .query_row(
@@ -1260,7 +1281,11 @@ impl LicenseDb {
         if Utc::now() > expires {
             return Ok(None);
         }
-        Ok(Some(LoginTokenRow { username, device_fp, device_label }))
+        Ok(Some(LoginTokenRow {
+            username,
+            device_fp,
+            device_label,
+        }))
     }
 
     /// Validate a magic-link token and mark it as consumed.
@@ -1268,7 +1293,10 @@ impl LicenseDb {
     /// Returns the (username, device_fp, device_label) on success. Returns
     /// `Ok(None)` if the token is unknown, already used, or expired. The token
     /// is single-use — once consumed, subsequent lookups return `None`.
-    pub fn consume_login_token(&self, token_hash: &str) -> Result<Option<LoginTokenRow>, LicenseError> {
+    pub fn consume_login_token(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<LoginTokenRow>, LicenseError> {
         let row: Option<(String, String, String, String, Option<String>)> = self
             .conn
             .query_row(
@@ -1303,7 +1331,11 @@ impl LicenseDb {
             // Race — another consumer beat us to it.
             return Ok(None);
         }
-        Ok(Some(LoginTokenRow { username, device_fp, device_label }))
+        Ok(Some(LoginTokenRow {
+            username,
+            device_fp,
+            device_label,
+        }))
     }
 
     pub fn insert_password_reset_token(
@@ -1380,7 +1412,10 @@ impl LicenseDb {
     /// Returns the username on success. Single-use; matches `kind IN
     /// ('reset','invite')` so the same `/#/reset/<token>` flow lets a new
     /// user set their initial password and a returning user reset theirs.
-    pub fn consume_password_reset_token(&self, token_hash: &str) -> Result<Option<String>, LicenseError> {
+    pub fn consume_password_reset_token(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<String>, LicenseError> {
         let row: Option<(String, String, Option<String>)> = self
             .conn
             .query_row(
@@ -1406,7 +1441,8 @@ impl LicenseDb {
         }
 
         let now = Utc::now().to_rfc3339();
-        let n = self.conn
+        let n = self
+            .conn
             .execute(
                 "UPDATE login_tokens SET used_at = ?1
                  WHERE token_hash = ?2 AND used_at IS NULL AND kind IN ('reset','invite')",
@@ -1432,10 +1468,15 @@ impl LicenseDb {
         hashes: &[String],
     ) -> Result<(), LicenseError> {
         let now = Utc::now().to_rfc3339();
-        let tx = self.conn.unchecked_transaction()
+        let tx = self
+            .conn
+            .unchecked_transaction()
             .map_err(|e| LicenseError::Other(format!("DB tx: {}", e)))?;
-        tx.execute("DELETE FROM totp_backup_codes WHERE username = ?1", params![username])
-            .map_err(|e| LicenseError::Other(format!("DB delete: {}", e)))?;
+        tx.execute(
+            "DELETE FROM totp_backup_codes WHERE username = ?1",
+            params![username],
+        )
+        .map_err(|e| LicenseError::Other(format!("DB delete: {}", e)))?;
         for h in hashes {
             tx.execute(
                 "INSERT INTO totp_backup_codes (username, code_hash, created_at) VALUES (?1, ?2, ?3)",
@@ -1443,13 +1484,17 @@ impl LicenseDb {
             )
             .map_err(|e| LicenseError::Other(format!("DB insert backup: {}", e)))?;
         }
-        tx.commit().map_err(|e| LicenseError::Other(format!("DB commit: {}", e)))?;
+        tx.commit()
+            .map_err(|e| LicenseError::Other(format!("DB commit: {}", e)))?;
         Ok(())
     }
 
     pub fn clear_backup_codes(&self, username: &str) -> Result<(), LicenseError> {
         self.conn
-            .execute("DELETE FROM totp_backup_codes WHERE username = ?1", params![username])
+            .execute(
+                "DELETE FROM totp_backup_codes WHERE username = ?1",
+                params![username],
+            )
             .map_err(|e| LicenseError::Other(format!("DB delete: {}", e)))?;
         Ok(())
     }
@@ -1465,7 +1510,9 @@ impl LicenseDb {
             )
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
         let rows = stmt
-            .query_map(params![username], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+            .query_map(params![username], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+            })
             .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
             .filter_map(|r| r.ok())
             .collect();
@@ -1574,12 +1621,18 @@ impl LicenseDb {
     pub fn touch_api_token_used(&self, id: i64) -> Result<(), LicenseError> {
         let now = Utc::now().to_rfc3339();
         self.conn
-            .execute("UPDATE api_tokens SET last_used_at = ?1 WHERE id = ?2", params![now, id])
+            .execute(
+                "UPDATE api_tokens SET last_used_at = ?1 WHERE id = ?2",
+                params![now, id],
+            )
             .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))?;
         Ok(())
     }
 
-    pub fn list_api_tokens_for_user(&self, username: &str) -> Result<Vec<ApiTokenInfo>, LicenseError> {
+    pub fn list_api_tokens_for_user(
+        &self,
+        username: &str,
+    ) -> Result<Vec<ApiTokenInfo>, LicenseError> {
         let mut stmt = self
             .conn
             .prepare(
@@ -1615,7 +1668,8 @@ impl LicenseDb {
     /// flipped, false if the row was unknown or already revoked.
     pub fn revoke_api_token(&self, id: i64) -> Result<bool, LicenseError> {
         let now = Utc::now().to_rfc3339();
-        let n = self.conn
+        let n = self
+            .conn
             .execute(
                 "UPDATE api_tokens SET revoked_at = ?1 WHERE id = ?2 AND revoked_at IS NULL",
                 params![now, id],
@@ -1649,7 +1703,12 @@ impl LicenseDb {
         Ok(())
     }
 
-    pub fn create_user(&self, username: &str, password_hash: &str, role: &str) -> Result<(), LicenseError> {
+    pub fn create_user(
+        &self,
+        username: &str,
+        password_hash: &str,
+        role: &str,
+    ) -> Result<(), LicenseError> {
         let now = Utc::now().to_rfc3339();
         self.conn
             .execute(
@@ -1700,11 +1759,13 @@ impl LicenseDb {
             .query_row(
                 "SELECT role, must_change_password, totp_enabled FROM users WHERE username = ?1",
                 params![username],
-                |r| Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, i64>(1)? != 0,
-                    r.get::<_, i64>(2)? != 0,
-                )),
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, i64>(1)? != 0,
+                        r.get::<_, i64>(2)? != 0,
+                    ))
+                },
             )
             .optional()
             .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))
@@ -1790,20 +1851,23 @@ impl LicenseDb {
     pub fn get_workspace(
         &self,
         id: &str,
-    ) -> Result<Option<(String, String, String, String, String, String, String)>, LicenseError> {
+    ) -> Result<Option<(String, String, String, String, String, String, String)>, LicenseError>
+    {
         match self.conn.query_row(
             "SELECT id, name, product, description, created_by, created_at, updated_at
              FROM workspaces WHERE id = ?1",
             params![id],
-            |r| Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
-                r.get::<_, String>(4)?,
-                r.get::<_, String>(5)?,
-                r.get::<_, String>(6)?,
-            )),
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
+                    r.get::<_, String>(6)?,
+                ))
+            },
         ) {
             Ok(row) => Ok(Some(row)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -1814,7 +1878,19 @@ impl LicenseDb {
     pub fn list_workspaces_for_user(
         &self,
         username: &str,
-    ) -> Result<Vec<(String, String, String, String, String, String, String, String)>, LicenseError> {
+    ) -> Result<
+        Vec<(
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+        )>,
+        LicenseError,
+    > {
         let mut stmt = self.conn
             .prepare(
                 "SELECT w.id, w.name, w.product, w.description, w.created_by, w.created_at, w.updated_at, wm.role
@@ -1915,7 +1991,8 @@ impl LicenseDb {
     }
 
     pub fn delete_workspace(&self, id: &str) -> Result<bool, LicenseError> {
-        let rows = self.conn
+        let rows = self
+            .conn
             .execute("DELETE FROM workspaces WHERE id = ?1", params![id])
             .map_err(|e| LicenseError::Other(format!("DB delete: {}", e)))?;
         Ok(rows > 0)
@@ -1948,7 +2025,8 @@ impl LicenseDb {
         workspace_id: &str,
         username: &str,
     ) -> Result<bool, LicenseError> {
-        let rows = self.conn
+        let rows = self
+            .conn
             .execute(
                 "DELETE FROM workspace_members WHERE workspace_id = ?1 AND username = ?2",
                 params![workspace_id, username],
@@ -2007,7 +2085,8 @@ impl LicenseDb {
         &self,
         workspace_id: &str,
     ) -> Result<String, LicenseError> {
-        let existing: Option<String> = self.conn
+        let existing: Option<String> = self
+            .conn
             .query_row(
                 "SELECT channel_secret FROM workspace_federation WHERE workspace_id = ?1",
                 params![workspace_id],
@@ -2048,7 +2127,8 @@ impl LicenseDb {
         rand::rngs::OsRng.fill_bytes(&mut buf);
         let secret = base64::engine::general_purpose::STANDARD.encode(&buf);
         let now = Utc::now().to_rfc3339();
-        let updated = self.conn
+        let updated = self
+            .conn
             .execute(
                 "UPDATE workspace_federation SET channel_secret = ?2, rotated_at = ?3
                  WHERE workspace_id = ?1",
@@ -2104,7 +2184,8 @@ impl LicenseDb {
         &self,
         workspace_id: &str,
     ) -> Result<Vec<(String, String, String, String, String, String)>, LicenseError> {
-        let mut stmt = self.conn
+        let mut stmt = self
+            .conn
             .prepare(
                 "SELECT host_id, url, label, network_id, registered_by, last_seen
                  FROM workspace_peers
@@ -2135,7 +2216,8 @@ impl LicenseDb {
         workspace_id: &str,
         host_id: &str,
     ) -> Result<bool, LicenseError> {
-        let n = self.conn
+        let n = self
+            .conn
             .execute(
                 "DELETE FROM workspace_peers WHERE workspace_id = ?1 AND host_id = ?2",
                 params![workspace_id, host_id],
@@ -2154,7 +2236,8 @@ impl LicenseDb {
         &self,
         workspace_id: &str,
     ) -> Result<Option<(u32, String, String, String)>, LicenseError> {
-        let mut stmt = self.conn
+        let mut stmt = self
+            .conn
             .prepare(
                 "SELECT graph_version, config, updated_by, updated_at
                  FROM workspace_graphs WHERE workspace_id = ?1",
@@ -2180,7 +2263,8 @@ impl LicenseDb {
         &self,
         workspace_id: &str,
     ) -> Result<Option<u32>, LicenseError> {
-        let mut stmt = self.conn
+        let mut stmt = self
+            .conn
             .prepare("SELECT graph_version FROM workspace_graphs WHERE workspace_id = ?1")
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
         let row = stmt
@@ -2231,7 +2315,14 @@ impl LicenseDb {
                         "UPDATE workspace_graphs
                             SET graph_version = ?2, config = ?3, updated_by = ?4, updated_at = ?5
                           WHERE workspace_id = ?1 AND graph_version = ?6",
-                        params![workspace_id, next as i64, config_json, updated_by, now, cur as i64],
+                        params![
+                            workspace_id,
+                            next as i64,
+                            config_json,
+                            updated_by,
+                            now,
+                            cur as i64
+                        ],
                     )
                     .map_err(|e| LicenseError::Other(format!("DB update graph: {}", e)))?;
                 Ok(next)
@@ -2278,11 +2369,12 @@ impl LicenseDb {
         &self,
         workspace_id: &str,
     ) -> Result<Vec<(i64, String, String, String, String)>, LicenseError> {
-        let mut stmt = self.conn
+        let mut stmt = self
+            .conn
             .prepare(
                 "SELECT id, name, description, author, created_at
                  FROM config_revisions WHERE workspace_id = ?1
-                 ORDER BY id DESC"
+                 ORDER BY id DESC",
             )
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
         let rows = stmt
@@ -2310,14 +2402,16 @@ impl LicenseDb {
             "SELECT id, config_json, name, description, author, created_at
              FROM config_revisions WHERE workspace_id = ?1 AND id = ?2",
             params![workspace_id, id],
-            |r| Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
-                r.get::<_, String>(4)?,
-                r.get::<_, String>(5)?,
-            )),
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
+                ))
+            },
         ) {
             Ok(row) => Ok(Some(row)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -2334,14 +2428,16 @@ impl LicenseDb {
              FROM config_revisions WHERE workspace_id = ?1
              ORDER BY id DESC LIMIT 1",
             params![workspace_id],
-            |r| Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
-                r.get::<_, String>(4)?,
-                r.get::<_, String>(5)?,
-            )),
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
+                ))
+            },
         ) {
             Ok(row) => Ok(Some(row)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -2369,7 +2465,8 @@ impl LicenseDb {
                  WHERE workspace_id = ?3 AND id = ?4",
                 params![name, description, workspace_id, id],
             )
-        }.map_err(|e| LicenseError::Other(format!("DB update config: {}", e)))?;
+        }
+        .map_err(|e| LicenseError::Other(format!("DB update config: {}", e)))?;
         Ok(affected > 0)
     }
 
@@ -2378,7 +2475,8 @@ impl LicenseDb {
         workspace_id: &str,
         id: i64,
     ) -> Result<bool, LicenseError> {
-        let affected = self.conn
+        let affected = self
+            .conn
             .execute(
                 "DELETE FROM config_revisions WHERE workspace_id = ?1 AND id = ?2",
                 params![workspace_id, id],
@@ -2419,7 +2517,8 @@ impl LicenseDb {
         file_size: u64,
     ) -> Result<bool, LicenseError> {
         let now = Utc::now().to_rfc3339();
-        let affected = self.conn
+        let affected = self
+            .conn
             .execute(
                 "UPDATE workspace_recordings
                  SET status = 'uploaded', file_size = ?1, completed_at = ?2
@@ -2430,10 +2529,7 @@ impl LicenseDb {
         Ok(affected > 0)
     }
 
-    pub fn list_recordings(
-        &self,
-        workspace_id: &str,
-    ) -> Result<Vec<RecordingRow>, LicenseError> {
+    pub fn list_recordings(&self, workspace_id: &str) -> Result<Vec<RecordingRow>, LicenseError> {
         let mut stmt = self.conn
             .prepare(
                 "SELECT id, workspace_id, s3_key, file_name, description, file_size, status, author, created_at, completed_at
@@ -2496,17 +2592,24 @@ impl LicenseDb {
         workspace_id: &str,
         id: i64,
     ) -> Result<Option<String>, LicenseError> {
-        let key: Option<String> = self.conn.query_row(
-            "SELECT s3_key FROM workspace_recordings WHERE workspace_id = ?1 AND id = ?2",
-            params![workspace_id, id],
-            |r| r.get::<_, String>(0),
-        ).optional()
+        let key: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT s3_key FROM workspace_recordings WHERE workspace_id = ?1 AND id = ?2",
+                params![workspace_id, id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
             .map_err(|e| LicenseError::Other(format!("DB lookup recording: {}", e)))?;
-        let Some(k) = key else { return Ok(None); };
-        self.conn.execute(
-            "DELETE FROM workspace_recordings WHERE workspace_id = ?1 AND id = ?2",
-            params![workspace_id, id],
-        ).map_err(|e| LicenseError::Other(format!("DB delete recording: {}", e)))?;
+        let Some(k) = key else {
+            return Ok(None);
+        };
+        self.conn
+            .execute(
+                "DELETE FROM workspace_recordings WHERE workspace_id = ?1 AND id = ?2",
+                params![workspace_id, id],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB delete recording: {}", e)))?;
         Ok(Some(k))
     }
 
@@ -2548,8 +2651,13 @@ impl LicenseDb {
         Ok(())
     }
 
-    pub fn delete_release_asset(&self, release_id: i64, file_name: &str) -> Result<bool, LicenseError> {
-        let n = self.conn
+    pub fn delete_release_asset(
+        &self,
+        release_id: i64,
+        file_name: &str,
+    ) -> Result<bool, LicenseError> {
+        let n = self
+            .conn
             .execute(
                 "DELETE FROM release_assets WHERE release_id = ?1 AND file_name = ?2",
                 params![release_id, file_name],
@@ -2578,7 +2686,10 @@ impl LicenseDb {
         Ok(())
     }
 
-    pub fn list_releases(&self) -> Result<Vec<(i64, String, String, String, bool, String, Option<String>)>, LicenseError> {
+    pub fn list_releases(
+        &self,
+    ) -> Result<Vec<(i64, String, String, String, bool, String, Option<String>)>, LicenseError>
+    {
         let mut stmt = self.conn
             .prepare("SELECT id, tag, name, body, prerelease, created_at, workspace_id FROM releases ORDER BY id DESC")
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
@@ -2603,12 +2714,16 @@ impl LicenseDb {
     /// List releases that belong to a single workspace. Global releases are
     /// excluded — those are reachable through the public/admin global release
     /// listing and don't belong on a workspace-specific surface.
-    pub fn list_releases_for_workspace(&self, workspace_id: &str) -> Result<Vec<(i64, String, String, String, bool, String)>, LicenseError> {
-        let mut stmt = self.conn
+    pub fn list_releases_for_workspace(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<(i64, String, String, String, bool, String)>, LicenseError> {
+        let mut stmt = self
+            .conn
             .prepare(
                 "SELECT id, tag, name, body, prerelease, created_at FROM releases
                  WHERE workspace_id = ?1
-                 ORDER BY id DESC"
+                 ORDER BY id DESC",
             )
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
         let rows = stmt
@@ -2629,7 +2744,8 @@ impl LicenseDb {
     }
 
     pub fn get_release_assets(&self, release_id: i64) -> Result<Vec<(String, u64)>, LicenseError> {
-        let mut stmt = self.conn
+        let mut stmt = self
+            .conn
             .prepare("SELECT file_name, file_size FROM release_assets WHERE release_id = ?1")
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
         let rows = stmt
@@ -2666,11 +2782,17 @@ impl LicenseDb {
             .conn
             .prepare(&sql)
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
-        let params_iter: Vec<&dyn rusqlite::ToSql> =
-            release_ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        let params_iter: Vec<&dyn rusqlite::ToSql> = release_ids
+            .iter()
+            .map(|s| s as &dyn rusqlite::ToSql)
+            .collect();
         let rows = stmt
             .query_map(&params_iter[..], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)? as u64))
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)? as u64,
+                ))
             })
             .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?;
         for (rid, name, size) in rows.flatten() {
@@ -2710,7 +2832,10 @@ impl LicenseDb {
 
     /// Return `Some(workspace_id_or_none)` if the tag exists, else `None`.
     /// Inner `Option` is `Some(ws_id)` for workspace-scoped, `None` for global.
-    pub fn get_release_workspace_id(&self, tag: &str) -> Result<Option<Option<String>>, LicenseError> {
+    pub fn get_release_workspace_id(
+        &self,
+        tag: &str,
+    ) -> Result<Option<Option<String>>, LicenseError> {
         match self.conn.query_row(
             "SELECT workspace_id FROM releases WHERE tag = ?1",
             params![tag],
@@ -2723,7 +2848,8 @@ impl LicenseDb {
     }
 
     pub fn delete_release(&self, tag: &str) -> Result<bool, LicenseError> {
-        let rows = self.conn
+        let rows = self
+            .conn
             .execute("DELETE FROM releases WHERE tag = ?1", params![tag])
             .map_err(|e| LicenseError::Other(format!("DB delete: {}", e)))?;
         Ok(rows > 0)
@@ -2765,9 +2891,7 @@ impl LicenseDb {
         // query for activations instead of N round-trips. Lease cleanup runs
         // periodically in the background (`spawn_lease_cleanup_task`); doing
         // it here would issue another DELETE per license per list call.
-        let parents: Vec<_> = rows
-            .filter_map(|r| r.ok())
-            .collect();
+        let parents: Vec<_> = rows.filter_map(|r| r.ok()).collect();
         let ids: Vec<String> = parents.iter().map(|r| r.0.clone()).collect();
         let mut machines_by_id = self
             .get_machine_activations_for_licenses(&ids)
@@ -2856,7 +2980,8 @@ impl LicenseDb {
                 params![release_id, slug, title, body_md, parent_slug, ord, now],
             )
             .map_err(|e| LicenseError::Other(format!("DB upsert doc page: {}", e)))?;
-        let id = self.conn
+        let id = self
+            .conn
             .query_row(
                 "SELECT id FROM doc_pages WHERE release_id = ?1 AND slug = ?2",
                 params![release_id, slug],
@@ -2871,7 +2996,8 @@ impl LicenseDb {
         &self,
         release_id: i64,
     ) -> Result<Vec<(String, String, Option<String>, i64, String)>, LicenseError> {
-        let mut stmt = self.conn
+        let mut stmt = self
+            .conn
             .prepare(
                 "SELECT slug, title, parent_slug, ord, updated_at FROM doc_pages
                  WHERE release_id = ?1 ORDER BY parent_slug NULLS FIRST, ord, title",
@@ -2920,7 +3046,8 @@ impl LicenseDb {
     }
 
     pub fn delete_doc_page(&self, release_id: i64, slug: &str) -> Result<bool, LicenseError> {
-        let n = self.conn
+        let n = self
+            .conn
             .execute(
                 "DELETE FROM doc_pages WHERE release_id = ?1 AND slug = ?2",
                 params![release_id, slug],
@@ -2941,20 +3068,26 @@ impl LicenseDb {
         if old_slug == new_slug {
             return Ok(true);
         }
-        let tx = self.conn.transaction()
+        let tx = self
+            .conn
+            .transaction()
             .map_err(|e| LicenseError::Other(format!("DB tx: {}", e)))?;
-        let n = tx.execute(
-            "UPDATE doc_pages SET slug = ?1 WHERE release_id = ?2 AND slug = ?3",
-            params![new_slug, release_id, old_slug],
-        ).map_err(|e| LicenseError::Other(format!("DB rename: {}", e)))?;
+        let n = tx
+            .execute(
+                "UPDATE doc_pages SET slug = ?1 WHERE release_id = ?2 AND slug = ?3",
+                params![new_slug, release_id, old_slug],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB rename: {}", e)))?;
         if n == 0 {
             return Ok(false);
         }
         tx.execute(
             "UPDATE doc_pages SET parent_slug = ?1 WHERE release_id = ?2 AND parent_slug = ?3",
             params![new_slug, release_id, old_slug],
-        ).map_err(|e| LicenseError::Other(format!("DB rename cascade: {}", e)))?;
-        tx.commit().map_err(|e| LicenseError::Other(format!("DB tx commit: {}", e)))?;
+        )
+        .map_err(|e| LicenseError::Other(format!("DB rename cascade: {}", e)))?;
+        tx.commit()
+            .map_err(|e| LicenseError::Other(format!("DB tx commit: {}", e)))?;
         Ok(true)
     }
 
@@ -2970,7 +3103,9 @@ impl LicenseDb {
         pages: &[(String, String, String, Option<String>, i64)],
     ) -> Result<(usize, Vec<String>), LicenseError> {
         let now = Utc::now().to_rfc3339();
-        let tx = self.conn.transaction()
+        let tx = self
+            .conn
+            .transaction()
             .map_err(|e| LicenseError::Other(format!("DB tx: {}", e)))?;
         let mut written = 0usize;
         let mut skipped: Vec<String> = Vec::new();
@@ -3036,7 +3171,8 @@ impl LicenseDb {
         file_name: &str,
         file_size: u64,
     ) -> Result<bool, LicenseError> {
-        let existing: Option<String> = self.conn
+        let existing: Option<String> = self
+            .conn
             .query_row(
                 "SELECT origin FROM doc_assets WHERE release_id = ?1 AND file_name = ?2",
                 params![release_id, file_name],
@@ -3060,10 +3196,7 @@ impl LicenseDb {
         Ok(true)
     }
 
-    pub fn list_doc_assets(
-        &self,
-        release_id: i64,
-    ) -> Result<Vec<(String, u64)>, LicenseError> {
+    pub fn list_doc_assets(&self, release_id: i64) -> Result<Vec<(String, u64)>, LicenseError> {
         let mut stmt = self.conn
             .prepare("SELECT file_name, file_size FROM doc_assets WHERE release_id = ?1 ORDER BY file_name")
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
@@ -3078,7 +3211,8 @@ impl LicenseDb {
     }
 
     pub fn delete_doc_asset(&self, release_id: i64, file_name: &str) -> Result<bool, LicenseError> {
-        let n = self.conn
+        let n = self
+            .conn
             .execute(
                 "DELETE FROM doc_assets WHERE release_id = ?1 AND file_name = ?2",
                 params![release_id, file_name],
@@ -3089,8 +3223,11 @@ impl LicenseDb {
 
     /// Releases that contain at least one doc page (newest first).
     /// Returns (id, tag, name, created_at, page_count).
-    pub fn list_doc_releases(&self) -> Result<Vec<(i64, String, String, String, i64)>, LicenseError> {
-        let mut stmt = self.conn
+    pub fn list_doc_releases(
+        &self,
+    ) -> Result<Vec<(i64, String, String, String, i64)>, LicenseError> {
+        let mut stmt = self
+            .conn
             .prepare(
                 "SELECT r.id, r.tag, r.name, r.created_at, COUNT(p.id)
                  FROM releases r
@@ -3123,7 +3260,8 @@ impl LicenseDb {
         &self,
         workspace_id: &str,
     ) -> Result<Vec<(i64, String, String, String, i64)>, LicenseError> {
-        let mut stmt = self.conn
+        let mut stmt = self
+            .conn
             .prepare(
                 "SELECT r.id, r.tag, r.name, r.created_at,
                         (SELECT COUNT(*) FROM doc_pages p WHERE p.release_id = r.id)
@@ -3150,11 +3288,7 @@ impl LicenseDb {
 
     /// Ensure a release row exists for the given tag — used by bulk doc import
     /// when the docs ship before the binary release. Returns the release id.
-    pub fn ensure_release(
-        &self,
-        tag: &str,
-        name: &str,
-    ) -> Result<i64, LicenseError> {
+    pub fn ensure_release(&self, tag: &str, name: &str) -> Result<i64, LicenseError> {
         Ok(self.ensure_release_created(tag, name)?.0)
     }
 
@@ -3236,7 +3370,8 @@ impl LicenseDb {
         dst_release_id: i64,
     ) -> Result<usize, LicenseError> {
         let now = Utc::now().to_rfc3339();
-        let n = self.conn
+        let n = self
+            .conn
             .execute(
                 "INSERT OR IGNORE INTO doc_pages
                    (release_id, slug, title, body_md, parent_slug, ord, updated_at, origin)
@@ -3257,7 +3392,8 @@ impl LicenseDb {
         src_release_id: i64,
         dst_release_id: i64,
     ) -> Result<Vec<String>, LicenseError> {
-        let mut stmt = self.conn
+        let mut stmt = self
+            .conn
             .prepare(
                 "SELECT file_name, file_size FROM doc_assets
                  WHERE release_id = ?1 AND origin = 'user'",
@@ -3302,7 +3438,9 @@ impl LicenseDb {
         author: Option<&str>,
     ) -> Result<i64, LicenseError> {
         let now = Utc::now().to_rfc3339();
-        let tx = self.conn.transaction()
+        let tx = self
+            .conn
+            .transaction()
             .map_err(|e| LicenseError::Other(format!("DB tx: {}", e)))?;
 
         // Capture prior state as a revision if this is an update-with-change.
@@ -3310,12 +3448,14 @@ impl LicenseDb {
             .query_row(
                 "SELECT title, body_md, parent_slug, ord FROM website_pages WHERE slug = ?1",
                 params![slug],
-                |r| Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, Option<String>>(2)?,
-                    r.get::<_, i64>(3)?,
-                )),
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                        r.get::<_, i64>(3)?,
+                    ))
+                },
             )
             .optional()
             .map_err(|e| LicenseError::Other(format!("DB read prior: {}", e)))?;
@@ -3330,7 +3470,8 @@ impl LicenseDb {
                        (slug, title, body_md, parent_slug, ord, captured_at, author)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                     params![slug, p_title, p_body, p_parent, p_ord, now, author],
-                ).map_err(|e| LicenseError::Other(format!("DB snapshot: {}", e)))?;
+                )
+                .map_err(|e| LicenseError::Other(format!("DB snapshot: {}", e)))?;
             }
         }
 
@@ -3354,7 +3495,8 @@ impl LicenseDb {
                 |r| r.get::<_, i64>(0),
             )
             .map_err(|e| LicenseError::Other(format!("DB lookup website page: {}", e)))?;
-        tx.commit().map_err(|e| LicenseError::Other(format!("DB tx commit: {}", e)))?;
+        tx.commit()
+            .map_err(|e| LicenseError::Other(format!("DB tx commit: {}", e)))?;
         Ok(id)
     }
 
@@ -3363,7 +3505,8 @@ impl LicenseDb {
         &self,
         slug: &str,
     ) -> Result<Vec<(i64, String, Option<String>, String, i64)>, LicenseError> {
-        let mut stmt = self.conn
+        let mut stmt = self
+            .conn
             .prepare(
                 "SELECT id, captured_at, author, title, LENGTH(body_md)
                  FROM website_page_revisions
@@ -3420,7 +3563,8 @@ impl LicenseDb {
     pub fn list_website_assets_with_usage(
         &self,
     ) -> Result<Vec<(String, i64, i64, String)>, LicenseError> {
-        let mut stmt = self.conn
+        let mut stmt = self
+            .conn
             .prepare(
                 "SELECT a.file_name, a.file_size,
                         (SELECT COUNT(*) FROM website_pages p
@@ -3459,20 +3603,29 @@ impl LicenseDb {
         if old_name == new_name {
             return Ok((true, 0));
         }
-        let tx = self.conn.transaction()
+        let tx = self
+            .conn
+            .transaction()
             .map_err(|e| LicenseError::Other(format!("DB tx: {}", e)))?;
         // Reject if target already exists (would collide on UNIQUE).
-        let exists: bool = tx.query_row(
-            "SELECT 1 FROM website_assets WHERE file_name = ?1",
-            params![new_name], |_| Ok(true),
-        ).optional().map_err(|e| LicenseError::Other(format!("DB check: {}", e)))?.unwrap_or(false);
+        let exists: bool = tx
+            .query_row(
+                "SELECT 1 FROM website_assets WHERE file_name = ?1",
+                params![new_name],
+                |_| Ok(true),
+            )
+            .optional()
+            .map_err(|e| LicenseError::Other(format!("DB check: {}", e)))?
+            .unwrap_or(false);
         if exists {
             return Err(LicenseError::Other("target filename already exists".into()));
         }
-        let n_assets = tx.execute(
-            "UPDATE website_assets SET file_name = ?1 WHERE file_name = ?2",
-            params![new_name, old_name],
-        ).map_err(|e| LicenseError::Other(format!("DB rename asset: {}", e)))?;
+        let n_assets = tx
+            .execute(
+                "UPDATE website_assets SET file_name = ?1 WHERE file_name = ?2",
+                params![new_name, old_name],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB rename asset: {}", e)))?;
         if n_assets == 0 {
             return Ok((false, 0));
         }
@@ -3481,13 +3634,16 @@ impl LicenseDb {
         let paren_new = format!("]({})", new_name);
         let brace_old = format!("]({}){{", old_name);
         let brace_new = format!("]({}){{", new_name);
-        let n_pages = tx.execute(
-            "UPDATE website_pages
+        let n_pages = tx
+            .execute(
+                "UPDATE website_pages
              SET body_md = REPLACE(REPLACE(body_md, ?1, ?2), ?3, ?4)
              WHERE body_md LIKE '%' || ?5 || '%'",
-            params![brace_old, brace_new, paren_old, paren_new, old_name],
-        ).map_err(|e| LicenseError::Other(format!("DB rewrite body_md: {}", e)))?;
-        tx.commit().map_err(|e| LicenseError::Other(format!("DB tx commit: {}", e)))?;
+                params![brace_old, brace_new, paren_old, paren_new, old_name],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB rewrite body_md: {}", e)))?;
+        tx.commit()
+            .map_err(|e| LicenseError::Other(format!("DB tx commit: {}", e)))?;
         Ok((true, n_pages))
     }
 
@@ -3543,11 +3699,9 @@ impl LicenseDb {
     }
 
     pub fn delete_website_page(&self, slug: &str) -> Result<bool, LicenseError> {
-        let n = self.conn
-            .execute(
-                "DELETE FROM website_pages WHERE slug = ?1",
-                params![slug],
-            )
+        let n = self
+            .conn
+            .execute("DELETE FROM website_pages WHERE slug = ?1", params![slug])
             .map_err(|e| LicenseError::Other(format!("DB delete: {}", e)))?;
         Ok(n > 0)
     }
@@ -3562,20 +3716,26 @@ impl LicenseDb {
         if old_slug == new_slug {
             return Ok(true);
         }
-        let tx = self.conn.transaction()
+        let tx = self
+            .conn
+            .transaction()
             .map_err(|e| LicenseError::Other(format!("DB tx: {}", e)))?;
-        let n = tx.execute(
-            "UPDATE website_pages SET slug = ?1 WHERE slug = ?2",
-            params![new_slug, old_slug],
-        ).map_err(|e| LicenseError::Other(format!("DB rename: {}", e)))?;
+        let n = tx
+            .execute(
+                "UPDATE website_pages SET slug = ?1 WHERE slug = ?2",
+                params![new_slug, old_slug],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB rename: {}", e)))?;
         if n == 0 {
             return Ok(false);
         }
         tx.execute(
             "UPDATE website_pages SET parent_slug = ?1 WHERE parent_slug = ?2",
             params![new_slug, old_slug],
-        ).map_err(|e| LicenseError::Other(format!("DB rename cascade: {}", e)))?;
-        tx.commit().map_err(|e| LicenseError::Other(format!("DB tx commit: {}", e)))?;
+        )
+        .map_err(|e| LicenseError::Other(format!("DB rename cascade: {}", e)))?;
+        tx.commit()
+            .map_err(|e| LicenseError::Other(format!("DB tx commit: {}", e)))?;
         Ok(true)
     }
 
@@ -3611,7 +3771,8 @@ impl LicenseDb {
     }
 
     pub fn list_website_assets(&self) -> Result<Vec<(String, i64)>, LicenseError> {
-        let mut stmt = self.conn
+        let mut stmt = self
+            .conn
             .prepare("SELECT file_name, file_size FROM website_assets ORDER BY file_name")
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
         let rows = stmt
@@ -3623,7 +3784,8 @@ impl LicenseDb {
     }
 
     pub fn delete_website_asset(&self, file_name: &str) -> Result<bool, LicenseError> {
-        let n = self.conn
+        let n = self
+            .conn
             .execute(
                 "DELETE FROM website_assets WHERE file_name = ?1",
                 params![file_name],
@@ -3642,7 +3804,21 @@ impl LicenseDb {
     pub fn list_products(
         &self,
         active_only: bool,
-    ) -> Result<Vec<(String, String, String, i64, String, Option<String>, String, bool, i64, String)>, LicenseError> {
+    ) -> Result<
+        Vec<(
+            String,
+            String,
+            String,
+            i64,
+            String,
+            Option<String>,
+            String,
+            bool,
+            i64,
+            String,
+        )>,
+        LicenseError,
+    > {
         let sql = if active_only {
             "SELECT sku, title, description_md, price_cents, currency, image_asset, tax_code, active, ord, updated_at
              FROM shop_products WHERE active = 1 ORDER BY ord, title"
@@ -3650,7 +3826,8 @@ impl LicenseDb {
             "SELECT sku, title, description_md, price_cents, currency, image_asset, tax_code, active, ord, updated_at
              FROM shop_products ORDER BY ord, title"
         };
-        let mut stmt = self.conn
+        let mut stmt = self
+            .conn
             .prepare(sql)
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
         let rows = stmt
@@ -3680,7 +3857,24 @@ impl LicenseDb {
     pub fn get_products_by_skus(
         &self,
         skus: &[String],
-    ) -> Result<std::collections::HashMap<String, (String, String, String, i64, String, Option<String>, String, bool, i64, String)>, LicenseError> {
+    ) -> Result<
+        std::collections::HashMap<
+            String,
+            (
+                String,
+                String,
+                String,
+                i64,
+                String,
+                Option<String>,
+                String,
+                bool,
+                i64,
+                String,
+            ),
+        >,
+        LicenseError,
+    > {
         let mut out = std::collections::HashMap::with_capacity(skus.len());
         if skus.is_empty() {
             return Ok(out);
@@ -3695,10 +3889,12 @@ impl LicenseDb {
              FROM shop_products WHERE sku IN ({})",
             placeholders,
         );
-        let mut stmt = self.conn
+        let mut stmt = self
+            .conn
             .prepare(&sql)
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
-        let params_iter: Vec<&dyn rusqlite::ToSql> = skus.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        let params_iter: Vec<&dyn rusqlite::ToSql> =
+            skus.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
         let rows = stmt
             .query_map(&params_iter[..], |r| {
                 Ok((
@@ -3724,7 +3920,21 @@ impl LicenseDb {
     pub fn get_product(
         &self,
         sku: &str,
-    ) -> Result<Option<(String, String, String, i64, String, Option<String>, String, bool, i64, String)>, LicenseError> {
+    ) -> Result<
+        Option<(
+            String,
+            String,
+            String,
+            i64,
+            String,
+            Option<String>,
+            String,
+            bool,
+            i64,
+            String,
+        )>,
+        LicenseError,
+    > {
         match self.conn.query_row(
             "SELECT sku, title, description_md, price_cents, currency, image_asset, tax_code, active, ord, updated_at
              FROM shop_products WHERE sku = ?1",
@@ -3786,7 +3996,8 @@ impl LicenseDb {
     }
 
     pub fn delete_product(&self, sku: &str) -> Result<bool, LicenseError> {
-        let n = self.conn
+        let n = self
+            .conn
             .execute("DELETE FROM shop_products WHERE sku = ?1", params![sku])
             .map_err(|e| LicenseError::Other(format!("DB delete product: {}", e)))?;
         Ok(n > 0)
@@ -3802,7 +4013,20 @@ impl LicenseDb {
     pub fn list_shipping_rates(
         &self,
         active_only: bool,
-    ) -> Result<Vec<(i64, String, i64, String, Option<i64>, Option<i64>, String, bool, i64)>, LicenseError> {
+    ) -> Result<
+        Vec<(
+            i64,
+            String,
+            i64,
+            String,
+            Option<i64>,
+            Option<i64>,
+            String,
+            bool,
+            i64,
+        )>,
+        LicenseError,
+    > {
         let sql = if active_only {
             "SELECT id, label, amount_cents, currency, delivery_min_days, delivery_max_days, regions, active, ord
              FROM shop_shipping_rates WHERE active = 1 ORDER BY ord, amount_cents"
@@ -3810,7 +4034,8 @@ impl LicenseDb {
             "SELECT id, label, amount_cents, currency, delivery_min_days, delivery_max_days, regions, active, ord
              FROM shop_shipping_rates ORDER BY ord, amount_cents"
         };
-        let mut stmt = self.conn
+        let mut stmt = self
+            .conn
             .prepare(sql)
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
         let rows = stmt
@@ -3872,24 +4097,33 @@ impl LicenseDb {
         active: bool,
         ord: i64,
     ) -> Result<bool, LicenseError> {
-        let n = self.conn.execute(
-            "UPDATE shop_shipping_rates
+        let n = self
+            .conn
+            .execute(
+                "UPDATE shop_shipping_rates
                SET label = ?2, amount_cents = ?3, currency = ?4,
                    delivery_min_days = ?5, delivery_max_days = ?6,
                    regions = ?7, active = ?8, ord = ?9
              WHERE id = ?1",
-            params![
-                id, label, amount_cents, currency,
-                delivery_min_days, delivery_max_days, regions_json,
-                active as i64, ord,
-            ],
-        )
-        .map_err(|e| LicenseError::Other(format!("DB update shipping rate: {}", e)))?;
+                params![
+                    id,
+                    label,
+                    amount_cents,
+                    currency,
+                    delivery_min_days,
+                    delivery_max_days,
+                    regions_json,
+                    active as i64,
+                    ord,
+                ],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB update shipping rate: {}", e)))?;
         Ok(n > 0)
     }
 
     pub fn delete_shipping_rate(&self, id: i64) -> Result<bool, LicenseError> {
-        let n = self.conn
+        let n = self
+            .conn
             .execute("DELETE FROM shop_shipping_rates WHERE id = ?1", params![id])
             .map_err(|e| LicenseError::Other(format!("DB delete shipping rate: {}", e)))?;
         Ok(n > 0)
@@ -3918,18 +4152,27 @@ impl LicenseDb {
         ship_to_json: &str,
         line_items_json: &str,
     ) -> Result<(i64, bool), LicenseError> {
-        let n = self.conn.execute(
-            "INSERT OR IGNORE INTO shop_orders
+        let n = self
+            .conn
+            .execute(
+                "INSERT OR IGNORE INTO shop_orders
                (stripe_session_id, created_at, customer_email, customer_name,
                 amount_total_cents, currency, status, ship_to_json, line_items_json)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'paid', ?7, ?8)",
-            params![
-                stripe_session_id, created_at, customer_email, customer_name,
-                amount_total_cents, currency, ship_to_json, line_items_json,
-            ],
-        )
-        .map_err(|e| LicenseError::Other(format!("DB insert order: {}", e)))?;
-        let id = self.conn
+                params![
+                    stripe_session_id,
+                    created_at,
+                    customer_email,
+                    customer_name,
+                    amount_total_cents,
+                    currency,
+                    ship_to_json,
+                    line_items_json,
+                ],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB insert order: {}", e)))?;
+        let id = self
+            .conn
             .query_row(
                 "SELECT id FROM shop_orders WHERE stripe_session_id = ?1",
                 params![stripe_session_id],
@@ -3943,7 +4186,25 @@ impl LicenseDb {
     pub fn list_orders(
         &self,
         status_filter: Option<&str>,
-    ) -> Result<Vec<(i64, String, String, String, String, i64, String, String, String, String, String, String, Option<String>, String)>, LicenseError> {
+    ) -> Result<
+        Vec<(
+            i64,
+            String,
+            String,
+            String,
+            String,
+            i64,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            String,
+        )>,
+        LicenseError,
+    > {
         let (sql, has_filter) = if status_filter.is_some() {
             (
                 "SELECT id, stripe_session_id, created_at, customer_email, customer_name,
@@ -3961,7 +4222,9 @@ impl LicenseDb {
                 false,
             )
         };
-        let mut stmt = self.conn.prepare(sql)
+        let mut stmt = self
+            .conn
+            .prepare(sql)
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
         let row_map = |r: &rusqlite::Row<'_>| {
             Ok((
@@ -3999,29 +4262,49 @@ impl LicenseDb {
     pub fn get_order(
         &self,
         id: i64,
-    ) -> Result<Option<(i64, String, String, String, String, i64, String, String, String, String, String, String, Option<String>, String)>, LicenseError> {
+    ) -> Result<
+        Option<(
+            i64,
+            String,
+            String,
+            String,
+            String,
+            i64,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            String,
+        )>,
+        LicenseError,
+    > {
         match self.conn.query_row(
             "SELECT id, stripe_session_id, created_at, customer_email, customer_name,
                     amount_total_cents, currency, status, ship_to_json, line_items_json,
                     tracking_carrier, tracking_number, shipped_at, notes
              FROM shop_orders WHERE id = ?1",
             params![id],
-            |r| Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
-                r.get::<_, String>(4)?,
-                r.get::<_, i64>(5)?,
-                r.get::<_, String>(6)?,
-                r.get::<_, String>(7)?,
-                r.get::<_, String>(8)?,
-                r.get::<_, String>(9)?,
-                r.get::<_, String>(10)?,
-                r.get::<_, String>(11)?,
-                r.get::<_, Option<String>>(12)?,
-                r.get::<_, String>(13)?,
-            )),
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, i64>(5)?,
+                    r.get::<_, String>(6)?,
+                    r.get::<_, String>(7)?,
+                    r.get::<_, String>(8)?,
+                    r.get::<_, String>(9)?,
+                    r.get::<_, String>(10)?,
+                    r.get::<_, String>(11)?,
+                    r.get::<_, Option<String>>(12)?,
+                    r.get::<_, String>(13)?,
+                ))
+            },
         ) {
             Ok(row) => Ok(Some(row)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -4038,25 +4321,29 @@ impl LicenseDb {
         tracking_number: &str,
         shipped_at: &str,
     ) -> Result<bool, LicenseError> {
-        let n = self.conn.execute(
-            "UPDATE shop_orders
+        let n = self
+            .conn
+            .execute(
+                "UPDATE shop_orders
                SET status = 'shipped',
                    tracking_carrier = ?2,
                    tracking_number  = ?3,
                    shipped_at       = ?4
              WHERE id = ?1",
-            params![id, carrier, tracking_number, shipped_at],
-        )
-        .map_err(|e| LicenseError::Other(format!("DB mark shipped: {}", e)))?;
+                params![id, carrier, tracking_number, shipped_at],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB mark shipped: {}", e)))?;
         Ok(n > 0)
     }
 
     pub fn update_order_notes(&self, id: i64, notes: &str) -> Result<bool, LicenseError> {
-        let n = self.conn.execute(
-            "UPDATE shop_orders SET notes = ?2 WHERE id = ?1",
-            params![id, notes],
-        )
-        .map_err(|e| LicenseError::Other(format!("DB update notes: {}", e)))?;
+        let n = self
+            .conn
+            .execute(
+                "UPDATE shop_orders SET notes = ?2 WHERE id = ?1",
+                params![id, notes],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB update notes: {}", e)))?;
         Ok(n > 0)
     }
 
@@ -4077,17 +4364,19 @@ impl LicenseDb {
     }
 
     pub fn set_shop_setting(&self, key: &str, value: &str) -> Result<(), LicenseError> {
-        self.conn.execute(
-            "INSERT INTO shop_settings (key, value) VALUES (?1, ?2)
+        self.conn
+            .execute(
+                "INSERT INTO shop_settings (key, value) VALUES (?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![key, value],
-        )
-        .map_err(|e| LicenseError::Other(format!("DB set setting: {}", e)))?;
+                params![key, value],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB set setting: {}", e)))?;
         Ok(())
     }
 
     pub fn list_shop_settings(&self) -> Result<Vec<(String, String)>, LicenseError> {
-        let mut stmt = self.conn
+        let mut stmt = self
+            .conn
             .prepare("SELECT key, value FROM shop_settings ORDER BY key")
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
         let rows = stmt
@@ -4111,17 +4400,19 @@ impl LicenseDb {
     }
 
     pub fn set_site_setting(&self, key: &str, value: &str) -> Result<(), LicenseError> {
-        self.conn.execute(
-            "INSERT INTO site_settings (key, value) VALUES (?1, ?2)
+        self.conn
+            .execute(
+                "INSERT INTO site_settings (key, value) VALUES (?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![key, value],
-        )
-        .map_err(|e| LicenseError::Other(format!("DB set site setting: {}", e)))?;
+                params![key, value],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB set site setting: {}", e)))?;
         Ok(())
     }
 
     pub fn list_site_settings(&self) -> Result<Vec<(String, String)>, LicenseError> {
-        let mut stmt = self.conn
+        let mut stmt = self
+            .conn
             .prepare("SELECT key, value FROM site_settings ORDER BY key")
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
         let rows = stmt
@@ -4148,8 +4439,8 @@ fn row_to_api_token_info(r: &rusqlite::Row<'_>) -> rusqlite::Result<ApiTokenInfo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Duration;
     use crate::license::DEFAULT_LEASE_DURATION_HOURS;
+    use chrono::Duration;
 
     fn test_db() -> LicenseDb {
         LicenseDb::open(":memory:").unwrap()
@@ -4164,8 +4455,12 @@ mod tests {
         let db = test_db();
         db.seed_admin("hash").unwrap();
         assert_eq!(db.get_user_email("admin").unwrap(), None);
-        db.set_user_email("admin", Some("klaus@lp-research.com")).unwrap();
-        assert_eq!(db.get_user_email("admin").unwrap().as_deref(), Some("klaus@lp-research.com"));
+        db.set_user_email("admin", Some("klaus@lp-research.com"))
+            .unwrap();
+        assert_eq!(
+            db.get_user_email("admin").unwrap().as_deref(),
+            Some("klaus@lp-research.com")
+        );
         db.set_user_email("admin", None).unwrap();
         assert_eq!(db.get_user_email("admin").unwrap(), None);
     }
@@ -4175,7 +4470,8 @@ mod tests {
         let db = test_db();
         db.seed_admin("hash").unwrap();
         assert!(!db.is_device_known("admin", "fp1").unwrap());
-        db.register_device("admin", "fp1", "Chrome / Linux").unwrap();
+        db.register_device("admin", "fp1", "Chrome / Linux")
+            .unwrap();
         assert!(db.is_device_known("admin", "fp1").unwrap());
 
         // Upsert on repeat — last_seen should update but no duplicate row.
@@ -4194,9 +4490,13 @@ mod tests {
     fn test_login_token_consume_once() {
         let db = test_db();
         db.seed_admin("hash").unwrap();
-        db.insert_login_token("hash1", "admin", "fp1", "Chrome", 900).unwrap();
+        db.insert_login_token("hash1", "admin", "fp1", "Chrome", 900)
+            .unwrap();
 
-        let row = db.consume_login_token("hash1").unwrap().expect("token valid");
+        let row = db
+            .consume_login_token("hash1")
+            .unwrap()
+            .expect("token valid");
         assert_eq!(row.username, "admin");
         assert_eq!(row.device_fp, "fp1");
         assert_eq!(row.device_label, "Chrome");
@@ -4209,7 +4509,8 @@ mod tests {
     fn test_peek_does_not_consume() {
         let db = test_db();
         db.seed_admin("hash").unwrap();
-        db.insert_login_token("hashP", "admin", "fp1", "", 900).unwrap();
+        db.insert_login_token("hashP", "admin", "fp1", "", 900)
+            .unwrap();
         // Peek twice — token should still be consumable after.
         assert!(db.peek_login_token("hashP").unwrap().is_some());
         assert!(db.peek_login_token("hashP").unwrap().is_some());
@@ -4224,7 +4525,8 @@ mod tests {
         let db = test_db();
         db.seed_admin("hash").unwrap();
         // Insert with -1 TTL → already expired.
-        db.insert_login_token("hash2", "admin", "fp1", "", -1).unwrap();
+        db.insert_login_token("hash2", "admin", "fp1", "", -1)
+            .unwrap();
         assert!(db.consume_login_token("hash2").unwrap().is_none());
     }
 
@@ -4233,8 +4535,13 @@ mod tests {
         let db = test_db();
         db.seed_admin("hash").unwrap();
 
-        let id = db.insert_api_token("admin", "ci-bot", "h-abcdef", "susi_pat_ab").unwrap();
-        let row = db.find_api_token_by_hash("h-abcdef").unwrap().expect("present");
+        let id = db
+            .insert_api_token("admin", "ci-bot", "h-abcdef", "susi_pat_ab")
+            .unwrap();
+        let row = db
+            .find_api_token_by_hash("h-abcdef")
+            .unwrap()
+            .expect("present");
         assert_eq!(row.id, id);
         assert_eq!(row.username, "admin");
         assert!(!row.revoked);
@@ -4254,7 +4561,10 @@ mod tests {
         assert!(!db.revoke_api_token(id).unwrap());
 
         // Lookup still finds it but reports revoked=true so the auth path can reject.
-        let row = db.find_api_token_by_hash("h-abcdef").unwrap().expect("present");
+        let row = db
+            .find_api_token_by_hash("h-abcdef")
+            .unwrap()
+            .expect("present");
         assert!(row.revoked);
     }
 
@@ -4270,7 +4580,10 @@ mod tests {
         let db = test_db();
         db.seed_admin("hash").unwrap();
         let id = db.insert_api_token("admin", "x", "h-x", "p-x").unwrap();
-        assert_eq!(db.get_api_token_owner(id).unwrap().as_deref(), Some("admin"));
+        assert_eq!(
+            db.get_api_token_owner(id).unwrap().as_deref(),
+            Some("admin")
+        );
         assert_eq!(db.get_api_token_owner(999).unwrap(), None);
     }
 
@@ -4428,13 +4741,16 @@ mod tests {
 
     /// Mirrors `handle_deactivate_machine` (admin path): remove + tombstone.
     fn sim_admin_remove(db: &LicenseDb, license_id: &str, machine_code: &str) {
-        db.remove_machine_activation(license_id, machine_code).unwrap();
-        db.add_machine_tombstone(license_id, machine_code, 24).unwrap();
+        db.remove_machine_activation(license_id, machine_code)
+            .unwrap();
+        db.add_machine_tombstone(license_id, machine_code, 24)
+            .unwrap();
     }
 
     /// Mirrors `handle_deactivate` (public client path): remove only, NO tombstone.
     fn sim_client_self_deactivate(db: &LicenseDb, license_id: &str, machine_code: &str) {
-        db.remove_machine_activation(license_id, machine_code).unwrap();
+        db.remove_machine_activation(license_id, machine_code)
+            .unwrap();
     }
 
     #[test]
@@ -4452,14 +4768,22 @@ mod tests {
         // Client activates on startup.
         sim_client_activate(&db, &license.id, "mc-laptop", "nico-lpLaptop").unwrap();
         assert_eq!(
-            db.get_license_by_key(&license.license_key).unwrap().unwrap().machines.len(),
+            db.get_license_by_key(&license.license_key)
+                .unwrap()
+                .unwrap()
+                .machines
+                .len(),
             1
         );
 
         // Admin removes the machine via the admin UI.
         sim_admin_remove(&db, &license.id, "mc-laptop");
         assert_eq!(
-            db.get_license_by_key(&license.license_key).unwrap().unwrap().machines.len(),
+            db.get_license_by_key(&license.license_key)
+                .unwrap()
+                .unwrap()
+                .machines
+                .len(),
             0
         );
 
@@ -4467,9 +4791,17 @@ mod tests {
         // otherwise the admin's removal is effectively a no-op, which is the
         // exact bug we are guarding against.
         let err = sim_client_activate(&db, &license.id, "mc-laptop", "nico-lpLaptop").unwrap_err();
-        assert!(err.contains("tombstoned"), "expected tombstone rejection, got: {}", err);
+        assert!(
+            err.contains("tombstoned"),
+            "expected tombstone rejection, got: {}",
+            err
+        );
         assert_eq!(
-            db.get_license_by_key(&license.license_key).unwrap().unwrap().machines.len(),
+            db.get_license_by_key(&license.license_key)
+                .unwrap()
+                .unwrap()
+                .machines
+                .len(),
             0,
             "machine must NOT reappear after admin removal"
         );
@@ -4493,11 +4825,18 @@ mod tests {
         sim_client_activate(&db, &license.id, "mc-1", "laptop").unwrap();
         sim_client_self_deactivate(&db, &license.id, "mc-1");
         // No tombstone should have been written.
-        assert!(db.machine_tombstone_expires_at(&license.id, "mc-1").unwrap().is_none());
+        assert!(db
+            .machine_tombstone_expires_at(&license.id, "mc-1")
+            .unwrap()
+            .is_none());
         // Re-activate must succeed right away.
         sim_client_activate(&db, &license.id, "mc-1", "laptop").unwrap();
         assert_eq!(
-            db.get_license_by_key(&license.license_key).unwrap().unwrap().machines.len(),
+            db.get_license_by_key(&license.license_key)
+                .unwrap()
+                .unwrap()
+                .machines
+                .len(),
             1
         );
     }
@@ -4523,7 +4862,11 @@ mod tests {
         db.clear_machine_tombstone(&license.id, "mc-oops").unwrap();
         sim_client_activate(&db, &license.id, "mc-oops", "laptop").unwrap();
         assert_eq!(
-            db.get_license_by_key(&license.license_key).unwrap().unwrap().machines.len(),
+            db.get_license_by_key(&license.license_key)
+                .unwrap()
+                .unwrap()
+                .machines
+                .len(),
             1
         );
     }
@@ -4549,8 +4892,15 @@ mod tests {
             let name = format!("run-{}", i);
             sim_client_activate(&db, &license.id, "stable-mc", &name).unwrap();
         }
-        let retrieved = db.get_license_by_key(&license.license_key).unwrap().unwrap();
-        assert_eq!(retrieved.machines.len(), 1, "stable fingerprint must map to one slot");
+        let retrieved = db
+            .get_license_by_key(&license.license_key)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            retrieved.machines.len(),
+            1,
+            "stable fingerprint must map to one slot"
+        );
         // Latest friendly name wins (upsert semantics).
         assert_eq!(retrieved.machines[0].friendly_name, "run-9");
     }
@@ -4784,7 +5134,8 @@ mod tests {
     #[test]
     fn test_create_and_get_workspace() {
         let db = test_db();
-        db.create_workspace("ws-1", "Test Workspace", "FusionHub", "A test", "admin").unwrap();
+        db.create_workspace("ws-1", "Test Workspace", "FusionHub", "A test", "admin")
+            .unwrap();
 
         let ws = db.get_workspace("ws-1").unwrap().unwrap();
         assert_eq!(ws.0, "ws-1");
@@ -4808,7 +5159,8 @@ mod tests {
         let db = test_db();
         db.create_workspace("ws-1", "One", "", "", "admin").unwrap();
         db.create_workspace("ws-2", "Two", "", "", "admin").unwrap();
-        db.create_workspace("ws-3", "Three", "", "", "other").unwrap();
+        db.create_workspace("ws-3", "Three", "", "", "other")
+            .unwrap();
 
         let list = db.list_workspaces_for_user("admin").unwrap();
         assert_eq!(list.len(), 2);
@@ -4828,13 +5180,25 @@ mod tests {
         let members = db.list_workspace_members("ws-1").unwrap();
         assert_eq!(members.len(), 3); // admin + user1 + user2
 
-        assert_eq!(db.get_workspace_member_role("ws-1", "user1").unwrap(), Some("editor".to_string()));
-        assert_eq!(db.get_workspace_member_role("ws-1", "user2").unwrap(), Some("viewer".to_string()));
-        assert_eq!(db.get_workspace_member_role("ws-1", "nobody").unwrap(), None);
+        assert_eq!(
+            db.get_workspace_member_role("ws-1", "user1").unwrap(),
+            Some("editor".to_string())
+        );
+        assert_eq!(
+            db.get_workspace_member_role("ws-1", "user2").unwrap(),
+            Some("viewer".to_string())
+        );
+        assert_eq!(
+            db.get_workspace_member_role("ws-1", "nobody").unwrap(),
+            None
+        );
 
         // Update role via upsert
         db.add_workspace_member("ws-1", "user2", "editor").unwrap();
-        assert_eq!(db.get_workspace_member_role("ws-1", "user2").unwrap(), Some("editor".to_string()));
+        assert_eq!(
+            db.get_workspace_member_role("ws-1", "user2").unwrap(),
+            Some("editor".to_string())
+        );
 
         // Remove member
         db.remove_workspace_member("ws-1", "user1").unwrap();
@@ -4845,9 +5209,12 @@ mod tests {
     #[test]
     fn test_update_workspace() {
         let db = test_db();
-        db.create_workspace("ws-1", "Old Name", "P", "D", "admin").unwrap();
+        db.create_workspace("ws-1", "Old Name", "P", "D", "admin")
+            .unwrap();
 
-        let updated = db.update_workspace("ws-1", "New Name", "NewP", "NewD", None).unwrap();
+        let updated = db
+            .update_workspace("ws-1", "New Name", "NewP", "NewD", None)
+            .unwrap();
         assert!(updated);
 
         let ws = db.get_workspace("ws-1").unwrap().unwrap();
@@ -4860,7 +5227,8 @@ mod tests {
         let db = test_db();
         db.create_workspace("ws-1", "WS", "", "", "admin").unwrap();
         db.add_workspace_member("ws-1", "user1", "viewer").unwrap();
-        db.push_config_revision("ws-1", "{}", "init", "", "admin").unwrap();
+        db.push_config_revision("ws-1", "{}", "init", "", "admin")
+            .unwrap();
 
         db.delete_workspace("ws-1").unwrap();
 
@@ -4878,8 +5246,12 @@ mod tests {
         let db = test_db();
         db.create_workspace("ws-1", "WS", "", "", "admin").unwrap();
 
-        let v1 = db.push_config_revision("ws-1", r#"{"a":1}"#, "first", "", "admin").unwrap();
-        let v2 = db.push_config_revision("ws-1", r#"{"a":2}"#, "second", "", "admin").unwrap();
+        let v1 = db
+            .push_config_revision("ws-1", r#"{"a":1}"#, "first", "", "admin")
+            .unwrap();
+        let v2 = db
+            .push_config_revision("ws-1", r#"{"a":2}"#, "second", "", "admin")
+            .unwrap();
         assert_eq!(v1, 1);
         assert_eq!(v2, 2);
 
@@ -4894,7 +5266,8 @@ mod tests {
     fn test_get_config_revision() {
         let db = test_db();
         db.create_workspace("ws-1", "WS", "", "", "admin").unwrap();
-        db.push_config_revision("ws-1", r#"{"key":"value"}"#, "test", "", "admin").unwrap();
+        db.push_config_revision("ws-1", r#"{"key":"value"}"#, "test", "", "admin")
+            .unwrap();
 
         let rev = db.get_config_revision("ws-1", 1).unwrap().unwrap();
         assert_eq!(rev.1, r#"{"key":"value"}"#); // config_json
@@ -4910,8 +5283,10 @@ mod tests {
 
         assert!(db.get_latest_config_revision("ws-1").unwrap().is_none());
 
-        db.push_config_revision("ws-1", r#"{"v":1}"#, "v1", "", "admin").unwrap();
-        db.push_config_revision("ws-1", r#"{"v":2}"#, "v2", "", "admin").unwrap();
+        db.push_config_revision("ws-1", r#"{"v":1}"#, "v1", "", "admin")
+            .unwrap();
+        db.push_config_revision("ws-1", r#"{"v":2}"#, "v2", "", "admin")
+            .unwrap();
 
         let latest = db.get_latest_config_revision("ws-1").unwrap().unwrap();
         assert_eq!(latest.1, r#"{"v":2}"#); // config_json
@@ -4948,28 +5323,51 @@ mod tests {
     #[test]
     fn test_doc_pages_crud_and_bulk_upsert() {
         let mut db = test_db();
-        let rid = db.insert_release("v1.0", "FusionHub 1.0", "", false, None).unwrap();
+        let rid = db
+            .insert_release("v1.0", "FusionHub 1.0", "", false, None)
+            .unwrap();
 
         // Editor upsert marks as user
-        db.upsert_doc_page(rid, "imu", "IMU Source", "# IMU", Some("sources"), 1).unwrap();
+        db.upsert_doc_page(rid, "imu", "IMU Source", "# IMU", Some("sources"), 1)
+            .unwrap();
         let page = db.get_doc_page(rid, "imu").unwrap().unwrap();
         assert_eq!(page.0, "IMU Source");
         assert_eq!(page.1, "# IMU");
         assert_eq!(page.2.as_deref(), Some("sources"));
 
-        db.upsert_doc_page(rid, "imu", "IMU Source v2", "# v2", Some("sources"), 2).unwrap();
+        db.upsert_doc_page(rid, "imu", "IMU Source v2", "# v2", Some("sources"), 2)
+            .unwrap();
         let page = db.get_doc_page(rid, "imu").unwrap().unwrap();
         assert_eq!(page.0, "IMU Source v2");
         assert_eq!(page.3, 2);
 
-        db.upsert_doc_page(rid, "sources", "Sources", "Index", None, 0).unwrap();
+        db.upsert_doc_page(rid, "sources", "Sources", "Index", None, 0)
+            .unwrap();
         assert_eq!(db.list_doc_pages(rid).unwrap().len(), 2);
 
         // Bulk (pipeline) upsert: skips user-owned `imu`, writes new slugs as pipeline.
         let new_pages = vec![
-            ("imu".to_string(), "Pipeline IMU".to_string(), "pipe".to_string(), Some("sources".to_string()), 5),
-            ("a".to_string(), "A".to_string(), "body a".to_string(), None, 0),
-            ("b".to_string(), "B".to_string(), "body b".to_string(), Some("a".to_string()), 1),
+            (
+                "imu".to_string(),
+                "Pipeline IMU".to_string(),
+                "pipe".to_string(),
+                Some("sources".to_string()),
+                5,
+            ),
+            (
+                "a".to_string(),
+                "A".to_string(),
+                "body a".to_string(),
+                None,
+                0,
+            ),
+            (
+                "b".to_string(),
+                "B".to_string(),
+                "body b".to_string(),
+                Some("a".to_string()),
+                1,
+            ),
         ];
         let (written, skipped) = db.upsert_doc_pages(rid, &new_pages).unwrap();
         assert_eq!(written, 2);
@@ -4990,27 +5388,41 @@ mod tests {
         let rid = db.insert_release("v1.0", "", "", false, None).unwrap();
 
         // Pipeline bulk plants a page.
-        db.upsert_doc_pages(rid, &[(
-            "imu".into(), "IMU".into(), "pipe body".into(), None, 0,
-        )]).unwrap();
-        let origin: String = db.conn.query_row(
-            "SELECT origin FROM doc_pages WHERE release_id = ?1 AND slug = ?2",
-            params![rid, "imu"], |r| r.get(0),
-        ).unwrap();
+        db.upsert_doc_pages(
+            rid,
+            &[("imu".into(), "IMU".into(), "pipe body".into(), None, 0)],
+        )
+        .unwrap();
+        let origin: String = db
+            .conn
+            .query_row(
+                "SELECT origin FROM doc_pages WHERE release_id = ?1 AND slug = ?2",
+                params![rid, "imu"],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(origin, "pipeline");
 
         // Editor edit on the same slug promotes it to user.
-        db.upsert_doc_page(rid, "imu", "IMU (edited)", "user body", None, 0).unwrap();
-        let origin: String = db.conn.query_row(
-            "SELECT origin FROM doc_pages WHERE release_id = ?1 AND slug = ?2",
-            params![rid, "imu"], |r| r.get(0),
-        ).unwrap();
+        db.upsert_doc_page(rid, "imu", "IMU (edited)", "user body", None, 0)
+            .unwrap();
+        let origin: String = db
+            .conn
+            .query_row(
+                "SELECT origin FROM doc_pages WHERE release_id = ?1 AND slug = ?2",
+                params![rid, "imu"],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(origin, "user");
 
         // Pipeline re-run now skips the user page.
-        let (written, skipped) = db.upsert_doc_pages(rid, &[(
-            "imu".into(), "IMU".into(), "pipe again".into(), None, 0,
-        )]).unwrap();
+        let (written, skipped) = db
+            .upsert_doc_pages(
+                rid,
+                &[("imu".into(), "IMU".into(), "pipe again".into(), None, 0)],
+            )
+            .unwrap();
         assert_eq!(written, 0);
         assert_eq!(skipped, vec!["imu".to_string()]);
         let body = db.get_doc_page(rid, "imu").unwrap().unwrap().1;
@@ -5023,26 +5435,58 @@ mod tests {
         let old = db.insert_release("v1.0", "", "", false, None).unwrap();
 
         // Mixed origins under the old release.
-        db.upsert_doc_pages(old, &[
-            ("imu".into(), "IMU".into(), "pipe".into(), Some("sources".into()), 0),
-            ("sources".into(), "Sources".into(), "auto".into(), None, 10),
-        ]).unwrap();
-        db.upsert_doc_page(old, "general", "General", "# General\nHand-authored", None, 0).unwrap();
-        db.upsert_doc_page(old, "getting-started", "Getting Started", "guide", Some("general"), 1).unwrap();
+        db.upsert_doc_pages(
+            old,
+            &[
+                (
+                    "imu".into(),
+                    "IMU".into(),
+                    "pipe".into(),
+                    Some("sources".into()),
+                    0,
+                ),
+                ("sources".into(), "Sources".into(), "auto".into(), None, 10),
+            ],
+        )
+        .unwrap();
+        db.upsert_doc_page(
+            old,
+            "general",
+            "General",
+            "# General\nHand-authored",
+            None,
+            0,
+        )
+        .unwrap();
+        db.upsert_doc_page(
+            old,
+            "getting-started",
+            "Getting Started",
+            "guide",
+            Some("general"),
+            1,
+        )
+        .unwrap();
 
         // Brand-new release tag.
         let (new_id, created) = db.ensure_release_created("v1.1", "FusionHub 1.1").unwrap();
         assert!(created);
 
-        let prior = db.latest_prior_release_with_user_docs(new_id, None).unwrap();
+        let prior = db
+            .latest_prior_release_with_user_docs(new_id, None)
+            .unwrap();
         assert_eq!(prior.as_ref().map(|p| p.1.as_str()), Some("v1.0"));
         let (src_id, _src_tag) = prior.unwrap();
 
         let n = db.copy_user_doc_pages(src_id, new_id).unwrap();
         assert_eq!(n, 2); // general + getting-started
 
-        let pages: Vec<String> = db.list_doc_pages(new_id).unwrap()
-            .into_iter().map(|p| p.0).collect();
+        let pages: Vec<String> = db
+            .list_doc_pages(new_id)
+            .unwrap()
+            .into_iter()
+            .map(|p| p.0)
+            .collect();
         assert!(pages.contains(&"general".to_string()));
         assert!(pages.contains(&"getting-started".to_string()));
         assert!(!pages.contains(&"imu".to_string()));
@@ -5050,10 +5494,14 @@ mod tests {
 
         // All carried pages retain origin='user'.
         for slug in &pages {
-            let o: String = db.conn.query_row(
-                "SELECT origin FROM doc_pages WHERE release_id = ?1 AND slug = ?2",
-                params![new_id, slug], |r| r.get(0),
-            ).unwrap();
+            let o: String = db
+                .conn
+                .query_row(
+                    "SELECT origin FROM doc_pages WHERE release_id = ?1 AND slug = ?2",
+                    params![new_id, slug],
+                    |r| r.get(0),
+                )
+                .unwrap();
             assert_eq!(o, "user", "slug {} should be user", slug);
         }
 
@@ -5065,9 +5513,14 @@ mod tests {
     #[test]
     fn test_doc_releases_filters_to_releases_with_pages() {
         let db = test_db();
-        let r1 = db.insert_release("v1.0", "with docs", "", false, None).unwrap();
-        let _r2 = db.insert_release("v1.1", "no docs", "", false, None).unwrap();
-        db.upsert_doc_page(r1, "intro", "Intro", "...", None, 0).unwrap();
+        let r1 = db
+            .insert_release("v1.0", "with docs", "", false, None)
+            .unwrap();
+        let _r2 = db
+            .insert_release("v1.1", "no docs", "", false, None)
+            .unwrap();
+        db.upsert_doc_page(r1, "intro", "Intro", "...", None, 0)
+            .unwrap();
 
         let releases = db.list_doc_releases().unwrap();
         assert_eq!(releases.len(), 1);
@@ -5081,11 +5534,18 @@ mod tests {
         db.create_workspace("ws-a", "A", "", "", "admin").unwrap();
         db.create_workspace("ws-b", "B", "", "", "admin").unwrap();
 
-        let g1 = db.insert_release("g1.0", "global", "", false, None).unwrap();
-        let a1 = db.insert_release("a1.0", "a-rel", "", false, Some("ws-a")).unwrap();
-        let b1 = db.insert_release("b1.0", "b-rel", "", false, Some("ws-b")).unwrap();
+        let g1 = db
+            .insert_release("g1.0", "global", "", false, None)
+            .unwrap();
+        let a1 = db
+            .insert_release("a1.0", "a-rel", "", false, Some("ws-a"))
+            .unwrap();
+        let b1 = db
+            .insert_release("b1.0", "b-rel", "", false, Some("ws-b"))
+            .unwrap();
         for rid in [g1, a1, b1] {
-            db.upsert_doc_page(rid, "intro", "Intro", "body", None, 0).unwrap();
+            db.upsert_doc_page(rid, "intro", "Intro", "body", None, 0)
+                .unwrap();
         }
 
         // Global list excludes workspace-scoped releases entirely.
@@ -5111,26 +5571,43 @@ mod tests {
 
         // Set up: a global release with user docs, plus ws-a release with its own user docs.
         let g_old = db.insert_release("g0.9", "g old", "", false, None).unwrap();
-        db.upsert_doc_page(g_old, "guide", "Guide", "global hand-authored", None, 0).unwrap();
+        db.upsert_doc_page(g_old, "guide", "Guide", "global hand-authored", None, 0)
+            .unwrap();
 
-        let a_old = db.insert_release("a0.9", "a old", "", false, Some("ws-a")).unwrap();
-        db.upsert_doc_page(a_old, "guide", "Guide", "ws-a hand-authored", None, 0).unwrap();
+        let a_old = db
+            .insert_release("a0.9", "a old", "", false, Some("ws-a"))
+            .unwrap();
+        db.upsert_doc_page(a_old, "guide", "Guide", "ws-a hand-authored", None, 0)
+            .unwrap();
 
         // New global release: prior must come from the global pool.
-        let (g_new, _) = db.ensure_release_created_scoped("g1.0", "g new", None).unwrap();
+        let (g_new, _) = db
+            .ensure_release_created_scoped("g1.0", "g new", None)
+            .unwrap();
         let prior = db.latest_prior_release_with_user_docs(g_new, None).unwrap();
         assert_eq!(prior.map(|p| p.1), Some("g0.9".to_string()));
 
         // New ws-a release: prior must come from ws-a's pool, not global, not ws-b.
-        let (a_new, _) = db.ensure_release_created_scoped("a1.0", "a new", Some("ws-a")).unwrap();
-        let prior = db.latest_prior_release_with_user_docs(a_new, Some("ws-a")).unwrap();
+        let (a_new, _) = db
+            .ensure_release_created_scoped("a1.0", "a new", Some("ws-a"))
+            .unwrap();
+        let prior = db
+            .latest_prior_release_with_user_docs(a_new, Some("ws-a"))
+            .unwrap();
         assert_eq!(prior.map(|p| p.1), Some("a0.9".to_string()));
 
         // New ws-b release: no prior in ws-b's scope, so seeding finds nothing
         // (it must NOT pull from ws-a or global).
-        let (b_new, _) = db.ensure_release_created_scoped("b1.0", "b new", Some("ws-b")).unwrap();
-        let prior = db.latest_prior_release_with_user_docs(b_new, Some("ws-b")).unwrap();
-        assert!(prior.is_none(), "ws-b must not see prior docs from ws-a or global");
+        let (b_new, _) = db
+            .ensure_release_created_scoped("b1.0", "b new", Some("ws-b"))
+            .unwrap();
+        let prior = db
+            .latest_prior_release_with_user_docs(b_new, Some("ws-b"))
+            .unwrap();
+        assert!(
+            prior.is_none(),
+            "ws-b must not see prior docs from ws-a or global"
+        );
     }
 
     #[test]
@@ -5146,8 +5623,10 @@ mod tests {
         let db = test_db();
         db.create_workspace("ws-1", "WS", "", "", "admin").unwrap();
 
-        db.insert_release("v1.0", "Global", "", false, None).unwrap();
-        db.insert_release("v1.1", "Scoped", "", false, Some("ws-1")).unwrap();
+        db.insert_release("v1.0", "Global", "", false, None)
+            .unwrap();
+        db.insert_release("v1.1", "Scoped", "", false, Some("ws-1"))
+            .unwrap();
 
         // Global list shows all releases regardless of scope.
         let all = db.list_releases().unwrap();
@@ -5168,11 +5647,16 @@ mod tests {
     fn test_get_release_workspace_id() {
         let db = test_db();
         db.create_workspace("ws-1", "WS", "", "", "admin").unwrap();
-        db.insert_release("v1.0", "Global", "", false, None).unwrap();
-        db.insert_release("v1.1", "Scoped", "", false, Some("ws-1")).unwrap();
+        db.insert_release("v1.0", "Global", "", false, None)
+            .unwrap();
+        db.insert_release("v1.1", "Scoped", "", false, Some("ws-1"))
+            .unwrap();
 
         assert_eq!(db.get_release_workspace_id("v1.0").unwrap(), Some(None));
-        assert_eq!(db.get_release_workspace_id("v1.1").unwrap(), Some(Some("ws-1".to_string())));
+        assert_eq!(
+            db.get_release_workspace_id("v1.1").unwrap(),
+            Some(Some("ws-1".to_string()))
+        );
         assert_eq!(db.get_release_workspace_id("nonexistent").unwrap(), None);
     }
 
@@ -5182,14 +5666,20 @@ mod tests {
         db.create_workspace("ws-1", "WS", "", "", "admin").unwrap();
         db.create_workspace("ws-2", "WS2", "", "", "admin").unwrap();
 
-        let s1a = db.get_or_create_workspace_federation_secret("ws-1").unwrap();
-        let s1b = db.get_or_create_workspace_federation_secret("ws-1").unwrap();
+        let s1a = db
+            .get_or_create_workspace_federation_secret("ws-1")
+            .unwrap();
+        let s1b = db
+            .get_or_create_workspace_federation_secret("ws-1")
+            .unwrap();
         assert_eq!(s1a, s1b, "same workspace must return same secret");
         assert!(!s1a.is_empty());
         // base64 of 32 bytes → 44 chars (with padding).
         assert_eq!(s1a.len(), 44);
 
-        let s2 = db.get_or_create_workspace_federation_secret("ws-2").unwrap();
+        let s2 = db
+            .get_or_create_workspace_federation_secret("ws-2")
+            .unwrap();
         assert_ne!(s1a, s2, "different workspaces must get different secrets");
     }
 
@@ -5198,21 +5688,27 @@ mod tests {
         let db = test_db();
         db.create_workspace("ws-1", "WS", "", "", "admin").unwrap();
 
-        let before = db.get_or_create_workspace_federation_secret("ws-1").unwrap();
+        let before = db
+            .get_or_create_workspace_federation_secret("ws-1")
+            .unwrap();
         let rotated = db.rotate_workspace_federation_secret("ws-1").unwrap();
         assert_ne!(before, rotated, "rotation must produce a new secret");
 
         // Subsequent reads return the rotated value.
-        let after = db.get_or_create_workspace_federation_secret("ws-1").unwrap();
+        let after = db
+            .get_or_create_workspace_federation_secret("ws-1")
+            .unwrap();
         assert_eq!(after, rotated);
 
         // Rotating on a workspace that never had a secret should still work
         // (treat as create).
-        db.create_workspace("ws-fresh", "F", "", "", "admin").unwrap();
+        db.create_workspace("ws-fresh", "F", "", "", "admin")
+            .unwrap();
         let fresh = db.rotate_workspace_federation_secret("ws-fresh").unwrap();
         assert_eq!(fresh.len(), 44);
         assert_eq!(
-            db.get_or_create_workspace_federation_secret("ws-fresh").unwrap(),
+            db.get_or_create_workspace_federation_secret("ws-fresh")
+                .unwrap(),
             fresh
         );
     }
@@ -5224,9 +5720,26 @@ mod tests {
         db.create_workspace("ws-2", "WS2", "", "", "admin").unwrap();
 
         // Register two peers in ws-1 and one in ws-2.
-        db.upsert_workspace_peer("ws-1", "hostA", "https://a.local:443", "Laptop A", "", "alice").unwrap();
-        db.upsert_workspace_peer("ws-1", "hostB", "https://b.local:443", "Laptop B", "", "alice").unwrap();
-        db.upsert_workspace_peer("ws-2", "hostA", "https://other.local", "", "", "bob").unwrap();
+        db.upsert_workspace_peer(
+            "ws-1",
+            "hostA",
+            "https://a.local:443",
+            "Laptop A",
+            "",
+            "alice",
+        )
+        .unwrap();
+        db.upsert_workspace_peer(
+            "ws-1",
+            "hostB",
+            "https://b.local:443",
+            "Laptop B",
+            "",
+            "alice",
+        )
+        .unwrap();
+        db.upsert_workspace_peer("ws-2", "hostA", "https://other.local", "", "", "bob")
+            .unwrap();
 
         let peers_ws1 = db.list_workspace_peers("ws-1").unwrap();
         assert_eq!(peers_ws1.len(), 2);
@@ -5240,7 +5753,15 @@ mod tests {
 
         // Re-register hostA with a new URL — must update in place.
         std::thread::sleep(std::time::Duration::from_millis(5));
-        db.upsert_workspace_peer("ws-1", "hostA", "https://a.new:443", "Laptop A v2", "", "alice").unwrap();
+        db.upsert_workspace_peer(
+            "ws-1",
+            "hostA",
+            "https://a.new:443",
+            "Laptop A v2",
+            "",
+            "alice",
+        )
+        .unwrap();
         let after = db.list_workspace_peers("ws-1").unwrap();
         assert_eq!(after.len(), 2, "upsert must not create duplicate row");
         let row_a = after.iter().find(|p| p.0 == "hostA").unwrap();
@@ -5255,15 +5776,18 @@ mod tests {
         // other workspace members at their next federation poll.
         let db = test_db();
         db.create_workspace("ws-1", "WS", "", "", "admin").unwrap();
-        db.upsert_workspace_peer("ws-1", "hostA", "https://a", "A", "lab-east", "alice").unwrap();
-        db.upsert_workspace_peer("ws-1", "hostB", "https://b", "B", "lab-west", "alice").unwrap();
+        db.upsert_workspace_peer("ws-1", "hostA", "https://a", "A", "lab-east", "alice")
+            .unwrap();
+        db.upsert_workspace_peer("ws-1", "hostB", "https://b", "B", "lab-west", "alice")
+            .unwrap();
         let rows = db.list_workspace_peers("ws-1").unwrap();
         let a = rows.iter().find(|r| r.0 == "hostA").unwrap();
         let b = rows.iter().find(|r| r.0 == "hostB").unwrap();
         assert_eq!(a.3, "lab-east", "network_id stored on initial insert");
         assert_eq!(b.3, "lab-west");
         // Flip hostA's network_id; re-register must update the row.
-        db.upsert_workspace_peer("ws-1", "hostA", "https://a", "A", "lab-west", "alice").unwrap();
+        db.upsert_workspace_peer("ws-1", "hostA", "https://a", "A", "lab-west", "alice")
+            .unwrap();
         let rows2 = db.list_workspace_peers("ws-1").unwrap();
         let a2 = rows2.iter().find(|r| r.0 == "hostA").unwrap();
         assert_eq!(a2.3, "lab-west", "network_id updated on re-register");
@@ -5276,7 +5800,9 @@ mod tests {
         assert!(db.get_workspace_graph("ws-1").unwrap().is_none());
         assert!(db.get_workspace_graph_version("ws-1").unwrap().is_none());
 
-        let v = db.upsert_workspace_graph("ws-1", None, r#"{"sources":{}}"#, "alice").unwrap();
+        let v = db
+            .upsert_workspace_graph("ws-1", None, r#"{"sources":{}}"#, "alice")
+            .unwrap();
         assert_eq!(v, 1);
         let row = db.get_workspace_graph("ws-1").unwrap().expect("row exists");
         assert_eq!(row.0, 1);
@@ -5289,9 +5815,12 @@ mod tests {
     fn test_workspace_graph_optimistic_lock_bumps_on_match() {
         let db = test_db();
         db.create_workspace("ws-1", "WS", "", "", "admin").unwrap();
-        db.upsert_workspace_graph("ws-1", None, r#"{"a":1}"#, "alice").unwrap();
+        db.upsert_workspace_graph("ws-1", None, r#"{"a":1}"#, "alice")
+            .unwrap();
 
-        let v2 = db.upsert_workspace_graph("ws-1", Some(1), r#"{"a":2}"#, "bob").unwrap();
+        let v2 = db
+            .upsert_workspace_graph("ws-1", Some(1), r#"{"a":2}"#, "bob")
+            .unwrap();
         assert_eq!(v2, 2);
         let row = db.get_workspace_graph("ws-1").unwrap().unwrap();
         assert_eq!(row.0, 2);
@@ -5303,16 +5832,23 @@ mod tests {
     fn test_workspace_graph_stale_version_rejected() {
         let db = test_db();
         db.create_workspace("ws-1", "WS", "", "", "admin").unwrap();
-        db.upsert_workspace_graph("ws-1", None, r#"{"v":1}"#, "alice").unwrap();
-        db.upsert_workspace_graph("ws-1", Some(1), r#"{"v":2}"#, "alice").unwrap();
+        db.upsert_workspace_graph("ws-1", None, r#"{"v":1}"#, "alice")
+            .unwrap();
+        db.upsert_workspace_graph("ws-1", Some(1), r#"{"v":2}"#, "alice")
+            .unwrap();
         // Caller still thinks it's at v1 — must fail with current=2.
-        let err = db.upsert_workspace_graph("ws-1", Some(1), r#"{"v":3}"#, "bob").unwrap_err();
+        let err = db
+            .upsert_workspace_graph("ws-1", Some(1), r#"{"v":3}"#, "bob")
+            .unwrap_err();
         match err {
             crate::error::LicenseError::GraphConflict { current } => assert_eq!(current, 2),
             other => panic!("expected GraphConflict, got {:?}", other),
         }
         // Stored row unchanged after the rejected write.
-        assert_eq!(db.get_workspace_graph("ws-1").unwrap().unwrap().1, r#"{"v":2}"#);
+        assert_eq!(
+            db.get_workspace_graph("ws-1").unwrap().unwrap().1,
+            r#"{"v":2}"#
+        );
     }
 
     #[test]
@@ -5321,9 +5857,15 @@ mod tests {
         // overwrite — that would be the same "forgot to load" footgun.
         let db = test_db();
         db.create_workspace("ws-1", "WS", "", "", "admin").unwrap();
-        db.upsert_workspace_graph("ws-1", None, r#"{"v":1}"#, "alice").unwrap();
-        let err = db.upsert_workspace_graph("ws-1", None, r#"{"v":2}"#, "bob").unwrap_err();
-        assert!(matches!(err, crate::error::LicenseError::GraphConflict { current: 1 }));
+        db.upsert_workspace_graph("ws-1", None, r#"{"v":1}"#, "alice")
+            .unwrap();
+        let err = db
+            .upsert_workspace_graph("ws-1", None, r#"{"v":2}"#, "bob")
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::LicenseError::GraphConflict { current: 1 }
+        ));
     }
 
     #[test]
@@ -5331,7 +5873,8 @@ mod tests {
         // Dropping the parent workspace must take the graph with it (FK ON DELETE CASCADE).
         let db = test_db();
         db.create_workspace("ws-1", "WS", "", "", "admin").unwrap();
-        db.upsert_workspace_graph("ws-1", None, "{}", "alice").unwrap();
+        db.upsert_workspace_graph("ws-1", None, "{}", "alice")
+            .unwrap();
         db.delete_workspace("ws-1").unwrap();
         assert!(db.get_workspace_graph("ws-1").unwrap().is_none());
     }
@@ -5340,14 +5883,16 @@ mod tests {
     fn test_workspace_peer_delete() {
         let db = test_db();
         db.create_workspace("ws-1", "WS", "", "", "admin").unwrap();
-        db.upsert_workspace_peer("ws-1", "hostA", "https://a", "", "", "alice").unwrap();
+        db.upsert_workspace_peer("ws-1", "hostA", "https://a", "", "", "alice")
+            .unwrap();
 
         assert!(db.delete_workspace_peer("ws-1", "hostA").unwrap());
         assert_eq!(db.list_workspace_peers("ws-1").unwrap().len(), 0);
         // Second delete returns false.
         assert!(!db.delete_workspace_peer("ws-1", "hostA").unwrap());
         // Wrong workspace also false.
-        db.upsert_workspace_peer("ws-1", "hostA", "https://a", "", "", "alice").unwrap();
+        db.upsert_workspace_peer("ws-1", "hostA", "https://a", "", "", "alice")
+            .unwrap();
         assert!(!db.delete_workspace_peer("ws-other", "hostA").unwrap());
         assert_eq!(db.list_workspace_peers("ws-1").unwrap().len(), 1);
     }
@@ -5356,10 +5901,12 @@ mod tests {
     fn test_invitation_token_roundtrip() {
         let db = test_db();
         db.seed_admin("hash").unwrap();
-        db.create_user("alice", "unusable-random-hash", "user").unwrap();
+        db.create_user("alice", "unusable-random-hash", "user")
+            .unwrap();
 
         assert!(!db.has_pending_invitation("alice").unwrap());
-        db.insert_invitation_token("inv-1", "alice", 7 * 24 * 3600).unwrap();
+        db.insert_invitation_token("inv-1", "alice", 7 * 24 * 3600)
+            .unwrap();
         assert!(db.has_pending_invitation("alice").unwrap());
 
         // Same consume function handles both kinds — invitee uses the
@@ -5385,7 +5932,10 @@ mod tests {
         db.insert_invitation_token("new", "bob", 3600).unwrap();
 
         assert!(db.consume_password_reset_token("old").unwrap().is_none());
-        assert_eq!(db.consume_password_reset_token("new").unwrap().as_deref(), Some("bob"));
+        assert_eq!(
+            db.consume_password_reset_token("new").unwrap().as_deref(),
+            Some("bob")
+        );
     }
 
     #[test]
@@ -5408,15 +5958,20 @@ mod tests {
         db.create_user("dave", "h", "user").unwrap();
 
         db.insert_password_reset_token("rh", "dave", 600).unwrap();
-        assert_eq!(db.consume_password_reset_token("rh").unwrap().as_deref(), Some("dave"));
+        assert_eq!(
+            db.consume_password_reset_token("rh").unwrap().as_deref(),
+            Some("dave")
+        );
     }
 
     #[test]
     fn test_workspace_delete_cascades_federation_and_peers() {
         let db = test_db();
         db.create_workspace("ws-1", "WS", "", "", "admin").unwrap();
-        db.get_or_create_workspace_federation_secret("ws-1").unwrap();
-        db.upsert_workspace_peer("ws-1", "hostA", "https://a", "", "", "alice").unwrap();
+        db.get_or_create_workspace_federation_secret("ws-1")
+            .unwrap();
+        db.upsert_workspace_peer("ws-1", "hostA", "https://a", "", "", "alice")
+            .unwrap();
         assert_eq!(db.list_workspace_peers("ws-1").unwrap().len(), 1);
 
         db.delete_workspace("ws-1").unwrap();
@@ -5424,8 +5979,11 @@ mod tests {
         // FK cascade should have wiped both rows.
         assert_eq!(db.list_workspace_peers("ws-1").unwrap().len(), 0);
         // Re-creating the workspace must yield a fresh secret, not the old one.
-        db.create_workspace("ws-1", "WS again", "", "", "admin").unwrap();
-        let fresh = db.get_or_create_workspace_federation_secret("ws-1").unwrap();
+        db.create_workspace("ws-1", "WS again", "", "", "admin")
+            .unwrap();
+        let fresh = db
+            .get_or_create_workspace_federation_secret("ws-1")
+            .unwrap();
         assert_eq!(fresh.len(), 44);
     }
 }

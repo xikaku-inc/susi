@@ -21,9 +21,10 @@ fn platform_enumerate() -> Result<Vec<UsbDevice>, LicenseError> {
     use std::mem::size_of;
     use windows::core::PCWSTR;
     use windows::Win32::Devices::DeviceAndDriverInstallation::{
-        CM_Get_Device_IDW, CM_Get_Parent, SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces,
-        SetupDiGetClassDevsW, SetupDiGetDeviceInterfaceDetailW, CR_SUCCESS, SP_DEVICE_INTERFACE_DATA,
-        SP_DEVICE_INTERFACE_DETAIL_DATA_W, SP_DEVINFO_DATA, DIGCF_DEVICEINTERFACE, DIGCF_PRESENT,
+        CM_Get_Device_IDW, CM_Get_Parent, SetupDiDestroyDeviceInfoList,
+        SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW, SetupDiGetDeviceInterfaceDetailW,
+        CR_SUCCESS, DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, SP_DEVICE_INTERFACE_DATA,
+        SP_DEVICE_INTERFACE_DETAIL_DATA_W, SP_DEVINFO_DATA,
     };
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
     use windows::Win32::Storage::FileSystem::{
@@ -56,11 +57,20 @@ fn platform_enumerate() -> Result<Vec<UsbDevice>, LicenseError> {
         let mut idx = 0u32;
         let mut found_serial: Option<String> = None;
 
-        while SetupDiEnumDeviceInterfaces(devs, None, &GUID_DEVINTERFACE_DISK, idx, &mut if_data).is_ok() {
+        while SetupDiEnumDeviceInterfaces(devs, None, &GUID_DEVINTERFACE_DISK, idx, &mut if_data)
+            .is_ok()
+        {
             idx += 1;
 
             let mut required: u32 = 0;
-            let _ = SetupDiGetDeviceInterfaceDetailW(devs, &mut if_data, None, 0, Some(&mut required), None);
+            let _ = SetupDiGetDeviceInterfaceDetailW(
+                devs,
+                &mut if_data,
+                None,
+                0,
+                Some(&mut required),
+                None,
+            );
             if required < size_of::<SP_DEVICE_INTERFACE_DETAIL_DATA_W>() as u32 {
                 continue;
             }
@@ -138,7 +148,10 @@ fn platform_enumerate() -> Result<Vec<UsbDevice>, LicenseError> {
                 if CM_Get_Device_IDW(dev_inst, inst_id.as_mut_slice(), 0) != CR_SUCCESS {
                     break;
                 }
-                let id_end = inst_id.iter().position(|&c| c == 0).unwrap_or(inst_id.len());
+                let id_end = inst_id
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(inst_id.len());
                 let id_wide = &inst_id[..id_end];
                 let id = String::from_utf16_lossy(id_wide);
                 if id.len() >= 8 && id[..8].eq_ignore_ascii_case("USBSTOR\\") {
@@ -269,7 +282,10 @@ fn platform_enumerate() -> Result<Vec<UsbDevice>, LicenseError> {
         };
 
         let name = if vol_ok.is_ok() {
-            let end = vol_name.iter().position(|&c| c == 0).unwrap_or(vol_name.len());
+            let end = vol_name
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(vol_name.len());
             let label = String::from_utf16_lossy(&vol_name[..end]);
             if label.is_empty() {
                 "USB Drive".to_string()
@@ -367,7 +383,7 @@ fn platform_enumerate() -> Result<Vec<UsbDevice>, LicenseError> {
 
         // Try partitions first (e.g. /dev/sdb1)
         for i in 1..=9 {
-            let part = format!("{}{}",dev_path, i);
+            let part = format!("{}{}", dev_path, i);
             if let Some(mp) = mounts.get(&part) {
                 mount_path = Some(mp.clone());
                 break;
@@ -429,8 +445,17 @@ fn platform_enumerate() -> Result<Vec<UsbDevice>, LicenseError> {
     extern "C" {
         static kCFAllocatorDefault: CFAllocatorRef;
         static kCFBooleanTrue: CFTypeRef;
-        fn CFStringGetCString(s: CFStringRef, buf: *mut c_char, size: CFIndex, enc: CFStringEncoding) -> bool;
-        fn CFStringCreateWithCString(alloc: CFAllocatorRef, c_str: *const c_char, enc: CFStringEncoding) -> CFStringRef;
+        fn CFStringGetCString(
+            s: CFStringRef,
+            buf: *mut c_char,
+            size: CFIndex,
+            enc: CFStringEncoding,
+        ) -> bool;
+        fn CFStringCreateWithCString(
+            alloc: CFAllocatorRef,
+            c_str: *const c_char,
+            enc: CFStringEncoding,
+        ) -> CFStringRef;
         fn CFRelease(cf: CFTypeRef);
         fn CFDictionarySetValue(dict: CFMutableDictionaryRef, key: CFTypeRef, value: CFTypeRef);
     }
@@ -438,12 +463,25 @@ fn platform_enumerate() -> Result<Vec<UsbDevice>, LicenseError> {
     #[link(name = "IOKit", kind = "framework")]
     extern "C" {
         fn IOServiceMatching(name: *const c_char) -> CFMutableDictionaryRef;
-        fn IOServiceGetMatchingServices(port: u32, matching: CFMutableDictionaryRef, existing: *mut IoIteratorT) -> KernReturn;
+        fn IOServiceGetMatchingServices(
+            port: u32,
+            matching: CFMutableDictionaryRef,
+            existing: *mut IoIteratorT,
+        ) -> KernReturn;
         fn IOIteratorNext(iter: IoIteratorT) -> IoServiceT;
         fn IOObjectRelease(obj: IoObjectT) -> KernReturn;
         fn IOObjectRetain(obj: IoObjectT) -> KernReturn;
-        fn IORegistryEntryCreateCFProperty(entry: IoServiceT, key: CFStringRef, alloc: CFAllocatorRef, options: u32) -> CFTypeRef;
-        fn IORegistryEntryGetParentEntry(entry: IoServiceT, plane: *const c_char, parent: *mut IoServiceT) -> KernReturn;
+        fn IORegistryEntryCreateCFProperty(
+            entry: IoServiceT,
+            key: CFStringRef,
+            alloc: CFAllocatorRef,
+            options: u32,
+        ) -> CFTypeRef;
+        fn IORegistryEntryGetParentEntry(
+            entry: IoServiceT,
+            plane: *const c_char,
+            parent: *mut IoServiceT,
+        ) -> KernReturn;
     }
 
     unsafe fn cf_str(s: &str) -> CFStringRef {
@@ -452,10 +490,20 @@ fn platform_enumerate() -> Result<Vec<UsbDevice>, LicenseError> {
     }
 
     unsafe fn cf_string_to_std(s: CFStringRef) -> Option<String> {
-        if s.is_null() { return None; }
+        if s.is_null() {
+            return None;
+        }
         let mut buf = [0i8; 512];
-        if CFStringGetCString(s, buf.as_mut_ptr(), buf.len() as CFIndex, K_CF_STRING_ENCODING_UTF8) {
-            CStr::from_ptr(buf.as_ptr()).to_str().ok().map(str::to_string)
+        if CFStringGetCString(
+            s,
+            buf.as_mut_ptr(),
+            buf.len() as CFIndex,
+            K_CF_STRING_ENCODING_UTF8,
+        ) {
+            CStr::from_ptr(buf.as_ptr())
+                .to_str()
+                .ok()
+                .map(str::to_string)
         } else {
             None
         }
@@ -469,7 +517,9 @@ fn platform_enumerate() -> Result<Vec<UsbDevice>, LicenseError> {
         IOObjectRetain(cur);
         let mut serial = None;
         for _ in 0..12 {
-            if cur == IO_OBJECT_NULL { break; }
+            if cur == IO_OBJECT_NULL {
+                break;
+            }
             let prop = IORegistryEntryCreateCFProperty(cur, key, kCFAllocatorDefault, 0);
             if !prop.is_null() {
                 serial = cf_string_to_std(prop);
@@ -478,9 +528,15 @@ fn platform_enumerate() -> Result<Vec<UsbDevice>, LicenseError> {
                 break;
             }
             let mut parent: IoServiceT = IO_OBJECT_NULL;
-            let kr = IORegistryEntryGetParentEntry(cur, b"IOService\0".as_ptr() as *const c_char, &mut parent);
+            let kr = IORegistryEntryGetParentEntry(
+                cur,
+                b"IOService\0".as_ptr() as *const c_char,
+                &mut parent,
+            );
             IOObjectRelease(cur);
-            if kr != KERN_SUCCESS { break; }
+            if kr != KERN_SUCCESS {
+                break;
+            }
             cur = parent;
         }
         CFRelease(key);
@@ -499,8 +555,12 @@ fn platform_enumerate() -> Result<Vec<UsbDevice>, LicenseError> {
                 libc::MNT_NOWAIT,
             );
             for stat in &stats[..count2.max(0) as usize] {
-                let from = CStr::from_ptr(stat.f_mntfromname.as_ptr()).to_string_lossy().into_owned();
-                let to = CStr::from_ptr(stat.f_mntonname.as_ptr()).to_string_lossy().into_owned();
+                let from = CStr::from_ptr(stat.f_mntfromname.as_ptr())
+                    .to_string_lossy()
+                    .into_owned();
+                let to = CStr::from_ptr(stat.f_mntonname.as_ptr())
+                    .to_string_lossy()
+                    .into_owned();
                 mount_map.insert(from, to);
             }
         }
@@ -511,7 +571,9 @@ fn platform_enumerate() -> Result<Vec<UsbDevice>, LicenseError> {
     unsafe {
         // IOServiceGetMatchingServices consumes one reference to `matching`, so no CFRelease after.
         let matching = IOServiceMatching(b"IOMedia\0".as_ptr() as *const c_char);
-        if matching.is_null() { return Ok(devices); }
+        if matching.is_null() {
+            return Ok(devices);
+        }
 
         let removable_key = cf_str("Removable");
         let whole_key = cf_str("Whole");
@@ -529,20 +591,30 @@ fn platform_enumerate() -> Result<Vec<UsbDevice>, LicenseError> {
 
         loop {
             let media = IOIteratorNext(iter);
-            if media == IO_OBJECT_NULL { break; }
+            if media == IO_OBJECT_NULL {
+                break;
+            }
 
             let bsd_prop = IORegistryEntryCreateCFProperty(media, bsd_key, kCFAllocatorDefault, 0);
             let bsd_name = cf_string_to_std(bsd_prop);
-            if !bsd_prop.is_null() { CFRelease(bsd_prop); }
+            if !bsd_prop.is_null() {
+                CFRelease(bsd_prop);
+            }
 
             let bsd_name = match bsd_name.filter(|n| !n.is_empty()) {
                 Some(n) => n,
-                None => { IOObjectRelease(media); continue; }
+                None => {
+                    IOObjectRelease(media);
+                    continue;
+                }
             };
 
             let serial = match usb_serial_for_service(media).filter(|s| !s.is_empty()) {
                 Some(s) => s,
-                None => { IOObjectRelease(media); continue; }
+                None => {
+                    IOObjectRelease(media);
+                    continue;
+                }
             };
 
             // Find mount point: try partitions diskNs1..s9, then whole disk
@@ -560,12 +632,19 @@ fn platform_enumerate() -> Result<Vec<UsbDevice>, LicenseError> {
 
             let mount_path = match mount_point {
                 Some(mp) => mp,
-                None => { IOObjectRelease(media); continue; }
+                None => {
+                    IOObjectRelease(media);
+                    continue;
+                }
             };
 
             // Volume name = last path component (e.g. /Volumes/MY_DRIVE -> MY_DRIVE)
-            let name = mount_path.rsplit('/').next().filter(|s| !s.is_empty())
-                .unwrap_or("USB Drive").to_string();
+            let name = mount_path
+                .rsplit('/')
+                .next()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("USB Drive")
+                .to_string();
 
             devices.push(UsbDevice {
                 serial,
@@ -601,7 +680,12 @@ mod tests {
         let devices = enumerate_usb_devices().unwrap();
         println!("Found {} USB device(s):", devices.len());
         for dev in &devices {
-            println!("  serial={}, mount={}, name={}", dev.serial, dev.mount_path.display(), dev.name);
+            println!(
+                "  serial={}, mount={}, name={}",
+                dev.serial,
+                dev.mount_path.display(),
+                dev.name
+            );
         }
     }
 }

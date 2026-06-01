@@ -95,7 +95,7 @@ mod windows {
     // crypt32.dll FFI — certificate chain extraction from embedded Authenticode
     // ---------------------------------------------------------------------------
     type HCERTSTORE = *mut std::ffi::c_void;
-    type HCRYPTMSG  = *mut std::ffi::c_void;
+    type HCRYPTMSG = *mut std::ffi::c_void;
     #[allow(non_camel_case_types)]
     type PCCERT_CONTEXT = *const CERT_CONTEXT;
 
@@ -141,7 +141,11 @@ mod windows {
             Ok(p) => p,
             Err(_) => return vec![],
         };
-        let wide: Vec<u16> = exe.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        let wide: Vec<u16> = exe
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
 
         unsafe {
             let mut cert_store: HCERTSTORE = std::ptr::null_mut();
@@ -166,7 +170,9 @@ mod windows {
             );
 
             if ok == 0 || cert_store.is_null() {
-                if !hcrypt_msg.is_null() { CryptMsgClose(hcrypt_msg); }
+                if !hcrypt_msg.is_null() {
+                    CryptMsgClose(hcrypt_msg);
+                }
                 return vec![];
             }
 
@@ -174,7 +180,9 @@ mod windows {
             let mut p_prev: PCCERT_CONTEXT = std::ptr::null();
             loop {
                 let p_ctx = CertEnumCertificatesInStore(cert_store, p_prev);
-                if p_ctx.is_null() { break; }
+                if p_ctx.is_null() {
+                    break;
+                }
                 let cb = (*p_ctx).cb_cert_encoded as usize;
                 let pb = (*p_ctx).pb_cert_encoded;
                 certs.push(std::slice::from_raw_parts(pb, cb).to_vec());
@@ -183,7 +191,9 @@ mod windows {
                 // call CertFreeCertificateContext on intermediate pointers.
             }
 
-            if !hcrypt_msg.is_null() { CryptMsgClose(hcrypt_msg); }
+            if !hcrypt_msg.is_null() {
+                CryptMsgClose(hcrypt_msg);
+            }
             CertCloseStore(cert_store, CERT_CLOSE_STORE_FORCE_FLAG);
             certs
         }
@@ -194,7 +204,11 @@ mod windows {
             Ok(p) => p,
             Err(_) => return false,
         };
-        let wide: Vec<u16> = exe.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        let wide: Vec<u16> = exe
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
 
         unsafe {
             let mut file_info = WINTRUST_FILE_INFO {
@@ -252,13 +266,17 @@ mod macos {
     type CFURLPathStyle = i64;
 
     // Additional types for certificate extraction
-    #[repr(C)] struct __CFDictionary(u8);
+    #[repr(C)]
+    struct __CFDictionary(u8);
     type CFDictionaryRef = *const __CFDictionary;
-    #[repr(C)] struct __CFArray(u8);
+    #[repr(C)]
+    struct __CFArray(u8);
     type CFArrayRef = *const __CFArray;
-    #[repr(C)] struct __CFData(u8);
+    #[repr(C)]
+    struct __CFData(u8);
     type CFDataRef = *const __CFData;
-    #[repr(C)] struct OpaqueSecCertificate(u8);
+    #[repr(C)]
+    struct OpaqueSecCertificate(u8);
     type SecCertificateRef = *const OpaqueSecCertificate;
 
     // kSecCSSigningInformation = 0x00000002 — requests the certificate chain
@@ -322,19 +340,24 @@ mod macos {
                 path_bytes.len() as isize,
                 0,
             );
-            if url.is_null() { return vec![]; }
+            if url.is_null() {
+                return vec![];
+            }
 
             let mut code: SecStaticCodeRef = std::ptr::null_mut();
             let status = SecStaticCodeCreateWithPath(url, KSE_CS_DEFAULT_FLAGS, &mut code);
             CFRelease(url as *const _);
-            if status != ERR_SEC_SUCCESS || code.is_null() { return vec![]; }
+            if status != ERR_SEC_SUCCESS || code.is_null() {
+                return vec![];
+            }
 
             let mut info_dict: CFDictionaryRef = std::ptr::null();
-            let status = SecCodeCopySigningInformation(
-                code, K_SEC_CS_SIGNING_INFORMATION, &mut info_dict,
-            );
+            let status =
+                SecCodeCopySigningInformation(code, K_SEC_CS_SIGNING_INFORMATION, &mut info_dict);
             CFRelease(code as *const _);
-            if status != ERR_SEC_SUCCESS || info_dict.is_null() { return vec![]; }
+            if status != ERR_SEC_SUCCESS || info_dict.is_null() {
+                return vec![];
+            }
 
             let certs_val = CFDictionaryGetValue(info_dict, kSecCodeInfoCertificates);
             if certs_val.is_null() {
@@ -347,9 +370,13 @@ mod macos {
             let mut result: Vec<Vec<u8>> = Vec::with_capacity(count as usize);
             for i in 0..count {
                 let cert_ref = CFArrayGetValueAtIndex(certs_array, i) as SecCertificateRef;
-                if cert_ref.is_null() { continue; }
+                if cert_ref.is_null() {
+                    continue;
+                }
                 let data_ref = SecCertificateCopyData(cert_ref);
-                if data_ref.is_null() { continue; }
+                if data_ref.is_null() {
+                    continue;
+                }
                 let len = CFDataGetLength(data_ref) as usize;
                 let ptr = CFDataGetBytePtr(data_ref);
                 result.push(std::slice::from_raw_parts(ptr, len).to_vec());
@@ -390,7 +417,8 @@ mod macos {
                 return false;
             }
 
-            let valid = SecStaticCodeCheckValidity(code, KSE_CS_DEFAULT_FLAGS, std::ptr::null_mut());
+            let valid =
+                SecStaticCodeCheckValidity(code, KSE_CS_DEFAULT_FLAGS, std::ptr::null_mut());
             CFRelease(code as *const std::ffi::c_void);
 
             valid == ERR_SEC_SUCCESS

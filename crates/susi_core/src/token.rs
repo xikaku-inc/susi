@@ -56,13 +56,11 @@ pub fn decrypt_token(blob: &[u8], usb_serial: &str) -> Result<SignedLicense, Lic
     let nonce = Nonce::from_slice(&blob[..NONCE_SIZE]);
     let ciphertext = &blob[NONCE_SIZE..];
 
-    let plaintext = cipher
-        .decrypt(nonce, ciphertext)
-        .map_err(|_| {
-            LicenseError::TokenDecryptionFailed(
-                "Decryption failed (wrong USB device or corrupted token)".to_string(),
-            )
-        })?;
+    let plaintext = cipher.decrypt(nonce, ciphertext).map_err(|_| {
+        LicenseError::TokenDecryptionFailed(
+            "Decryption failed (wrong USB device or corrupted token)".to_string(),
+        )
+    })?;
 
     let signed: SignedLicense = serde_json::from_slice(&plaintext)?;
     Ok(signed)

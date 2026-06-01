@@ -98,12 +98,17 @@ impl WorkspaceClient {
     }
 
     /// Async variant of [`login`].
-    pub async fn login_async(server_url: &str, username: &str, password: &str) -> Result<Self, WorkspaceError> {
+    pub async fn login_async(
+        server_url: &str,
+        username: &str,
+        password: &str,
+    ) -> Result<Self, WorkspaceError> {
         let http = Client::new();
         let base = server_url.trim_end_matches('/');
         let url = format!("{}/api/v1/auth/login", base);
 
-        let resp = http.post(&url)
+        let resp = http
+            .post(&url)
             .json(&serde_json::json!({
                 "username": username,
                 "password": password,
@@ -117,13 +122,19 @@ impl WorkspaceClient {
             return Err(WorkspaceError::AuthFailed("Invalid credentials".into()));
         }
         if !resp.status().is_success() {
-            return Err(WorkspaceError::RequestFailed(format!("Login failed: {}", resp.status())));
+            return Err(WorkspaceError::RequestFailed(format!(
+                "Login failed: {}",
+                resp.status()
+            )));
         }
 
         #[derive(Deserialize)]
-        struct LoginResponse { token: String }
+        struct LoginResponse {
+            token: String,
+        }
 
-        let login: LoginResponse = resp.json()
+        let login: LoginResponse = resp
+            .json()
             .await
             .map_err(|e| WorkspaceError::InvalidResponse(e.to_string()))?;
 
@@ -157,7 +168,9 @@ impl WorkspaceClient {
 
     pub async fn list_workspaces_async(&self) -> Result<Vec<WorkspaceInfo>, WorkspaceError> {
         #[derive(Deserialize)]
-        struct Resp { workspaces: Vec<WorkspaceInfo> }
+        struct Resp {
+            workspaces: Vec<WorkspaceInfo>,
+        }
 
         let resp: Resp = self.get("/api/v1/workspaces").await?;
         Ok(resp.workspaces)
@@ -186,11 +199,15 @@ impl WorkspaceClient {
         product: &str,
         description: &str,
     ) -> Result<WorkspaceInfo, WorkspaceError> {
-        self.post("/api/v1/workspaces", &serde_json::json!({
-            "name": name,
-            "product": product,
-            "description": description,
-        })).await
+        self.post(
+            "/api/v1/workspaces",
+            &serde_json::json!({
+                "name": name,
+                "product": product,
+                "description": description,
+            }),
+        )
+        .await
     }
 
     pub fn update_workspace(
@@ -210,11 +227,15 @@ impl WorkspaceClient {
         product: &str,
         description: &str,
     ) -> Result<(), WorkspaceError> {
-        self.put::<serde_json::Value>(&format!("/api/v1/workspaces/{}", id), &serde_json::json!({
-            "name": name,
-            "product": product,
-            "description": description,
-        })).await?;
+        self.put::<serde_json::Value>(
+            &format!("/api/v1/workspaces/{}", id),
+            &serde_json::json!({
+                "name": name,
+                "product": product,
+                "description": description,
+            }),
+        )
+        .await?;
         Ok(())
     }
 
@@ -249,14 +270,11 @@ impl WorkspaceClient {
         self.post_void(
             &format!("/api/v1/workspaces/{}/members", workspace_id),
             &serde_json::json!({ "username": username, "role": role }),
-        ).await
+        )
+        .await
     }
 
-    pub fn remove_member(
-        &self,
-        workspace_id: &str,
-        username: &str,
-    ) -> Result<(), WorkspaceError> {
+    pub fn remove_member(&self, workspace_id: &str, username: &str) -> Result<(), WorkspaceError> {
         blocking_run(self.remove_member_async(workspace_id, username))
     }
 
@@ -265,7 +283,11 @@ impl WorkspaceClient {
         workspace_id: &str,
         username: &str,
     ) -> Result<(), WorkspaceError> {
-        self.delete(&format!("/api/v1/workspaces/{}/members/{}", workspace_id, username)).await?;
+        self.delete(&format!(
+            "/api/v1/workspaces/{}/members/{}",
+            workspace_id, username
+        ))
+        .await?;
         Ok(())
     }
 
@@ -285,9 +307,13 @@ impl WorkspaceClient {
         workspace_id: &str,
     ) -> Result<Vec<ConfigRevisionInfo>, WorkspaceError> {
         #[derive(Deserialize)]
-        struct Resp { configs: Vec<ConfigRevisionInfo> }
+        struct Resp {
+            configs: Vec<ConfigRevisionInfo>,
+        }
 
-        let resp: Resp = self.get(&format!("/api/v1/workspaces/{}/configs", workspace_id)).await?;
+        let resp: Resp = self
+            .get(&format!("/api/v1/workspaces/{}/configs", workspace_id))
+            .await?;
         Ok(resp.configs)
     }
 
@@ -309,16 +335,20 @@ impl WorkspaceClient {
         description: &str,
     ) -> Result<i64, WorkspaceError> {
         #[derive(Deserialize)]
-        struct Resp { id: i64 }
+        struct Resp {
+            id: i64,
+        }
 
-        let resp: Resp = self.post(
-            &format!("/api/v1/workspaces/{}/configs", workspace_id),
-            &serde_json::json!({
-                "config_json": config_json,
-                "name": name,
-                "description": description,
-            }),
-        ).await?;
+        let resp: Resp = self
+            .post(
+                &format!("/api/v1/workspaces/{}/configs", workspace_id),
+                &serde_json::json!({
+                    "config_json": config_json,
+                    "name": name,
+                    "description": description,
+                }),
+            )
+            .await?;
         Ok(resp.id)
     }
 
@@ -342,15 +372,12 @@ impl WorkspaceClient {
         self.put::<serde_json::Value>(
             &format!("/api/v1/workspaces/{}/configs/{}", workspace_id, id),
             &serde_json::json!({ "name": name, "description": description }),
-        ).await?;
+        )
+        .await?;
         Ok(())
     }
 
-    pub fn delete_config(
-        &self,
-        workspace_id: &str,
-        id: i64,
-    ) -> Result<(), WorkspaceError> {
+    pub fn delete_config(&self, workspace_id: &str, id: i64) -> Result<(), WorkspaceError> {
         blocking_run(self.delete_config_async(workspace_id, id))
     }
 
@@ -359,7 +386,11 @@ impl WorkspaceClient {
         workspace_id: &str,
         id: i64,
     ) -> Result<(), WorkspaceError> {
-        self.delete(&format!("/api/v1/workspaces/{}/configs/{}", workspace_id, id)).await?;
+        self.delete(&format!(
+            "/api/v1/workspaces/{}/configs/{}",
+            workspace_id, id
+        ))
+        .await?;
         Ok(())
     }
 
@@ -376,13 +407,14 @@ impl WorkspaceClient {
         workspace_id: &str,
         id: i64,
     ) -> Result<ConfigRevision, WorkspaceError> {
-        self.get(&format!("/api/v1/workspaces/{}/configs/{}", workspace_id, id)).await
+        self.get(&format!(
+            "/api/v1/workspaces/{}/configs/{}",
+            workspace_id, id
+        ))
+        .await
     }
 
-    pub fn get_latest_config(
-        &self,
-        workspace_id: &str,
-    ) -> Result<ConfigRevision, WorkspaceError> {
+    pub fn get_latest_config(&self, workspace_id: &str) -> Result<ConfigRevision, WorkspaceError> {
         blocking_run(self.get_latest_config_async(workspace_id))
     }
 
@@ -390,7 +422,11 @@ impl WorkspaceClient {
         &self,
         workspace_id: &str,
     ) -> Result<ConfigRevision, WorkspaceError> {
-        self.get(&format!("/api/v1/workspaces/{}/configs/latest", workspace_id)).await
+        self.get(&format!(
+            "/api/v1/workspaces/{}/configs/latest",
+            workspace_id
+        ))
+        .await
     }
 
     // -----------------------------------------------------------------------
@@ -399,7 +435,9 @@ impl WorkspaceClient {
 
     async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, WorkspaceError> {
         let url = format!("{}{}", self.server_url, path);
-        let resp = self.http.get(&url)
+        let resp = self
+            .http
+            .get(&url)
             .bearer_auth(&self.token)
             .timeout(REQUEST_TIMEOUT)
             .send()
@@ -414,7 +452,9 @@ impl WorkspaceClient {
         body: &serde_json::Value,
     ) -> Result<T, WorkspaceError> {
         let url = format!("{}{}", self.server_url, path);
-        let resp = self.http.post(&url)
+        let resp = self
+            .http
+            .post(&url)
             .bearer_auth(&self.token)
             .json(body)
             .timeout(REQUEST_TIMEOUT)
@@ -424,13 +464,11 @@ impl WorkspaceClient {
         self.handle_response(resp).await
     }
 
-    async fn post_void(
-        &self,
-        path: &str,
-        body: &serde_json::Value,
-    ) -> Result<(), WorkspaceError> {
+    async fn post_void(&self, path: &str, body: &serde_json::Value) -> Result<(), WorkspaceError> {
         let url = format!("{}{}", self.server_url, path);
-        let resp = self.http.post(&url)
+        let resp = self
+            .http
+            .post(&url)
             .bearer_auth(&self.token)
             .json(body)
             .timeout(REQUEST_TIMEOUT)
@@ -447,7 +485,9 @@ impl WorkspaceClient {
         body: &serde_json::Value,
     ) -> Result<T, WorkspaceError> {
         let url = format!("{}{}", self.server_url, path);
-        let resp = self.http.put(&url)
+        let resp = self
+            .http
+            .put(&url)
             .bearer_auth(&self.token)
             .json(body)
             .timeout(REQUEST_TIMEOUT)
@@ -459,7 +499,9 @@ impl WorkspaceClient {
 
     async fn delete(&self, path: &str) -> Result<serde_json::Value, WorkspaceError> {
         let url = format!("{}{}", self.server_url, path);
-        let resp = self.http.delete(&url)
+        let resp = self
+            .http
+            .delete(&url)
             .bearer_auth(&self.token)
             .timeout(REQUEST_TIMEOUT)
             .send()
@@ -475,8 +517,11 @@ impl WorkspaceClient {
         }
 
         #[derive(Deserialize)]
-        struct ErrBody { error: String }
-        let msg = resp.json::<ErrBody>()
+        struct ErrBody {
+            error: String,
+        }
+        let msg = resp
+            .json::<ErrBody>()
             .await
             .map(|b| b.error)
             .unwrap_or_else(|_| status.to_string());
@@ -495,14 +540,18 @@ impl WorkspaceClient {
     ) -> Result<T, WorkspaceError> {
         let status = resp.status();
         if status.is_success() {
-            return resp.json::<T>()
+            return resp
+                .json::<T>()
                 .await
                 .map_err(|e| WorkspaceError::InvalidResponse(e.to_string()));
         }
 
         #[derive(Deserialize)]
-        struct ErrBody { error: String }
-        let msg = resp.json::<ErrBody>()
+        struct ErrBody {
+            error: String,
+        }
+        let msg = resp
+            .json::<ErrBody>()
             .await
             .map(|b| b.error)
             .unwrap_or_else(|_| status.to_string());

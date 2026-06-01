@@ -104,7 +104,8 @@ impl License {
     /// from that machine's lease. Otherwise it's left as `None`.
     pub fn to_payload_for(&self, for_machine: Option<&str>) -> LicensePayload {
         let lease_expires = for_machine.and_then(|mc| {
-            self.machines.iter()
+            self.machines
+                .iter()
                 .find(|m| m.machine_code == mc)
                 .and_then(|m| m.lease_expires_at)
         });
@@ -140,7 +141,8 @@ impl License {
     /// Returns machine codes that have an active lease (or no lease enforcement).
     pub fn active_machine_codes(&self) -> Vec<String> {
         let now = Utc::now();
-        self.machines.iter()
+        self.machines
+            .iter()
             .filter(|m| m.is_lease_active(now))
             .map(|m| m.machine_code.clone())
             .collect()
@@ -149,12 +151,17 @@ impl License {
     /// Count machines with active leases only.
     pub fn active_machine_count(&self) -> usize {
         let now = Utc::now();
-        self.machines.iter().filter(|m| m.is_lease_active(now)).count()
+        self.machines
+            .iter()
+            .filter(|m| m.is_lease_active(now))
+            .count()
     }
 
     pub fn is_machine_activated(&self, machine_code: &str) -> bool {
         let now = Utc::now();
-        self.machines.iter().any(|m| m.machine_code == machine_code && m.is_lease_active(now))
+        self.machines
+            .iter()
+            .any(|m| m.machine_code == machine_code && m.is_lease_active(now))
     }
 
     pub fn can_add_machine(&self) -> bool {
@@ -168,7 +175,11 @@ impl License {
             Some(Utc::now() + chrono::Duration::hours(self.lease_duration_hours as i64))
         };
 
-        if let Some(existing) = self.machines.iter_mut().find(|m| m.machine_code == machine_code) {
+        if let Some(existing) = self
+            .machines
+            .iter_mut()
+            .find(|m| m.machine_code == machine_code)
+        {
             existing.lease_expires_at = lease_expires_at;
             existing.activated_at = Utc::now();
         } else {
@@ -219,7 +230,8 @@ impl LicensePayload {
     pub fn is_in_grace_period(&self, default_grace_hours: i64) -> bool {
         match self.lease_expires {
             Some(dt) => {
-                let grace_hours = self.lease_grace_period
+                let grace_hours = self
+                    .lease_grace_period
                     .map(|h| h as i64)
                     .unwrap_or(default_grace_hours);
                 let now = Utc::now();
