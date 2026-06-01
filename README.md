@@ -566,6 +566,7 @@ The remainder of this section documents the licensing API specifically. See [Wor
 | `GET` / `PUT` / `DELETE` | `/api/v1/licenses/{key}` | JWT | Get / update / delete a license |
 | `POST` | `/api/v1/licenses/{key}/revoke` | JWT | Revoke a license |
 | `POST` | `/api/v1/licenses/{key}/export` | JWT | Export a signed license file |
+| `POST` | `/api/v1/licenses/{key}/export-token` | JWT | Export a signed license file bound to a USB token |
 | `DELETE` | `/api/v1/licenses/{key}/machines/{code}` | JWT | Deactivate a machine |
 | `DELETE` | `/api/v1/licenses/{key}/machines/{code}/tombstone` | JWT | Clear the deactivation tombstone (allow re-activation) |
 | `GET` | `/health` | None | Health check |

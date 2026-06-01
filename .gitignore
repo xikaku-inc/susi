@@ -8,3 +8,5 @@ license.json
 # CMake and Conan
 build/
 CMakeUserPresets.json
+
+.vscode
