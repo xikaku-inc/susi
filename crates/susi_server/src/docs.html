@@ -262,6 +262,12 @@ body {
 .content a { color: var(--accent); text-decoration: none; }
 .content a:hover { text-decoration: underline; }
 .content img { max-width: 100%; border-radius: var(--radius); display: block; margin: 16px auto; }
+.content .video-embed { position: relative; padding-top: 56.25%; margin: 16px 0; }
+.content .video-embed iframe {
+    position: absolute; top: 0; left: 0;
+    width: 100%; height: 100%; border: 0;
+    border-radius: var(--radius);
+}
 .content hr { border: none; border-top: 1px solid var(--border); margin: 22px 0; }
 /* Allow inline icons in tables not to be forced to a new line */
 .content td img, .content th img { display: inline-block; margin: 0; }
@@ -351,6 +357,14 @@ body {
 .EasyMDEContainer .editor-preview img,
 .EasyMDEContainer .editor-preview-side img {
     max-width: 100%;
+    border-radius: var(--radius);
+}
+.EasyMDEContainer .editor-preview .video-embed,
+.EasyMDEContainer .editor-preview-side .video-embed { position: relative; padding-top: 56.25%; margin: 16px 0; }
+.EasyMDEContainer .editor-preview .video-embed iframe,
+.EasyMDEContainer .editor-preview-side .video-embed iframe {
+    position: absolute; top: 0; left: 0;
+    width: 100%; height: 100%; border: 0;
     border-radius: var(--radius);
 }
 .EasyMDEContainer .editor-preview h1,
@@ -734,12 +748,34 @@ function escHtml(s) {
 // blockquotes, unordered lists, GFM tables, horizontal rules, hard line breaks.
 // ---------------------------------------------------------------------------
 
+function videoEmbedSrc(url) {
+    let m = url.match(/^https?:\/\/(?:www\.)?vimeo\.com\/(\d+)(?:\/([a-f0-9]+))?/);
+    if (m) return 'https://player.vimeo.com/video/' + m[1] + (m[2] ? '?h=' + m[2] : '');
+    m = url.match(/^https?:\/\/player\.vimeo\.com\/video\/\d+/);
+    if (m) return url;
+    m = url.match(/^https?:\/\/(?:www\.)?youtube\.com\/watch\?v=([A-Za-z0-9_-]+)/);
+    if (m) return 'https://www.youtube.com/embed/' + m[1];
+    m = url.match(/^https?:\/\/youtu\.be\/([A-Za-z0-9_-]+)/);
+    if (m) return 'https://www.youtube.com/embed/' + m[1];
+    m = url.match(/^https?:\/\/(?:www\.)?youtube\.com\/embed\/[A-Za-z0-9_-]+/);
+    if (m) return url;
+    return null;
+}
+
 function renderInline(s) {
     let out = escHtml(s);
     // Code spans first to avoid further substitution inside them.
     out = out.replace(/`([^`]+)`/g, (_, c) => '<code>' + c + '</code>');
-    // Images ![alt](url) with optional Pandoc-style {width=N height=M} attributes
+    // Images ![alt](url) with optional Pandoc-style {width=N height=M} attributes.
+    // A Vimeo/YouTube url renders as a responsive video embed instead.
     out = out.replace(/!\[([^\]]*)\]\(([^)]+)\)(\{[^}]*\})?/g, (_, alt, url, attrs) => {
+        const vsrc = videoEmbedSrc(url);
+        if (vsrc) {
+            return '<div class="video-embed"><iframe src="' + vsrc
+                + '" title="' + alt
+                + '" allow="autoplay; fullscreen; picture-in-picture"'
+                + ' allowfullscreen loading="lazy"></iframe></div>';
+        }
         let extra = '';
         if (attrs) {
             const w = attrs.match(/\bwidth\s*=\s*(\d+(?:px|%)?)/i);
