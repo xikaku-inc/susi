@@ -560,7 +560,7 @@ fn create_jwt(secret: &[u8; 32], username: &str) -> Result<String, (StatusCode, 
     let claims = Claims {
         sub: username.into(),
         iat: now,
-        exp: now + 86400, // 24h
+        exp: now + 2_592_000, // 30 days
     };
     encode(&Header::default(), &claims, &EncodingKey::from_secret(secret))
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))
