@@ -833,24 +833,24 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
             <h2 style="font-size:16px;font-weight:600;">Products</h2>
         </div>
         <div class="card" style="margin-bottom:20px;">
-            <div style="padding:16px;display:grid;grid-template-columns:150px 1fr 1.8fr 90px 130px;gap:12px;align-items:end;">
+            <div style="padding:16px;display:grid;grid-template-columns:150px 1fr 1.8fr 90px 180px;gap:12px;align-items:end;">
                 <div>
                     <label style="display:block;font-size:12px;color:var(--text2);margin-bottom:4px;">Slug</label>
-                    <input type="text" id="newProductSlug" placeholder="lpvr" autocomplete="off">
+                    <input type="text" id="newProductSlug" placeholder="lpvr" autocomplete="off" style="width:100%;">
                 </div>
                 <div>
                     <label style="display:block;font-size:12px;color:var(--text2);margin-bottom:4px;">Name</label>
-                    <input type="text" id="newProductName" placeholder="LPVR" autocomplete="off">
+                    <input type="text" id="newProductName" placeholder="LPVR" autocomplete="off" style="width:100%;">
                 </div>
                 <div>
                     <label style="display:block;font-size:12px;color:var(--text2);margin-bottom:4px;">Description</label>
-                    <input type="text" id="newProductDesc" autocomplete="off">
+                    <input type="text" id="newProductDesc" autocomplete="off" style="width:100%;">
                 </div>
                 <div>
                     <label style="display:block;font-size:12px;color:var(--text2);margin-bottom:4px;">Order</label>
-                    <input type="number" id="newProductOrd" value="0">
+                    <input type="number" id="newProductOrd" value="0" style="width:100%;">
                 </div>
-                <button onclick="createProduct()" style="min-width:0;">Add Product</button>
+                <button onclick="createProduct()">Add Product</button>
             </div>
         </div>
         <div class="card">
@@ -3630,7 +3630,7 @@ function renderProducts() {
         container.innerHTML = '<span style="color:var(--text2);">No products yet</span>';
         return;
     }
-    const GRID = 'display:grid;grid-template-columns:150px 1fr 1.8fr 90px 130px;gap:12px;align-items:center;';
+    const GRID = 'display:grid;grid-template-columns:150px 1fr 1.8fr 90px 180px;gap:12px;align-items:center;';
     const header =
         '<div style="' + GRID + 'padding:0 0 8px;border-bottom:1px solid var(--border);font-size:12px;font-weight:600;color:var(--text2);">' +
         '<div>Slug</div><div>Name</div><div>Description</div><div>Order</div><div></div></div>';

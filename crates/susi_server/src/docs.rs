@@ -30,8 +30,17 @@ fn docs_root(state: &AppState) -> std::path::PathBuf {
     std::path::Path::new(&state.data_dir).join("docs")
 }
 
-fn assets_dir(state: &AppState, tag: &str) -> std::path::PathBuf {
-    docs_root(state).join(tag).join("assets")
+/// On-disk asset directory for a release. FusionHub keeps its historical flat
+/// layout (`docs/{tag}/assets`) so existing asset files stay addressable with
+/// no migration; every other product is namespaced (`docs/{product}/{tag}/...`)
+/// to avoid tag collisions. Back-compat shim: remove the special-case once all
+/// products use the namespaced layout.
+fn assets_dir(state: &AppState, product: &str, tag: &str) -> std::path::PathBuf {
+    if product == susi_core::db::DEFAULT_PRODUCT {
+        docs_root(state).join(tag).join("assets")
+    } else {
+        docs_root(state).join(product).join(tag).join("assets")
+    }
 }
 
 /// Reject path components that could escape the asset directory.
@@ -46,6 +55,19 @@ pub(crate) fn safe_filename(name: &str) -> Result<&str, (StatusCode, Json<ErrorR
         return Err(error_response(StatusCode::BAD_REQUEST, "Invalid filename"));
     }
     Ok(name)
+}
+
+pub(crate) fn safe_product(product: &str) -> Result<&str, (StatusCode, Json<ErrorResponse>)> {
+    if product.is_empty()
+        || product.contains('/')
+        || product.contains('\\')
+        || product.contains('\0')
+        || product == "."
+        || product == ".."
+    {
+        return Err(error_response(StatusCode::BAD_REQUEST, "Invalid product"));
+    }
+    Ok(product)
 }
 
 pub(crate) fn safe_tag(tag: &str) -> Result<&str, (StatusCode, Json<ErrorResponse>)> {
@@ -88,13 +110,14 @@ fn db_err(e: LicenseError) -> (StatusCode, Json<ErrorResponse>) {
 pub(crate) fn seed_user_docs_into_release(
     state: &AppState,
     dst_id: i64,
+    product: &str,
     dst_tag: &str,
     workspace_id: Option<&str>,
 ) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
     let (src_tag, asset_names) = {
         let mut db = state.db.lock().unwrap();
         let prior = db
-            .latest_prior_release_with_user_docs(dst_id, workspace_id)
+            .latest_prior_release_with_user_docs(dst_id, product, workspace_id)
             .map_err(db_err)?;
         let Some((src_id, src_tag)) = prior else {
             return Ok(());
@@ -109,8 +132,8 @@ pub(crate) fn seed_user_docs_into_release(
     };
 
     if !asset_names.is_empty() {
-        let src_dir = assets_dir(state, &src_tag);
-        let dst_dir = assets_dir(state, dst_tag);
+        let src_dir = assets_dir(state, product, &src_tag);
+        let dst_dir = assets_dir(state, product, dst_tag);
         if let Err(e) = std::fs::create_dir_all(&dst_dir) {
             log::warn!("Could not create asset dir {}: {}", dst_dir.display(), e);
         } else {
@@ -136,33 +159,35 @@ pub(crate) fn seed_user_docs_into_release(
 fn release_writer_check_or_admin_create(
     state: &AppState,
     principal: &Principal,
+    product: &str,
     tag: &str,
 ) -> Result<Option<String>, (StatusCode, Json<ErrorResponse>)> {
     crate::require_admin_full(state, principal)?;
     let db = state.db.lock().unwrap();
     let scoped_ws = db
-        .get_release_workspace_id(tag)
+        .get_release_workspace_id(product, tag)
         .map_err(db_err)?
         .flatten();
     Ok(scoped_ws)
 }
 
-/// Ensure the release row for `tag` exists and, if it was just created, seed
-/// it with hand-authored content from the most recent prior release in the
-/// same scope. Returns the release id.
+/// Ensure the release row for `(product, tag)` exists and, if it was just
+/// created, seed it with hand-authored content from the most recent prior
+/// release in the same scope. Returns the release id.
 fn ensure_release_with_seed(
     state: &AppState,
+    product: &str,
     tag: &str,
     name: &str,
     workspace_id: Option<&str>,
 ) -> Result<i64, (StatusCode, Json<ErrorResponse>)> {
     let (dst_id, newly_created) = {
         let db = state.db.lock().unwrap();
-        db.ensure_release_created_scoped(tag, name, workspace_id)
+        db.ensure_release_created_scoped(product, tag, name, workspace_id)
             .map_err(db_err)?
     };
     if newly_created {
-        seed_user_docs_into_release(state, dst_id, tag, workspace_id)?;
+        seed_user_docs_into_release(state, dst_id, product, tag, workspace_id)?;
     }
     Ok(dst_id)
 }
@@ -171,11 +196,20 @@ fn ensure_release_with_seed(
 // Public read endpoints
 // ---------------------------------------------------------------------------
 
-pub async fn handle_list_doc_releases(
-    State(state): State<Arc<AppState>>,
+// Each public read endpoint has a product-scoped axum handler
+// (`/api/v1/docs/{product}/...`) and a legacy tag-only wrapper
+// (`/api/v1/docs/...`) that pins the default product, so already-deployed
+// FusionHubs keep working. Both delegate to a shared `_impl`.
+// Back-compat shim: drop the legacy wrappers once every client sends a product.
+
+use susi_core::db::DEFAULT_PRODUCT;
+
+async fn list_doc_releases_impl(
+    state: &Arc<AppState>,
+    product: &str,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let db = state.db.lock().unwrap();
-    let rows = db.list_doc_releases().map_err(db_err)?;
+    let rows = db.list_doc_releases(product).map_err(db_err)?;
     let releases: Vec<_> = rows
         .into_iter()
         .map(|(_id, tag, name, created_at, page_count)| {
@@ -190,11 +224,26 @@ pub async fn handle_list_doc_releases(
     Ok(Json(json!({ "releases": releases })))
 }
 
-pub async fn handle_latest_doc_release(
+pub async fn handle_list_doc_releases(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    list_doc_releases_impl(&state, DEFAULT_PRODUCT).await
+}
+
+pub async fn handle_list_doc_releases_p(
+    State(state): State<Arc<AppState>>,
+    Path(product): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    safe_product(&product)?;
+    list_doc_releases_impl(&state, &product).await
+}
+
+async fn latest_doc_release_impl(
+    state: &Arc<AppState>,
+    product: &str,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let db = state.db.lock().unwrap();
-    let mut rows = db.list_doc_releases().map_err(db_err)?;
+    let mut rows = db.list_doc_releases(product).map_err(db_err)?;
     if rows.is_empty() {
         return Err(error_response(StatusCode::NOT_FOUND, "No documentation releases"));
     }
@@ -207,17 +256,32 @@ pub async fn handle_latest_doc_release(
     })))
 }
 
-pub async fn handle_list_doc_pages(
+pub async fn handle_latest_doc_release(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Path(tag): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    safe_tag(&tag)?;
-    let principal_opt = validate_principal(&headers, &state).ok();
-    release_reader_check(&state, principal_opt.as_ref(), &tag)?;
+    latest_doc_release_impl(&state, DEFAULT_PRODUCT).await
+}
+
+pub async fn handle_latest_doc_release_p(
+    State(state): State<Arc<AppState>>,
+    Path(product): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    safe_product(&product)?;
+    latest_doc_release_impl(&state, &product).await
+}
+
+async fn list_doc_pages_impl(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    product: &str,
+    tag: &str,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    safe_tag(tag)?;
+    let principal_opt = validate_principal(headers, state).ok();
+    release_reader_check(state, principal_opt.as_ref(), product, tag)?;
     let db = state.db.lock().unwrap();
     let release_id = db
-        .get_release_by_tag(&tag)
+        .get_release_by_product_tag(product, tag)
         .map_err(db_err)?
         .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Release not found"))?;
     let pages = db.list_doc_pages(release_id).map_err(db_err)?;
@@ -245,21 +309,40 @@ pub async fn handle_list_doc_pages(
     })))
 }
 
-pub async fn handle_get_doc_page(
+pub async fn handle_list_doc_pages(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Path((tag, slug)): Path<(String, String)>,
+    Path(tag): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    safe_tag(&tag)?;
-    let principal_opt = validate_principal(&headers, &state).ok();
-    release_reader_check(&state, principal_opt.as_ref(), &tag)?;
+    list_doc_pages_impl(&state, &headers, DEFAULT_PRODUCT, &tag).await
+}
+
+pub async fn handle_list_doc_pages_p(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((product, tag)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    safe_product(&product)?;
+    list_doc_pages_impl(&state, &headers, &product, &tag).await
+}
+
+async fn get_doc_page_impl(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    product: &str,
+    tag: &str,
+    slug: &str,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    safe_tag(tag)?;
+    let principal_opt = validate_principal(headers, state).ok();
+    release_reader_check(state, principal_opt.as_ref(), product, tag)?;
     let db = state.db.lock().unwrap();
     let release_id = db
-        .get_release_by_tag(&tag)
+        .get_release_by_product_tag(product, tag)
         .map_err(db_err)?
         .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Release not found"))?;
     let page = db
-        .get_doc_page(release_id, &slug)
+        .get_doc_page(release_id, slug)
         .map_err(db_err)?
         .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Page not found"))?;
     let (title, body_md, parent_slug, ord, updated_at) = page;
@@ -274,6 +357,23 @@ pub async fn handle_get_doc_page(
     })))
 }
 
+pub async fn handle_get_doc_page(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((tag, slug)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    get_doc_page_impl(&state, &headers, DEFAULT_PRODUCT, &tag, &slug).await
+}
+
+pub async fn handle_get_doc_page_p(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((product, tag, slug)): Path<(String, String, String)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    safe_product(&product)?;
+    get_doc_page_impl(&state, &headers, &product, &tag, &slug).await
+}
+
 #[derive(Deserialize)]
 pub struct AssetAuthQuery {
     /// Bearer token passed via query string. Browser <img> requests can't set
@@ -283,14 +383,16 @@ pub struct AssetAuthQuery {
     auth: Option<String>,
 }
 
-pub async fn handle_get_doc_asset(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Query(q): Query<AssetAuthQuery>,
-    Path((tag, file_name)): Path<(String, String)>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    safe_tag(&tag)?;
-    safe_filename(&file_name)?;
+async fn get_doc_asset_impl(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    q: &AssetAuthQuery,
+    product: &str,
+    tag: &str,
+    file_name: &str,
+) -> Result<(HeaderMap, Vec<u8>), (StatusCode, Json<ErrorResponse>)> {
+    safe_tag(tag)?;
+    safe_filename(file_name)?;
     let mut auth_headers = headers.clone();
     if !auth_headers.contains_key("authorization") {
         if let Some(tok) = q.auth.as_deref().filter(|s| !s.is_empty()) {
@@ -299,10 +401,10 @@ pub async fn handle_get_doc_asset(
             }
         }
     }
-    let principal_opt = validate_principal(&auth_headers, &state).ok();
-    release_reader_check(&state, principal_opt.as_ref(), &tag)?;
+    let principal_opt = validate_principal(&auth_headers, state).ok();
+    release_reader_check(state, principal_opt.as_ref(), product, tag)?;
 
-    let path = assets_dir(&state, &tag).join(&file_name);
+    let path = assets_dir(state, product, tag).join(file_name);
     if !path.exists() {
         return Err(error_response(StatusCode::NOT_FOUND, "Asset not found"));
     }
@@ -313,11 +415,30 @@ pub async fn handle_get_doc_asset(
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("Read: {}", e)))?;
 
     let mut resp = HeaderMap::new();
-    resp.insert(header::CONTENT_TYPE, content_type_for(&file_name).parse().unwrap());
+    resp.insert(header::CONTENT_TYPE, content_type_for(file_name).parse().unwrap());
     resp.insert(header::CONTENT_LENGTH, bytes.len().into());
     // Allow inline display; long max-age since assets are immutable per release
     resp.insert(header::CACHE_CONTROL, "public, max-age=86400".parse().unwrap());
     Ok((resp, bytes))
+}
+
+pub async fn handle_get_doc_asset(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(q): Query<AssetAuthQuery>,
+    Path((tag, file_name)): Path<(String, String)>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    get_doc_asset_impl(&state, &headers, &q, DEFAULT_PRODUCT, &tag, &file_name).await
+}
+
+pub async fn handle_get_doc_asset_p(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(q): Query<AssetAuthQuery>,
+    Path((product, tag, file_name)): Path<(String, String, String)>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    safe_product(&product)?;
+    get_doc_asset_impl(&state, &headers, &q, &product, &tag, &file_name).await
 }
 
 // ---------------------------------------------------------------------------
@@ -337,19 +458,22 @@ pub struct UpsertPageRequest {
     pub release_name: Option<String>,
 }
 
-pub async fn handle_upsert_doc_page(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Path((tag, slug)): Path<(String, String)>,
-    Json(req): Json<UpsertPageRequest>,
+async fn upsert_doc_page_impl(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    product: &str,
+    tag: &str,
+    slug: &str,
+    req: UpsertPageRequest,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    let principal = validate_principal(&headers, &state)?;
-    safe_tag(&tag)?;
-    let workspace_id = release_writer_check_or_admin_create(&state, &principal, &tag)?;
+    let principal = validate_principal(headers, state)?;
+    safe_tag(tag)?;
+    let workspace_id = release_writer_check_or_admin_create(state, &principal, product, tag)?;
 
     let release_id = ensure_release_with_seed(
-        &state,
-        &tag,
+        state,
+        product,
+        tag,
         req.release_name.as_deref().unwrap_or(""),
         workspace_id.as_deref(),
     )?;
@@ -357,7 +481,7 @@ pub async fn handle_upsert_doc_page(
         let db = state.db.lock().unwrap();
         db.upsert_doc_page(
             release_id,
-            &slug,
+            slug,
             &req.title,
             &req.body_md,
             req.parent_slug.as_deref(),
@@ -368,20 +492,41 @@ pub async fn handle_upsert_doc_page(
     Ok(Json(json!({ "id": id, "tag": tag, "slug": slug })))
 }
 
+pub async fn handle_upsert_doc_page(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((tag, slug)): Path<(String, String)>,
+    Json(req): Json<UpsertPageRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    upsert_doc_page_impl(&state, &headers, DEFAULT_PRODUCT, &tag, &slug, req).await
+}
+
+pub async fn handle_upsert_doc_page_p(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((product, tag, slug)): Path<(String, String, String)>,
+    Json(req): Json<UpsertPageRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    safe_product(&product)?;
+    upsert_doc_page_impl(&state, &headers, &product, &tag, &slug, req).await
+}
+
 #[derive(Deserialize)]
 pub struct RenamePageRequest {
     pub new_slug: String,
 }
 
-pub async fn handle_rename_doc_page(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Path((tag, slug)): Path<(String, String)>,
-    Json(req): Json<RenamePageRequest>,
+async fn rename_doc_page_impl(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    product: &str,
+    tag: &str,
+    slug: &str,
+    req: RenamePageRequest,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    let principal = validate_principal(&headers, &state)?;
-    safe_tag(&tag)?;
-    release_writer_check(&state, &principal, &tag)?;
+    let principal = validate_principal(headers, state)?;
+    safe_tag(tag)?;
+    release_writer_check(state, &principal, product, tag)?;
     let new_slug = req.new_slug.trim();
     if new_slug.is_empty() || new_slug.contains('/') || new_slug.contains('\\') || new_slug.contains('\0') {
         return Err(error_response(StatusCode::BAD_REQUEST, "Invalid slug"));
@@ -389,10 +534,10 @@ pub async fn handle_rename_doc_page(
 
     let mut db = state.db.lock().unwrap();
     let release_id = db
-        .get_release_by_tag(&tag)
+        .get_release_by_product_tag(product, tag)
         .map_err(db_err)?
         .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Release not found"))?;
-    match db.rename_doc_page(release_id, &slug, new_slug) {
+    match db.rename_doc_page(release_id, slug, new_slug) {
         Ok(true) => Ok(Json(json!({ "tag": tag, "slug": new_slug }))),
         Ok(false) => Err(error_response(StatusCode::NOT_FOUND, "Page not found")),
         Err(e) => {
@@ -406,25 +551,63 @@ pub async fn handle_rename_doc_page(
     }
 }
 
+pub async fn handle_rename_doc_page(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((tag, slug)): Path<(String, String)>,
+    Json(req): Json<RenamePageRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    rename_doc_page_impl(&state, &headers, DEFAULT_PRODUCT, &tag, &slug, req).await
+}
+
+pub async fn handle_rename_doc_page_p(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((product, tag, slug)): Path<(String, String, String)>,
+    Json(req): Json<RenamePageRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    safe_product(&product)?;
+    rename_doc_page_impl(&state, &headers, &product, &tag, &slug, req).await
+}
+
+async fn delete_doc_page_impl(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    product: &str,
+    tag: &str,
+    slug: &str,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(headers, state)?;
+    safe_tag(tag)?;
+    release_writer_check(state, &principal, product, tag)?;
+
+    let db = state.db.lock().unwrap();
+    let release_id = db
+        .get_release_by_product_tag(product, tag)
+        .map_err(db_err)?
+        .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Release not found"))?;
+    let removed = db.delete_doc_page(release_id, slug).map_err(db_err)?;
+    if !removed {
+        return Err(error_response(StatusCode::NOT_FOUND, "Page not found"));
+    }
+    Ok(Json(json!({ "status": "OK" })))
+}
+
 pub async fn handle_delete_doc_page(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path((tag, slug)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    let principal = validate_principal(&headers, &state)?;
-    safe_tag(&tag)?;
-    release_writer_check(&state, &principal, &tag)?;
+    delete_doc_page_impl(&state, &headers, DEFAULT_PRODUCT, &tag, &slug).await
+}
 
-    let db = state.db.lock().unwrap();
-    let release_id = db
-        .get_release_by_tag(&tag)
-        .map_err(db_err)?
-        .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Release not found"))?;
-    let removed = db.delete_doc_page(release_id, &slug).map_err(db_err)?;
-    if !removed {
-        return Err(error_response(StatusCode::NOT_FOUND, "Page not found"));
-    }
-    Ok(Json(json!({ "status": "OK" })))
+pub async fn handle_delete_doc_page_p(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((product, tag, slug)): Path<(String, String, String)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    safe_product(&product)?;
+    delete_doc_page_impl(&state, &headers, &product, &tag, &slug).await
 }
 
 #[derive(Deserialize, Default)]
@@ -441,15 +624,16 @@ struct PageManifestEntry {
 /// upload. Existing pages/assets that are not present in the upload are left
 /// alone, so hand-authored content (e.g. the General section) survives a
 /// release pipeline run.
-pub async fn handle_bulk_import_docs(
-    State(state): State<Arc<AppState>>,
+async fn bulk_import_docs_impl(
+    state: Arc<AppState>,
     headers: HeaderMap,
-    Path(tag): Path<String>,
+    product: &str,
+    tag: String,
     mut multipart: Multipart,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
     safe_tag(&tag)?;
-    let workspace_id = release_writer_check_or_admin_create(&state, &principal, &tag)?;
+    let workspace_id = release_writer_check_or_admin_create(&state, &principal, product, &tag)?;
 
     let mut release_name = String::new();
     let mut manifest: HashMap<String, PageManifestEntry> = HashMap::new();
@@ -525,7 +709,7 @@ pub async fn handle_bulk_import_docs(
         })
         .collect();
 
-    let release_id = ensure_release_with_seed(&state, &tag, &release_name, workspace_id.as_deref())?;
+    let release_id = ensure_release_with_seed(&state, product, &tag, &release_name, workspace_id.as_deref())?;
     let (written_pages, skipped_user_slugs) = {
         let mut db = state.db.lock().unwrap();
         db.upsert_doc_pages(release_id, &row_data).map_err(db_err)?
@@ -533,7 +717,7 @@ pub async fn handle_bulk_import_docs(
 
     // Pipeline-side asset upsert on disk + DB. User-owned assets with the same
     // file_name are left alone (both on disk and in DB).
-    let asset_path = assets_dir(&state, &tag);
+    let asset_path = assets_dir(&state, product, &tag);
     let mut written_assets = 0usize;
     let mut skipped_user_assets: Vec<String> = Vec::new();
     if !assets.is_empty() {
@@ -578,16 +762,39 @@ pub async fn handle_bulk_import_docs(
     })))
 }
 
-/// Upload (or overwrite) a single asset for a release. Used by the in-browser editor.
-pub async fn handle_upload_doc_asset(
+/// Bulk import: upserts pages and assets for a release tag from a multipart
+/// upload. Existing pages/assets not present in the upload are left alone, so
+/// hand-authored content survives a release pipeline run.
+pub async fn handle_bulk_import_docs(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(tag): Path<String>,
+    multipart: Multipart,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    bulk_import_docs_impl(state, headers, DEFAULT_PRODUCT, tag, multipart).await
+}
+
+pub async fn handle_bulk_import_docs_p(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((product, tag)): Path<(String, String)>,
+    multipart: Multipart,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    safe_product(&product)?;
+    bulk_import_docs_impl(state, headers, &product, tag, multipart).await
+}
+
+/// Upload (or overwrite) a single asset for a release. Used by the in-browser editor.
+async fn upload_doc_asset_impl(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    product: &str,
+    tag: String,
     mut multipart: Multipart,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
     safe_tag(&tag)?;
-    let workspace_id = release_writer_check_or_admin_create(&state, &principal, &tag)?;
+    let workspace_id = release_writer_check_or_admin_create(&state, &principal, product, &tag)?;
 
     // Pull the first "file" field from the multipart body.
     let mut file_name = String::new();
@@ -613,9 +820,9 @@ pub async fn handle_upload_doc_asset(
     safe_filename(&file_name)?;
 
     // Ensure the release exists so the asset has a valid parent row.
-    let release_id = ensure_release_with_seed(&state, &tag, "", workspace_id.as_deref())?;
+    let release_id = ensure_release_with_seed(&state, product, &tag, "", workspace_id.as_deref())?;
 
-    let dir = assets_dir(&state, &tag);
+    let dir = assets_dir(&state, product, &tag);
     std::fs::create_dir_all(&dir).map_err(|e| {
         error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("mkdir: {}", e))
     })?;
@@ -630,9 +837,63 @@ pub async fn handle_upload_doc_asset(
             .map_err(db_err)?;
     }
 
-    let url = format!("/api/v1/docs/{}/assets/{}", tag, file_name);
+    // FusionHub keeps the flat asset URL so its markdown rewrite still resolves;
+    // other products carry the product segment.
+    let url = if product == DEFAULT_PRODUCT {
+        format!("/api/v1/docs/{}/assets/{}", tag, file_name)
+    } else {
+        format!("/api/v1/docs/{}/{}/assets/{}", product, tag, file_name)
+    };
     log::info!("Doc asset uploaded: {} ({} bytes) for release {}", file_name, bytes.len(), tag);
     Ok(Json(json!({ "name": file_name, "size": bytes.len(), "url": url })))
+}
+
+pub async fn handle_upload_doc_asset(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(tag): Path<String>,
+    multipart: Multipart,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    upload_doc_asset_impl(state, headers, DEFAULT_PRODUCT, tag, multipart).await
+}
+
+pub async fn handle_upload_doc_asset_p(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((product, tag)): Path<(String, String)>,
+    multipart: Multipart,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    safe_product(&product)?;
+    upload_doc_asset_impl(state, headers, &product, tag, multipart).await
+}
+
+async fn delete_doc_asset_impl(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    product: &str,
+    tag: &str,
+    file_name: &str,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(headers, state)?;
+    safe_tag(tag)?;
+    safe_filename(file_name)?;
+    release_writer_check(state, &principal, product, tag)?;
+
+    let release_id = {
+        let db = state.db.lock().unwrap();
+        db.get_release_by_product_tag(product, tag)
+            .map_err(db_err)?
+            .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Release not found"))?
+    };
+    let removed = {
+        let db = state.db.lock().unwrap();
+        db.delete_doc_asset(release_id, file_name).map_err(db_err)?
+    };
+    let _ = std::fs::remove_file(assets_dir(state, product, tag).join(file_name));
+    if !removed {
+        return Err(error_response(StatusCode::NOT_FOUND, "Asset not found"));
+    }
+    Ok(Json(json!({ "status": "OK" })))
 }
 
 pub async fn handle_delete_doc_asset(
@@ -640,26 +901,16 @@ pub async fn handle_delete_doc_asset(
     headers: HeaderMap,
     Path((tag, file_name)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    let principal = validate_principal(&headers, &state)?;
-    safe_tag(&tag)?;
-    safe_filename(&file_name)?;
-    release_writer_check(&state, &principal, &tag)?;
+    delete_doc_asset_impl(&state, &headers, DEFAULT_PRODUCT, &tag, &file_name).await
+}
 
-    let release_id = {
-        let db = state.db.lock().unwrap();
-        db.get_release_by_tag(&tag)
-            .map_err(db_err)?
-            .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Release not found"))?
-    };
-    let removed = {
-        let db = state.db.lock().unwrap();
-        db.delete_doc_asset(release_id, &file_name).map_err(db_err)?
-    };
-    let _ = std::fs::remove_file(assets_dir(&state, &tag).join(&file_name));
-    if !removed {
-        return Err(error_response(StatusCode::NOT_FOUND, "Asset not found"));
-    }
-    Ok(Json(json!({ "status": "OK" })))
+pub async fn handle_delete_doc_asset_p(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((product, tag, file_name)): Path<(String, String, String)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    safe_product(&product)?;
+    delete_doc_asset_impl(&state, &headers, &product, &tag, &file_name).await
 }
 
 /// Pick a title: first H1 in the markdown, else humanize the slug.

@@ -28,7 +28,7 @@ use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation}
 use rand::{Rng, RngCore};
 use sha2::{Digest, Sha256};
 use susi_core::crypto::{private_key_from_pem, sign_license};
-use susi_core::db::LicenseDb;
+use susi_core::db::{LicenseDb, DEFAULT_PRODUCT};
 use susi_core::{License, DEFAULT_LEASE_DURATION_HOURS, DEFAULT_LEASE_GRACE_HOURS};
 use rsa::RsaPrivateKey;
 use serde::{Deserialize, Serialize};
@@ -359,6 +359,8 @@ struct Claims {
 #[derive(Debug, Serialize, Deserialize)]
 struct DownloadTicketClaims {
     sub: String,
+    #[serde(default)]
+    product: String,
     tag: String,
     asset: String,
     aud: String,
@@ -569,11 +571,13 @@ fn create_jwt(secret: &[u8; 32], username: &str) -> Result<String, (StatusCode, 
 fn mint_download_ticket(
     secret: &[u8; 32],
     sub: &str,
+    product: &str,
     tag: &str,
     asset: &str,
 ) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
     let claims = DownloadTicketClaims {
         sub: sub.into(),
+        product: product.into(),
         tag: tag.into(),
         asset: asset.into(),
         aud: DOWNLOAD_TICKET_AUDIENCE.into(),
@@ -586,6 +590,7 @@ fn mint_download_ticket(
 fn validate_download_ticket(
     secret: &[u8; 32],
     token: &str,
+    expected_product: &str,
     expected_tag: &str,
     expected_asset: &str,
 ) -> Result<DownloadTicketClaims, (StatusCode, Json<ErrorResponse>)> {
@@ -594,7 +599,9 @@ fn validate_download_ticket(
     let claims = decode::<DownloadTicketClaims>(token, &DecodingKey::from_secret(secret), &validation)
         .map(|d| d.claims)
         .map_err(|_| error_response(StatusCode::UNAUTHORIZED, "Invalid or expired download ticket"))?;
-    if claims.tag != expected_tag || claims.asset != expected_asset {
+    // Empty `product` in older tickets means the default product.
+    let ticket_product = if claims.product.is_empty() { DEFAULT_PRODUCT } else { &claims.product };
+    if ticket_product != expected_product || claims.tag != expected_tag || claims.asset != expected_asset {
         return Err(error_response(StatusCode::FORBIDDEN, "Ticket does not match requested asset"));
     }
     Ok(claims)
@@ -820,12 +827,13 @@ fn is_site_admin(state: &AppState, principal: &Principal) -> bool {
 pub(crate) fn release_writer_check(
     state: &AppState,
     principal: &Principal,
+    product: &str,
     tag: &str,
 ) -> Result<Option<String>, (StatusCode, Json<ErrorResponse>)> {
     require_admin_full(state, principal)?;
     let scoped_ws = {
         let db = state.db.lock().unwrap();
-        db.get_release_workspace_id(tag)
+        db.get_release_workspace_id(product, tag)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
             .flatten()
     };
@@ -837,11 +845,12 @@ pub(crate) fn release_writer_check(
 pub(crate) fn release_reader_check(
     state: &AppState,
     principal_opt: Option<&Principal>,
+    product: &str,
     tag: &str,
 ) -> Result<Option<String>, (StatusCode, Json<ErrorResponse>)> {
     let scoped_ws = {
         let db = state.db.lock().unwrap();
-        db.get_release_workspace_id(tag)
+        db.get_release_workspace_id(product, tag)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
             .flatten()
     };
@@ -2967,15 +2976,147 @@ fn releases_dir(state: &AppState) -> std::path::PathBuf {
     std::path::Path::new(&state.data_dir).join("releases")
 }
 
+/// On-disk binary directory for a release. FusionHub keeps its historical flat
+/// layout (`releases/{tag}`) so existing artifacts and the public download
+/// endpoint stay valid with no migration; other products are namespaced.
+/// Back-compat shim, mirrors `docs::assets_dir`.
+fn release_tag_dir(state: &AppState, product: &str, tag: &str) -> std::path::PathBuf {
+    if product == DEFAULT_PRODUCT {
+        releases_dir(state).join(tag)
+    } else {
+        releases_dir(state).join(product).join(tag)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Products (catalog dimension that scopes releases + docs)
+// ---------------------------------------------------------------------------
+
+/// Public list of products so doc clients can populate a product picker.
+async fn handle_list_products(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let db = state.db.lock().unwrap();
+    let rows = db
+        .list_release_products()
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    let products: Vec<_> = rows
+        .into_iter()
+        .map(|(slug, name, description, ord)| {
+            serde_json::json!({ "slug": slug, "name": name, "description": description, "ord": ord })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({ "products": products })))
+}
+
+#[derive(Deserialize)]
+struct ProductRequest {
+    slug: String,
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    ord: i64,
+}
+
+/// Create a product. Admin only (JWT).
+async fn handle_create_product(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<ProductRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    require_admin_full(&state, &principal)?;
+    let slug = req.slug.trim();
+    docs::safe_product(slug)?;
+    if req.name.trim().is_empty() {
+        return Err(error_response(StatusCode::BAD_REQUEST, "Missing product name"));
+    }
+    let db = state.db.lock().unwrap();
+    if db
+        .product_exists(slug)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+    {
+        return Err(error_response(StatusCode::CONFLICT, "Product already exists"));
+    }
+    db.upsert_release_product(slug, req.name.trim(), req.description.trim(), req.ord)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    Ok(Json(serde_json::json!({ "status": "OK", "slug": slug })))
+}
+
+#[derive(Deserialize)]
+struct UpdateProductRequest {
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    ord: i64,
+}
+
+/// Update a product's metadata (slug is immutable). Admin only (JWT).
+async fn handle_update_product(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(product): Path<String>,
+    Json(req): Json<UpdateProductRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    require_admin_full(&state, &principal)?;
+    docs::safe_product(&product)?;
+    let db = state.db.lock().unwrap();
+    if !db
+        .product_exists(&product)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+    {
+        return Err(error_response(StatusCode::NOT_FOUND, "Product not found"));
+    }
+    db.upsert_release_product(&product, req.name.trim(), req.description.trim(), req.ord)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    Ok(Json(serde_json::json!({ "status": "OK", "slug": product })))
+}
+
+/// Delete a product. Admin only (JWT). Rejected if it still owns releases, and
+/// the default product cannot be removed.
+async fn handle_delete_product(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(product): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    require_admin_full(&state, &principal)?;
+    if product == DEFAULT_PRODUCT {
+        return Err(error_response(StatusCode::BAD_REQUEST, "Cannot delete the default product"));
+    }
+    let db = state.db.lock().unwrap();
+    let n = db
+        .count_releases_for_product(&product)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    if n > 0 {
+        return Err(error_response(
+            StatusCode::CONFLICT,
+            "Product still has releases; delete them first",
+        ));
+    }
+    if !db
+        .delete_release_product(&product)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+    {
+        return Err(error_response(StatusCode::NOT_FOUND, "Product not found"));
+    }
+    Ok(Json(serde_json::json!({ "status": "OK" })))
+}
+
 /// List releases — available to licensed clients or authenticated users
 async fn handle_get_releases(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(pq): Query<ProductQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     // Accept either license key or bearer token
     if validate_license_key(&state, &headers).is_err() {
         validate_principal(&headers, &state)?;
     }
+    let product = pq.slug();
 
     let (rows, mut assets_by_id) = {
         let db = state.db.lock().unwrap();
@@ -2988,8 +3129,8 @@ async fn handle_get_releases(
     };
 
     let mut releases = Vec::new();
-    for (id, tag, name, body, prerelease, created_at, workspace_id) in &rows {
-        if workspace_id.is_some() { continue; }
+    for (id, tag, name, body, prerelease, created_at, workspace_id, product_col) in &rows {
+        if workspace_id.is_some() || product_col != product { continue; }
         let assets = assets_by_id.remove(id).unwrap_or_default();
         releases.push(serde_json::json!({
             "tag": tag,
@@ -3014,6 +3155,7 @@ async fn handle_get_releases(
 fn authorize_release_download(
     state: &Arc<AppState>,
     headers: &HeaderMap,
+    product: &str,
     tag: &str,
 ) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
     let license_ok = validate_license_key(state, headers).is_ok();
@@ -3024,7 +3166,7 @@ fn authorize_release_download(
 
     let scoped_ws = {
         let db = state.db.lock().unwrap();
-        db.get_release_workspace_id(tag)
+        db.get_release_workspace_id(product, tag)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
             .flatten()
     };
@@ -3053,6 +3195,22 @@ fn authorize_release_download(
 struct DownloadTicketRequest {
     tag: String,
     asset: String,
+    #[serde(default)]
+    product: Option<String>,
+}
+
+/// Optional `?product=` selector for release-admin and download routes. Absent
+/// means the default product, so deployed FusionHub clients keep working.
+#[derive(Deserialize)]
+struct ProductQuery {
+    #[serde(default)]
+    product: Option<String>,
+}
+
+impl ProductQuery {
+    fn slug(&self) -> &str {
+        self.product.as_deref().filter(|s| !s.is_empty()).unwrap_or(DEFAULT_PRODUCT)
+    }
 }
 
 /// Mint a short-lived, single-asset ticket the browser can include as a query
@@ -3066,8 +3224,10 @@ async fn handle_mint_download_ticket(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let safe_tag = docs::safe_tag(&body.tag)?;
     let safe_asset = docs::safe_filename(&body.asset)?;
-    let sub = authorize_release_download(&state, &headers, &safe_tag)?;
-    let ticket = mint_download_ticket(&state.jwt_secret, &sub, &safe_tag, &safe_asset)?;
+    let product = body.product.as_deref().filter(|s| !s.is_empty()).unwrap_or(DEFAULT_PRODUCT);
+    docs::safe_product(product)?;
+    let sub = authorize_release_download(&state, &headers, product, safe_tag)?;
+    let ticket = mint_download_ticket(&state.jwt_secret, &sub, product, safe_tag, safe_asset)?;
     Ok(Json(serde_json::json!({
         "ticket": ticket,
         "expires_in": DOWNLOAD_TICKET_TTL_SECS,
@@ -3078,6 +3238,8 @@ async fn handle_mint_download_ticket(
 struct DownloadQuery {
     #[serde(default)]
     ticket: Option<String>,
+    #[serde(default)]
+    product: Option<String>,
 }
 
 async fn handle_download_asset(
@@ -3086,10 +3248,12 @@ async fn handle_download_asset(
     Path((tag, asset_name)): Path<(String, String)>,
     Query(q): Query<DownloadQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let product = q.product.as_deref().filter(|s| !s.is_empty()).unwrap_or(DEFAULT_PRODUCT);
+    docs::safe_product(product)?;
     if let Some(ref ticket) = q.ticket {
-        validate_download_ticket(&state.jwt_secret, ticket, &tag, &asset_name)?;
+        validate_download_ticket(&state.jwt_secret, ticket, product, &tag, &asset_name)?;
     } else {
-        authorize_release_download(&state, &headers, &tag)?;
+        authorize_release_download(&state, &headers, product, &tag)?;
     }
 
     // Reject traversal / empty / nul before building the path, and confirm the
@@ -3100,7 +3264,7 @@ async fn handle_download_asset(
 
     let base = releases_dir(&state).canonicalize()
         .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Releases directory unavailable"))?;
-    let file_path = base.join(safe_tag).join(safe_asset);
+    let file_path = release_tag_dir(&state, product, safe_tag).join(safe_asset);
     let canonical = match file_path.canonicalize() {
         Ok(p) => p,
         Err(_) => return Err(error_response(StatusCode::NOT_FOUND, "Asset not found")),
@@ -3152,7 +3316,7 @@ async fn handle_list_releases_admin(
     };
 
     let mut releases = Vec::with_capacity(rows.len());
-    for (id, tag, name, body, prerelease, created_at, workspace_id) in &rows {
+    for (id, tag, name, body, prerelease, created_at, workspace_id, product) in &rows {
         let assets = assets_by_id.remove(id).unwrap_or_default();
         releases.push(serde_json::json!({
             "tag": tag,
@@ -3161,6 +3325,7 @@ async fn handle_list_releases_admin(
             "published_at": created_at,
             "prerelease": prerelease,
             "workspace_id": workspace_id,
+            "product": product,
             "assets": assets.iter().map(|(name, size)| serde_json::json!({
                 "name": name,
                 "size": size,
@@ -3184,6 +3349,7 @@ async fn handle_upload_release(
     let mut name = String::new();
     let mut body = String::new();
     let mut prerelease = false;
+    let mut product = DEFAULT_PRODUCT.to_string();
     let mut workspace_id: Option<String> = None;
     let mut files: Vec<(String, Vec<u8>)> = Vec::new();
 
@@ -3195,6 +3361,13 @@ async fn handle_upload_release(
             "tag" => {
                 tag = field.text().await
                     .map_err(|e| error_response(StatusCode::BAD_REQUEST, &e.to_string()))?;
+            }
+            "product" => {
+                let val = field.text().await
+                    .map_err(|e| error_response(StatusCode::BAD_REQUEST, &e.to_string()))?;
+                if !val.trim().is_empty() {
+                    product = val.trim().to_string();
+                }
             }
             "name" => {
                 name = field.text().await
@@ -3233,6 +3406,7 @@ async fn handle_upload_release(
         return Err(error_response(StatusCode::BAD_REQUEST, "No files uploaded"));
     }
     docs::safe_tag(&tag)?;
+    docs::safe_product(&product)?;
     for (file_name, _) in &files {
         docs::safe_filename(file_name)?;
     }
@@ -3244,7 +3418,7 @@ async fn handle_upload_release(
     // hand-authored documentation pages.
     let (release_id, newly_created) = {
         let db = state.db.lock().unwrap();
-        match db.get_release_by_tag(&tag)
+        match db.get_release_by_product_tag(&product, &tag)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         {
             Some(existing_id) => {
@@ -3253,7 +3427,7 @@ async fn handle_upload_release(
                 (existing_id, false)
             }
             None => {
-                let id = db.insert_release(&tag, &name, &body, prerelease, workspace_id.as_deref())
+                let id = db.insert_release(&product, &tag, &name, &body, prerelease, workspace_id.as_deref())
                     .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
                 (id, true)
             }
@@ -3265,11 +3439,11 @@ async fn handle_upload_release(
     // (binaries) before /api/v1/docs/.../import, so the docs handler's own
     // seed step would otherwise see an existing release row and skip seeding.
     if newly_created {
-        docs::seed_user_docs_into_release(&state, release_id, &tag, workspace_id.as_deref())?;
+        docs::seed_user_docs_into_release(&state, release_id, &product, &tag, workspace_id.as_deref())?;
     }
 
     // Save files to disk
-    let tag_dir = releases_dir(&state).join(&tag);
+    let tag_dir = release_tag_dir(&state, &product, &tag);
     std::fs::create_dir_all(&tag_dir)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("Cannot create dir: {}", e)))?;
 
@@ -3309,18 +3483,20 @@ async fn handle_update_release(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(tag): Path<String>,
+    Query(pq): Query<ProductQuery>,
     Json(req): Json<UpdateReleaseRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
+    let product = pq.slug();
 
     let db = state.db.lock().unwrap();
     let release_id = db
-        .get_release_by_tag(&tag)
+        .get_release_by_product_tag(product, &tag)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Release not found"))?;
     let existing_ws = db
-        .get_release_workspace_id(&tag)
+        .get_release_workspace_id(product, &tag)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .flatten();
     db.update_release_metadata(release_id, &req.name, &req.body, req.prerelease, existing_ws.as_deref())
@@ -3341,10 +3517,12 @@ async fn handle_move_release(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(tag): Path<String>,
+    Query(pq): Query<ProductQuery>,
     Json(req): Json<MoveReleaseRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
+    let product = pq.slug();
 
     let target = req
         .workspace_id
@@ -3363,7 +3541,7 @@ async fn handle_move_release(
         }
     }
     let release_id = db
-        .get_release_by_tag(&tag)
+        .get_release_by_product_tag(product, &tag)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Release not found"))?;
     db.set_release_workspace(release_id, target)
@@ -3382,12 +3560,14 @@ async fn handle_delete_release(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(tag): Path<String>,
+    Query(pq): Query<ProductQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
+    let product = pq.slug();
 
     let db = state.db.lock().unwrap();
-    if !db.delete_release(&tag)
+    if !db.delete_release(product, &tag)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
     {
         return Err(error_response(StatusCode::NOT_FOUND, "Release not found"));
@@ -3395,7 +3575,7 @@ async fn handle_delete_release(
     drop(db);
 
     // Remove files from disk
-    let tag_dir = releases_dir(&state).join(&tag);
+    let tag_dir = release_tag_dir(&state, product, &tag);
     let _ = std::fs::remove_dir_all(&tag_dir);
 
     log::info!("Release {} deleted", tag);
@@ -3408,15 +3588,17 @@ async fn handle_delete_release_asset(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path((tag, file_name)): Path<(String, String)>,
+    Query(pq): Query<ProductQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
     docs::safe_tag(&tag)?;
     docs::safe_filename(&file_name)?;
+    let product = pq.slug();
 
     let release_id = {
         let db = state.db.lock().unwrap();
-        db.get_release_by_tag(&tag)
+        db.get_release_by_product_tag(product, &tag)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
             .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Release not found"))?
     };
@@ -3425,7 +3607,7 @@ async fn handle_delete_release_asset(
         db.delete_release_asset(release_id, &file_name)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
     };
-    let _ = std::fs::remove_file(releases_dir(&state).join(&tag).join(&file_name));
+    let _ = std::fs::remove_file(release_tag_dir(&state, product, &tag).join(&file_name));
     if !removed {
         return Err(error_response(StatusCode::NOT_FOUND, "Asset not found"));
     }
@@ -3440,12 +3622,14 @@ async fn handle_replace_release_asset(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path((tag, old_file_name)): Path<(String, String)>,
+    Query(pq): Query<ProductQuery>,
     mut multipart: Multipart,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
     docs::safe_tag(&tag)?;
     docs::safe_filename(&old_file_name)?;
+    let product = pq.slug();
 
     let mut new_file_name = String::new();
     let mut bytes: Vec<u8> = Vec::new();
@@ -3467,12 +3651,12 @@ async fn handle_replace_release_asset(
 
     let release_id = {
         let db = state.db.lock().unwrap();
-        db.get_release_by_tag(&tag)
+        db.get_release_by_product_tag(product, &tag)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
             .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Release not found"))?
     };
 
-    let tag_dir = releases_dir(&state).join(&tag);
+    let tag_dir = release_tag_dir(&state, product, &tag);
     std::fs::create_dir_all(&tag_dir)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("mkdir: {}", e)))?;
     let new_path = tag_dir.join(&new_file_name);
@@ -4491,7 +4675,7 @@ async fn handle_create_workspace_doc_release(
     // rejected — those would change ownership semantics.
     let existing_ws = {
         let db = state.db.lock().unwrap();
-        db.get_release_workspace_id(&tag)
+        db.get_release_workspace_id(DEFAULT_PRODUCT, &tag)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
     };
     if let Some(ref existing) = existing_ws {
@@ -4499,13 +4683,13 @@ async fn handle_create_workspace_doc_release(
             Some(ws) if ws == &workspace_id => {
                 let id = {
                     let db = state.db.lock().unwrap();
-                    db.get_release_by_tag(&tag)
+                    db.get_release_by_product_tag(DEFAULT_PRODUCT, &tag)
                         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
                         .ok_or_else(|| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Release vanished"))?
                 };
                 // Seeding is INSERT OR IGNORE, so calling again is a no-op
                 // when user pages already exist for this release.
-                docs::seed_user_docs_into_release(&state, id, &tag, Some(&workspace_id))?;
+                docs::seed_user_docs_into_release(&state, id, DEFAULT_PRODUCT, &tag, Some(&workspace_id))?;
                 return Ok(Json(serde_json::json!({
                     "tag": tag,
                     "name": req.name,
@@ -4522,10 +4706,10 @@ async fn handle_create_workspace_doc_release(
 
     let release_id = {
         let db = state.db.lock().unwrap();
-        db.insert_release(&tag, &req.name, "", false, Some(&workspace_id))
+        db.insert_release(DEFAULT_PRODUCT, &tag, &req.name, "", false, Some(&workspace_id))
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
     };
-    docs::seed_user_docs_into_release(&state, release_id, &tag, Some(&workspace_id))?;
+    docs::seed_user_docs_into_release(&state, release_id, DEFAULT_PRODUCT, &tag, Some(&workspace_id))?;
 
     Ok(Json(serde_json::json!({
         "tag": tag,
@@ -4904,7 +5088,15 @@ async fn main() -> Result<()> {
             "/api/v1/workspaces/{id}/docs/releases",
             get(handle_list_workspace_doc_releases).post(handle_create_workspace_doc_release),
         )
-        // Docs — public read endpoints
+        // Products catalog
+        .route("/api/v1/products", get(handle_list_products).post(handle_create_product))
+        .route(
+            "/api/v1/products/{product}",
+            axum::routing::put(handle_update_product).delete(handle_delete_product),
+        )
+        // Docs — legacy tag-only endpoints (back-compat shim: pin the default
+        // product so already-deployed FusionHubs keep working. Remove once every
+        // client uses the product-scoped routes below).
         .route("/api/v1/docs/releases", get(docs::handle_list_doc_releases))
         .route("/api/v1/docs/releases/latest", get(docs::handle_latest_doc_release))
         .route("/api/v1/docs/{tag}/pages", get(docs::handle_list_doc_pages))
@@ -4913,11 +5105,23 @@ async fn main() -> Result<()> {
             "/api/v1/docs/{tag}/assets/{file}",
             get(docs::handle_get_doc_asset).delete(docs::handle_delete_doc_asset),
         )
+        // Docs — product-scoped endpoints (`/api/v1/products/{product}/docs/...`),
+        // parallel to the workspace docs routes.
+        .route("/api/v1/products/{product}/docs/releases", get(docs::handle_list_doc_releases_p))
+        .route("/api/v1/products/{product}/docs/releases/latest", get(docs::handle_latest_doc_release_p))
+        .route("/api/v1/products/{product}/docs/{tag}/pages", get(docs::handle_list_doc_pages_p))
+        .route("/api/v1/products/{product}/docs/{tag}/pages/{slug}", get(docs::handle_get_doc_page_p))
+        .route(
+            "/api/v1/products/{product}/docs/{tag}/assets/{file}",
+            get(docs::handle_get_doc_asset_p).delete(docs::handle_delete_doc_asset_p),
+        )
         // Docs — admin write endpoints (JWT). Bulk import + asset upload get the larger body limit.
         .merge(
             Router::new()
                 .route("/api/v1/docs/{tag}/import", post(docs::handle_bulk_import_docs))
                 .route("/api/v1/docs/{tag}/assets", post(docs::handle_upload_doc_asset))
+                .route("/api/v1/products/{product}/docs/{tag}/import", post(docs::handle_bulk_import_docs_p))
+                .route("/api/v1/products/{product}/docs/{tag}/assets", post(docs::handle_upload_doc_asset_p))
                 .layer(DefaultBodyLimit::max(100 * 1024 * 1024))
         )
         .route(
@@ -4928,6 +5132,15 @@ async fn main() -> Result<()> {
         .route(
             "/api/v1/docs/{tag}/pages/{slug}/rename",
             post(docs::handle_rename_doc_page),
+        )
+        .route(
+            "/api/v1/products/{product}/docs/{tag}/pages/{slug}",
+            axum::routing::put(docs::handle_upsert_doc_page_p)
+                .delete(docs::handle_delete_doc_page_p),
+        )
+        .route(
+            "/api/v1/products/{product}/docs/{tag}/pages/{slug}/rename",
+            post(docs::handle_rename_doc_page_p),
         )
         // Website — public read
         .route("/api/v1/website/pages", get(website::handle_list_pages))

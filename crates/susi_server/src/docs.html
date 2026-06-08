@@ -269,6 +269,26 @@ body {
     border-radius: var(--radius);
 }
 .content hr { border: none; border-top: 1px solid var(--border); margin: 22px 0; }
+/* Inline [TOC] tag */
+.content .doc-toc {
+    display: block;
+    border: 1px solid var(--border);
+    background: var(--bg2);
+    border-radius: var(--radius);
+    padding: 14px 18px;
+    margin: 18px 0;
+}
+.content .doc-toc .doc-toc-title {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text2);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 8px;
+}
+.content .doc-toc a { display: block; color: var(--accent); text-decoration: none; padding: 3px 0; line-height: 1.4; }
+.content .doc-toc a:hover { text-decoration: underline; }
+.content .doc-toc a.doc-toc-lvl-3 { padding-left: 16px; font-size: 13px; }
 /* Allow inline icons in tables not to be forced to a new line */
 .content td img, .content th img { display: inline-block; margin: 0; }
 /* Anchor offset for sticky header so jumps don't hide titles. */
@@ -555,7 +575,9 @@ body {
     </div>
     <div class="header-right">
         <span id="wsBanner" style="display:none;font-size:13px;color:var(--text2);margin-right:12px;">Workspace: <strong id="wsBannerName" style="color:var(--accent);"></strong></span>
+        <select id="productPicker" class="release-picker" onchange="onProductChanged()" style="display:none;margin-right:8px;"></select>
         <select id="releasePicker" class="release-picker" onchange="onReleaseChanged()"></select>
+        <button id="newVersionBtn" class="btn" onclick="newVersion()" style="display:none;">+ Version</button>
         <button id="editBtn" class="btn" onclick="enterEditMode()" style="display:none;">Edit</button>
         <button id="newPageBtn" class="btn" onclick="newPage()" style="display:none;">+ Page</button>
         <button id="btnTheme" class="btn" onclick="cycleTheme()" title="Toggle theme">🌓</button>
@@ -629,7 +651,17 @@ if (window.matchMedia) {
 
 const API = '/api/v1';
 let releases = [];
+let products = [];
+let currentProduct = 'fusionhub';
 let currentTag = null;
+
+// Base path for doc page/asset operations. Workspace docs go through the legacy
+// (default-product) routes; global docs are product-scoped.
+function docBase() {
+    return currentWorkspaceId
+        ? API + '/docs'
+        : API + '/products/' + encodeURIComponent(currentProduct) + '/docs';
+}
 let pages = [];        // [{slug, title, parent_slug, ord, updated_at}]
 let assets = [];       // [{name, size}]
 let currentSlug = null;
@@ -644,6 +676,26 @@ const workspaceParams = new URLSearchParams(location.search);
 const currentWorkspaceId = workspaceParams.get('workspace') || null;
 const initialTagParam = workspaceParams.get('tag') || null;
 let currentWorkspaceName = null;
+
+// Deep links carry the product as `?product=<slug>` (absent = the default
+// product, so existing FusionHub links keep working). Not applicable in
+// workspace mode, where docs aren't product-scoped.
+if (!currentWorkspaceId) {
+    const p = workspaceParams.get('product');
+    if (p) currentProduct = p;
+}
+
+// Keep the address bar in sync with the selected product so the URL shown is a
+// shareable deep link. The default product is omitted to keep URLs clean.
+function syncProductInUrl() {
+    const url = new URL(location.href);
+    if (currentProduct && currentProduct !== 'fusionhub') {
+        url.searchParams.set('product', currentProduct);
+    } else {
+        url.searchParams.delete('product');
+    }
+    history.replaceState(null, '', url.toString());
+}
 
 // Admin detection. We confirm against the server in renderTopNav() and update
 // `isAdminUser` so edit/new-page buttons only show for actual admins; a JWT
@@ -685,10 +737,16 @@ async function renderTopNav() {
     const newBtn = document.getElementById('newPageBtn');
     if (editBtn && currentPage) editBtn.style.display = isAdmin ? '' : 'none';
     if (newBtn) newBtn.style.display = isAdmin ? '' : 'none';
+    // "+ Version" lets an admin start a fresh version for the current product.
+    // Hidden in workspace mode (releases there are created from the Workspaces
+    // page and are workspace-scoped).
+    const verBtn = document.getElementById('newVersionBtn');
+    if (verBtn) verBtn.style.display = (isAdmin && !currentWorkspaceId) ? '' : 'none';
     const items = [
         { label: 'Documentation', href: '/docs', active: true,           show: true },
         { label: 'Workspaces',    href: '/#/workspaces', active: false,  show: !!authToken() },
         { label: 'Releases',      href: '/#/releases',   active: false,  show: !!authToken() },
+        { label: 'Products',      href: '/#/products',   active: false,  show: !!authToken() && isAdmin },
         { label: 'Licenses',      href: '/#/licenses',   active: false,  show: !!authToken() && isAdmin },
         { label: 'Website',       href: '/#/website',    active: false,  show: !!authToken() && isAdmin },
         { label: 'Shop',          href: '/#/shop',       active: false,  show: !!authToken() && isAdmin },
@@ -799,7 +857,7 @@ function renderInline(s) {
 function resolveAssetUrl(url) {
     if (url.startsWith('http') || url.startsWith('/') || url.startsWith('data:')) return url;
     if (!currentTag) return url;
-    let assetUrl = API + '/docs/' + encodeURIComponent(currentTag) + '/assets/' + encodeURIComponent(url);
+    let assetUrl = docBase() + '/' + encodeURIComponent(currentTag) + '/assets/' + encodeURIComponent(url);
     // Workspace-scoped doc reads require auth, but browser <img> requests don't
     // send the Authorization header. Pass the JWT via query string for these.
     if (currentWorkspaceId && authToken()) {
@@ -828,6 +886,13 @@ function renderMarkdown(src) {
             i++;
             out.push('<pre><code' + (lang ? ' class="lang-' + escHtml(lang) + '"' : '') + '>'
                 + escHtml(buf.join('\n')) + '</code></pre>');
+            continue;
+        }
+
+        // Inline table-of-contents marker on its own line: [TOC] / [[TOC]] / [[_TOC_]]
+        if (/^\[\[?_?toc_?\]?\]$/i.test(line.trim())) {
+            out.push('<nav class="doc-toc" data-doc-toc></nav>');
+            i++;
             continue;
         }
 
@@ -932,10 +997,38 @@ function splitTableRow(line) {
 // Data fetch
 // ---------------------------------------------------------------------------
 
+// Load the product catalog and populate the picker. Global mode only —
+// workspace docs are not product-scoped.
+async function loadProducts() {
+    if (currentWorkspaceId) return;
+    try {
+        const resp = await fetch(API + '/products', { headers: docHeaders() });
+        if (!resp.ok) return;
+        const data = await resp.json();
+        products = data.products || [];
+    } catch (e) { return; }
+    const picker = document.getElementById('productPicker');
+    if (!picker || products.length === 0) return;
+    if (!products.some(p => p.slug === currentProduct)) currentProduct = products[0].slug;
+    picker.innerHTML = products.map(p =>
+        '<option value="' + escHtml(p.slug) + '">' + escHtml(p.name || p.slug) + '</option>'
+    ).join('');
+    picker.value = currentProduct;
+    picker.style.display = '';
+    syncProductInUrl();
+}
+
+async function onProductChanged() {
+    currentProduct = document.getElementById('productPicker').value;
+    syncProductInUrl();
+    releases = []; currentTag = null; currentSlug = null;
+    if (location.hash) { location.hash = ''; } else { route(); }
+}
+
 async function loadReleases() {
     const url = currentWorkspaceId
         ? API + '/workspaces/' + encodeURIComponent(currentWorkspaceId) + '/docs/releases'
-        : API + '/docs/releases';
+        : API + '/products/' + encodeURIComponent(currentProduct) + '/docs/releases';
     const resp = await fetch(url, { headers: docHeaders() });
     if (!resp.ok) {
         renderEmptyState(currentWorkspaceId
@@ -955,7 +1048,7 @@ async function loadReleases() {
 async function loadRelease(tag) {
     currentTag = tag;
     document.getElementById('releasePicker').value = tag;
-    const resp = await fetch(API + '/docs/' + encodeURIComponent(tag) + '/pages', { headers: docHeaders() });
+    const resp = await fetch(docBase() + '/' + encodeURIComponent(tag) + '/pages', { headers: docHeaders() });
     if (!resp.ok) {
         renderEmptyState('Release "' + tag + '" not found.');
         return;
@@ -969,7 +1062,7 @@ async function loadRelease(tag) {
 async function loadPage(slug) {
     if (!currentTag) return;
     currentSlug = slug;
-    const resp = await fetch(API + '/docs/' + encodeURIComponent(currentTag) + '/pages/' + encodeURIComponent(slug), { headers: docHeaders() });
+    const resp = await fetch(docBase() + '/' + encodeURIComponent(currentTag) + '/pages/' + encodeURIComponent(slug), { headers: docHeaders() });
     if (!resp.ok) {
         currentPage = null;
         renderEmptyState('Page "' + slug + '" not found in this release.');
@@ -1060,7 +1153,31 @@ function renderPage() {
     let html = meta + renderMarkdown(currentPage.body_md || '');
     const { html: withIds, headings } = injectHeadingIds(html);
     c.innerHTML = withIds;
+    populateInlineToc(c, headings);
     renderToc(headings);
+}
+
+// Fill any inline [TOC] placeholders with H2/H3 links derived from the page's
+// own heading ids (assigned by injectHeadingIds), wired to scroll-into-view so
+// they don't disturb the hash router.
+function populateInlineToc(container, headings) {
+    const hosts = container.querySelectorAll('nav.doc-toc[data-doc-toc]');
+    if (!hosts.length) return;
+    const items = headings.filter(h => h.level >= 2 && h.level <= 3);
+    hosts.forEach(host => {
+        if (!items.length) { host.remove(); return; }
+        const links = items.map(h =>
+            '<a class="doc-toc-lvl-' + h.level + '" href="#' + h.id + '" data-toc-id="' + h.id + '">' + escHtml(h.text) + '</a>'
+        ).join('');
+        host.innerHTML = '<div class="doc-toc-title">Contents</div>' + links;
+        host.querySelectorAll('a').forEach(a => {
+            a.addEventListener('click', (e) => {
+                e.preventDefault();
+                const el = document.getElementById(a.getAttribute('data-toc-id'));
+                if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            });
+        });
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -1264,7 +1381,7 @@ async function easymdeImageUpload(file, onSuccess, onError) {
     try {
         const fd = new FormData();
         fd.append('file', file, name);
-        const resp = await fetch(API + '/docs/' + encodeURIComponent(currentTag) + '/assets', {
+        const resp = await fetch(docBase() + '/' + encodeURIComponent(currentTag) + '/assets', {
             method: 'POST',
             headers: { 'Authorization': 'Bearer ' + authToken() },
             body: fd,
@@ -1341,7 +1458,7 @@ async function savePage() {
 
     let targetSlug = currentSlug;
     if (newSlug !== currentSlug) {
-        const renameResp = await fetch(API + '/docs/' + encodeURIComponent(currentTag) + '/pages/' + encodeURIComponent(currentSlug) + '/rename', {
+        const renameResp = await fetch(docBase() + '/' + encodeURIComponent(currentTag) + '/pages/' + encodeURIComponent(currentSlug) + '/rename', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken() },
             body: JSON.stringify({ new_slug: newSlug }),
@@ -1355,7 +1472,7 @@ async function savePage() {
         targetSlug = newSlug;
     }
 
-    const resp = await fetch(API + '/docs/' + encodeURIComponent(currentTag) + '/pages/' + encodeURIComponent(targetSlug), {
+    const resp = await fetch(docBase() + '/' + encodeURIComponent(currentTag) + '/pages/' + encodeURIComponent(targetSlug), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken() },
         body: JSON.stringify({ title, body_md, parent_slug: parent || null, ord }),
@@ -1416,7 +1533,7 @@ function handleSessionExpired(currentBody) {
 
 async function deletePage() {
     if (!confirm('Delete page "' + currentPage.title + '"? This cannot be undone.')) return;
-    const resp = await fetch(API + '/docs/' + encodeURIComponent(currentTag) + '/pages/' + encodeURIComponent(currentSlug), {
+    const resp = await fetch(docBase() + '/' + encodeURIComponent(currentTag) + '/pages/' + encodeURIComponent(currentSlug), {
         method: 'DELETE',
         headers: { 'Authorization': 'Bearer ' + authToken() },
     });
@@ -1434,7 +1551,7 @@ async function newPage() {
     const cleanSlug = slug.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '-');
     if (!cleanSlug) { toast('Invalid slug', 'error'); return; }
     const title = prompt('Page title:', cleanSlug) || cleanSlug;
-    const resp = await fetch(API + '/docs/' + encodeURIComponent(currentTag) + '/pages/' + encodeURIComponent(cleanSlug), {
+    const resp = await fetch(docBase() + '/' + encodeURIComponent(currentTag) + '/pages/' + encodeURIComponent(cleanSlug), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken() },
         body: JSON.stringify({ title, body_md: '# ' + title + '\n\n', parent_slug: null, ord: 999 }),
@@ -1445,9 +1562,42 @@ async function newPage() {
         toast(msg, 'error');
         return;
     }
-    // Reload the release so the new page shows up in the sidebar before navigating.
+    // The release row is created lazily on the first page save, so refresh the
+    // release list to pick up a brand-new version, then reload the release so
+    // the new page shows up in the sidebar before navigating.
+    if (!releases.some(r => r.tag === currentTag)) {
+        await loadReleases();
+        document.getElementById('releasePicker').value = currentTag;
+    }
     await loadRelease(currentTag);
     location.hash = '#/' + currentTag + '/' + cleanSlug;
+}
+
+// Start authoring a fresh version for the current product. The release row is
+// created on the backend when the first page is saved (ensure_release_with_seed),
+// so here we just point the editor at the new tag with an empty sidebar.
+async function newVersion() {
+    if (!isPotentialAdmin()) { toast('Login required', 'error'); return; }
+    const tag = prompt('New version tag (e.g. v1.0):');
+    if (!tag) return;
+    const cleanTag = tag.trim();
+    if (!cleanTag) { toast('Invalid version', 'error'); return; }
+    if (releases.some(r => r.tag === cleanTag)) {
+        // Already exists — just switch to it.
+        location.hash = '#/' + cleanTag;
+        return;
+    }
+    currentTag = cleanTag;
+    pages = []; assets = []; currentSlug = null; currentPage = null;
+    const picker = document.getElementById('releasePicker');
+    const opt = document.createElement('option');
+    opt.value = cleanTag; opt.textContent = cleanTag;
+    picker.appendChild(opt);
+    picker.value = cleanTag;
+    renderSidebar();
+    document.getElementById('newPageBtn').style.display = '';
+    document.getElementById('editBtn').style.display = 'none';
+    renderEmptyState('New version "' + cleanTag + '" - click + Page to add the first page.');
 }
 
 // ---------------------------------------------------------------------------
@@ -1462,9 +1612,16 @@ function onReleaseChanged() {
 async function route() {
     const hash = location.hash.replace(/^#\/?/, '');
     const parts = hash.split('/').filter(Boolean).map(decodeURIComponent);
+    if (!currentWorkspaceId && products.length === 0) await loadProducts();
     if (releases.length === 0) {
         const ok = await loadReleases();
         if (!ok) {
+            // No releases for this product/workspace — clear any pages left over
+            // from a previously selected product so the sidebar doesn't lie.
+            pages = []; assets = []; currentTag = null; currentSlug = null; currentPage = null;
+            renderSidebar();
+            document.getElementById('editBtn').style.display = 'none';
+            document.getElementById('newPageBtn').style.display = 'none';
             renderEmptyState(currentWorkspaceId
                 ? 'No documentation releases in this workspace yet. Create one from the Workspaces page.'
                 : 'No documentation has been published yet.');

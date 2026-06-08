@@ -881,3 +881,98 @@ fn test_resend_invitation_requires_smtp() {
         .expect("resend");
     assert_eq!(resp.status().as_u16(), 503);
 }
+
+/// End-to-end: a second product gets its own docs, reuses a version tag the
+/// default product also uses, and the two stay isolated. Exercises the products
+/// CRUD, the product-scoped doc routes, and the legacy (default-product) routes.
+#[test]
+fn test_product_scoped_docs_flow() {
+    let server = TestServer::start();
+    let token = server.admin_token();
+    let http = server.http();
+
+    // The default product is seeded and listed.
+    let resp = http
+        .get(format!("{}/products", server.api_url))
+        .send()
+        .expect("list products");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = resp.json::<Value>().expect("products json");
+    let slugs: Vec<&str> = body["products"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["slug"].as_str().unwrap())
+        .collect();
+    assert!(slugs.contains(&"fusionhub"), "default product must be seeded");
+
+    // Create a second product.
+    let resp = http
+        .post(format!("{}/products", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "slug": "lpvr", "name": "LPVR" }))
+        .send()
+        .expect("create product");
+    assert_eq!(resp.status().as_u16(), 200, "create product: {}", resp.text().unwrap_or_default());
+
+    // Author a page under lpvr / v1.0 via the product-scoped route.
+    let resp = http
+        .put(format!("{}/products/lpvr/docs/v1.0/pages/intro", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "title": "LPVR Intro", "body_md": "# Hello LPVR" }))
+        .send()
+        .expect("upsert lpvr page");
+    assert_eq!(resp.status().as_u16(), 200, "upsert: {}", resp.text().unwrap_or_default());
+
+    // It shows up in lpvr's releases and reads back.
+    let resp = http
+        .get(format!("{}/products/lpvr/docs/releases", server.api_url))
+        .send()
+        .expect("lpvr releases");
+    let body = resp.json::<Value>().expect("json");
+    let tags: Vec<&str> = body["releases"].as_array().unwrap().iter()
+        .map(|r| r["tag"].as_str().unwrap()).collect();
+    assert_eq!(tags, vec!["v1.0"]);
+
+    let resp = http
+        .get(format!("{}/products/lpvr/docs/v1.0/pages/intro", server.api_url))
+        .send()
+        .expect("lpvr page");
+    assert_eq!(resp.json::<Value>().unwrap()["body_md"].as_str().unwrap(), "# Hello LPVR");
+
+    // The default product has NO docs yet — isolation holds on both the
+    // product-scoped and the legacy routes.
+    for url in [
+        format!("{}/products/fusionhub/docs/releases", server.api_url),
+        format!("{}/docs/releases", server.api_url),
+    ] {
+        let resp = http.get(&url).send().expect("fusionhub releases");
+        let body = resp.json::<Value>().expect("json");
+        assert!(body["releases"].as_array().unwrap().is_empty(), "{} must be empty", url);
+    }
+
+    // Reuse the same tag under the default product via the legacy route — the
+    // composite (product, tag) key allows it, and the two pages are distinct.
+    let resp = http
+        .put(format!("{}/docs/v1.0/pages/intro", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "title": "FH Intro", "body_md": "# Hello FusionHub" }))
+        .send()
+        .expect("upsert fusionhub page");
+    assert_eq!(resp.status().as_u16(), 200, "legacy upsert: {}", resp.text().unwrap_or_default());
+
+    let fh = http.get(format!("{}/docs/v1.0/pages/intro", server.api_url))
+        .send().expect("fh page").json::<Value>().unwrap();
+    let lpvr = http.get(format!("{}/products/lpvr/docs/v1.0/pages/intro", server.api_url))
+        .send().expect("lpvr page").json::<Value>().unwrap();
+    assert_eq!(fh["body_md"].as_str().unwrap(), "# Hello FusionHub");
+    assert_eq!(lpvr["body_md"].as_str().unwrap(), "# Hello LPVR");
+
+    // A product that still owns a release cannot be deleted.
+    let resp = http
+        .delete(format!("{}/products/lpvr", server.api_url))
+        .bearer_auth(&token)
+        .send()
+        .expect("delete product");
+    assert_eq!(resp.status().as_u16(), 409, "product with releases must not delete");
+}

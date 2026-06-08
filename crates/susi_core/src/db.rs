@@ -5,6 +5,12 @@ use serde::Serialize;
 use crate::error::LicenseError;
 use crate::license::{License, MachineActivation};
 
+/// Default product slug. Every pre-existing release and every release created
+/// through a non-product-aware code path (binary uploads, workspace docs)
+/// belongs to this product, so the migration and the back-compat routes can
+/// rely on it.
+pub const DEFAULT_PRODUCT: &str = "fusionhub";
+
 #[derive(Debug, Serialize)]
 pub struct UserInfo {
     pub username: String,
@@ -133,13 +139,24 @@ impl LicenseDb {
             CREATE INDEX IF NOT EXISTS idx_activations_license ON machine_activations(license_id);
             CREATE INDEX IF NOT EXISTS idx_tombstones_expiry ON machine_tombstones(expires_at);
 
+            CREATE TABLE IF NOT EXISTS products (
+                slug TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                ord INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS releases (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                tag TEXT NOT NULL UNIQUE,
+                tag TEXT NOT NULL,
                 name TEXT NOT NULL DEFAULT '',
                 body TEXT NOT NULL DEFAULT '',
                 prerelease INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                workspace_id TEXT DEFAULT NULL,
+                product TEXT NOT NULL DEFAULT 'fusionhub',
+                UNIQUE(product, tag)
             );
 
             CREATE TABLE IF NOT EXISTS release_assets (
@@ -520,6 +537,61 @@ impl LicenseDb {
         // Add require binary signing to licenses table
         let _ = self.conn.execute_batch(
             "ALTER TABLE licenses ADD COLUMN require_signed_binary INTEGER NOT NULL DEFAULT 0;",
+        );
+
+        // Per-product scoping for releases (docs + binaries). Existing rows
+        // default to the FusionHub product so every current release, doc page,
+        // and asset stays addressable. The unique key moves from `tag` alone to
+        // `(product, tag)` so a second product can reuse version tags.
+        let _ = self
+            .conn
+            .execute_batch("ALTER TABLE releases ADD COLUMN product TEXT NOT NULL DEFAULT 'fusionhub';");
+
+        // The old schema declared `tag TEXT NOT NULL UNIQUE`, whose implicit
+        // unique index SQLite can't ALTER away. Rebuild the table once to swap
+        // that for the composite `UNIQUE(product, tag)`. Guard on the stored
+        // schema so this runs exactly once and never on a fresh DB (whose
+        // CREATE already carries the composite key).
+        let releases_sql: String = self
+            .conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='releases'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or_default();
+        if !releases_sql.contains("UNIQUE(product, tag)") {
+            self.conn
+                .execute_batch(
+                    "PRAGMA foreign_keys=OFF;
+                     BEGIN;
+                     CREATE TABLE releases_new (
+                         id INTEGER PRIMARY KEY AUTOINCREMENT,
+                         tag TEXT NOT NULL,
+                         name TEXT NOT NULL DEFAULT '',
+                         body TEXT NOT NULL DEFAULT '',
+                         prerelease INTEGER NOT NULL DEFAULT 0,
+                         created_at TEXT NOT NULL,
+                         workspace_id TEXT DEFAULT NULL,
+                         product TEXT NOT NULL DEFAULT 'fusionhub',
+                         UNIQUE(product, tag)
+                     );
+                     INSERT INTO releases_new (id, tag, name, body, prerelease, created_at, workspace_id, product)
+                         SELECT id, tag, name, body, prerelease, created_at, workspace_id, product FROM releases;
+                     DROP TABLE releases;
+                     ALTER TABLE releases_new RENAME TO releases;
+                     COMMIT;
+                     PRAGMA foreign_keys=ON;",
+                )
+                .map_err(|e| LicenseError::Other(format!("DB releases rebuild: {}", e)))?;
+        }
+
+        // Seed the default product row so the admin UI lists it and FK-style
+        // lookups resolve. Idempotent.
+        let _ = self.conn.execute(
+            "INSERT OR IGNORE INTO products (slug, name, description, ord, created_at)
+             VALUES ('fusionhub', 'FusionHub', '', 0, ?1)",
+            params![Utc::now().to_rfc3339()],
         );
 
         // >> Add new migrations as own execute_batch statements here <<
@@ -2619,6 +2691,7 @@ impl LicenseDb {
 
     pub fn insert_release(
         &self,
+        product: &str,
         tag: &str,
         name: &str,
         body: &str,
@@ -2628,8 +2701,8 @@ impl LicenseDb {
         let now = Utc::now().to_rfc3339();
         self.conn
             .execute(
-                "INSERT INTO releases (tag, name, body, prerelease, created_at, workspace_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![tag, name, body, prerelease as i32, now, workspace_id],
+                "INSERT INTO releases (product, tag, name, body, prerelease, created_at, workspace_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![product, tag, name, body, prerelease as i32, now, workspace_id],
             )
             .map_err(|e| LicenseError::Other(format!("DB insert release: {}", e)))?;
         Ok(self.conn.last_insert_rowid())
@@ -2688,10 +2761,10 @@ impl LicenseDb {
 
     pub fn list_releases(
         &self,
-    ) -> Result<Vec<(i64, String, String, String, bool, String, Option<String>)>, LicenseError>
+    ) -> Result<Vec<(i64, String, String, String, bool, String, Option<String>, String)>, LicenseError>
     {
         let mut stmt = self.conn
-            .prepare("SELECT id, tag, name, body, prerelease, created_at, workspace_id FROM releases ORDER BY id DESC")
+            .prepare("SELECT id, tag, name, body, prerelease, created_at, workspace_id, product FROM releases ORDER BY id DESC")
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
         let rows = stmt
             .query_map([], |r| {
@@ -2703,6 +2776,7 @@ impl LicenseDb {
                     r.get::<_, i32>(4)? != 0,
                     r.get::<_, String>(5)?,
                     r.get::<_, Option<String>>(6)?,
+                    r.get::<_, String>(7)?,
                 ))
             })
             .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
@@ -2801,10 +2875,14 @@ impl LicenseDb {
         Ok(out)
     }
 
-    pub fn get_release_by_tag(&self, tag: &str) -> Result<Option<i64>, LicenseError> {
+    pub fn get_release_by_product_tag(
+        &self,
+        product: &str,
+        tag: &str,
+    ) -> Result<Option<i64>, LicenseError> {
         match self.conn.query_row(
-            "SELECT id FROM releases WHERE tag = ?1",
-            params![tag],
+            "SELECT id FROM releases WHERE product = ?1 AND tag = ?2",
+            params![product, tag],
             |r| r.get(0),
         ) {
             Ok(id) => Ok(Some(id)),
@@ -2830,15 +2908,17 @@ impl LicenseDb {
         Ok(())
     }
 
-    /// Return `Some(workspace_id_or_none)` if the tag exists, else `None`.
-    /// Inner `Option` is `Some(ws_id)` for workspace-scoped, `None` for global.
+    /// Return `Some(workspace_id_or_none)` if the (product, tag) exists, else
+    /// `None`. Inner `Option` is `Some(ws_id)` for workspace-scoped, `None` for
+    /// global.
     pub fn get_release_workspace_id(
         &self,
+        product: &str,
         tag: &str,
     ) -> Result<Option<Option<String>>, LicenseError> {
         match self.conn.query_row(
-            "SELECT workspace_id FROM releases WHERE tag = ?1",
-            params![tag],
+            "SELECT workspace_id FROM releases WHERE product = ?1 AND tag = ?2",
+            params![product, tag],
             |r| r.get::<_, Option<String>>(0),
         ) {
             Ok(ws) => Ok(Some(ws)),
@@ -2847,11 +2927,96 @@ impl LicenseDb {
         }
     }
 
-    pub fn delete_release(&self, tag: &str) -> Result<bool, LicenseError> {
+    pub fn delete_release(&self, product: &str, tag: &str) -> Result<bool, LicenseError> {
         let rows = self
             .conn
-            .execute("DELETE FROM releases WHERE tag = ?1", params![tag])
+            .execute(
+                "DELETE FROM releases WHERE product = ?1 AND tag = ?2",
+                params![product, tag],
+            )
             .map_err(|e| LicenseError::Other(format!("DB delete: {}", e)))?;
+        Ok(rows > 0)
+    }
+
+    // -----------------------------------------------------------------------
+    // Products (catalog dimension that scopes releases + docs)
+    // -----------------------------------------------------------------------
+
+    /// All products, ordered for display. Returns (slug, name, description, ord).
+    pub fn list_release_products(
+        &self,
+    ) -> Result<Vec<(String, String, String, i64)>, LicenseError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT slug, name, description, ord FROM products ORDER BY ord, name")
+            .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            })
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    pub fn product_exists(&self, slug: &str) -> Result<bool, LicenseError> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM products WHERE slug = ?1",
+                params![slug],
+                |r| r.get(0),
+            )
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?;
+        Ok(count > 0)
+    }
+
+    /// Insert or update a product. Slug is the immutable key.
+    pub fn upsert_release_product(
+        &self,
+        slug: &str,
+        name: &str,
+        description: &str,
+        ord: i64,
+    ) -> Result<(), LicenseError> {
+        let now = Utc::now().to_rfc3339();
+        self.conn
+            .execute(
+                "INSERT INTO products (slug, name, description, ord, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(slug) DO UPDATE SET
+                    name = excluded.name,
+                    description = excluded.description,
+                    ord = excluded.ord",
+                params![slug, name, description, ord, now],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB upsert product: {}", e)))?;
+        Ok(())
+    }
+
+    /// Count releases attached to a product — callers reject deletion of a
+    /// product that still owns releases.
+    pub fn count_releases_for_product(&self, slug: &str) -> Result<i64, LicenseError> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM releases WHERE product = ?1",
+                params![slug],
+                |r| r.get(0),
+            )
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))
+    }
+
+    pub fn delete_release_product(&self, slug: &str) -> Result<bool, LicenseError> {
+        let rows = self
+            .conn
+            .execute("DELETE FROM products WHERE slug = ?1", params![slug])
+            .map_err(|e| LicenseError::Other(format!("DB delete product: {}", e)))?;
         Ok(rows > 0)
     }
 
@@ -3221,10 +3386,11 @@ impl LicenseDb {
         Ok(n > 0)
     }
 
-    /// Releases that contain at least one doc page (newest first).
-    /// Returns (id, tag, name, created_at, page_count).
+    /// Releases of one product that contain at least one doc page (newest
+    /// first). Returns (id, tag, name, created_at, page_count).
     pub fn list_doc_releases(
         &self,
+        product: &str,
     ) -> Result<Vec<(i64, String, String, String, i64)>, LicenseError> {
         let mut stmt = self
             .conn
@@ -3232,13 +3398,13 @@ impl LicenseDb {
                 "SELECT r.id, r.tag, r.name, r.created_at, COUNT(p.id)
                  FROM releases r
                  INNER JOIN doc_pages p ON p.release_id = r.id
-                 WHERE r.workspace_id IS NULL
+                 WHERE r.workspace_id IS NULL AND r.product = ?1
                  GROUP BY r.id
                  ORDER BY r.id DESC",
             )
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
         let rows = stmt
-            .query_map([], |r| {
+            .query_map(params![product], |r| {
                 Ok((
                     r.get::<_, i64>(0)?,
                     r.get::<_, String>(1)?,
@@ -3286,8 +3452,9 @@ impl LicenseDb {
         Ok(rows)
     }
 
-    /// Ensure a release row exists for the given tag — used by bulk doc import
-    /// when the docs ship before the binary release. Returns the release id.
+    /// Ensure a release row exists for the given tag under the default product
+    /// — used by bulk doc import when the docs ship before the binary release.
+    /// Returns the release id.
     pub fn ensure_release(&self, tag: &str, name: &str) -> Result<i64, LicenseError> {
         Ok(self.ensure_release_created(tag, name)?.0)
     }
@@ -3300,59 +3467,64 @@ impl LicenseDb {
         tag: &str,
         name: &str,
     ) -> Result<(i64, bool), LicenseError> {
-        self.ensure_release_created_scoped(tag, name, None)
+        self.ensure_release_created_scoped(DEFAULT_PRODUCT, tag, name, None)
     }
 
-    /// Workspace-aware variant. When `workspace_id` is `Some`, the release is
-    /// created with that scope. If the tag already exists with a *different*
-    /// scope (or none), returns the existing id without modifying it — a
-    /// caller that cares should reject that case before calling.
+    /// Product- and workspace-aware variant. When `workspace_id` is `Some`, the
+    /// release is created with that scope. If the (product, tag) already exists
+    /// with a *different* scope (or none), returns the existing id without
+    /// modifying it — a caller that cares should reject that case before
+    /// calling.
     pub fn ensure_release_created_scoped(
         &self,
+        product: &str,
         tag: &str,
         name: &str,
         workspace_id: Option<&str>,
     ) -> Result<(i64, bool), LicenseError> {
-        if let Some(id) = self.get_release_by_tag(tag)? {
+        if let Some(id) = self.get_release_by_product_tag(product, tag)? {
             return Ok((id, false));
         }
-        let id = self.insert_release(tag, name, "", false, workspace_id)?;
+        let id = self.insert_release(product, tag, name, "", false, workspace_id)?;
         Ok((id, true))
     }
 
     /// Return (id, tag) of the most recent release that has at least one
     /// `origin='user'` doc page, excluding a given release id. Restricted to
-    /// the same workspace scope (`Some(ws)` for a workspace release; `None`
-    /// for a global release) so that user docs from one workspace never seed
-    /// another workspace or vice versa.
+    /// the same product and workspace scope (`Some(ws)` for a workspace
+    /// release; `None` for a global release) so that user docs never seed
+    /// across products or workspaces.
     pub fn latest_prior_release_with_user_docs(
         &self,
         exclude_id: i64,
+        product: &str,
         workspace_id: Option<&str>,
     ) -> Result<Option<(i64, String)>, LicenseError> {
         let res = match workspace_id {
             Some(ws) => self.conn.query_row(
                 "SELECT r.id, r.tag FROM releases r
                  WHERE r.id != ?1
+                   AND r.product = ?3
                    AND r.workspace_id = ?2
                    AND EXISTS (
                        SELECT 1 FROM doc_pages p
                        WHERE p.release_id = r.id AND p.origin = 'user'
                    )
                  ORDER BY r.id DESC LIMIT 1",
-                params![exclude_id, ws],
+                params![exclude_id, ws, product],
                 |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
             ),
             None => self.conn.query_row(
                 "SELECT r.id, r.tag FROM releases r
                  WHERE r.id != ?1
+                   AND r.product = ?2
                    AND r.workspace_id IS NULL
                    AND EXISTS (
                        SELECT 1 FROM doc_pages p
                        WHERE p.release_id = r.id AND p.origin = 'user'
                    )
                  ORDER BY r.id DESC LIMIT 1",
-                params![exclude_id],
+                params![exclude_id, product],
                 |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
             ),
         };
@@ -4446,6 +4618,79 @@ mod tests {
         LicenseDb::open(":memory:").unwrap()
     }
 
+    /// Build an old-schema database (releases keyed by a global-unique `tag`,
+    /// no product column) with a release + a doc page, then reopen it through
+    /// `LicenseDb::open` to exercise the product migration + table rebuild.
+    #[test]
+    fn test_product_migration_rebuilds_releases() {
+        let path = std::env::temp_dir()
+            .join(format!("susi_migtest_{}.db", std::process::id()));
+        let p = path.to_str().unwrap().to_string();
+        let _ = std::fs::remove_file(&path);
+
+        // Pre-migration shape: tag is globally UNIQUE, no product column.
+        {
+            let conn = Connection::open(&p).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE releases (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tag TEXT NOT NULL UNIQUE,
+                    name TEXT NOT NULL DEFAULT '',
+                    body TEXT NOT NULL DEFAULT '',
+                    prerelease INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    workspace_id TEXT DEFAULT NULL
+                );
+                 CREATE TABLE doc_pages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    release_id INTEGER NOT NULL,
+                    slug TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    body_md TEXT NOT NULL DEFAULT '',
+                    parent_slug TEXT,
+                    ord INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL,
+                    origin TEXT NOT NULL DEFAULT 'user',
+                    FOREIGN KEY (release_id) REFERENCES releases(id) ON DELETE CASCADE,
+                    UNIQUE(release_id, slug)
+                 );
+                 INSERT INTO releases (id, tag, name, created_at) VALUES (1, 'v1.0', 'Old', '2020-01-01T00:00:00Z');
+                 INSERT INTO doc_pages (release_id, slug, title, updated_at) VALUES (1, 'intro', 'Intro', '2020-01-01T00:00:00Z');",
+            )
+            .unwrap();
+        }
+
+        // Reopen — runs init_tables + migrate (adds product, rebuilds releases).
+        let db = LicenseDb::open(&p).unwrap();
+
+        // Existing release is preserved and now belongs to the default product.
+        let rid = db
+            .get_release_by_product_tag(DEFAULT_PRODUCT, "v1.0")
+            .unwrap();
+        assert_eq!(rid, Some(1), "release row must survive the rebuild");
+
+        // FK-linked doc page survived (id preserved across the rebuild).
+        let pages = db.list_doc_pages(1).unwrap();
+        assert_eq!(pages.len(), 1);
+        assert_eq!(pages[0].0, "intro");
+
+        // Composite (product, tag) now lets another product reuse the same tag.
+        let other = db
+            .insert_release("lpvr", "v1.0", "LPVR", "", false, None)
+            .unwrap();
+        assert_ne!(other, 1);
+        assert_eq!(
+            db.get_release_by_product_tag("lpvr", "v1.0").unwrap(),
+            Some(other)
+        );
+
+        // The default product row was seeded.
+        assert!(db.product_exists(DEFAULT_PRODUCT).unwrap());
+
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
     fn lease_expires(hours: i64) -> Option<DateTime<Utc>> {
         Some(Utc::now() + Duration::hours(hours))
     }
@@ -5296,7 +5541,7 @@ mod tests {
     #[test]
     fn test_release_asset_add_and_delete() {
         let db = test_db();
-        let rid = db.insert_release("v9.9", "Test", "", false, None).unwrap();
+        let rid = db.insert_release(DEFAULT_PRODUCT, "v9.9", "Test", "", false, None).unwrap();
 
         db.add_release_asset(rid, "a.bin", 11).unwrap();
         db.add_release_asset(rid, "b.bin", 22).unwrap();
@@ -5324,7 +5569,7 @@ mod tests {
     fn test_doc_pages_crud_and_bulk_upsert() {
         let mut db = test_db();
         let rid = db
-            .insert_release("v1.0", "FusionHub 1.0", "", false, None)
+            .insert_release(DEFAULT_PRODUCT, "v1.0", "FusionHub 1.0", "", false, None)
             .unwrap();
 
         // Editor upsert marks as user
@@ -5378,14 +5623,14 @@ mod tests {
         assert_eq!(db.list_doc_pages(rid).unwrap().len(), 4);
 
         // Cascade delete with release
-        assert!(db.delete_release("v1.0").unwrap());
+        assert!(db.delete_release(DEFAULT_PRODUCT, "v1.0").unwrap());
         assert!(db.get_doc_page(rid, "a").unwrap().is_none());
     }
 
     #[test]
     fn test_doc_page_origin_tracking() {
         let mut db = test_db();
-        let rid = db.insert_release("v1.0", "", "", false, None).unwrap();
+        let rid = db.insert_release(DEFAULT_PRODUCT, "v1.0", "", "", false, None).unwrap();
 
         // Pipeline bulk plants a page.
         db.upsert_doc_pages(
@@ -5432,7 +5677,7 @@ mod tests {
     #[test]
     fn test_copy_user_docs_to_new_release() {
         let mut db = test_db();
-        let old = db.insert_release("v1.0", "", "", false, None).unwrap();
+        let old = db.insert_release(DEFAULT_PRODUCT, "v1.0", "", "", false, None).unwrap();
 
         // Mixed origins under the old release.
         db.upsert_doc_pages(
@@ -5473,7 +5718,7 @@ mod tests {
         assert!(created);
 
         let prior = db
-            .latest_prior_release_with_user_docs(new_id, None)
+            .latest_prior_release_with_user_docs(new_id, DEFAULT_PRODUCT, None)
             .unwrap();
         assert_eq!(prior.as_ref().map(|p| p.1.as_str()), Some("v1.0"));
         let (src_id, _src_tag) = prior.unwrap();
@@ -5514,15 +5759,15 @@ mod tests {
     fn test_doc_releases_filters_to_releases_with_pages() {
         let db = test_db();
         let r1 = db
-            .insert_release("v1.0", "with docs", "", false, None)
+            .insert_release(DEFAULT_PRODUCT, "v1.0", "with docs", "", false, None)
             .unwrap();
         let _r2 = db
-            .insert_release("v1.1", "no docs", "", false, None)
+            .insert_release(DEFAULT_PRODUCT, "v1.1", "no docs", "", false, None)
             .unwrap();
         db.upsert_doc_page(r1, "intro", "Intro", "...", None, 0)
             .unwrap();
 
-        let releases = db.list_doc_releases().unwrap();
+        let releases = db.list_doc_releases(DEFAULT_PRODUCT).unwrap();
         assert_eq!(releases.len(), 1);
         assert_eq!(releases[0].1, "v1.0");
         assert_eq!(releases[0].4, 1); // page count
@@ -5535,13 +5780,13 @@ mod tests {
         db.create_workspace("ws-b", "B", "", "", "admin").unwrap();
 
         let g1 = db
-            .insert_release("g1.0", "global", "", false, None)
+            .insert_release(DEFAULT_PRODUCT, "g1.0", "global", "", false, None)
             .unwrap();
         let a1 = db
-            .insert_release("a1.0", "a-rel", "", false, Some("ws-a"))
+            .insert_release(DEFAULT_PRODUCT, "a1.0", "a-rel", "", false, Some("ws-a"))
             .unwrap();
         let b1 = db
-            .insert_release("b1.0", "b-rel", "", false, Some("ws-b"))
+            .insert_release(DEFAULT_PRODUCT, "b1.0", "b-rel", "", false, Some("ws-b"))
             .unwrap();
         for rid in [g1, a1, b1] {
             db.upsert_doc_page(rid, "intro", "Intro", "body", None, 0)
@@ -5549,7 +5794,7 @@ mod tests {
         }
 
         // Global list excludes workspace-scoped releases entirely.
-        let global = db.list_doc_releases().unwrap();
+        let global = db.list_doc_releases(DEFAULT_PRODUCT).unwrap();
         assert_eq!(global.len(), 1);
         assert_eq!(global[0].1, "g1.0");
 
@@ -5570,39 +5815,39 @@ mod tests {
         db.create_workspace("ws-b", "B", "", "", "admin").unwrap();
 
         // Set up: a global release with user docs, plus ws-a release with its own user docs.
-        let g_old = db.insert_release("g0.9", "g old", "", false, None).unwrap();
+        let g_old = db.insert_release(DEFAULT_PRODUCT, "g0.9", "g old", "", false, None).unwrap();
         db.upsert_doc_page(g_old, "guide", "Guide", "global hand-authored", None, 0)
             .unwrap();
 
         let a_old = db
-            .insert_release("a0.9", "a old", "", false, Some("ws-a"))
+            .insert_release(DEFAULT_PRODUCT, "a0.9", "a old", "", false, Some("ws-a"))
             .unwrap();
         db.upsert_doc_page(a_old, "guide", "Guide", "ws-a hand-authored", None, 0)
             .unwrap();
 
         // New global release: prior must come from the global pool.
         let (g_new, _) = db
-            .ensure_release_created_scoped("g1.0", "g new", None)
+            .ensure_release_created_scoped(DEFAULT_PRODUCT, "g1.0", "g new", None)
             .unwrap();
-        let prior = db.latest_prior_release_with_user_docs(g_new, None).unwrap();
+        let prior = db.latest_prior_release_with_user_docs(g_new, DEFAULT_PRODUCT, None).unwrap();
         assert_eq!(prior.map(|p| p.1), Some("g0.9".to_string()));
 
         // New ws-a release: prior must come from ws-a's pool, not global, not ws-b.
         let (a_new, _) = db
-            .ensure_release_created_scoped("a1.0", "a new", Some("ws-a"))
+            .ensure_release_created_scoped(DEFAULT_PRODUCT, "a1.0", "a new", Some("ws-a"))
             .unwrap();
         let prior = db
-            .latest_prior_release_with_user_docs(a_new, Some("ws-a"))
+            .latest_prior_release_with_user_docs(a_new, DEFAULT_PRODUCT, Some("ws-a"))
             .unwrap();
         assert_eq!(prior.map(|p| p.1), Some("a0.9".to_string()));
 
         // New ws-b release: no prior in ws-b's scope, so seeding finds nothing
         // (it must NOT pull from ws-a or global).
         let (b_new, _) = db
-            .ensure_release_created_scoped("b1.0", "b new", Some("ws-b"))
+            .ensure_release_created_scoped(DEFAULT_PRODUCT, "b1.0", "b new", Some("ws-b"))
             .unwrap();
         let prior = db
-            .latest_prior_release_with_user_docs(b_new, Some("ws-b"))
+            .latest_prior_release_with_user_docs(b_new, DEFAULT_PRODUCT, Some("ws-b"))
             .unwrap();
         assert!(
             prior.is_none(),
@@ -5623,9 +5868,9 @@ mod tests {
         let db = test_db();
         db.create_workspace("ws-1", "WS", "", "", "admin").unwrap();
 
-        db.insert_release("v1.0", "Global", "", false, None)
+        db.insert_release(DEFAULT_PRODUCT, "v1.0", "Global", "", false, None)
             .unwrap();
-        db.insert_release("v1.1", "Scoped", "", false, Some("ws-1"))
+        db.insert_release(DEFAULT_PRODUCT, "v1.1", "Scoped", "", false, Some("ws-1"))
             .unwrap();
 
         // Global list shows all releases regardless of scope.
@@ -5647,17 +5892,17 @@ mod tests {
     fn test_get_release_workspace_id() {
         let db = test_db();
         db.create_workspace("ws-1", "WS", "", "", "admin").unwrap();
-        db.insert_release("v1.0", "Global", "", false, None)
+        db.insert_release(DEFAULT_PRODUCT, "v1.0", "Global", "", false, None)
             .unwrap();
-        db.insert_release("v1.1", "Scoped", "", false, Some("ws-1"))
+        db.insert_release(DEFAULT_PRODUCT, "v1.1", "Scoped", "", false, Some("ws-1"))
             .unwrap();
 
-        assert_eq!(db.get_release_workspace_id("v1.0").unwrap(), Some(None));
+        assert_eq!(db.get_release_workspace_id(DEFAULT_PRODUCT, "v1.0").unwrap(), Some(None));
         assert_eq!(
-            db.get_release_workspace_id("v1.1").unwrap(),
+            db.get_release_workspace_id(DEFAULT_PRODUCT, "v1.1").unwrap(),
             Some(Some("ws-1".to_string()))
         );
-        assert_eq!(db.get_release_workspace_id("nonexistent").unwrap(), None);
+        assert_eq!(db.get_release_workspace_id(DEFAULT_PRODUCT, "nonexistent").unwrap(), None);
     }
 
     #[test]
