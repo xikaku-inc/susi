@@ -188,6 +188,8 @@ td {
 tr:last-child td { border-bottom: none; }
 .release-item:last-child { border-bottom: none !important; }
 tr:hover td { background: rgba(108, 140, 255, 0.04); }
+.ws-row { cursor: pointer; }
+.ws-row.selected td { background: rgba(108, 140, 255, 0.10); }
 
 .badge {
     display: inline-block;
@@ -695,7 +697,7 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
         <h2 style="font-size:16px;font-weight:600;">Workspaces</h2>
         <button id="btnCreateWorkspace" onclick="showCreateWorkspaceModal()">+ New Workspace</button>
     </div>
-    <div id="workspacesContainer" style="display:flex;flex-wrap:wrap;gap:12px;margin-bottom:20px;"></div>
+    <div id="workspacesContainer" style="margin-bottom:20px;"></div>
 
     <!-- Workspace detail panel -->
     <div id="wsDetailPanel" class="detail-panel card">
@@ -823,6 +825,39 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
         </div>
     </div>
 </div><!-- /page-releases -->
+
+<!-- Products page -->
+<div id="page-products" class="dash-page">
+    <div style="margin-top:32px;">
+        <div style="margin-bottom:20px;">
+            <h2 style="font-size:16px;font-weight:600;">Products</h2>
+        </div>
+        <div class="card" style="margin-bottom:20px;">
+            <div style="padding:16px;display:grid;grid-template-columns:150px 1fr 1.8fr 90px 130px;gap:12px;align-items:end;">
+                <div>
+                    <label style="display:block;font-size:12px;color:var(--text2);margin-bottom:4px;">Slug</label>
+                    <input type="text" id="newProductSlug" placeholder="lpvr" autocomplete="off">
+                </div>
+                <div>
+                    <label style="display:block;font-size:12px;color:var(--text2);margin-bottom:4px;">Name</label>
+                    <input type="text" id="newProductName" placeholder="LPVR" autocomplete="off">
+                </div>
+                <div>
+                    <label style="display:block;font-size:12px;color:var(--text2);margin-bottom:4px;">Description</label>
+                    <input type="text" id="newProductDesc" autocomplete="off">
+                </div>
+                <div>
+                    <label style="display:block;font-size:12px;color:var(--text2);margin-bottom:4px;">Order</label>
+                    <input type="number" id="newProductOrd" value="0">
+                </div>
+                <button onclick="createProduct()" style="min-width:0;">Add Product</button>
+            </div>
+        </div>
+        <div class="card">
+            <div id="productsContainer" style="padding:16px;color:var(--text2);font-size:13px;">Loading...</div>
+        </div>
+    </div>
+</div><!-- /page-products -->
 
 <!-- Licenses page -->
 <div id="page-licenses" class="dash-page">
@@ -1373,6 +1408,10 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
         <h2>Upload Release</h2>
         <div class="modal-body">
             <div class="form-row">
+                <label>Product</label>
+                <select id="releaseProduct" style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:var(--radius);font-size:13px;width:100%;"></select>
+            </div>
+            <div class="form-row">
                 <label>Version Tag</label>
                 <input type="text" id="releaseTag" placeholder="e.g. v1.3.0">
             </div>
@@ -1889,6 +1928,7 @@ function renderNav() {
         { page: 'docs', label: 'Documentation', href: '/docs', show: true },
         { page: 'workspaces', label: 'Workspaces', href: '#/workspaces', show: !!authToken },
         { page: 'releases', label: 'Releases', href: '#/releases', show: !!authToken },
+        { page: 'products', label: 'Products', href: '#/products', show: !!authToken && isAdmin },
         { page: 'licenses', label: 'Licenses', href: '#/licenses', show: !!authToken && isAdmin },
         { page: 'website', label: 'Website', href: '#/website', show: !!authToken && isAdmin },
         { page: 'shop', label: 'Shop', href: '#/shop', show: !!authToken && isAdmin },
@@ -2214,6 +2254,7 @@ function enterDashboard() {
     loadFeatures();
     if (isAdmin) {
         loadLicenses();
+        loadProducts();
         loadShop();
         loadWebsitePages();
         loadSiteSettings();
@@ -3303,17 +3344,18 @@ async function loadReleases() {
     }
 }
 
-async function downloadAsset(event, tag, assetName) {
+async function downloadAsset(event, product, tag, assetName) {
     event.preventDefault();
+    product = product || DEFAULT_PRODUCT;
     try {
         const resp = await fetch(API + '/updates/download-ticket', {
             method: 'POST',
             headers: authHeaders(),
-            body: JSON.stringify({ tag: tag, asset: assetName }),
+            body: JSON.stringify({ tag: tag, asset: assetName, product: product }),
         });
         if (!resp.ok) { toast('Download failed', 'error'); return; }
         const { ticket } = await resp.json();
-        const url = API + '/updates/download/' + encodeURIComponent(tag) + '/' + encodeURIComponent(assetName) + '?ticket=' + encodeURIComponent(ticket);
+        const url = API + '/updates/download/' + encodeURIComponent(tag) + '/' + encodeURIComponent(assetName) + '?ticket=' + encodeURIComponent(ticket) + '&product=' + encodeURIComponent(product);
         const a = document.createElement('a');
         a.href = url;
         a.download = assetName;
@@ -3363,13 +3405,17 @@ function renderReleases() {
     const isAdmin = userRole === 'admin';
     container.innerHTML = releases.map(r => {
         const expanded = expandedRelease === r.tag;
+        const prodSlug = r.product || DEFAULT_PRODUCT;
         const assets = (r.assets || []).map(a =>
-            '<a href="' + API + '/updates/download/' + encodeURIComponent(r.tag) + '/' + encodeURIComponent(a.name) + '" ' +
+            '<a href="' + API + '/updates/download/' + encodeURIComponent(r.tag) + '/' + encodeURIComponent(a.name) + '?product=' + encodeURIComponent(prodSlug) + '" ' +
             'style="font-family:monospace;font-size:12px;color:var(--accent);text-decoration:none;" ' +
-            'onclick="downloadAsset(event,\'' + esc(r.tag) + '\',\'' + esc(a.name) + '\')">' + esc(a.name) + '</a>' +
+            'onclick="downloadAsset(event,\'' + esc(prodSlug) + '\',\'' + esc(r.tag) + '\',\'' + esc(a.name) + '\')">' + esc(a.name) + '</a>' +
             '<span style="color:var(--text2);font-size:11px;margin-left:8px;">' + formatSize(a.size) + '</span>'
         ).join('<br>');
         const pre = r.prerelease ? ' <span style="background:rgba(251,191,36,0.15);color:var(--yellow);font-size:11px;font-weight:600;padding:2px 8px;border-radius:4px;">Pre-release</span>' : '';
+        const prod = (r.product && r.product !== DEFAULT_PRODUCT)
+            ? ' <span style="background:rgba(52,211,153,0.15);color:#34d399;font-size:11px;font-weight:600;padding:2px 8px;border-radius:4px;" title="Product">' + esc(r.product) + '</span>'
+            : '';
         let scope = '';
         if (r.workspace_id) {
             const ws = workspaces.find(w => w.id === r.workspace_id);
@@ -3377,10 +3423,10 @@ function renderReleases() {
             scope = ' <span style="background:rgba(96,165,250,0.15);color:var(--accent);font-size:11px;font-weight:600;padding:2px 8px;border-radius:4px;" title="Workspace-scoped release">' + esc(label) + '</span>';
         }
         const dlBtns = (r.assets || []).filter(a => /\.(msi|zip)$/i.test(a.name)).map(a =>
-            '<button class="small" onclick="event.stopPropagation();downloadAsset(event,\'' + esc(r.tag) + '\',\'' + esc(a.name) + '\')" title="' + esc(a.name) + ' (' + formatSize(a.size) + ')">' +
+            '<button class="small" onclick="event.stopPropagation();downloadAsset(event,\'' + esc(prodSlug) + '\',\'' + esc(r.tag) + '\',\'' + esc(a.name) + '\')" title="' + esc(a.name) + ' (' + formatSize(a.size) + ')">' +
             a.name.match(/\.(msi|zip)$/i)[1].toUpperCase() + '</button>'
         ).join('');
-        const deleteBtn = isAdmin ? '<button class="small danger" onclick="event.stopPropagation();deleteRelease(\'' + esc(r.tag) + '\')">Delete</button>' : '';
+        const deleteBtn = isAdmin ? '<button class="small danger" onclick="event.stopPropagation();deleteRelease(\'' + esc(prodSlug) + '\',\'' + esc(r.tag) + '\')">Delete</button>' : '';
         const arrow = '<span style="color:var(--text2);font-size:10px;margin-right:4px;display:inline-block;transition:transform 0.15s;transform:rotate(' + (expanded ? '90' : '0') + 'deg);">&#9654;</span>';
         const body = expanded ? (
             '<div style="padding:8px 0 4px 18px;border-top:1px solid var(--border);margin-top:8px;">' +
@@ -3392,7 +3438,7 @@ function renderReleases() {
         return '<div style="padding:10px 0;border-bottom:1px solid var(--border);" class="release-item">' +
             '<div onclick="toggleRelease(\'' + esc(r.tag) + '\')" style="display:flex;align-items:flex-start;justify-content:space-between;cursor:pointer;">' +
                 '<div>' +
-                    '<div style="font-weight:600;font-size:14px;font-family:monospace;">' + arrow + esc(r.tag) + pre + scope + '</div>' +
+                    '<div style="font-weight:600;font-size:14px;font-family:monospace;">' + arrow + esc(r.tag) + pre + prod + scope + '</div>' +
                     (r.name && r.name !== r.tag ? '<div style="font-size:13px;color:var(--text2);margin-left:18px;">' + esc(r.name) + '</div>' : '') +
                     '<div style="font-size:12px;color:var(--text2);margin-top:4px;margin-left:18px;">' + formatDateTime(r.published_at) + '</div>' +
                 '</div>' +
@@ -3439,9 +3485,28 @@ function showUploadReleaseModal(presetWorkspaceId) {
     document.getElementById('releaseFile').value = '';
     document.getElementById('uploadProgress').style.display = 'none';
     document.getElementById('uploadBtn').disabled = false;
+    populateReleaseProductDropdown();
+    // Workspace releases are FusionHub-scoped; lock the product there.
+    const prodSel = document.getElementById('releaseProduct');
+    prodSel.value = DEFAULT_PRODUCT;
+    prodSel.disabled = !!presetWorkspaceId;
     document.getElementById('uploadReleaseModal').classList.add('visible');
     populateReleaseWorkspaceDropdown(presetWorkspaceId);
     tagInput.focus();
+}
+
+// Fill the upload modal's product dropdown from the loaded catalog. Falls back
+// to just the default product if the catalog hasn't loaded yet.
+function populateReleaseProductDropdown() {
+    const sel = document.getElementById('releaseProduct');
+    if (!sel) return;
+    const list = (products && products.length)
+        ? products
+        : [{ slug: DEFAULT_PRODUCT, name: 'FusionHub' }];
+    sel.innerHTML = list.map(p =>
+        '<option value="' + esc(p.slug) + '">' + esc(p.name || p.slug) + '</option>'
+    ).join('');
+    sel.value = DEFAULT_PRODUCT;
 }
 
 function closeUploadReleaseModal() {
@@ -3454,6 +3519,7 @@ async function uploadRelease() {
     const body = document.getElementById('releaseBody').value;
     const prerelease = document.getElementById('releasePrerelease').checked;
     const workspaceId = document.getElementById('releaseWorkspace').value;
+    const product = document.getElementById('releaseProduct').value || DEFAULT_PRODUCT;
     const fileInput = document.getElementById('releaseFile');
 
     if (!tag) { toast('Version tag is required', 'error'); return; }
@@ -3463,6 +3529,7 @@ async function uploadRelease() {
     formData.append('tag', tag);
     formData.append('name', name);
     formData.append('body', body);
+    formData.append('product', product);
     formData.append('prerelease', prerelease ? 'true' : 'false');
     if (workspaceId) formData.append('workspace_id', workspaceId);
     // The backend handler iterates over every "file" multipart field, so a
@@ -3516,10 +3583,11 @@ async function uploadRelease() {
     }
 }
 
-async function deleteRelease(tag) {
-    if (!confirm('Delete release ' + tag + '? This cannot be undone.')) return;
+async function deleteRelease(product, tag) {
+    product = product || DEFAULT_PRODUCT;
+    if (!confirm('Delete release ' + tag + ' (' + product + ')? This cannot be undone.')) return;
     try {
-        const resp = await fetch(API + '/releases/' + encodeURIComponent(tag), {
+        const resp = await fetch(API + '/releases/' + encodeURIComponent(tag) + '?product=' + encodeURIComponent(product), {
             method: 'DELETE',
             headers: authHeaders(),
         });
@@ -3530,6 +3598,133 @@ async function deleteRelease(tag) {
         }
         toast('Release ' + tag + ' deleted', 'success');
         await loadReleases();
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Products (catalog that scopes releases + docs)
+// ---------------------------------------------------------------------------
+
+let products = [];
+const DEFAULT_PRODUCT = 'fusionhub';
+
+async function loadProducts() {
+    const container = document.getElementById('productsContainer');
+    if (!container) return;
+    try {
+        const resp = await fetch(API + '/products', { headers: authHeaders() });
+        if (!resp.ok) { container.innerHTML = '<span style="color:var(--text2);">Failed to load products</span>'; return; }
+        const data = await resp.json();
+        products = data.products || [];
+        renderProducts();
+    } catch (e) {
+        container.innerHTML = '<span style="color:var(--text2);">Failed to load products</span>';
+    }
+}
+
+function renderProducts() {
+    const container = document.getElementById('productsContainer');
+    if (products.length === 0) {
+        container.innerHTML = '<span style="color:var(--text2);">No products yet</span>';
+        return;
+    }
+    const GRID = 'display:grid;grid-template-columns:150px 1fr 1.8fr 90px 130px;gap:12px;align-items:center;';
+    const header =
+        '<div style="' + GRID + 'padding:0 0 8px;border-bottom:1px solid var(--border);font-size:12px;font-weight:600;color:var(--text2);">' +
+        '<div>Slug</div><div>Name</div><div>Description</div><div>Order</div><div></div></div>';
+    const rows = products.map(p => {
+        const isDefault = p.slug === DEFAULT_PRODUCT;
+        const menuId = 'product-menu-' + p.slug.replace(/[^a-zA-Z0-9_-]/g, '_');
+        const deleteItem = isDefault ? ''
+            : '<div class="divider"></div><button class="danger" onclick="deleteProduct(\'' + esc(p.slug) + '\')">Delete</button>';
+        const menu =
+            '<span class="dropdown" onclick="event.stopPropagation();" style="justify-self:end;">' +
+                '<button class="small secondary" onclick="toggleDropdown(event,\'' + menuId + '\')">Actions &#9662;</button>' +
+                '<div id="' + menuId + '" class="dropdown-menu" style="display:none;">' +
+                    '<button onclick="saveProduct(\'' + esc(p.slug) + '\')">Save changes</button>' +
+                    deleteItem +
+                '</div>' +
+            '</span>';
+        const slugCell = '<div style="font-family:monospace;font-size:13px;color:var(--text1);">' + esc(p.slug) +
+            (isDefault ? ' <span style="font-size:10px;color:var(--text2);">(default)</span>' : '') + '</div>';
+        return '<div style="' + GRID + 'padding:10px 0;border-bottom:1px solid var(--border);">' +
+            slugCell +
+            '<input type="text" id="prod-name-' + esc(p.slug) + '" value="' + esc(p.name) + '">' +
+            '<input type="text" id="prod-desc-' + esc(p.slug) + '" value="' + esc(p.description || '') + '">' +
+            '<input type="number" id="prod-ord-' + esc(p.slug) + '" value="' + esc(p.ord || 0) + '">' +
+            menu +
+        '</div>';
+    }).join('');
+    container.innerHTML = header + rows;
+}
+
+async function createProduct() {
+    const slug = document.getElementById('newProductSlug').value.trim();
+    const name = document.getElementById('newProductName').value.trim();
+    const description = document.getElementById('newProductDesc').value.trim();
+    const ord = parseInt(document.getElementById('newProductOrd').value, 10) || 0;
+    if (!slug || !name) { toast('Slug and name are required', 'error'); return; }
+    try {
+        const resp = await fetch(API + '/products', {
+            method: 'POST',
+            headers: authHeaders(),
+            body: JSON.stringify({ slug, name, description, ord }),
+        });
+        if (!resp.ok) {
+            const data = await resp.json().catch(() => ({}));
+            toast('Error: ' + (data.error || resp.status), 'error');
+            return;
+        }
+        toast('Product "' + slug + '" created', 'success');
+        document.getElementById('newProductSlug').value = '';
+        document.getElementById('newProductName').value = '';
+        document.getElementById('newProductDesc').value = '';
+        document.getElementById('newProductOrd').value = '0';
+        await loadProducts();
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function saveProduct(slug) {
+    const name = document.getElementById('prod-name-' + slug).value.trim();
+    const description = document.getElementById('prod-desc-' + slug).value.trim();
+    const ord = parseInt(document.getElementById('prod-ord-' + slug).value, 10) || 0;
+    if (!name) { toast('Name is required', 'error'); return; }
+    try {
+        const resp = await fetch(API + '/products/' + encodeURIComponent(slug), {
+            method: 'PUT',
+            headers: authHeaders(),
+            body: JSON.stringify({ name, description, ord }),
+        });
+        if (!resp.ok) {
+            const data = await resp.json().catch(() => ({}));
+            toast('Error: ' + (data.error || resp.status), 'error');
+            return;
+        }
+        toast('Product "' + slug + '" saved', 'success');
+        await loadProducts();
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function deleteProduct(slug) {
+    if (!confirm('Delete product "' + slug + '"? Only products with no releases can be deleted.')) return;
+    try {
+        const resp = await fetch(API + '/products/' + encodeURIComponent(slug), {
+            method: 'DELETE',
+            headers: authHeaders(),
+        });
+        if (!resp.ok) {
+            const data = await resp.json().catch(() => ({}));
+            toast('Error: ' + (data.error || resp.status), 'error');
+            return;
+        }
+        toast('Product "' + slug + '" deleted', 'success');
+        await loadProducts();
     } catch (e) {
         toast('Failed: ' + e.message, 'error');
     }
@@ -3566,16 +3761,32 @@ function renderWorkspaces() {
         container.innerHTML = '<div class="empty-state" style="width:100%;padding:24px;"><p>No workspaces yet.</p></div>';
         return;
     }
-    container.innerHTML = workspaces.map(ws => `
-        <div class="stat-card" style="cursor:pointer;min-width:200px;max-width:300px;border:1px solid ${ws.id === selectedWsId ? 'var(--accent)' : 'var(--border)'};"
-             onclick="showWsDetail('${ws.id}')">
-            <div style="font-weight:600;font-size:14px;margin-bottom:4px;">${esc(ws.name)}</div>
-            ${ws.product ? `<span class="badge active" style="font-size:10px;">${esc(ws.product)}</span>` : ''}
-            ${ws.description ? `<div style="font-size:12px;color:var(--text2);margin-top:4px;">${esc(ws.description)}</div>` : ''}
-            <div style="font-size:11px;color:var(--text2);margin-top:6px;">Your role: ${esc(ws.role ? ws.role.charAt(0).toUpperCase() + ws.role.slice(1) : 'Not a member')}</div>
-            <div style="font-size:11px;color:var(--text2);margin-top:2px;">Created by: ${esc(ws.created_by)}</div>
+    container.innerHTML = `
+        <div class="card">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Product</th>
+                        <th>Description</th>
+                        <th>Role</th>
+                        <th>Created by</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${workspaces.map(ws => `
+                        <tr class="ws-row${ws.id === selectedWsId ? ' selected' : ''}" onclick="showWsDetail('${ws.id}')">
+                            <td style="font-weight:600;">${esc(ws.name)}</td>
+                            <td>${ws.product ? `<span class="badge active">${esc(ws.product)}</span>` : ''}</td>
+                            <td style="color:var(--text2);">${ws.description ? esc(ws.description) : ''}</td>
+                            <td style="color:var(--text2);">${esc(ws.role ? ws.role.charAt(0).toUpperCase() + ws.role.slice(1) : 'Not a member')}</td>
+                            <td style="color:var(--text2);">${esc(ws.created_by)}</td>
+                        </tr>
+                    `).join('')}
+                </tbody>
+            </table>
         </div>
-    `).join('');
+    `;
 }
 
 
@@ -4113,7 +4324,7 @@ function renderWsReleaseExpansion(r, hasDocReleaseRow) {
                       '<button class="small danger" style="min-width:0;padding:2px 7px;font-size:12px;line-height:1.4;" onclick="deleteWsReleaseAsset(\'' + esc(tag) + '\',\'' + esc(a.name) + '\')" title="Remove this file">&times;</button>'
                     : '';
                 return '<li style="display:flex;justify-content:space-between;gap:8px;font-size:13px;align-items:center;">' +
-                    '<a href="#" onclick="event.preventDefault();downloadAsset(event,\'' + esc(tag) + '\',\'' + esc(a.name) + '\')" style="color:var(--accent);text-decoration:none;font-family:monospace;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(a.name) + '</a>' +
+                    '<a href="#" onclick="event.preventDefault();downloadAsset(event,\'' + DEFAULT_PRODUCT + '\',\'' + esc(tag) + '\',\'' + esc(a.name) + '\')" style="color:var(--accent);text-decoration:none;font-family:monospace;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(a.name) + '</a>' +
                     '<span style="color:var(--text2);font-size:11px;white-space:nowrap;">' + formatSize(a.size) + '</span>' +
                     (actions ? '<span style="display:flex;gap:4px;">' + actions + '</span>' : '') +
                 '</li>';
