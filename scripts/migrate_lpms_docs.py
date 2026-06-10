@@ -36,6 +36,54 @@ RELEASE_NAME = "LPMS Documentation"
 # Absolute asset URL prefix: file links must bypass the renderer's slug routing.
 ASSET_URL = f"/api/v1/products/{PRODUCT_SLUG}/docs/{RELEASE_TAG}/assets"
 
+# External PDFs converted to native doc pages (<cache>/pdf_final/<slug>.md +
+# <cache>/pdf_assets). Links to these URLs are rewritten to the page slug.
+PDF_PAGES = {
+    "lpms-nav2-datasheet": {
+        "title": "LPMS-NAV2 Datasheet", "parent": "lpms-nav2-series-documentation", "ord": 5,
+        "url": "https://lp-research.com/wp-content/uploads/2019/09/20190902LpmsNAV2FlyerEng.pdf"},
+    "lpms-nav2-user-manual": {
+        "title": "LPMS-NAV2 User Manual", "parent": "lpms-nav2-series-documentation", "ord": 6,
+        "url": "https://www.lp-research.com/wp-content/uploads/2017/11/LPMS-NAV2Manual20171025.pdf"},
+    "lpms-nav2-hardware-manual": {
+        "title": "LPMS-NAV2 Hardware Manual", "parent": "lpms-nav2-series-documentation", "ord": 7,
+        "url": "https://lp-research.com/wp-content/uploads/2020/07/20200108LpmsNav2SeriesHardwareManual.pdf"},
+    "lpms-ig1-hardware-manual": {
+        "title": "LPMS-IG1 Hardware Manual", "parent": "lpms-ig1-series-documentation", "ord": 5,
+        "url": "https://lp-research.com/wp-content/uploads/2020/06/20200521LpmsIG1HardwareManual.pdf"},
+    "lpms-ig1-quick-start-guide": {
+        "title": "LPMS-IG1 Quick Start Guide", "parent": "lpms-ig1-series-documentation", "ord": 6,
+        "url": "https://lp-research.com/wp-content/uploads/2020/03/20190801LpmsIG1QuickStartGuide.pdf"},
+    "lpms-b2-quick-start-guide": {
+        "title": "LPMS-B2 Quick Start Guide", "parent": "lpms2-series-documentation", "ord": 50,
+        "url": "https://lp-research.com/wp-content/uploads/2020/10/LpmsB2AppManual20160901.pdf"},
+    "lpms-curs2-quick-start-guide": {
+        "title": "LPMS-CURS2 Quick Start Guide", "parent": "lpms2-series-documentation", "ord": 51,
+        "url": "https://www.lp-research.com/wp-content/uploads/2016/10/LpmsCurs2QuickStartGuide20161013.pdf"},
+    "lpms-usbal2-quick-start-guide": {
+        "title": "LPMS-USBAL2 Quick Start Guide", "parent": "lpms2-series-documentation", "ord": 52,
+        "url": "https://www.lp-research.com/wp-content/uploads/2016/10/LpmsUsbal2QuickStartGuide20161001.pdf"},
+    "lpms-me1-manual": {
+        "title": "LPMS-ME1 Manual", "parent": "lpms2-series-documentation", "ord": 53,
+        "url": "https://lp-research.com/wp-content/uploads/2021/07/20191122LpmsMe1Manual.pdf"},
+    "lpms-b2-hardware-manual": {
+        "title": "LPMS-B2 Series Hardware Manual", "parent": "lpms2-series-documentation", "ord": 60,
+        "url": "https://lp-research.com/wp-content/uploads/2020/03/20200310LpmsB2HardwareManual.pdf"},
+    "lpms-u2-hardware-manual": {
+        "title": "LPMS-U2 Series Hardware Manual", "parent": "lpms2-series-documentation", "ord": 61,
+        "url": "https://lp-research.com/wp-content/uploads/2020/03/20200310LpmsU2SeriesHardwareManual.pdf"},
+    "lpms-al2-hardware-manual": {
+        "title": "LPMS-AL2 Series Hardware Manual", "parent": "lpms2-series-documentation", "ord": 62,
+        "url": "https://lp-research.com/wp-content/uploads/2020/05/2020318LpmsAl2SeriesHardwareManual.pdf"},
+    "lpms-me1-hardware-manual": {
+        "title": "LPMS-ME1 Hardware Manual", "parent": "lpms2-series-documentation", "ord": 63,
+        "url": "https://lp-research.com/wp-content/uploads/2021/07/20200914LpmsMe1HardwareManual.pdf"},
+    "lpms-me1-dk-manual": {
+        "title": "LPMS-ME1 Development Kit Manual", "parent": "lpms2-series-documentation", "ord": 64,
+        "url": "https://lp-research.com/wp-content/uploads/2021/07/20191114LPMS-ME1_DKManual.pdf"},
+}
+PDF_URL_TO_SLUG = {v["url"]: k for k, v in PDF_PAGES.items()}
+
 
 def api_get(path: str) -> dict:
     url = WIKI + path
@@ -74,6 +122,30 @@ def slugify(title: str) -> str:
     s = unicodedata.normalize("NFKD", title).encode("ascii", "ignore").decode()
     s = re.sub(r"[^a-zA-Z0-9]+", "-", s).strip("-").lower()
     return s or "page"
+
+
+def fill_cell_image(img_md: str) -> str:
+    """Make an image fill its table column (consistent product-table sizing)."""
+    return re.sub(r"\{[^}]*\}$", "", img_md) + "{width=100%}"
+
+
+def join_cell_lines(lines) -> str:
+    """lines: [(text, is_list_item)]. Pure multi-item lists get '- ' markers
+    so the renderer shows a bullet list; otherwise plain <br> stacking."""
+    if len(lines) > 1 and all(li for _, li in lines):
+        return "<br>".join("- " + t for t, _ in lines)
+    return "<br>".join(t for t, _ in lines)
+
+
+def text_outside_images(tag):
+    """Visible text of a tag excluding anything inside ac:image (captions)."""
+    bits = []
+    for d in tag.descendants:
+        if isinstance(d, NavigableString):
+            if any(isinstance(p, Tag) and p.name == "ac:image" for p in d.parents):
+                continue
+            bits.append(str(d))
+    return re.sub(r"\s+", " ", "".join(bits)).replace("|", "\\|").strip()
 
 
 def heading_anchor(frag: str) -> str:
@@ -188,7 +260,7 @@ class Converter:
             inner = c.get_text().strip()
             return f"`{inner}`" if inner else ""
         if name == "br":
-            return " " if in_table else "\n"
+            return "<br>" if in_table else "\n"
         if name == "a":
             href = c.get("href", "")
             text = self.inline(c, in_table).strip() or href
@@ -213,6 +285,10 @@ class Converter:
 
     def map_url(self, href: str) -> str:
         """Map Confluence URLs to susi-internal slugs where possible."""
+        norm = re.sub(r"^https?://(www\.)?", "", href)
+        for url, slug in PDF_URL_TO_SLUG.items():
+            if re.sub(r"^https?://(www\.)?", "", url) == norm:
+                return slug
         base, _, frag = href.partition("#")
         if not base and frag:
             return "#" + heading_anchor(frag)
@@ -336,7 +412,12 @@ class Converter:
             return [f"```\n{c.get_text().rstrip()}\n```"]
         if name == "ac:structured-macro":
             return self.macro_block(c)
-        if name in ("div", "ac:layout", "ac:layout-section", "ac:layout-cell", "ac:rich-text-body"):
+        if name == "ac:layout-section":
+            t = self.sensor_gallery_from_layout(c)
+            if t is not None:
+                return t
+            return self.blocks(c)
+        if name in ("div", "ac:layout", "ac:layout-cell", "ac:rich-text-body"):
             return self.blocks(c)
         if name == "ac:image":
             s = self.ac_image(c)
@@ -400,7 +481,78 @@ class Converter:
                 lines.append(self.list_block(nl, nl.name, depth + 1))
         return "\n".join(lines)
 
+    def product_table(self, rows) -> list:
+        """rows: [(image_md, names_md)] -> overview-style 2-column table."""
+        products = all(n.lstrip("*[- ").startswith("LPMS") for _, n in rows)
+        header = ("| **Product Image** | **Product Name** |" if products
+                  else "| **Image** | **Description** |")
+        out = [header, "|---|---|"]
+        for img, names in rows:
+            out.append(f"| {fill_cell_image(img)} | {names} |")
+        return ["\n".join(out)]
+
+    def sensor_gallery_from_layout(self, section: Tag):
+        """A layout section whose every cell is image (+caption) + name list
+        becomes an overview-style product table. Returns None if not matching."""
+        rows = []
+        for cell in section.find_all("ac:layout-cell", recursive=False):
+            if not cell.get_text().strip() and cell.find("ac:image") is None:
+                continue  # empty filler cell
+            imgs = cell.find_all("ac:image")
+            lis = cell.find_all("li")
+            if len(imgs) != 1 or cell.find("table") is not None:
+                return None
+            # Anything beyond image + list + captions disqualifies the cell.
+            for child in cell.children:
+                if isinstance(child, Tag) and child.name not in ("ac:image", "ul", "ol", "p"):
+                    return None
+                if isinstance(child, Tag) and child.name == "p" and child.get_text().strip():
+                    return None
+            img_md = self.ac_image(imgs[0])
+            names = [self.inline(li, in_table=True).strip() for li in lis]
+            names = [n for n in names if n]
+            if not names:
+                cap = imgs[0].find("ac:caption")
+                if cap is not None and cap.get_text().strip():
+                    names = [self.inline(cap, in_table=True).strip()]
+            if not img_md or not names:
+                return None
+            rows.append((img_md, join_cell_lines([(n, True) for n in names])))
+        return self.product_table(rows) if len(rows) >= 2 else None
+
+    def try_gallery_table(self, c: Tag):
+        """A table whose every non-empty cell is image + short label becomes an
+        overview-style product table. Returns None if not matching."""
+        rows = []
+        for tr in c.find_all("tr"):
+            for cell in tr.find_all(["th", "td"], recursive=False):
+                has_img = cell.find("ac:image") is not None
+                if not has_img:
+                    if cell.get_text().strip():
+                        return None  # text-only cell: a real data table
+                    continue
+                imgs = cell.find_all("ac:image")
+                if len(imgs) != 1 or cell.find("table") is not None:
+                    return None
+                img_md = self.ac_image(imgs[0])
+                lis = cell.find_all("li")
+                if lis:
+                    names = [self.inline(li, in_table=True).strip() for li in lis]
+                    label = join_cell_lines([(n, True) for n in names if n])
+                else:
+                    label = text_outside_images(cell)
+                    if not label:
+                        cap = imgs[0].find("ac:caption")
+                        label = cap.get_text().strip() if cap is not None else ""
+                if not img_md or not label:
+                    return None
+                rows.append((img_md, label))
+        return self.product_table(rows) if len(rows) >= 2 else None
+
     def table(self, c: Tag) -> list:
+        gallery = self.try_gallery_table(c)
+        if gallery is not None:
+            return gallery
         # Lift headings buried in cells (Confluence detail tables use them as
         # anchor targets) out as real headings so links and the TOC can hit them.
         lifted = []
@@ -432,8 +584,17 @@ class Converter:
         return lifted + ["\n".join(out)]
 
     def cell_text(self, cell: Tag) -> str:
-        """Flatten a table cell to single-line inline markdown."""
-        parts = []
+        """Flatten a table cell to one line; block children stack via <br>.
+        A cell that is purely a multi-item list becomes "- a<br>- b" which the
+        renderer shows as a real bullet list."""
+        lines = []  # (text, is_list_item)
+        cur = []
+
+        def flush():
+            t = re.sub(r"\s+", " ", "".join(cur)).strip()
+            if t:
+                lines.append((t, False))
+            cur.clear()
 
         def li_own_text(li):
             bits = []
@@ -445,14 +606,19 @@ class Converter:
 
         for child in cell.children:
             if isinstance(child, Tag) and child.name in ("ul", "ol"):
-                items = [li_own_text(li) for li in child.find_all("li")]
-                parts.append("; ".join(i for i in items if i))
-            elif isinstance(child, Tag) and child.name == "p":
-                parts.append(self.inline(child, in_table=True).strip())
+                flush()
+                lines.extend((i, True) for i in (li_own_text(li) for li in child.find_all("li")) if i)
+            elif isinstance(child, Tag) and child.name in ("p", "h1", "h2", "h3", "h4", "h5", "h6"):
+                flush()
+                cur.append(self.inline(child, in_table=True))
+                flush()
             else:
-                parts.append(self.inline_one(child, in_table=True))
-        s = " ".join(p for p in parts if p.strip())
-        return re.sub(r"\s+", " ", s).strip()
+                cur.append(self.inline_one(child, in_table=True))
+        flush()
+        # An image-only cell fills its column for consistent gallery sizing.
+        if len(lines) == 1 and re.fullmatch(r"!\[[^\]]*\]\([^)]+\)(\{[^}]*\})?", lines[0][0]):
+            return fill_cell_image(lines[0][0])
+        return join_cell_lines(lines)
 
     def macro_block(self, c: Tag) -> list:
         name = c.get("ac:name", "")
@@ -594,6 +760,8 @@ def convert_all(cache: Path) -> None:
         if p["id"] == ROOT_PAGE_ID:
             # Drop the Confluence-specific note about saving pages as PDF.
             md = re.sub(r"^NOTE: The pages in this online documentation[^\n]*\n+", "", md)
+        # Fix a source typo on the NAV2 page ("Hardware Manua](...)l").
+        md = md.replace("[Hardware Manua](lpms-nav2-hardware-manual)l", "[Hardware Manual](lpms-nav2-hardware-manual)")
         (md_dir / f"{slug}.md").write_text(md, encoding="utf-8")
         used_assets |= conv.used_assets
         print(f"conv  {slug}.md ({len(md)} chars, {len(conv.used_assets)} assets)")
@@ -660,13 +828,41 @@ def do_import(cache: Path, susi_url: str, token: str) -> None:
             f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"; filename=\"{filename}\"\r\n"
             f"Content-Type: {ctype}\r\n\r\n".encode() + data + b"\r\n")
 
+    # Pages converted from external PDFs (produced by review agents). Their
+    # image picks (<slug>.images.json: asset name -> source path) are staged
+    # into pdf_assets here.
+    pdf_final = cache / "pdf_final"
+    if pdf_final.is_dir():
+        import shutil
+        pdf_assets = cache / "pdf_assets"
+        pdf_assets.mkdir(exist_ok=True)
+        for slug, meta in PDF_PAGES.items():
+            if not (pdf_final / f"{slug}.md").exists():
+                continue
+            manifest[slug] = {"title": meta["title"], "parent_slug": meta["parent"], "ord": meta["ord"]}
+            mapping_file = pdf_final / f"{slug}.images.json"
+            if mapping_file.exists():
+                for asset, src in json.loads(mapping_file.read_text(encoding="utf-8")).items():
+                    if Path(src).exists():
+                        shutil.copy2(src, pdf_assets / asset)
+                    else:
+                        print(f"WARN missing image source: {src}")
+
     add_field("release_name", RELEASE_NAME)
     add_field("manifest", json.dumps(manifest))
     for f in sorted((cache / "md").iterdir()):
         add_file("page", f.name, f.read_bytes(), "text/markdown")
+    if pdf_final.is_dir():
+        for f in sorted(pdf_final.glob("*.md")):
+            add_file("page", f.name, f.read_bytes(), "text/markdown")
     for f in sorted((cache / "assets").iterdir()):
         ctype = mimetypes.guess_type(f.name)[0] or "application/octet-stream"
         add_file("asset", f.name, f.read_bytes(), ctype)
+    pdf_assets = cache / "pdf_assets"
+    if pdf_assets.is_dir():
+        for f in sorted(pdf_assets.iterdir()):
+            ctype = mimetypes.guess_type(f.name)[0] or "application/octet-stream"
+            add_file("asset", f.name, f.read_bytes(), ctype)
     parts.append(f"--{boundary}--\r\n".encode())
     body = b"".join(parts)
 

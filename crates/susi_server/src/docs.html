@@ -257,6 +257,9 @@ body {
 }
 .content th { background: var(--bg2); font-weight: 600; }
 .content tr:nth-child(even) td { background: var(--bg2); }
+.content td ul.cell-list { margin: 0; padding-left: 18px; }
+.content td ul.cell-list li { margin: 2px 0; }
+.content table.gallery-table { table-layout: fixed; }
 .content ul, .content ol { margin: 10px 0; padding-left: 24px; }
 .content li { margin: 4px 0; }
 .content a { color: var(--accent); text-decoration: none; }
@@ -926,12 +929,29 @@ function renderMarkdown(src) {
             while (i < lines.length && lines[i].includes('|') && lines[i].trim() !== '') {
                 rows.push(splitTableRow(lines[i])); i++;
             }
-            let html = '<div class="table-scroll"><table><thead><tr>';
-            headers.forEach(h => html += '<th>' + renderInline(h) + '</th>');
+            // Table cells may stack lines with literal <br> (cells only, not
+            // body text). If every stacked line is a "- " item, render a list.
+            const cellInline = s => {
+                const parts = s.split(/<br\s*\/?>/i);
+                if (parts.length > 1 && parts.every(p => p.trim().startsWith('- '))) {
+                    return '<ul class="cell-list">'
+                        + parts.map(p => '<li>' + renderInline(p.trim().slice(2)) + '</li>').join('')
+                        + '</ul>';
+                }
+                return renderInline(s).replace(/&lt;br\s*\/?&gt;/gi, '<br>');
+            };
+            // Two-column image galleries (header "Image"/"Product Image") get
+            // fixed column proportions so a width=100% image can't blow up
+            // its column.
+            const isGallery = headers.length === 2 && /^\**(product )?image\**$/i.test(headers[0].trim());
+            let html = '<div class="table-scroll"><table' + (isGallery ? ' class="gallery-table"' : '') + '>';
+            if (isGallery) html += '<colgroup><col style="width:40%"><col></colgroup>';
+            html += '<thead><tr>';
+            headers.forEach(h => html += '<th>' + cellInline(h) + '</th>');
             html += '</tr></thead><tbody>';
             rows.forEach(r => {
                 html += '<tr>';
-                r.forEach(c => html += '<td>' + renderInline(c) + '</td>');
+                r.forEach(c => html += '<td>' + cellInline(c) + '</td>');
                 html += '</tr>';
             });
             html += '</tbody></table></div>';
