@@ -1154,7 +1154,22 @@ function renderPage() {
     const { html: withIds, headings } = injectHeadingIds(html);
     c.innerHTML = withIds;
     populateInlineToc(c, headings);
+    wireContentAnchors(c);
     renderToc(headings);
+}
+
+// In-content same-page anchor links ("#heading-id"): scroll instead of letting
+// the hash router misread the fragment as a release tag.
+function wireContentAnchors(container) {
+    container.querySelectorAll('a[href^="#"]:not([data-toc-id])').forEach(a => {
+        const href = a.getAttribute('href');
+        if (href.startsWith('#/')) return; // real route
+        a.addEventListener('click', (e) => {
+            e.preventDefault();
+            const el = document.getElementById(decodeURIComponent(href.slice(1)));
+            if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        });
+    });
 }
 
 // Fill any inline [TOC] placeholders with H2/H3 links derived from the page's
