@@ -672,6 +672,9 @@ class Converter:
         md = re.sub(r"\n{3,}", "\n\n", md)
         # Separate directly adjacent links (e.g. two view-file macros in one paragraph).
         md = re.sub(r"\)\[", ") [", md)
+        # Merge adjacent gallery tables (split tables in the Confluence source).
+        for hdr in ("| **Product Image** | **Product Name** |", "| **Image** | **Description** |"):
+            md = md.replace(f"|\n\n{hdr}\n|---|---|\n|", "|\n|")
         return md
 
 

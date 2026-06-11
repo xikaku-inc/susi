@@ -747,6 +747,7 @@ async function renderTopNav() {
     if (verBtn) verBtn.style.display = (isAdmin && !currentWorkspaceId) ? '' : 'none';
     const items = [
         { label: 'Documentation', href: '/docs', active: true,           show: true },
+        { label: 'My Licenses',   href: '/#/mylicenses', active: false,  show: !!authToken() && !isAdmin },
         { label: 'Workspaces',    href: '/#/workspaces', active: false,  show: !!authToken() },
         { label: 'Releases',      href: '/#/releases',   active: false,  show: !!authToken() },
         { label: 'Products',      href: '/#/products',   active: false,  show: !!authToken() && isAdmin },
