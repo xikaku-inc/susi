@@ -428,6 +428,9 @@ struct CreateLicenseRequest {
     /// Require valid binary code signature. Default: false.
     #[serde(default = "default_require_signed_binary")]
     require_signed_binary: bool,
+    /// Usernames to assign the license to on creation (self-serve portal access).
+    #[serde(default)]
+    assign_to: Vec<String>,
 }
 
 fn default_product() -> String {
@@ -499,6 +502,8 @@ struct LicenseSummary {
     machines: Vec<MachineSummary>,
     revoked: bool,
     require_signed_binary: bool,
+    /// Portal usernames the license is assigned to.
+    users: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -510,7 +515,7 @@ struct MachineSummary {
     lease_active: bool,
 }
 
-fn license_to_summary(lic: &License) -> LicenseSummary {
+fn license_to_summary(lic: &License, users: Vec<String>) -> LicenseSummary {
     let now = Utc::now();
     LicenseSummary {
         id: lic.id.clone(),
@@ -541,6 +546,7 @@ fn license_to_summary(lic: &License) -> LicenseSummary {
             .collect(),
         revoked: lic.revoked,
         require_signed_binary: lic.require_signed_binary,
+        users,
     }
 }
 
@@ -1049,18 +1055,32 @@ async fn handle_login(
     // Phase 1 — password check. Pull every DB row we need under one lock, drop
     // the lock, then run Argon2 verify off-thread so the ~50 ms CPU spend
     // doesn't serialise every other request behind us.
-    let (hash, must_change, role, totp_enabled, user_email, device_known) = {
+    let (username, hash, must_change, role, totp_enabled, user_email, device_known) = {
         let db = state.db.lock().unwrap();
+        // The identifier may be a username or an email. Exact username wins
+        // (usernames can themselves be email addresses); otherwise fall back
+        // to a unique-email lookup. Unresolvable identifiers fall through and
+        // fail the password-hash fetch generically (no enumeration).
+        let username = if req.username.contains('@')
+            && !db.user_exists(&req.username).unwrap_or(false)
+        {
+            db.find_unique_username_by_email(&req.username)
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| req.username.clone())
+        } else {
+            req.username.clone()
+        };
         let hash = db
-            .get_user_password_hash(&req.username)
+            .get_user_password_hash(&username)
             .map_err(|_| error_response(StatusCode::UNAUTHORIZED, "Invalid credentials"))?;
-        let must_change = db.user_must_change_password(&req.username).unwrap_or(false);
-        let role = db.get_user_role(&req.username).unwrap_or_else(|_| "user".into());
-        let totp_enabled = db.user_totp_enabled(&req.username).unwrap_or(false);
-        let email = db.get_user_email(&req.username).ok().flatten();
+        let must_change = db.user_must_change_password(&username).unwrap_or(false);
+        let role = db.get_user_role(&username).unwrap_or_else(|_| "user".into());
+        let totp_enabled = db.user_totp_enabled(&username).unwrap_or(false);
+        let email = db.get_user_email(&username).ok().flatten();
         let device_known = !req.device_fp.is_empty()
-            && db.is_device_known(&req.username, &req.device_fp).unwrap_or(false);
-        (hash, must_change, role, totp_enabled, email, device_known)
+            && db.is_device_known(&username, &req.device_fp).unwrap_or(false);
+        (username, hash, must_change, role, totp_enabled, email, device_known)
     };
     if !verify_password(&req.password, &hash).await? {
         return Err(error_response(StatusCode::UNAUTHORIZED, "Invalid credentials"));
@@ -1077,13 +1097,13 @@ async fn handle_login(
             // Issue a 6-digit sign-in code. Do NOT issue JWT yet — the user
             // has to type the code back, which proves email control.
             let code = random_signin_code();
-            let token_hash = hash_signin_code(&req.username, &code);
+            let token_hash = hash_signin_code(&username, &code);
             {
                 let db = state.db.lock().unwrap();
                 let _ = db.purge_old_login_tokens();
                 db.insert_login_token(
                     &token_hash,
-                    &req.username,
+                    &username,
                     &req.device_fp,
                     &device_label,
                     SIGNIN_CODE_TTL_MINUTES * 60,
@@ -1096,7 +1116,7 @@ async fn handle_login(
             // unreachable would be a small info leak.
             let email_service = state.email.clone().expect("checked above");
             let to = email_addr.clone();
-            let uname = req.username.clone();
+            let uname = username.clone();
             let code_for_email = code.clone();
             tokio::spawn(async move {
                 if let Err(e) = email_service
@@ -1123,7 +1143,7 @@ async fn handle_login(
         // Bootstrap path — no email on file or SMTP disabled.
         log::warn!(
             "New-device login for user '{}' accepted without email verification (email set: {}, smtp enabled: {})",
-            req.username,
+            username,
             user_email.is_some(),
             !signin_code_disabled(&state),
         );
@@ -1139,7 +1159,7 @@ async fn handle_login(
                 })));
             }
             Some(code) => {
-                verify_totp_or_backup(&state, &req.username, code)?;
+                verify_totp_or_backup(&state, &username, code)?;
             }
         }
     }
@@ -1148,18 +1168,19 @@ async fn handle_login(
     if !req.device_fp.is_empty() {
         let db = state.db.lock().unwrap();
         if device_known {
-            let _ = db.touch_device(&req.username, &req.device_fp);
+            let _ = db.touch_device(&username, &req.device_fp);
         } else {
-            let _ = db.register_device(&req.username, &req.device_fp, &device_label);
+            let _ = db.register_device(&username, &req.device_fp, &device_label);
         }
     }
 
-    let token = create_jwt(&state.jwt_secret, &req.username)?;
+    let token = create_jwt(&state.jwt_secret, &username)?;
     Ok(Json(serde_json::json!({
         "token": token,
         "must_change_password": must_change,
         "totp_enabled": totp_enabled,
-        "role": role
+        "role": role,
+        "username": username
     })))
 }
 
@@ -1298,7 +1319,23 @@ async fn handle_signin_code_exchange(
     // Strip any spaces / dashes the user may have typed when copying the
     // code out of the email.
     let code: String = req.code.chars().filter(|c| c.is_ascii_digit()).collect();
-    let token_hash = hash_signin_code(&req.username, &code);
+
+    // Logins may identify by email; resolve to the username the code was
+    // scoped to. Exact username wins (usernames can themselves be email
+    // addresses). Unresolvable identifiers fall through and fail the token
+    // lookup generically (no enumeration).
+    let username = {
+        let db = state.db.lock().unwrap();
+        if req.username.contains('@') && !db.user_exists(&req.username).unwrap_or(false) {
+            db.find_unique_username_by_email(&req.username)
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| req.username.clone())
+        } else {
+            req.username.clone()
+        }
+    };
+    let token_hash = hash_signin_code(&username, &code);
 
     // Peek first so we can surface a TOTP prompt without consuming the
     // code. Consuming on the first call would leave a TOTP-enabled user
@@ -1359,6 +1396,155 @@ async fn handle_signin_code_exchange(
         "totp_enabled": totp_enabled,
         "role": role,
         "username": row.username,
+    })))
+}
+
+// Passwordless login, step 1: request a sign-in code by email or username.
+// Admins qualify too: the code exchange enforces TOTP for TOTP-enabled
+// accounts, so an admin sign-in is still two factors (inbox + authenticator).
+// The response is always the same generic OK so the endpoint can't be used
+// to enumerate accounts.
+#[derive(Deserialize)]
+struct RequestCodeRequest {
+    /// Email address or username.
+    identifier: String,
+    #[serde(default)]
+    device_fp: String,
+    #[serde(default)]
+    device_label: String,
+}
+
+async fn handle_request_signin_code(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(req): Json<RequestCodeRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let ip = client_ip(peer, &headers);
+    check_login_rate_limit(&state, ip)?;
+
+    let ok = || {
+        Json(serde_json::json!({
+            "status": "OK",
+            "ttl_minutes": SIGNIN_CODE_TTL_MINUTES,
+        }))
+    };
+
+    let identifier = req.identifier.trim().to_string();
+    if identifier.is_empty() || signin_code_disabled(&state) {
+        return Ok(ok());
+    }
+
+    let device_label = summarize_user_agent(&req.device_label);
+    let (username, email_addr) = {
+        let db = state.db.lock().unwrap();
+        // Exact username wins (usernames can themselves be email addresses).
+        let resolved = if db.user_exists(&identifier).unwrap_or(false) {
+            Some(identifier.clone())
+        } else if identifier.contains('@') {
+            db.find_unique_username_by_email(&identifier).ok().flatten()
+        } else {
+            None
+        };
+        let Some(uname) = resolved else { return Ok(ok()); };
+        let Some(email) = db.get_user_email(&uname).ok().flatten() else {
+            return Ok(ok());
+        };
+        (uname, email)
+    };
+
+    let code = random_signin_code();
+    let token_hash = hash_signin_code(&username, &code);
+    {
+        let db = state.db.lock().unwrap();
+        let _ = db.purge_old_login_tokens();
+        db.insert_login_token(
+            &token_hash,
+            &username,
+            &req.device_fp,
+            &device_label,
+            SIGNIN_CODE_TTL_MINUTES * 60,
+        )
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    }
+
+    let email_service = state.email.clone().expect("checked above");
+    tokio::spawn(async move {
+        if let Err(e) = email_service
+            .send_signin_code(&email_addr, &username, &code, SIGNIN_CODE_TTL_MINUTES)
+            .await
+        {
+            log::error!("Failed to send sign-in code email to {}: {:#}", email_addr, e);
+        }
+    });
+
+    Ok(ok())
+}
+
+// Invitation magic-login: a non-admin invitee clicks the emailed link and is
+// signed in directly - no password setup. Single-use; consumes the invite
+// token. Admin invitations keep the password-setup link instead.
+#[derive(Deserialize)]
+struct MagicLoginRequest {
+    token: String,
+    #[serde(default)]
+    device_fp: String,
+    #[serde(default)]
+    device_label: String,
+}
+
+async fn handle_magic_login(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(req): Json<MagicLoginRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let ip = client_ip(peer, &headers);
+    check_login_rate_limit(&state, ip)?;
+
+    let token_hash = hash_token(&req.token);
+    let invalid = || error_response(StatusCode::UNAUTHORIZED, "Link is invalid, already used, or expired");
+
+    let (username, role) = {
+        let db = state.db.lock().unwrap();
+        let username = db
+            .peek_invitation_token(&token_hash)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+            .ok_or_else(invalid)?;
+        let role = db.get_user_role(&username).unwrap_or_else(|_| "user".into());
+        if role == "admin" {
+            // Admin invites must go through password setup; their link points
+            // at /#/reset/<token>, so landing here means a tampered URL.
+            return Err(invalid());
+        }
+        // All gates passed - consume (atomic; guards a concurrent second click).
+        if db
+            .consume_password_reset_token(&token_hash)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+            .is_none()
+        {
+            return Err(invalid());
+        }
+        // The invitee proved inbox control and stays passwordless; without
+        // this the dashboard would trap them in the change-password gate.
+        let _ = db.clear_must_change_password(&username);
+        if !req.device_fp.is_empty() {
+            let _ = db.register_device(
+                &username,
+                &req.device_fp,
+                &summarize_user_agent(&req.device_label),
+            );
+        }
+        (username.clone(), role)
+    };
+
+    let jwt = create_jwt(&state.jwt_secret, &username)?;
+    Ok(Json(serde_json::json!({
+        "token": jwt,
+        "must_change_password": false,
+        "totp_enabled": false,
+        "role": role,
+        "username": username,
     })))
 }
 
@@ -1473,10 +1659,11 @@ async fn handle_forgot_password(
     // treated as an email; otherwise as a username.
     let (username, email_addr) = {
         let db = state.db.lock().unwrap();
-        let resolved = if identifier.contains('@') {
-            db.find_unique_username_by_email(&identifier).ok().flatten()
-        } else if db.user_exists(&identifier).unwrap_or(false) {
+        // Exact username wins (usernames can themselves be email addresses).
+        let resolved = if db.user_exists(&identifier).unwrap_or(false) {
             Some(identifier.clone())
+        } else if identifier.contains('@') {
+            db.find_unique_username_by_email(&identifier).ok().flatten()
         } else {
             None
         };
@@ -2107,7 +2294,10 @@ async fn handle_list_licenses(
         .list_licenses()
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
-    let summaries: Vec<LicenseSummary> = licenses.iter().map(license_to_summary).collect();
+    let summaries: Vec<LicenseSummary> = licenses
+        .iter()
+        .map(|l| license_to_summary(l, db.list_license_users(&l.id).unwrap_or_default()))
+        .collect();
     Ok(Json(summaries))
 }
 
@@ -2125,7 +2315,8 @@ async fn handle_get_license(
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "License key not found"))?;
 
-    Ok(Json(license_to_summary(&license)))
+    let users = db.list_license_users(&license.id).unwrap_or_default();
+    Ok(Json(license_to_summary(&license, users)))
 }
 
 async fn handle_create_license(
@@ -2164,10 +2355,23 @@ async fn handle_create_license(
     license.require_signed_binary = req.require_signed_binary;
 
     let db = state.db.lock().unwrap();
+    for username in &req.assign_to {
+        if !db.user_exists(username).unwrap_or(false) {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("Cannot assign license: user '{}' does not exist", username),
+            ));
+        }
+    }
     db.insert_license(&license)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    for username in &req.assign_to {
+        db.assign_license_user(&license.id, username)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    }
 
-    Ok((StatusCode::CREATED, Json(license_to_summary(&license))))
+    let users = db.list_license_users(&license.id).unwrap_or_default();
+    Ok((StatusCode::CREATED, Json(license_to_summary(&license, users))))
 }
 
 async fn handle_revoke_license(
@@ -2251,21 +2455,21 @@ async fn handle_update_license(
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "License not found after update"))?;
 
-    Ok(Json(license_to_summary(&updated)))
+    let users = db.list_license_users(&updated.id).unwrap_or_default();
+    Ok(Json(license_to_summary(&updated, users)))
 }
 
-async fn handle_export_license(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Path(key): Path<String>,
-    Json(req): Json<ExportRequest>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    let principal = validate_principal(&headers, &state)?;
-    require_admin_full(&state, &principal)?;
-
+/// Activate `machine_code` on the license and return the signed license file
+/// as a download. Shared by the admin export and the self-serve portal export
+/// (offline activation); callers do their own permission gating.
+fn export_license_file(
+    state: &AppState,
+    key: &str,
+    req: &ExportRequest,
+) -> Result<(StatusCode, [(axum::http::HeaderName, &'static str); 2], String), (StatusCode, Json<ErrorResponse>)> {
     let db = state.db.lock().unwrap();
     let license = db
-        .get_license_by_key(&key)
+        .get_license_by_key(key)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "License key not found"))?;
 
@@ -2296,7 +2500,7 @@ async fn handle_export_license(
 
     // Re-fetch with the activation
     let license = db
-        .get_license_by_key(&key)
+        .get_license_by_key(key)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .unwrap();
 
@@ -2318,6 +2522,17 @@ async fn handle_export_license(
         ],
         json,
     ))
+}
+
+async fn handle_export_license(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(key): Path<String>,
+    Json(req): Json<ExportRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    require_admin_full(&state, &principal)?;
+    export_license_file(&state, &key, &req)
 }
 
 async fn handle_export_token(
@@ -2450,6 +2665,136 @@ async fn handle_clear_machine_tombstone(
 }
 
 // ---------------------------------------------------------------------------
+// License <-> user assignment (admin) and self-serve portal endpoints
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct AssignLicenseUserRequest {
+    username: String,
+}
+
+async fn handle_assign_license_user(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(key): Path<String>,
+    Json(req): Json<AssignLicenseUserRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    require_admin_full(&state, &principal)?;
+
+    let db = state.db.lock().unwrap();
+    let license = db
+        .get_license_by_key(&key)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "License key not found"))?;
+    let username = req.username.trim();
+    if !db.user_exists(username).unwrap_or(false) {
+        return Err(error_response(StatusCode::NOT_FOUND, "User not found"));
+    }
+    db.assign_license_user(&license.id, username)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    let users = db.list_license_users(&license.id).unwrap_or_default();
+    Ok(Json(serde_json::json!({ "status": "OK", "users": users })))
+}
+
+async fn handle_unassign_license_user(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((key, username)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    require_admin_full(&state, &principal)?;
+
+    let db = state.db.lock().unwrap();
+    let license = db
+        .get_license_by_key(&key)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "License key not found"))?;
+    db.unassign_license_user(&license.id, &username)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    let users = db.list_license_users(&license.id).unwrap_or_default();
+    Ok(Json(serde_json::json!({ "status": "OK", "users": users })))
+}
+
+/// Resolve `key` to a license owned by `principal`. Returns 404 (not 403) on
+/// foreign licenses so the endpoint doesn't confirm key existence.
+fn get_owned_license(
+    db: &LicenseDb,
+    key: &str,
+    principal: &Principal,
+) -> Result<License, (StatusCode, Json<ErrorResponse>)> {
+    let license = db
+        .get_license_by_key(key)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "License key not found"))?;
+    if !db
+        .is_license_assigned(&license.id, &principal.username)
+        .unwrap_or(false)
+    {
+        return Err(error_response(StatusCode::NOT_FOUND, "License key not found"));
+    }
+    Ok(license)
+}
+
+async fn handle_my_licenses(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<LicenseSummary>>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+
+    let db = state.db.lock().unwrap();
+    let licenses = db
+        .list_licenses_for_user(&principal.username)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    let summaries: Vec<LicenseSummary> = licenses
+        .iter()
+        .map(|l| license_to_summary(l, db.list_license_users(&l.id).unwrap_or_default()))
+        .collect();
+    Ok(Json(summaries))
+}
+
+async fn handle_my_export_license(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(key): Path<String>,
+    Json(req): Json<ExportRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    {
+        let db = state.db.lock().unwrap();
+        get_owned_license(&db, &key, &principal)?;
+    }
+    export_license_file(&state, &key, &req)
+}
+
+async fn handle_my_deactivate_machine(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((key, machine_code)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+
+    let db = state.db.lock().unwrap();
+    let license = get_owned_license(&db, &key, &principal)?;
+
+    db.remove_machine_activation(&license.id, &machine_code)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    // Same stickiness as the admin removal: the removed machine must not
+    // silently re-add itself on its next heartbeat, otherwise "move the
+    // license to a new machine" never frees the slot.
+    db.add_machine_tombstone(&license.id, &machine_code, TOMBSTONE_TTL_HOURS)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    Ok(Json(serde_json::json!({
+        "status": "deactivated",
+        "tombstone_hours": TOMBSTONE_TTL_HOURS,
+    })))
+}
+
+// ---------------------------------------------------------------------------
 // User management endpoints
 // ---------------------------------------------------------------------------
 
@@ -2463,10 +2808,17 @@ async fn handle_list_users(
     let users = db
         .list_users()
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    let mut licenses_by_user: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
+    for (username, license_key, product) in db.list_all_license_assignments().unwrap_or_default() {
+        licenses_by_user.entry(username).or_default().push(
+            serde_json::json!({ "license_key": license_key, "product": product }),
+        );
+    }
     let out = users
         .into_iter()
         .map(|u| {
             let pending = db.has_pending_invitation(&u.username).unwrap_or(false);
+            let licenses = licenses_by_user.remove(&u.username).unwrap_or_default();
             serde_json::json!({
                 "username": u.username,
                 "role": u.role,
@@ -2475,6 +2827,7 @@ async fn handle_list_users(
                 "created_at": u.created_at,
                 "email": u.email,
                 "pending_invitation": pending,
+                "licenses": licenses,
             })
         })
         .collect();
@@ -2510,18 +2863,22 @@ async fn issue_and_send_invitation(
 ) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
     let raw_token = random_magic_token();
     let token_hash = hash_token(&raw_token);
-    {
+    let passwordless = {
         let db = state.db.lock().unwrap();
         let _ = db.purge_old_login_tokens();
         db.invalidate_setup_tokens(username)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
         db.insert_invitation_token(&token_hash, username, INVITE_TTL_HOURS * 3600)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
-    }
+        db.get_user_role(username).unwrap_or_default() != "admin"
+    };
 
+    // Non-admin invitees sign in directly from the link (magic-login);
+    // admins set a password first.
     let link = format!(
-        "{}/#/reset/{}",
+        "{}/#/{}/{}",
         state.magic_link_base_url.trim_end_matches('/'),
+        if passwordless { "welcome" } else { "reset" },
         raw_token
     );
     let Some(email_service) = state.email.clone() else {
@@ -2534,7 +2891,7 @@ async fn issue_and_send_invitation(
     let uname = username.to_string();
     tokio::spawn(async move {
         if let Err(e) = email_service
-            .send_invitation(&to, &uname, &link, INVITE_TTL_HOURS)
+            .send_invitation(&to, &uname, &link, INVITE_TTL_HOURS, passwordless)
             .await
         {
             log::error!("Failed to send invitation email to {}: {:#}", to, e);
@@ -2681,14 +3038,22 @@ async fn handle_rename_user(
         return Err(error_response(StatusCode::BAD_REQUEST, "New username is the same"));
     }
 
-    let db = state.db.lock().unwrap();
-    if db.user_exists(&new).unwrap_or(false) {
-        return Err(error_response(StatusCode::CONFLICT, "Username already taken"));
+    {
+        let db = state.db.lock().unwrap();
+        if db.user_exists(&new).unwrap_or(false) {
+            return Err(error_response(StatusCode::CONFLICT, "Username already taken"));
+        }
+        db.rename_user(&username, &new)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
     }
-    db.rename_user(&username, &new)
-        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    // API tokens stay valid (the rows were migrated) but the auth hot-path
+    // cache still maps them to the old username for up to its TTL.
+    api_token_cache_clear();
 
-    Ok(Json(serde_json::json!({ "status": "OK" })))
+    // Renaming yourself invalidates the current JWT (its subject is the old
+    // name) - tell the frontend so it can force a re-login.
+    let self_renamed = principal.username == username;
+    Ok(Json(serde_json::json!({ "status": "OK", "self_renamed": self_renamed })))
 }
 
 #[derive(Deserialize)]
@@ -5002,6 +5367,8 @@ async fn main() -> Result<()> {
         // Auth endpoints
         .route("/api/v1/auth/login", post(handle_login))
         .route("/api/v1/auth/signin-code", post(handle_signin_code_exchange))
+        .route("/api/v1/auth/request-code", post(handle_request_signin_code))
+        .route("/api/v1/auth/magic-login", post(handle_magic_login))
         .route("/api/v1/auth/forgot-password", post(handle_forgot_password))
         .route("/api/v1/auth/reset-password", post(handle_reset_password_submit))
         .route("/api/v1/auth/status", get(handle_auth_status))
@@ -5037,6 +5404,12 @@ async fn main() -> Result<()> {
         .route("/api/v1/licenses/{key}", get(handle_get_license).put(handle_update_license).delete(handle_delete_license))
         .route("/api/v1/licenses/{key}/revoke", post(handle_revoke_license))
         .route("/api/v1/licenses/{key}/export", post(handle_export_license))
+        .route("/api/v1/licenses/{key}/users", post(handle_assign_license_user))
+        .route("/api/v1/licenses/{key}/users/{username}", axum::routing::delete(handle_unassign_license_user))
+        // Self-serve portal: read/manage only the caller's assigned licenses.
+        .route("/api/v1/my/licenses", get(handle_my_licenses))
+        .route("/api/v1/my/licenses/{key}/export", post(handle_my_export_license))
+        .route("/api/v1/my/licenses/{key}/machines/{machine_code}", axum::routing::delete(handle_my_deactivate_machine))
         .route("/api/v1/licenses/{key}/export-token", post(handle_export_token))
         .route(
             "/api/v1/licenses/{key}/machines/{machine_code}",

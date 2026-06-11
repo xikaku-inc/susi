@@ -200,8 +200,9 @@ impl EmailService {
         Ok(())
     }
 
-    /// Welcome email for an admin-created account. Embeds a one-shot link to
-    /// `/#/reset/<token>` where the invitee picks their initial password.
+    /// Welcome email for an admin-created account. For passwordless accounts
+    /// (customers) the link signs them in directly (`/#/welcome/<token>`);
+    /// otherwise it leads to password setup (`/#/reset/<token>`).
     /// `ttl_hours` is shown in the body so the recipient knows the window.
     pub async fn send_invitation(
         &self,
@@ -209,22 +210,28 @@ impl EmailService {
         username: &str,
         link: &str,
         ttl_hours: i64,
+        passwordless: bool,
     ) -> Result<()> {
         let to: Mailbox = to_addr
             .parse()
             .with_context(|| format!("Invalid recipient address: {}", to_addr))?;
 
+        let action = if passwordless {
+            "sign in"
+        } else {
+            "set your password and sign in"
+        };
         let subject = "You've been invited to Susi by LP-Research".to_string();
         let text = format!(
             "You've been invited to Susi by LP-Research\n\n\
              Hi {user},\n\n\
              A Susi by LP-Research account has been created for you. \
-             Click the link below within {ttl} hours to set your password and sign in:\n\n\
+             Click the link below within {ttl} hours to {action}:\n\n\
              {link}\n\n\
              If you weren't expecting this invitation, you can ignore this email - \
              the link will expire and no account access will be granted.\n\n\
              - Xikaku / LP-Research\n",
-            user = username, ttl = ttl_hours, link = link
+            user = username, ttl = ttl_hours, link = link, action = action
         );
 
         let html = format!(
@@ -232,7 +239,11 @@ impl EmailService {
                 <h2 style=\"margin:0 0 22px;font-weight:600;font-size:22px;\">You've been invited to Susi by LP-Research</h2>\
                 <div style=\"text-align:left;\">\
                     <p style=\"margin:0 0 14px;\">Hi {user},</p>\
-                    <p style=\"margin:0 0 14px;\">A Susi by LP-Research account has been created for you. Click the link below within {ttl} hours to set your password and sign in:</p>\
+                    <p style=\"margin:0 0 14px;\">A Susi by LP-Research account has been created for you. Click the button below within {ttl} hours to {action}:</p>\
+                </div>\
+                <p style=\"margin:0 0 22px;\"><a href=\"{link}\" style=\"display:inline-block;padding:11px 22px;background:#2563eb;color:#ffffff;text-decoration:none;border-radius:8px;font-weight:600;\">Sign in</a></p>\
+                <div style=\"text-align:left;\">\
+                    <p style=\"margin:0 0 6px;font-size:13px;\">Or paste this into your browser:</p>\
                     <p style=\"margin:0 0 18px;font-size:13px;word-break:break-all;\"><a href=\"{link}\" style=\"color:#2563eb;text-decoration:none;\">{link}</a></p>\
                     <p style=\"margin:0 0 4px;font-size:13px;\">If you weren't expecting this invitation, you can ignore this email - the link will expire and no account access will be granted.</p>\
                     <p style=\"margin:16px 0 0;font-size:13px;\">- Xikaku / LP-Research</p>\
@@ -241,6 +252,7 @@ impl EmailService {
             user = html_escape(username),
             ttl = ttl_hours,
             link = html_escape(link),
+            action = action,
         );
 
         let email = Message::builder()

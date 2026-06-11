@@ -918,6 +918,15 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
                     <div class="field-label">Max Machines</div>
                     <div class="field-value" id="detailMachineCount"></div>
                 </div>
+                <div class="detail-field" style="grid-column:1/-1;">
+                    <div class="field-label">Assigned Users (self-serve portal access)</div>
+                    <div class="machines-list" id="detailUsers"></div>
+                    <div style="display:flex;gap:8px;margin-top:8px;">
+                        <input type="text" id="assignUserInput" list="assignUserList" placeholder="Username or email" style="flex:1;" onkeydown="if(event.key==='Enter')assignLicenseUser()">
+                        <datalist id="assignUserList"></datalist>
+                        <button class="small secondary" onclick="assignLicenseUser()">Assign</button>
+                    </div>
+                </div>
             </div>
             <details class="detail-advanced">
                 <summary class="detail-section-title">Advanced Options</summary>
@@ -997,6 +1006,12 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
     </div>
     </div>
 </div><!-- /page-licenses -->
+
+<!-- My Licenses page (self-serve view for non-admin users) -->
+<div id="page-mylicenses" class="dash-page">
+    <h2 style="font-size:16px;font-weight:600;margin-top:32px;margin-bottom:16px;">My Licenses</h2>
+    <div id="myLicensesList"></div>
+</div><!-- /page-mylicenses -->
 
 <!-- Shop page -->
 <div id="page-shop" class="dash-page">
@@ -1310,6 +1325,10 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
                 <input type="text" id="createCustomer" placeholder="Company name">
             </div>
             <div class="form-row">
+                <label>Customer contact email <span style="font-weight:400;color:var(--text2);font-size:11px;">(optional - creates portal account + assigns license)</span></label>
+                <input type="email" id="createAssignEmail" placeholder="contact@customer.com">
+            </div>
+            <div class="form-row">
                 <label>Product</label>
                 <input type="text" id="createProduct" value="FusionHub">
             </div>
@@ -1397,6 +1416,36 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
             <div class="form-actions">
                 <button class="secondary" onclick="closeExportModal()">Cancel</button>
                 <button onclick="doExport()">Export &amp; Download</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Self-serve offline activation modal (My Licenses page). FusionHub shows
+     the machine code on its License page even without internet; the user
+     pastes it here from any connected device and carries license.json over. -->
+<div id="myExportModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeMyExportModal()">
+    <div class="modal">
+        <h2>Activate Offline Machine</h2>
+        <div class="modal-body">
+            <div class="form-row" style="font-size:12px;color:var(--text2);line-height:1.5">
+                FusionHub shows the machine code on its License page. Paste it below, then copy the downloaded <code style="font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:var(--bg3);padding:1px 5px;border-radius:3px">license.json</code> to the offline machine and load it in FusionHub.
+            </div>
+            <div class="form-row">
+                <label>License Key</label>
+                <input type="text" id="myExportKey" readonly>
+            </div>
+            <div class="form-row">
+                <label>Machine Code</label>
+                <input type="text" id="myExportMachineCode" placeholder="Paste machine code here">
+            </div>
+            <div class="form-row">
+                <label>Machine Name (optional)</label>
+                <input type="text" id="myExportFriendlyName" placeholder="e.g. Lab PC">
+            </div>
+            <div class="form-actions">
+                <button class="secondary" onclick="closeMyExportModal()">Cancel</button>
+                <button onclick="doMyExport()">Download license file</button>
             </div>
         </div>
     </div>
@@ -1532,8 +1581,8 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
         <div class="subtitle">Susi Server</div>
         <div id="loginError" class="auth-error"></div>
         <div class="form-row">
-            <label>Username</label>
-            <input type="text" id="loginUsername" placeholder="Username" autocomplete="username" onkeydown="if(event.key==='Enter')document.getElementById('loginPassword').focus()">
+            <label>Username or email</label>
+            <input type="text" id="loginUsername" placeholder="Username or email" autocomplete="username" onkeydown="if(event.key==='Enter')document.getElementById('loginPassword').focus()">
         </div>
         <div class="form-row">
             <label>Password</label>
@@ -1544,8 +1593,27 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
             <input type="text" id="loginTotp" placeholder="6-digit code, or XXXXX-XXXXX" maxlength="20" autocomplete="one-time-code" onkeydown="if(event.key==='Enter')submitLogin()">
         </div>
         <button onclick="submitLogin()">Sign In</button>
-        <div style="text-align:center;margin-top:12px;font-size:12px;">
+        <div style="text-align:center;margin-top:12px;font-size:12px;display:flex;justify-content:center;gap:16px;">
+            <a href="#" onclick="event.preventDefault();showEmailCode();" style="color:var(--text2);">Email me a sign-in code</a>
             <a href="#" onclick="event.preventDefault();showForgotPassword();" style="color:var(--text2);">Forgot password?</a>
+        </div>
+    </div>
+</div>
+
+<!-- Passwordless sign-in overlay: ask for email, send a 6-digit code, then
+     reuse the signinCodeOverlay for the exchange. -->
+<div id="emailCodeOverlay" class="auth-overlay">
+    <div class="auth-card">
+        <h2>Sign in with a code</h2>
+        <div class="subtitle">Enter your email - we'll send a sign-in code if an account is on file.</div>
+        <div id="emailCodeError" class="auth-error"></div>
+        <div class="form-row">
+            <label>Email</label>
+            <input type="text" id="emailCodeIdentifier" placeholder="you@company.com" autocomplete="email" onkeydown="if(event.key==='Enter')submitRequestCode()">
+        </div>
+        <button onclick="submitRequestCode()">Send sign-in code</button>
+        <div style="text-align:center;margin-top:12px;font-size:12px;">
+            <a href="#" onclick="event.preventDefault();document.getElementById('emailCodeOverlay').classList.remove('visible');showLogin();" style="color:var(--text2);">Back to sign in</a>
         </div>
     </div>
 </div>
@@ -1690,8 +1758,8 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
         <div class="modal-body">
             <div id="usersTableContainer" style="margin-bottom:16px;max-height:50vh;overflow:auto;">
                 <table>
-                    <thead><tr><th>Username</th><th>Role</th><th>Email</th><th>2FA</th><th>Status</th><th></th></tr></thead>
-                    <tbody id="usersTableBody"><tr><td colspan="6">Loading...</td></tr></tbody>
+                    <thead><tr><th>Username</th><th>Role</th><th>Email</th><th>Licenses</th><th>2FA</th><th>Status</th><th></th></tr></thead>
+                    <tbody id="usersTableBody"><tr><td colspan="7">Loading...</td></tr></tbody>
                 </table>
             </div>
             <div style="border-top:1px solid var(--border);padding-top:16px;">
@@ -1856,7 +1924,7 @@ function tryHandleResetLink() {
     const resetMatch = window.location.hash.match(/^#\/reset\/([A-Za-z0-9]+)/);
     if (!resetMatch) return false;
     pendingResetToken = resetMatch[1];
-    ['loginOverlay', 'changePasswordOverlay', 'forgotPasswordOverlay', 'signinCodeOverlay', 'resetSentOverlay'].forEach(id => {
+    ['loginOverlay', 'changePasswordOverlay', 'forgotPasswordOverlay', 'signinCodeOverlay', 'resetSentOverlay', 'emailCodeOverlay'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.classList.remove('visible');
     });
@@ -1869,15 +1937,52 @@ function tryHandleResetLink() {
     return true;
 }
 
+// Invitation magic-login landings (#/welcome/<token>): exchange the one-shot
+// token for a session directly - customer accounts stay passwordless.
+function isWelcomeLink() {
+    return /^#\/welcome\/[A-Za-z0-9]+/.test(window.location.hash);
+}
+async function handleWelcomeLink() {
+    const m = window.location.hash.match(/^#\/welcome\/([A-Za-z0-9]+)/);
+    if (!m) return;
+    history.replaceState(null, '', window.location.pathname + window.location.search);
+    try {
+        const resp = await fetch(API + '/auth/magic-login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token: m[1], device_fp: getDeviceFp(), device_label: getDeviceLabel() }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+            renderNav();
+            showLogin();
+            toast(data.error || 'Sign-in link is invalid or expired', 'error');
+            return;
+        }
+        authToken = data.token;
+        localStorage.setItem('auth_token', authToken);
+        userRole = data.role || 'user';
+        currentUsername = data.username || '';
+        location.hash = '#/mylicenses';
+        await checkAuthStatus();
+    } catch (e) {
+        renderNav();
+        showLogin();
+        toast('Connection failed: ' + e.message, 'error');
+    }
+}
+
 (function init() {
     authToken = localStorage.getItem('auth_token') || '';
 
     if (tryHandleResetLink()) return;
+    if (isWelcomeLink()) { handleWelcomeLink(); return; }
 
     window.addEventListener('hashchange', () => {
         // An email link that opens in an already-open tab only fires
         // hashchange, not a full reload. Catch #/reset/<token> here too.
         if (tryHandleResetLink()) return;
+        if (isWelcomeLink()) { handleWelcomeLink(); return; }
         route();
     });
     if (!authToken) {
@@ -1904,7 +2009,7 @@ function route() {
     }
     if (authToken && (target === '' || target === 'home')) {
         // Logged-in user landing on / — pick the first available section.
-        target = (userRole === 'admin') ? 'releases' : 'workspaces';
+        target = (userRole === 'admin') ? 'releases' : 'mylicenses';
         if (location.hash !== '#/' + target) location.hash = '#/' + target;
     }
     showPage(target);
@@ -1914,6 +2019,7 @@ function showPage(name) {
     document.querySelectorAll('.dash-page').forEach(p => p.classList.remove('active'));
     const page = document.getElementById('page-' + name);
     if (page) page.classList.add('active');
+    if (name === 'mylicenses' && authToken) loadMyLicenses();
     renderNav();
     document.querySelectorAll('#topNav a').forEach(a => {
         a.classList.toggle('active', a.dataset.page === name);
@@ -1926,6 +2032,7 @@ function renderNav() {
     const isAdmin = userRole === 'admin';
     const items = [
         { page: 'docs', label: 'Documentation', href: '/docs', show: true },
+        { page: 'mylicenses', label: 'My Licenses', href: '#/mylicenses', show: !!authToken && !isAdmin },
         { page: 'workspaces', label: 'Workspaces', href: '#/workspaces', show: !!authToken },
         { page: 'releases', label: 'Releases', href: '#/releases', show: !!authToken },
         { page: 'products', label: 'Products', href: '#/products', show: !!authToken && isAdmin },
@@ -1962,7 +2069,7 @@ async function submitLogin() {
 
     const username = document.getElementById('loginUsername').value.trim();
     const password = document.getElementById('loginPassword').value;
-    if (!username) { errEl.textContent = 'Username is required'; errEl.classList.add('visible'); return; }
+    if (!username) { errEl.textContent = 'Username or email is required'; errEl.classList.add('visible'); return; }
     if (!password) { errEl.textContent = 'Password is required'; errEl.classList.add('visible'); return; }
 
     const body = {
@@ -2178,6 +2285,52 @@ async function submitForgotPassword() {
     }
 }
 
+// -- Passwordless sign-in (customer accounts) --
+// Step 1: request a code by email. The server always answers OK (no account
+// enumeration); the code-entry overlay handles the rest via /auth/signin-code,
+// which resolves email identifiers server-side.
+function showEmailCode() {
+    document.getElementById('loginOverlay').classList.remove('visible');
+    document.getElementById('emailCodeOverlay').classList.add('visible');
+    document.getElementById('emailCodeError').classList.remove('visible');
+    document.getElementById('emailCodeIdentifier').value =
+        document.getElementById('loginUsername').value || '';
+    setTimeout(() => document.getElementById('emailCodeIdentifier').focus(), 50);
+}
+
+async function submitRequestCode() {
+    const errEl = document.getElementById('emailCodeError');
+    errEl.classList.remove('visible');
+    const identifier = document.getElementById('emailCodeIdentifier').value.trim();
+    if (!identifier) { errEl.textContent = 'Enter your email'; errEl.classList.add('visible'); return; }
+    try {
+        const resp = await fetch(API + '/auth/request-code', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ identifier, device_fp: getDeviceFp(), device_label: getDeviceLabel() }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+            errEl.textContent = data.error || 'Could not request a code - try again later';
+            errEl.classList.add('visible');
+            return;
+        }
+        pendingSigninUsername = identifier;
+        document.getElementById('emailCodeOverlay').classList.remove('visible');
+        document.getElementById('signinCodeHint').textContent = 'If an account exists for ' + identifier + ', a sign-in code is on its way.';
+        document.getElementById('signinCodeTtl').textContent = data.ttl_minutes || 15;
+        document.getElementById('signinCodeError').classList.remove('visible');
+        document.getElementById('signinCodeInput').value = '';
+        document.getElementById('signinCodeTotp').value = '';
+        document.getElementById('signinCodeTotpRow').style.display = 'none';
+        document.getElementById('signinCodeOverlay').classList.add('visible');
+        setTimeout(() => document.getElementById('signinCodeInput').focus(), 50);
+    } catch (e) {
+        errEl.textContent = 'Connection failed: ' + e.message;
+        errEl.classList.add('visible');
+    }
+}
+
 async function submitResetPassword() {
     const errEl = document.getElementById('resetPasswordError');
     errEl.classList.remove('visible');
@@ -2258,6 +2411,9 @@ function enterDashboard() {
         loadShop();
         loadWebsitePages();
         loadSiteSettings();
+        loadAssignableUsers();
+    } else {
+        loadMyLicenses();
     }
     loadReleases();
     loadWorkspaces();
@@ -2409,6 +2565,23 @@ function selectLicense(key) {
     document.getElementById('detailLeaseGrace').textContent = lic.lease_grace_hours + ' h';
     document.getElementById('detailRequireSignedBinary').textContent = lic.require_signed_binary ? 'Yes' : 'No';
 
+    const usersEl = document.getElementById('detailUsers');
+    if (lic.users && lic.users.length > 0) {
+        usersEl.innerHTML = lic.users.map(u => {
+            const account = assignableUsers.find(a => a.username === u);
+            const email = account && account.email && account.email !== u
+                ? '<span class="machine-code" style="margin-left:12px;">' + esc(account.email) + '</span>'
+                : '';
+            return '<div class="machine-item">' +
+                '<div style="display:flex;align-items:baseline;"><strong>' + esc(u) + '</strong>' + email + '</div>' +
+                '<button class="small danger" onclick="unassignLicenseUser(\'' + esc(lic.license_key) + '\',\'' + esc(u) + '\')">Remove</button>' +
+                '</div>';
+        }).join('');
+    } else {
+        usersEl.innerHTML = '<div style="color:var(--text2);font-size:13px;padding:8px 0;">No users assigned</div>';
+    }
+    document.getElementById('assignUserInput').value = '';
+
     const btnRevoke = document.getElementById('btnRevoke');
     btnRevoke.style.display = status === 'revoked' ? 'none' : '';
 
@@ -2528,6 +2701,7 @@ async function deleteLicense() {
 // Create modal
 function showCreateModal() {
     document.querySelectorAll('#createFeaturesContainer input[type=checkbox]').forEach(cb => cb.checked = false);
+    document.getElementById('createAssignEmail').value = '';
     document.getElementById('createLeaseDuration').value = '';
     document.getElementById('createLeaseGrace').value = '';
     document.getElementById('createRequireSignedBinary').checked = false;
@@ -2593,7 +2767,18 @@ async function createLicense() {
     const customer = document.getElementById('createCustomer').value.trim();
     if (!customer) { toast('Customer name is required', 'error'); return; }
 
+    // One-dialog flow: a contact email finds-or-creates the portal account
+    // (sending the invitation) and assigns the new license to it.
+    const assignEmail = document.getElementById('createAssignEmail').value.trim();
+    let assignTo = [];
+    if (assignEmail) {
+        const username = await ensurePortalUser(assignEmail);
+        if (!username) return;
+        assignTo = [username];
+    }
+
     const body = {
+        assign_to: assignTo,
         product: document.getElementById('createProduct').value.trim() || 'FusionHub',
         customer: customer,
         features: getSelectedFeatures(),
@@ -2676,6 +2861,87 @@ async function deactivateMachine(key, machineCode) {
     }
 }
 
+// -- License <-> user assignment (admin) --
+let assignableUsers = [];
+async function loadAssignableUsers() {
+    try {
+        const resp = await fetch(API + '/auth/users', { headers: authHeaders() });
+        if (!resp.ok) return;
+        assignableUsers = await resp.json();
+        const dl = document.getElementById('assignUserList');
+        if (dl) dl.innerHTML = assignableUsers
+            .filter(u => u.role !== 'admin')
+            .map(u => '<option value="' + esc(u.username) + '">' + esc(u.email || '') + '</option>').join('');
+    } catch (e) {}
+}
+
+// Resolve a username-or-email to an existing account; create + invite a new
+// portal user when given an unknown email. Returns the username or null.
+async function ensurePortalUser(identifier) {
+    const id = identifier.trim();
+    if (!id) return null;
+    const user = assignableUsers.find(u => u.username === id) ||
+                 assignableUsers.find(u => (u.email || '').toLowerCase() === id.toLowerCase());
+    if (user) return user.username;
+    if (!id.includes('@')) {
+        toast('No user "' + id + '" - enter an email address to create one', 'error');
+        return null;
+    }
+    try {
+        const resp = await fetch(API + '/auth/users', {
+            method: 'POST',
+            headers: authHeaders(),
+            body: JSON.stringify({ username: id, email: id, role: 'user' }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+            toast('Error creating user: ' + (data.error || resp.status), 'error');
+            return null;
+        }
+        toast('Invitation sent to ' + id, 'success');
+        await loadAssignableUsers();
+        return id;
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+        return null;
+    }
+}
+
+async function assignLicenseUser() {
+    if (!selectedKey) return;
+    const username = await ensurePortalUser(document.getElementById('assignUserInput').value);
+    if (!username) return;
+    try {
+        const resp = await fetch(API + '/licenses/' + encodeURIComponent(selectedKey) + '/users', {
+            method: 'POST',
+            headers: authHeaders(),
+            body: JSON.stringify({ username }),
+        });
+        if (!resp.ok) { const err = await resp.json(); toast('Error: ' + err.error, 'error'); return; }
+        toast('License assigned to ' + username, 'success');
+        await loadLicenses();
+        selectLicense(selectedKey);
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function unassignLicenseUser(key, username) {
+    if (!confirm('Remove portal access to this license for ' + username + '?')) return;
+    try {
+        const resp = await fetch(API + '/licenses/' + encodeURIComponent(key) + '/users/' + encodeURIComponent(username), {
+            method: 'DELETE',
+            headers: authHeaders(),
+        });
+        if (!resp.ok) { const err = await resp.json(); toast('Error: ' + err.error, 'error'); return; }
+        toast('Unassigned ' + username, 'success');
+        await loadLicenses();
+        selectLicense(key);
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
 // Export modal
 function exportLicense() {
     if (!selectedKey) return;
@@ -2749,6 +3015,128 @@ async function doExport() {
         closeExportModal();
         await loadLicenses();
         selectLicense(key);
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+// -- My Licenses (self-serve portal page) --
+let myLicenses = [];
+
+async function loadMyLicenses() {
+    const listEl = document.getElementById('myLicensesList');
+    try {
+        const resp = await fetch(API + '/my/licenses', { headers: authHeaders() });
+        if (resp.status === 401) {
+            authToken = '';
+            localStorage.removeItem('auth_token');
+            showLogin();
+            return;
+        }
+        if (!resp.ok) return;
+        myLicenses = await resp.json();
+        renderMyLicenses();
+    } catch (e) {
+        listEl.innerHTML = '<div class="card"><div class="detail-body" style="color:var(--text2);">Failed to load licenses: ' + esc(e.message) + '</div></div>';
+    }
+}
+
+function renderMyLicenses() {
+    const listEl = document.getElementById('myLicensesList');
+    if (!myLicenses.length) {
+        listEl.innerHTML = '<div class="card"><div class="detail-body" style="color:var(--text2);">No licenses are assigned to your account yet.</div></div>';
+        return;
+    }
+    listEl.innerHTML = myLicenses.map(lic => {
+        const status = getStatus(lic);
+        const features = lic.features.map(f => '<span class="feature-tag">' + esc(f) + '</span>').join(' ') || '<span style="color:var(--text2)">none</span>';
+        const machines = (lic.machines && lic.machines.length)
+            ? lic.machines.map(m =>
+                '<div class="machine-item">' +
+                '<div><strong>' + esc(m.friendly_name || 'Unknown') + '</strong>' +
+                '<br><span class="machine-code">' + esc(m.machine_code) + '</span></div>' +
+                '<button class="small danger" onclick="myDeactivateMachine(\'' + esc(lic.license_key) + '\',\'' + esc(m.machine_code) + '\')">Remove</button>' +
+                '</div>').join('')
+            : '<div style="color:var(--text2);font-size:13px;padding:8px 0;">No machines activated</div>';
+        return '<div class="card" style="margin-bottom:16px;">' +
+            '<div class="detail-header"><h3>' + esc(lic.product) + '</h3><span class="badge ' + status + '">' + status + '</span></div>' +
+            '<div class="detail-body">' +
+            '<div class="detail-grid">' +
+            '<div class="detail-field" style="grid-column:1/-1;">' +
+            '<div class="field-label">License Key</div>' +
+            '<div class="field-value" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">' +
+            '<span class="key-display">' + esc(lic.license_key) + '</span>' +
+            '<button class="small secondary" onclick="copyMyKey(\'' + esc(lic.license_key) + '\')">Copy</button>' +
+            '</div></div>' +
+            '<div class="detail-field"><div class="field-label">Expires</div><div class="field-value">' + formatDate(lic.expires) + '</div></div>' +
+            '<div class="detail-field"><div class="field-label">Machines</div><div class="field-value">' + lic.active_machine_count + ' / ' + (lic.max_machines === 0 ? '∞' : lic.max_machines) + '</div></div>' +
+            '<div class="detail-field" style="grid-column:1/-1;"><div class="field-label">Features</div><div class="field-value">' + features + '</div></div>' +
+            '</div>' +
+            '<div class="detail-section-title">Activated Machines</div>' +
+            '<div class="machines-list">' + machines + '</div>' +
+            '<div style="display:flex;justify-content:flex-end;margin-top:12px;">' +
+            '<button class="small secondary" onclick="showMyExportModal(\'' + esc(lic.license_key) + '\')">Activate offline machine</button>' +
+            '</div>' +
+            '</div></div>';
+    }).join('');
+}
+
+function copyMyKey(key) {
+    navigator.clipboard.writeText(key).then(
+        () => toast('License key copied', 'success'),
+        () => toast('Copy failed - select and copy manually', 'error')
+    );
+}
+
+async function myDeactivateMachine(key, machineCode) {
+    if (!confirm('Remove machine ' + machineCode.substring(0, 12) + '...? It will stop validating and the slot is freed for another machine.')) return;
+    try {
+        const resp = await fetch(API + '/my/licenses/' + encodeURIComponent(key) + '/machines/' + encodeURIComponent(machineCode), {
+            method: 'DELETE',
+            headers: authHeaders(),
+        });
+        if (!resp.ok) { const err = await resp.json(); toast('Error: ' + err.error, 'error'); return; }
+        toast('Machine removed', 'success');
+        await loadMyLicenses();
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+function showMyExportModal(key) {
+    document.getElementById('myExportKey').value = key;
+    document.getElementById('myExportMachineCode').value = '';
+    document.getElementById('myExportFriendlyName').value = '';
+    document.getElementById('myExportModal').classList.add('visible');
+    document.getElementById('myExportMachineCode').focus();
+}
+
+function closeMyExportModal() {
+    document.getElementById('myExportModal').classList.remove('visible');
+}
+
+async function doMyExport() {
+    const key = document.getElementById('myExportKey').value;
+    const machineCode = document.getElementById('myExportMachineCode').value.trim();
+    if (!machineCode) { toast('Machine code is required', 'error'); return; }
+    const friendlyName = document.getElementById('myExportFriendlyName').value.trim();
+    try {
+        const resp = await fetch(API + '/my/licenses/' + encodeURIComponent(key) + '/export', {
+            method: 'POST',
+            headers: authHeaders(),
+            body: JSON.stringify({ machine_code: machineCode, friendly_name: friendlyName }),
+        });
+        if (!resp.ok) { const err = await resp.json(); toast('Error: ' + err.error, 'error'); return; }
+        const blob = await resp.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'license.json';
+        a.click();
+        URL.revokeObjectURL(url);
+        toast('License file downloaded', 'success');
+        closeMyExportModal();
+        await loadMyLicenses();
     } catch (e) {
         toast('Failed: ' + e.message, 'error');
     }
@@ -2989,13 +3377,15 @@ async function loadUsers() {
                 : '';
             const emailItem = '<button onclick="setUserEmail(\'' + uname + '\',' + emailArg + ')">' +
                               (u.email ? 'Edit email' : 'Set email') + '</button>';
-            // Self row keeps a minimal Actions menu (just email management) so
-            // admins can still update their own email here without exposing the
-            // destructive items that would lock them out of their account.
+            // Self row keeps a reduced Actions menu (rename + email) so admins
+            // can manage their own account without exposing the destructive
+            // items that would lock them out. Self-rename forces a re-login
+            // (the session token is bound to the old name).
             const actions = isSelf
                 ? '<span class="dropdown" onclick="event.stopPropagation();">' +
                     '<button class="small secondary" onclick="toggleDropdown(event,\'' + menuId + '\')">Actions &#9662;</button>' +
                     '<div id="' + menuId + '" class="dropdown-menu" style="display:none;">' +
+                      '<button onclick="renameUser(\'' + uname + '\')">Rename</button>' +
                       emailItem +
                     '</div>' +
                   '</span>'
@@ -3010,7 +3400,10 @@ async function loadUsers() {
                       '<button class="danger" onclick="deleteUser(\'' + uname + '\')">Delete</button>' +
                     '</div>' +
                   '</span>';
-            return '<tr><td>' + esc(u.username) + '</td><td>' + roleBadge + '</td><td class="col-email">' + emailCell + '</td><td>' + tfa + '</td><td>' + status + '</td><td class="col-actions">' + actions + '</td></tr>';
+            const licCell = (u.licenses && u.licenses.length)
+                ? u.licenses.map(l => '<span class="feature-tag" title="' + esc(l.license_key) + '">' + esc(l.product) + '</span>').join(' ')
+                : '<span style="color:var(--text2);font-size:11px;">(none)</span>';
+            return '<tr><td>' + esc(u.username) + '</td><td>' + roleBadge + '</td><td class="col-email">' + emailCell + '</td><td>' + licCell + '</td><td>' + tfa + '</td><td>' + status + '</td><td class="col-actions">' + actions + '</td></tr>';
         }).join('');
     } catch (e) {
         toast('Failed to load users: ' + e.message, 'error');
@@ -3086,9 +3479,16 @@ async function renameUser(username) {
             headers: authHeaders(),
             body: JSON.stringify({ new_username: newName.trim() }),
         });
+        const data = await resp.json();
         if (!resp.ok) {
-            const data = await resp.json();
             toast('Error: ' + data.error, 'error');
+            return;
+        }
+        if (data.self_renamed) {
+            // The session token is bound to the old username - start over.
+            toast('Username changed to "' + newName.trim() + '" - sign in again', 'success');
+            closeUsersModal();
+            logout();
             return;
         }
         toast('User renamed to "' + newName.trim() + '"', 'success');

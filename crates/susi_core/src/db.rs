@@ -139,6 +139,19 @@ impl LicenseDb {
             CREATE INDEX IF NOT EXISTS idx_activations_license ON machine_activations(license_id);
             CREATE INDEX IF NOT EXISTS idx_tombstones_expiry ON machine_tombstones(expires_at);
 
+            -- License <-> portal-user association. A row means the user can
+            -- see the license in their self-serve view (key, machines,
+            -- offline export). Many-to-many: a company license is visible to
+            -- several contacts, a user may hold licenses for several products.
+            CREATE TABLE IF NOT EXISTS license_users (
+                license_id TEXT NOT NULL,
+                username TEXT NOT NULL,
+                added_at TEXT NOT NULL,
+                PRIMARY KEY (license_id, username),
+                FOREIGN KEY (license_id) REFERENCES licenses(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_license_users_user ON license_users(username);
+
             CREATE TABLE IF NOT EXISTS products (
                 slug TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -1043,6 +1056,85 @@ impl LicenseDb {
     }
 
     // -----------------------------------------------------------------------
+    // License <-> user assignment
+    // -----------------------------------------------------------------------
+
+    pub fn assign_license_user(&self, license_id: &str, username: &str) -> Result<(), LicenseError> {
+        self.conn
+            .execute(
+                "INSERT OR IGNORE INTO license_users (license_id, username, added_at) VALUES (?1, ?2, ?3)",
+                params![license_id, username, Utc::now().to_rfc3339()],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB insert: {}", e)))?;
+        Ok(())
+    }
+
+    pub fn unassign_license_user(
+        &self,
+        license_id: &str,
+        username: &str,
+    ) -> Result<bool, LicenseError> {
+        let rows = self
+            .conn
+            .execute(
+                "DELETE FROM license_users WHERE license_id = ?1 AND username = ?2",
+                params![license_id, username],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB delete: {}", e)))?;
+        Ok(rows > 0)
+    }
+
+    pub fn list_license_users(&self, license_id: &str) -> Result<Vec<String>, LicenseError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT username FROM license_users WHERE license_id = ?1 ORDER BY username")
+            .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
+        let users = stmt
+            .query_map(params![license_id], |r| r.get(0))
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(users)
+    }
+
+    pub fn is_license_assigned(
+        &self,
+        license_id: &str,
+        username: &str,
+    ) -> Result<bool, LicenseError> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM license_users WHERE license_id = ?1 AND username = ?2",
+                params![license_id, username],
+                |r| r.get(0),
+            )
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?;
+        Ok(count > 0)
+    }
+
+    /// Every (username, license_key, product) assignment row. One query for
+    /// the admin users list instead of a per-user lookup.
+    pub fn list_all_license_assignments(
+        &self,
+    ) -> Result<Vec<(String, String, String)>, LicenseError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT lu.username, l.license_key, l.product
+                 FROM license_users lu JOIN licenses l ON l.id = lu.license_id
+                 ORDER BY lu.username, l.product",
+            )
+            .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    // -----------------------------------------------------------------------
     // User management
     // -----------------------------------------------------------------------
 
@@ -1115,6 +1207,20 @@ impl LicenseDb {
             .execute(
                 "UPDATE users SET password_hash = ?1, must_change_password = 0, updated_at = ?2 WHERE username = ?3",
                 params![new_hash, now, username],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))?;
+        Ok(())
+    }
+
+    /// Clear the must-change-password bootstrap flag without touching the
+    /// hash. Used by invitation magic-login: the customer proved inbox
+    /// control and stays passwordless (the stored hash is a random secret).
+    pub fn clear_must_change_password(&self, username: &str) -> Result<(), LicenseError> {
+        let now = Utc::now().to_rfc3339();
+        self.conn
+            .execute(
+                "UPDATE users SET must_change_password = 0, updated_at = ?1 WHERE username = ?2",
+                params![now, username],
             )
             .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))?;
         Ok(())
@@ -1466,6 +1572,35 @@ impl LicenseDb {
 
     /// True iff the user has at least one unused, unexpired invitation token.
     /// Used by the admin UI to show a "Pending invite" badge.
+    /// Look up an invitation token WITHOUT consuming it. Same validity rules
+    /// as the consume path (unused + within TTL), restricted to kind='invite'.
+    /// Used by magic-login to check the invitee's role before consuming.
+    pub fn peek_invitation_token(&self, token_hash: &str) -> Result<Option<String>, LicenseError> {
+        let row: Option<(String, String, Option<String>)> = self
+            .conn
+            .query_row(
+                "SELECT username, expires_at, used_at FROM login_tokens
+                 WHERE token_hash = ?1 AND kind = 'invite'",
+                params![token_hash],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?;
+        let Some((username, expires_at, used_at)) = row else {
+            return Ok(None);
+        };
+        if used_at.is_some() {
+            return Ok(None);
+        }
+        let expires: DateTime<Utc> = DateTime::parse_from_rfc3339(&expires_at)
+            .map_err(|e| LicenseError::Other(format!("Bad token expires_at: {}", e)))?
+            .with_timezone(&Utc);
+        if Utc::now() > expires {
+            return Ok(None);
+        }
+        Ok(Some(username))
+    }
+
     pub fn has_pending_invitation(&self, username: &str) -> Result<bool, LicenseError> {
         let now = Utc::now().to_rfc3339();
         let count: i64 = self
@@ -1803,6 +1938,9 @@ impl LicenseDb {
         self.conn
             .execute("DELETE FROM users WHERE username = ?1", params![username])
             .map_err(|e| LicenseError::Other(format!("DB delete: {}", e)))?;
+        self.conn
+            .execute("DELETE FROM license_users WHERE username = ?1", params![username])
+            .map_err(|e| LicenseError::Other(format!("DB delete: {}", e)))?;
         Ok(())
     }
 
@@ -1855,7 +1993,36 @@ impl LicenseDb {
         Ok(count > 0)
     }
 
+    /// Rename a user across every username-keyed table, atomically. Tables
+    /// with a uniqueness constraint on (x, username) can already hold rows
+    /// under the new name (e.g. left over from an earlier partial rename, or
+    /// memberships added by hand) - those are merged instead of renamed: the
+    /// surviving membership keeps the more privileged role, duplicate rows
+    /// are dropped. Without the merge a plain UPDATE aborts on the unique
+    /// constraint and a non-transactional rename leaves half the tables on
+    /// the old name.
     pub fn rename_user(&self, old_username: &str, new_username: &str) -> Result<(), LicenseError> {
+        self.conn
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(|e| LicenseError::Other(format!("DB begin: {}", e)))?;
+        let result = self.rename_user_inner(old_username, new_username);
+        if result.is_ok() {
+            self.conn
+                .execute_batch("COMMIT")
+                .map_err(|e| LicenseError::Other(format!("DB commit: {}", e)))?;
+        } else {
+            let _ = self.conn.execute_batch("ROLLBACK");
+        }
+        result
+    }
+
+    fn rename_user_inner(&self, old_username: &str, new_username: &str) -> Result<(), LicenseError> {
+        let run = |sql: &str| {
+            self.conn
+                .execute(sql, params![new_username, old_username])
+                .map(|_| ())
+                .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))
+        };
         let now = Utc::now().to_rfc3339();
         self.conn
             .execute(
@@ -1863,18 +2030,27 @@ impl LicenseDb {
                 params![new_username, now, old_username],
             )
             .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))?;
-        self.conn
-            .execute(
-                "UPDATE workspace_members SET username = ?1 WHERE username = ?2",
-                params![new_username, old_username],
-            )
-            .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))?;
-        self.conn
-            .execute(
-                "UPDATE workspaces SET created_by = ?1 WHERE created_by = ?2",
-                params![new_username, old_username],
-            )
-            .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))?;
+        // Workspace memberships: upgrade the surviving row where the old
+        // account outranks it (owner > editor > viewer), drop the now
+        // duplicate rows, rename the rest.
+        run("UPDATE workspace_members SET role = 'owner' WHERE username = ?1 AND role != 'owner'
+             AND workspace_id IN (SELECT workspace_id FROM workspace_members WHERE username = ?2 AND role = 'owner')")?;
+        run("UPDATE workspace_members SET role = 'editor' WHERE username = ?1 AND role = 'viewer'
+             AND workspace_id IN (SELECT workspace_id FROM workspace_members WHERE username = ?2 AND role = 'editor')")?;
+        run("DELETE FROM workspace_members WHERE username = ?2
+             AND workspace_id IN (SELECT workspace_id FROM workspace_members WHERE username = ?1)")?;
+        run("UPDATE workspace_members SET username = ?1 WHERE username = ?2")?;
+        run("UPDATE workspaces SET created_by = ?1 WHERE created_by = ?2")?;
+        // License assignments and trusted devices: same merge, no roles.
+        run("DELETE FROM license_users WHERE username = ?2
+             AND license_id IN (SELECT license_id FROM license_users WHERE username = ?1)")?;
+        run("UPDATE license_users SET username = ?1 WHERE username = ?2")?;
+        run("DELETE FROM known_devices WHERE username = ?2
+             AND fingerprint IN (SELECT fingerprint FROM known_devices WHERE username = ?1)")?;
+        run("UPDATE known_devices SET username = ?1 WHERE username = ?2")?;
+        run("UPDATE login_tokens SET username = ?1 WHERE username = ?2")?;
+        run("UPDATE totp_backup_codes SET username = ?1 WHERE username = ?2")?;
+        run("UPDATE api_tokens SET username = ?1 WHERE username = ?2")?;
         Ok(())
     }
 
@@ -3025,16 +3201,35 @@ impl LicenseDb {
     // -----------------------------------------------------------------------
 
     pub fn list_licenses(&self) -> Result<Vec<License>, LicenseError> {
+        self.collect_licenses(
+            "SELECT id, product, customer, license_key, created, expires, features, max_machines, revoked, lease_duration_hours, lease_grace_hours, require_signed_binary
+             FROM licenses ORDER BY created DESC",
+            &[],
+        )
+    }
+
+    /// Licenses assigned to `username` via `license_users`, machines included.
+    pub fn list_licenses_for_user(&self, username: &str) -> Result<Vec<License>, LicenseError> {
+        self.collect_licenses(
+            "SELECT l.id, l.product, l.customer, l.license_key, l.created, l.expires, l.features, l.max_machines, l.revoked, l.lease_duration_hours, l.lease_grace_hours, l.require_signed_binary
+             FROM licenses l JOIN license_users lu ON lu.license_id = l.id
+             WHERE lu.username = ?1 ORDER BY l.created DESC",
+            &[&username],
+        )
+    }
+
+    fn collect_licenses(
+        &self,
+        sql: &str,
+        params: &[&dyn rusqlite::ToSql],
+    ) -> Result<Vec<License>, LicenseError> {
         let mut stmt = self
             .conn
-            .prepare(
-                "SELECT id, product, customer, license_key, created, expires, features, max_machines, revoked, lease_duration_hours, lease_grace_hours, require_signed_binary
-             FROM licenses ORDER BY created DESC",
-            )
+            .prepare(sql)
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
 
         let rows = stmt
-            .query_map([], |row| {
+            .query_map(params, |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,

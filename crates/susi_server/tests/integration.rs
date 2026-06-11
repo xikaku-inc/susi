@@ -811,6 +811,18 @@ fn test_create_user_with_explicit_password_skips_invite() {
         .send()
         .expect("login");
     assert!(resp.status().is_success(), "login: {}", resp.text().unwrap_or_default());
+
+    // The email address works as the login identifier too, resolving to the
+    // same account.
+    let resp = server
+        .http()
+        .post(format!("{}/auth/login", server.api_url))
+        .json(&json!({"username": "manual_alice@example.com", "password": "manualpw123"}))
+        .send()
+        .expect("login by email");
+    assert!(resp.status().is_success(), "login by email: {}", resp.text().unwrap_or_default());
+    let body = resp.json::<Value>().expect("login json");
+    assert_eq!(body["username"], json!("manual_alice"));
 }
 
 /// Without SMTP configured, asking for the invite path (no password) returns
@@ -975,4 +987,385 @@ fn test_product_scoped_docs_flow() {
         .send()
         .expect("delete product");
     assert_eq!(resp.status().as_u16(), 409, "product with releases must not delete");
+}
+
+/// End-to-end self-serve licensing: admin assigns a license to a customer
+/// account, the customer sees it via /my/licenses, exports a license file for
+/// an offline machine, removes the machine again, and loses access once the
+/// admin unassigns. Foreign licenses must stay invisible (404).
+#[test]
+fn test_license_user_self_serve_flow() {
+    let server = TestServer::start();
+    let admin = server.admin_token();
+    let client = server.http();
+
+    // Customer account (explicit password - no SMTP in tests).
+    client
+        .post(format!("{}/auth/users", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({
+            "username": "cust@example.com",
+            "email": "cust@example.com",
+            "role": "user",
+            "password": "custpass123",
+        }))
+        .send()
+        .expect("create user")
+        .error_for_status()
+        .expect("create user ok");
+
+    let resp = client
+        .post(format!("{}/auth/login", server.api_url))
+        .json(&json!({"username": "cust@example.com", "password": "custpass123"}))
+        .send()
+        .expect("customer login");
+    assert!(resp.status().is_success(), "login: {}", resp.text().unwrap_or_default());
+    let cust = resp.json::<Value>().expect("login json")["token"]
+        .as_str()
+        .expect("token")
+        .to_string();
+
+    // No licenses assigned yet.
+    let mine = client
+        .get(format!("{}/my/licenses", server.api_url))
+        .bearer_auth(&cust)
+        .send()
+        .expect("my licenses")
+        .json::<Value>()
+        .expect("my licenses json");
+    assert_eq!(mine.as_array().expect("array").len(), 0);
+
+    // Create one license assigned at creation time and one foreign license.
+    let resp = client
+        .post(format!("{}/licenses", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({
+            "customer": "Cust Corp",
+            "days": 30,
+            "features": ["imu_optical_fusion"],
+            "assign_to": ["cust@example.com"],
+        }))
+        .send()
+        .expect("create license");
+    assert_eq!(resp.status().as_u16(), 201, "{}", resp.text().unwrap_or_default());
+    let lic = resp.json::<Value>().expect("license json");
+    let key = lic["license_key"].as_str().expect("key").to_string();
+    assert_eq!(lic["users"], json!(["cust@example.com"]));
+
+    let foreign_key = server.create_license(&admin, false);
+
+    // Assigning to a non-existent user fails.
+    let resp = client
+        .post(format!("{}/licenses/{}/users", server.api_url, foreign_key))
+        .bearer_auth(&admin)
+        .json(&json!({"username": "nobody"}))
+        .send()
+        .expect("assign");
+    assert_eq!(resp.status().as_u16(), 404);
+
+    // Customer sees exactly their license.
+    let mine = client
+        .get(format!("{}/my/licenses", server.api_url))
+        .bearer_auth(&cust)
+        .send()
+        .expect("my licenses")
+        .json::<Value>()
+        .expect("my licenses json");
+    let arr = mine.as_array().expect("array");
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["license_key"].as_str(), Some(key.as_str()));
+
+    // Foreign license is invisible: export and machine-removal 404.
+    let resp = client
+        .post(format!("{}/my/licenses/{}/export", server.api_url, foreign_key))
+        .bearer_auth(&cust)
+        .json(&json!({"machine_code": TEST_MACHINE_CODE, "friendly_name": "Nope"}))
+        .send()
+        .expect("foreign export");
+    assert_eq!(resp.status().as_u16(), 404);
+
+    // Offline export of the assigned license activates the machine and
+    // returns a signed license file.
+    let resp = client
+        .post(format!("{}/my/licenses/{}/export", server.api_url, key))
+        .bearer_auth(&cust)
+        .json(&json!({"machine_code": TEST_MACHINE_CODE, "friendly_name": "Lab PC"}))
+        .send()
+        .expect("export");
+    assert!(resp.status().is_success(), "export: {}", resp.text().unwrap_or_default());
+    let signed = resp.json::<Value>().expect("signed license json");
+    assert!(signed["signature"].is_string(), "missing signature: {}", signed);
+
+    let mine = client
+        .get(format!("{}/my/licenses", server.api_url))
+        .bearer_auth(&cust)
+        .send()
+        .expect("my licenses")
+        .json::<Value>()
+        .expect("json");
+    assert_eq!(mine[0]["machines"].as_array().expect("machines").len(), 1);
+
+    // Self-service machine removal frees the slot (and tombstones it).
+    let resp = client
+        .delete(format!(
+            "{}/my/licenses/{}/machines/{}",
+            server.api_url, key, TEST_MACHINE_CODE
+        ))
+        .bearer_auth(&cust)
+        .send()
+        .expect("remove machine");
+    assert!(resp.status().is_success(), "remove: {}", resp.text().unwrap_or_default());
+    let mine = client
+        .get(format!("{}/my/licenses", server.api_url))
+        .bearer_auth(&cust)
+        .send()
+        .expect("my licenses")
+        .json::<Value>()
+        .expect("json");
+    assert_eq!(mine[0]["machines"].as_array().expect("machines").len(), 0);
+
+    // Admin users list shows the assignment.
+    let users = client
+        .get(format!("{}/auth/users", server.api_url))
+        .bearer_auth(&admin)
+        .send()
+        .expect("list users")
+        .json::<Value>()
+        .expect("users json");
+    let cust_row = users
+        .as_array()
+        .expect("array")
+        .iter()
+        .find(|u| u["username"] == "cust@example.com")
+        .expect("customer row");
+    assert_eq!(cust_row["licenses"].as_array().expect("licenses").len(), 1);
+
+    // Unassign removes portal visibility.
+    let resp = client
+        .delete(format!("{}/licenses/{}/users/cust@example.com", server.api_url, key))
+        .bearer_auth(&admin)
+        .send()
+        .expect("unassign");
+    assert!(resp.status().is_success());
+    let mine = client
+        .get(format!("{}/my/licenses", server.api_url))
+        .bearer_auth(&cust)
+        .send()
+        .expect("my licenses")
+        .json::<Value>()
+        .expect("json");
+    assert_eq!(mine.as_array().expect("array").len(), 0);
+}
+
+/// Passwordless plumbing without SMTP: request-code always answers a generic
+/// OK (never enumerates accounts) and magic-login rejects unknown tokens.
+#[test]
+fn test_request_code_and_magic_login_guards() {
+    let server = TestServer::start();
+    let client = server.http();
+
+    let resp = client
+        .post(format!("{}/auth/request-code", server.api_url))
+        .json(&json!({"identifier": "whoever@example.com"}))
+        .send()
+        .expect("request-code");
+    assert!(resp.status().is_success());
+    let body = resp.json::<Value>().expect("json");
+    assert_eq!(body["status"], json!("OK"));
+
+    let resp = client
+        .post(format!("{}/auth/magic-login", server.api_url))
+        .json(&json!({"token": "deadbeef"}))
+        .send()
+        .expect("magic-login");
+    assert_eq!(resp.status().as_u16(), 401);
+}
+
+/// Renaming a user migrates every username-keyed row: license assignments,
+/// API tokens (and the auth cache), and flags self-renames so the UI can
+/// force a re-login.
+#[test]
+fn test_rename_user_migrates_everything() {
+    let server = TestServer::start();
+    let admin = server.admin_token();
+    let client = server.http();
+
+    client
+        .post(format!("{}/auth/users", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({
+            "username": "old_name",
+            "email": "old@example.com",
+            "role": "user",
+            "password": "oldpass123",
+        }))
+        .send()
+        .expect("create user")
+        .error_for_status()
+        .expect("create user ok");
+
+    // Assign a license and mint an API token as that user.
+    let key = server.create_license(&admin, false);
+    client
+        .post(format!("{}/licenses/{}/users", server.api_url, key))
+        .bearer_auth(&admin)
+        .json(&json!({"username": "old_name"}))
+        .send()
+        .expect("assign")
+        .error_for_status()
+        .expect("assign ok");
+
+    let user_jwt = client
+        .post(format!("{}/auth/login", server.api_url))
+        .json(&json!({"username": "old_name", "password": "oldpass123"}))
+        .send()
+        .expect("login")
+        .json::<Value>()
+        .expect("json")["token"]
+        .as_str()
+        .expect("token")
+        .to_string();
+    let api_token = client
+        .post(format!("{}/auth/api-tokens", server.api_url))
+        .bearer_auth(&user_jwt)
+        .json(&json!({"name": "ci"}))
+        .send()
+        .expect("mint token")
+        .json::<Value>()
+        .expect("json")["token"]
+        .as_str()
+        .expect("token")
+        .to_string();
+
+    // Rename via admin.
+    let resp = client
+        .post(format!("{}/auth/users/old_name/rename", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({"new_username": "new_name"}))
+        .send()
+        .expect("rename");
+    let body = resp.json::<Value>().expect("json");
+    assert_eq!(body["status"], json!("OK"));
+    assert_eq!(body["self_renamed"], json!(false));
+
+    // The old-name JWT no longer resolves to an account with licenses.
+    let mine = client
+        .get(format!("{}/my/licenses", server.api_url))
+        .bearer_auth(&user_jwt)
+        .send()
+        .expect("my licenses");
+    let licenses = mine.json::<Value>().expect("json");
+    assert_eq!(licenses.as_array().map(|a| a.len()), Some(0), "old-name JWT must see nothing");
+
+    // The API token still works and resolves to the new name.
+    let mine = client
+        .get(format!("{}/my/licenses", server.api_url))
+        .bearer_auth(&api_token)
+        .send()
+        .expect("my licenses via api token")
+        .json::<Value>()
+        .expect("json");
+    assert_eq!(mine.as_array().expect("array").len(), 1);
+
+    // Fresh login under the new name sees the license.
+    let new_jwt = client
+        .post(format!("{}/auth/login", server.api_url))
+        .json(&json!({"username": "new_name", "password": "oldpass123"}))
+        .send()
+        .expect("relogin")
+        .json::<Value>()
+        .expect("json")["token"]
+        .as_str()
+        .expect("token")
+        .to_string();
+    let mine = client
+        .get(format!("{}/my/licenses", server.api_url))
+        .bearer_auth(&new_jwt)
+        .send()
+        .expect("my licenses new name")
+        .json::<Value>()
+        .expect("json");
+    assert_eq!(mine.as_array().expect("array").len(), 1);
+}
+
+/// Rename onto a name that still has orphaned membership rows (e.g. from a
+/// deleted account) must merge instead of failing: one surviving row, the
+/// more privileged role wins, and the whole rename stays atomic.
+#[test]
+fn test_rename_user_merges_conflicting_memberships() {
+    let server = TestServer::start();
+    let admin = server.admin_token();
+    let client = server.http();
+
+    for (name, _role) in [("merge_x", "viewer"), ("merge_y", "owner")] {
+        client
+            .post(format!("{}/auth/users", server.api_url))
+            .bearer_auth(&admin)
+            .json(&json!({
+                "username": name,
+                "email": format!("{}@example.com", name),
+                "role": "user",
+                "password": "mergepass123",
+            }))
+            .send()
+            .expect("create user")
+            .error_for_status()
+            .expect("create user ok");
+    }
+
+    let ws = client
+        .post(format!("{}/workspaces", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({"name": "Merge WS", "product": "fusionhub", "description": ""}))
+        .send()
+        .expect("create ws")
+        .json::<Value>()
+        .expect("ws json");
+    let ws_id = ws["id"].as_str().expect("ws id").to_string();
+
+    for (name, role) in [("merge_x", "viewer"), ("merge_y", "owner")] {
+        client
+            .post(format!("{}/workspaces/{}/members", server.api_url, ws_id))
+            .bearer_auth(&admin)
+            .json(&json!({"username": name, "role": role}))
+            .send()
+            .expect("add member")
+            .error_for_status()
+            .expect("add member ok");
+    }
+
+    // Deleting merge_x leaves its membership row orphaned (no FK on username).
+    client
+        .delete(format!("{}/auth/users/merge_x", server.api_url))
+        .bearer_auth(&admin)
+        .send()
+        .expect("delete user")
+        .error_for_status()
+        .expect("delete ok");
+
+    // Rename merge_y -> merge_x: must merge with the orphan row, not 500.
+    let resp = client
+        .post(format!("{}/auth/users/merge_y/rename", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({"new_username": "merge_x"}))
+        .send()
+        .expect("rename");
+    assert!(resp.status().is_success(), "rename: {}", resp.text().unwrap_or_default());
+
+    let ws = client
+        .get(format!("{}/workspaces/{}", server.api_url, ws_id))
+        .bearer_auth(&admin)
+        .send()
+        .expect("get ws")
+        .json::<Value>()
+        .expect("ws json");
+    let members: Vec<(&str, &str)> = ws["members"]
+        .as_array()
+        .expect("members")
+        .iter()
+        .map(|m| (m["username"].as_str().unwrap(), m["role"].as_str().unwrap()))
+        .collect();
+    let merge_rows: Vec<_> = members.iter().filter(|(u, _)| *u == "merge_x").collect();
+    assert_eq!(merge_rows.len(), 1, "exactly one surviving membership: {:?}", members);
+    assert_eq!(merge_rows[0].1, "owner", "more privileged role must win: {:?}", members);
 }
