@@ -2051,6 +2051,12 @@ impl LicenseDb {
         run("UPDATE login_tokens SET username = ?1 WHERE username = ?2")?;
         run("UPDATE totp_backup_codes SET username = ?1 WHERE username = ?2")?;
         run("UPDATE api_tokens SET username = ?1 WHERE username = ?2")?;
+        // Attribution columns: keep authorship pointing at the live account.
+        run("UPDATE config_revisions SET author = ?1 WHERE author = ?2")?;
+        run("UPDATE workspace_graphs SET updated_by = ?1 WHERE updated_by = ?2")?;
+        run("UPDATE workspace_peers SET registered_by = ?1 WHERE registered_by = ?2")?;
+        run("UPDATE workspace_recordings SET author = ?1 WHERE author = ?2")?;
+        run("UPDATE website_page_revisions SET author = ?1 WHERE author = ?2")?;
         Ok(())
     }
 

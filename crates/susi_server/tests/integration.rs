@@ -1334,6 +1334,35 @@ fn test_rename_user_merges_conflicting_memberships() {
             .expect("add member ok");
     }
 
+    // Push a config revision as merge_y so the rename has authorship to migrate.
+    let merge_y_jwt = client
+        .post(format!("{}/auth/login", server.api_url))
+        .json(&json!({"username": "merge_y", "password": "mergepass123"}))
+        .send()
+        .expect("login merge_y")
+        .json::<Value>()
+        .expect("json")["token"]
+        .as_str()
+        .expect("token")
+        .to_string();
+    // Clear the must-change-password bootstrap gate so the push isn't 403'd.
+    client
+        .post(format!("{}/auth/change-password", server.api_url))
+        .bearer_auth(&merge_y_jwt)
+        .json(&json!({"current_password": "mergepass123", "new_password": "mergepass456"}))
+        .send()
+        .expect("change pw")
+        .error_for_status()
+        .expect("change pw ok");
+    client
+        .post(format!("{}/workspaces/{}/configs", server.api_url, ws_id))
+        .bearer_auth(&merge_y_jwt)
+        .json(&json!({"config_json": "{}", "name": "test rev", "description": ""}))
+        .send()
+        .expect("push config")
+        .error_for_status()
+        .expect("push config ok");
+
     // Deleting merge_x leaves its membership row orphaned (no FK on username).
     client
         .delete(format!("{}/auth/users/merge_x", server.api_url))
@@ -1368,4 +1397,20 @@ fn test_rename_user_merges_conflicting_memberships() {
     let merge_rows: Vec<_> = members.iter().filter(|(u, _)| *u == "merge_x").collect();
     assert_eq!(merge_rows.len(), 1, "exactly one surviving membership: {:?}", members);
     assert_eq!(merge_rows[0].1, "owner", "more privileged role must win: {:?}", members);
+
+    // Config-revision authorship follows the rename.
+    let configs = client
+        .get(format!("{}/workspaces/{}/configs", server.api_url, ws_id))
+        .bearer_auth(&admin)
+        .send()
+        .expect("list configs")
+        .json::<Value>()
+        .expect("configs json");
+    let revs = configs["configs"]
+        .as_array()
+        .or_else(|| configs.as_array())
+        .expect("configs array")
+        .clone();
+    assert!(!revs.is_empty(), "expected a config revision: {}", configs);
+    assert_eq!(revs[0]["author"], json!("merge_x"), "author must follow rename: {}", configs);
 }
