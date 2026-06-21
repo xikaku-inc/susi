@@ -262,7 +262,7 @@ fn cmd_seed_e2e_workspace(
             username,
         )?;
     } else {
-        db.add_workspace_member(workspace_id, username, "owner")?;
+        db.add_workspace_member(workspace_id, username)?;
     }
 
     println!(

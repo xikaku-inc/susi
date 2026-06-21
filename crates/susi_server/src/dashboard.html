@@ -721,17 +721,12 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
                     <div class="field-label">Created By</div>
                     <div class="field-value" id="wsDetailCreatedBy"></div>
                 </div>
-                <div class="detail-field">
-                    <div class="field-label">Your Role</div>
-                    <div class="field-value" id="wsDetailRole"></div>
-                </div>
             </div>
 
             <div class="ws-tabs" role="tablist">
                 <button class="ws-tab active" data-ws-tab="releases" onclick="setWsTab('releases')">Releases</button>
                 <button class="ws-tab" data-ws-tab="configs" onclick="setWsTab('configs')">Configs</button>
                 <button class="ws-tab" data-ws-tab="recordings" onclick="setWsTab('recordings')">Recordings</button>
-                <button class="ws-tab" data-ws-tab="instances" onclick="setWsTab('instances')">Instances</button>
                 <button class="ws-tab" data-ws-tab="members" onclick="setWsTab('members')">Members</button>
                 <button class="ws-tab" data-ws-tab="settings" data-ws-admin-only onclick="setWsTab('settings')">Settings</button>
             </div>
@@ -759,24 +754,11 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
                 <div id="wsDetailRecordings" class="machines-list"></div>
             </div>
 
-            <div class="ws-tab-panel" data-ws-panel="instances">
-                <div class="detail-section-title" style="display:flex;align-items:center;justify-content:space-between;">
-                    <span>Connected Instances</span>
-                    <button class="small" onclick="loadWsInstances(selectedWsId)">Refresh</button>
-                </div>
-                <div id="wsDetailInstances" class="machines-list"></div>
-            </div>
-
             <div class="ws-tab-panel" data-ws-panel="members">
                 <div class="detail-section-title">Members</div>
                 <div id="wsDetailMembers" class="machines-list"></div>
                 <div id="wsAddMemberRow" style="display:flex;gap:8px;margin-top:8px;">
                     <select id="wsNewMember" style="flex:1;"><option value="">Select user...</option></select>
-                    <select id="wsNewMemberRole" style="width:100px;">
-                        <option value="viewer">Viewer</option>
-                        <option value="editor">Editor</option>
-                        <option value="owner">Owner</option>
-                    </select>
                     <button class="small" onclick="addWsMember()">Add</button>
                 </div>
             </div>
@@ -3375,6 +3357,9 @@ async function loadUsers() {
                 ? '<button onclick="resendInvitation(\'' + uname + '\')">' +
                   (u.pending_invitation ? 'Resend invite' : 'Send invite') + '</button>'
                 : '';
+            const roleItem = u.role === 'admin'
+                ? '<button onclick="setUserRole(\'' + uname + '\',\'user\')">Revoke admin</button>'
+                : '<button onclick="setUserRole(\'' + uname + '\',\'admin\')">Make admin</button>';
             const emailItem = '<button onclick="setUserEmail(\'' + uname + '\',' + emailArg + ')">' +
                               (u.email ? 'Edit email' : 'Set email') + '</button>';
             // Self row keeps a reduced Actions menu (rename + email) so admins
@@ -3396,6 +3381,7 @@ async function loadUsers() {
                       emailItem +
                       resendItem +
                       '<button onclick="resetUserPassword(\'' + uname + '\')">Reset password</button>' +
+                      roleItem +
                       '<div class="divider"></div>' +
                       '<button class="danger" onclick="deleteUser(\'' + uname + '\')">Delete</button>' +
                     '</div>' +
@@ -3534,6 +3520,27 @@ async function resetUserPassword(username) {
             return;
         }
         toast('Password reset for "' + username + '"', 'success');
+        await loadUsers();
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function setUserRole(username, role) {
+    const verb = role === 'admin' ? 'Grant admin rights to' : 'Revoke admin rights from';
+    if (!confirm(verb + ' ' + username + '?')) return;
+    try {
+        const resp = await fetch(API + '/auth/users/' + encodeURIComponent(username) + '/role', {
+            method: 'PUT',
+            headers: authHeaders(),
+            body: JSON.stringify({ role }),
+        });
+        if (!resp.ok) {
+            const data = await resp.json();
+            toast('Error: ' + data.error, 'error');
+            return;
+        }
+        toast(role === 'admin' ? username + ' is now an admin' : username + ' is now a user', 'success');
         await loadUsers();
     } catch (e) {
         toast('Failed: ' + e.message, 'error');
@@ -4169,7 +4176,6 @@ function renderWorkspaces() {
                         <th>Name</th>
                         <th>Product</th>
                         <th>Description</th>
-                        <th>Role</th>
                         <th>Created by</th>
                     </tr>
                 </thead>
@@ -4179,7 +4185,6 @@ function renderWorkspaces() {
                             <td style="font-weight:600;">${esc(ws.name)}</td>
                             <td>${ws.product ? `<span class="badge active">${esc(ws.product)}</span>` : ''}</td>
                             <td style="color:var(--text2);">${ws.description ? esc(ws.description) : ''}</td>
-                            <td style="color:var(--text2);">${esc(ws.role ? ws.role.charAt(0).toUpperCase() + ws.role.slice(1) : 'Not a member')}</td>
                             <td style="color:var(--text2);">${esc(ws.created_by)}</td>
                         </tr>
                     `).join('')}
@@ -4206,7 +4211,6 @@ async function showWsDetail(id) {
         document.getElementById('wsDetailProduct').textContent = ws.product || '-';
         document.getElementById('wsDetailDesc').textContent = ws.description || '-';
         document.getElementById('wsDetailCreatedBy').textContent = ws.created_by;
-        document.getElementById('wsDetailRole').textContent = ws.role ? ws.role.charAt(0).toUpperCase() + ws.role.slice(1) : '';
 
         // Members
         const members = ws.members || [];
@@ -4214,7 +4218,7 @@ async function showWsDetail(id) {
             ? '<div style="color:var(--text2);font-size:13px;">No members</div>'
             : members.map(m => `
                 <div class="machine-item">
-                    <span style="display:flex;align-items:center;gap:8px;"><strong style="min-width:200px;">${esc(m.username)}</strong> <span class="badge active" style="font-size:10px;">${esc(m.role.toUpperCase())}</span></span>
+                    <span style="display:flex;align-items:center;gap:8px;"><strong style="min-width:200px;">${esc(m.username)}</strong></span>
                     ${userRole === 'admin' ? `<button class="small danger" onclick="removeWsMember('${id}','${esc(m.username)}')">Remove</button>` : ''}
                 </div>
             `).join('');
@@ -4275,7 +4279,6 @@ async function showWsDetail(id) {
         // Load configs and the unified releases list.
         loadWsConfigs(id);
         loadWsReleases(id);
-        loadWsInstances(id);
         loadWsRecordings(id);
     } catch (e) {
         toast('Error: ' + e.message, 'error');
@@ -4883,58 +4886,16 @@ async function deleteWsRecording(id) {
     }
 }
 
-// Render registered FusionHub peers for the workspace. Peers re-register every
-// 30s, so anything seen within 90s (3 ticks) is treated as currently online.
-async function loadWsInstances(wsId) {
-    if (!wsId) return;
-    const container = document.getElementById('wsDetailInstances');
-    try {
-        const resp = await fetch(API + '/workspaces/' + wsId + '/federation', { headers: authHeaders() });
-        if (!resp.ok) { container.innerHTML = '<div style="color:var(--text2);font-size:13px;">Failed to load</div>'; return; }
-        const data = await resp.json();
-        const peers = data.peers || [];
-        if (peers.length === 0) {
-            container.innerHTML = '<div style="color:var(--text2);font-size:13px;">No FusionHub instances have registered with this workspace.</div>';
-            return;
-        }
-        const now = Date.now();
-        container.innerHTML = peers.map(p => {
-            const seenMs = p.last_seen ? new Date(p.last_seen).getTime() : 0;
-            const ageS = seenMs ? Math.max(0, Math.floor((now - seenMs) / 1000)) : null;
-            const online = ageS !== null && ageS <= 90;
-            const dotColor = online ? '#3fb950' : 'var(--text2)';
-            const ageLabel = ageS === null ? 'never'
-                : ageS < 60 ? ageS + 's ago'
-                : ageS < 3600 ? Math.floor(ageS / 60) + 'm ago'
-                : ageS < 86400 ? Math.floor(ageS / 3600) + 'h ago'
-                : Math.floor(ageS / 86400) + 'd ago';
-            const label = p.label && p.label.trim() ? p.label : '(unnamed)';
-            const hostShort = (p.host_id || '').slice(0, 12);
-            return '<div class="machine-item">' +
-                '<span style="display:flex;align-items:center;gap:10px;min-width:0;">' +
-                    '<span title="' + (online ? 'Online' : 'Last seen ' + ageLabel) + '" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + dotColor + ';flex-shrink:0;"></span>' +
-                    '<strong style="min-width:160px;">' + esc(label) + '</strong>' +
-                    '<span class="machine-code" title="' + esc(p.host_id) + '">' + esc(hostShort) + '</span>' +
-                    '<span class="machine-code" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(p.url) + '</span>' +
-                '</span>' +
-                '<span class="machine-code">' + esc(p.registered_by) + ' &middot; ' + ageLabel + '</span>' +
-            '</div>';
-        }).join('');
-    } catch (e) {
-        container.innerHTML = '<div style="color:var(--text2);font-size:13px;">Failed to load instances</div>';
-    }
-}
 
 async function addWsMember() {
     const username = document.getElementById('wsNewMember').value;
-    const role = document.getElementById('wsNewMemberRole').value;
     if (!username) { toast('Select a user first', 'error'); return; }
     if (!selectedWsId) return;
     try {
         const resp = await fetch(API + '/workspaces/' + selectedWsId + '/members', {
             method: 'POST',
             headers: authHeaders(),
-            body: JSON.stringify({ username, role }),
+            body: JSON.stringify({ username }),
         });
         if (!resp.ok) {
             const data = await resp.json();

@@ -847,7 +847,7 @@ pub(crate) fn release_writer_check(
 }
 
 /// Permission gate for reading a doc release. Workspace releases require
-/// admin or any-role membership; global releases are public.
+/// admin or workspace membership; global releases are public.
 pub(crate) fn release_reader_check(
     state: &AppState,
     principal_opt: Option<&Principal>,
@@ -869,7 +869,7 @@ pub(crate) fn release_reader_check(
     }
     let role = {
         let db = state.db.lock().unwrap();
-        db.get_workspace_member_role(&ws_id, &principal.username)
+        db.workspace_access(&ws_id, &principal.username)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
     };
     if role.is_none() {
@@ -3057,6 +3057,38 @@ async fn handle_rename_user(
 }
 
 #[derive(Deserialize)]
+struct SetUserRoleRequest {
+    role: String,
+}
+
+async fn handle_set_user_role(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(username): Path<String>,
+    Json(req): Json<SetUserRoleRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    require_admin_full(&state, &principal)?;
+
+    if !matches!(req.role.as_str(), "admin" | "user") {
+        return Err(error_response(StatusCode::BAD_REQUEST, "Role must be admin or user"));
+    }
+    // Block self-demotion so an admin can't lock the org out of admin access.
+    if principal.username == username {
+        return Err(error_response(StatusCode::BAD_REQUEST, "Cannot change your own role"));
+    }
+
+    let db = state.db.lock().unwrap();
+    if !db.user_exists(&username).unwrap_or(false) {
+        return Err(error_response(StatusCode::NOT_FOUND, "User does not exist"));
+    }
+    db.set_user_role(&username, &req.role)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    Ok(Json(serde_json::json!({ "status": "OK" })))
+}
+
+#[derive(Deserialize)]
 struct ResetPasswordRequest {
     new_password: String,
 }
@@ -3543,7 +3575,7 @@ fn authorize_release_download(
             .map(|r| r == "admin")
             .unwrap_or(false);
         if !is_admin {
-            let role = db.get_workspace_member_role(&ws_id, &principal.username)
+            let role = db.workspace_access(&ws_id, &principal.username)
                 .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
             if role.is_none() {
                 return Err(error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"));
@@ -4081,12 +4113,6 @@ struct UpdateWorkspaceRequest {
 #[derive(Deserialize)]
 struct AddMemberRequest {
     username: String,
-    #[serde(default = "default_member_role")]
-    role: String,
-}
-
-fn default_member_role() -> String {
-    "viewer".to_string()
 }
 
 #[derive(Deserialize)]
@@ -4147,13 +4173,13 @@ async fn handle_list_workspaces(
         .map(|r| r == "admin")
         .unwrap_or(false);
     let rows = if is_admin {
-        db.list_all_workspaces(&principal.username)
+        db.list_all_workspaces()
     } else {
         db.list_workspaces_for_user(&principal.username)
     }
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
-    let workspaces: Vec<_> = rows.iter().map(|(id, name, product, desc, created_by, created_at, updated_at, role)| {
+    let workspaces: Vec<_> = rows.iter().map(|(id, name, product, desc, created_by, created_at, updated_at)| {
         serde_json::json!({
             "id": id,
             "name": name,
@@ -4162,7 +4188,6 @@ async fn handle_list_workspaces(
             "created_by": created_by,
             "created_at": created_at,
             "updated_at": updated_at,
-            "role": role,
         })
     }).collect();
 
@@ -4178,7 +4203,7 @@ async fn handle_get_workspace(
     require_password_changed(&state, &principal)?;
 
     let db = state.db.lock().unwrap();
-    let role = db.get_workspace_member_role(&id, &principal.username)
+    db.workspace_access(&id, &principal.username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
 
@@ -4197,9 +4222,8 @@ async fn handle_get_workspace(
         "created_by": ws.4,
         "created_at": ws.5,
         "updated_at": ws.6,
-        "role": role,
-        "members": members.iter().map(|(u, r, a)| serde_json::json!({
-            "username": u, "role": r, "added_at": a,
+        "members": members.iter().map(|(u, a)| serde_json::json!({
+            "username": u, "added_at": a,
         })).collect::<Vec<_>>(),
     })))
 }
@@ -4214,12 +4238,9 @@ async fn handle_update_workspace(
     require_password_changed(&state, &principal)?;
 
     let db = state.db.lock().unwrap();
-    let role = db.get_workspace_member_role(&id, &principal.username)
+    db.workspace_access(&id, &principal.username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
-    if role != "owner" && role != "editor" {
-        return Err(error_response(StatusCode::FORBIDDEN, "Insufficient permissions"));
-    }
 
     // Re-assigning the "created by" attribution is admin-only (the field is
     // mostly cosmetic but we want admins to be the gate). Validate the target
@@ -4275,15 +4296,11 @@ async fn handle_add_workspace_member(
 
     let db = state.db.lock().unwrap();
 
-    if !matches!(req.role.as_str(), "owner" | "editor" | "viewer") {
-        return Err(error_response(StatusCode::BAD_REQUEST, "Role must be owner, editor, or viewer"));
-    }
-
     if !db.user_exists(&req.username).unwrap_or(false) {
         return Err(error_response(StatusCode::NOT_FOUND, "User does not exist"));
     }
 
-    db.add_workspace_member(&workspace_id, &req.username, &req.role)
+    db.add_workspace_member(&workspace_id, &req.username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
     Ok(Json(serde_json::json!({ "status": "OK" })))
@@ -4318,12 +4335,9 @@ async fn handle_push_config(
     require_password_changed(&state, &principal)?;
 
     let db = state.db.lock().unwrap();
-    let role = db.get_workspace_member_role(&workspace_id, &principal.username)
+    db.workspace_access(&workspace_id, &principal.username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
-    if role == "viewer" {
-        return Err(error_response(StatusCode::FORBIDDEN, "Viewers cannot push configs"));
-    }
 
     // Validate JSON
     serde_json::from_str::<serde_json::Value>(&req.config_json)
@@ -4347,7 +4361,7 @@ async fn handle_list_configs(
     require_password_changed(&state, &principal)?;
 
     let db = state.db.lock().unwrap();
-    db.get_workspace_member_role(&workspace_id, &principal.username)
+    db.workspace_access(&workspace_id, &principal.username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
 
@@ -4376,7 +4390,7 @@ async fn handle_get_config(
     require_password_changed(&state, &principal)?;
 
     let db = state.db.lock().unwrap();
-    db.get_workspace_member_role(&workspace_id, &principal.username)
+    db.workspace_access(&workspace_id, &principal.username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
 
@@ -4403,7 +4417,7 @@ async fn handle_get_latest_config(
     require_password_changed(&state, &principal)?;
 
     let db = state.db.lock().unwrap();
-    db.get_workspace_member_role(&workspace_id, &principal.username)
+    db.workspace_access(&workspace_id, &principal.username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
 
@@ -4431,12 +4445,9 @@ async fn handle_update_config(
     require_password_changed(&state, &principal)?;
 
     let db = state.db.lock().unwrap();
-    let role = db.get_workspace_member_role(&workspace_id, &principal.username)
+    db.workspace_access(&workspace_id, &principal.username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
-    if role == "viewer" {
-        return Err(error_response(StatusCode::FORBIDDEN, "Viewers cannot edit configs"));
-    }
 
     let updated = db.update_config_revision(&workspace_id, config_id, &req.name, &req.description, req.config_json.as_deref())
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
@@ -4456,12 +4467,9 @@ async fn handle_delete_config(
     require_password_changed(&state, &principal)?;
 
     let db = state.db.lock().unwrap();
-    let role = db.get_workspace_member_role(&workspace_id, &principal.username)
+    db.workspace_access(&workspace_id, &principal.username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
-    if role == "viewer" {
-        return Err(error_response(StatusCode::FORBIDDEN, "Viewers cannot delete configs"));
-    }
 
     let deleted = db.delete_config_revision(&workspace_id, config_id)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
@@ -4513,29 +4521,13 @@ fn s3_unavailable() -> (StatusCode, Json<ErrorResponse>) {
     )
 }
 
-fn assert_workspace_writer(
-    state: &AppState,
-    workspace_id: &str,
-    principal: &Principal,
-) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
-    let db = state.db.lock().unwrap();
-    let role = db
-        .get_workspace_member_role(workspace_id, &principal.username)
-        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
-        .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
-    if role == "viewer" {
-        return Err(error_response(StatusCode::FORBIDDEN, "Viewers cannot modify recordings"));
-    }
-    Ok(())
-}
-
 fn assert_workspace_member(
     state: &AppState,
     workspace_id: &str,
     principal: &Principal,
 ) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
     let db = state.db.lock().unwrap();
-    db.get_workspace_member_role(workspace_id, &principal.username)
+    db.workspace_access(workspace_id, &principal.username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
     Ok(())
@@ -4549,7 +4541,7 @@ async fn handle_init_recording(
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
     require_password_changed(&state, &principal)?;
-    assert_workspace_writer(&state, &workspace_id, &principal)?;
+    assert_workspace_member(&state, &workspace_id, &principal)?;
 
     let s3 = state.s3.as_ref().ok_or_else(s3_unavailable)?;
 
@@ -4587,7 +4579,7 @@ async fn handle_complete_recording(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
     require_password_changed(&state, &principal)?;
-    assert_workspace_writer(&state, &workspace_id, &principal)?;
+    assert_workspace_member(&state, &workspace_id, &principal)?;
 
     let s3 = state.s3.as_ref().ok_or_else(s3_unavailable)?;
 
@@ -4681,7 +4673,7 @@ async fn handle_delete_recording(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
     require_password_changed(&state, &principal)?;
-    assert_workspace_writer(&state, &workspace_id, &principal)?;
+    assert_workspace_member(&state, &workspace_id, &principal)?;
 
     // Tear down DB first to release the s3_key for cleanup; if S3 delete
     // fails the worst case is an orphan object — we log but don't surface.
@@ -4718,7 +4710,7 @@ struct RegisterPeerRequest {
 }
 
 /// Returns the workspace's federation channel secret and the live peer list.
-/// Any workspace member (incl. viewers) can read — the secret is the symmetric
+/// Any workspace member can read — the secret is the symmetric
 /// key for the ZMQ data plane that all member fusionhubs need to participate.
 async fn handle_get_workspace_federation(
     State(state): State<Arc<AppState>>,
@@ -4729,7 +4721,7 @@ async fn handle_get_workspace_federation(
     require_password_changed(&state, &principal)?;
 
     let db = state.db.lock().unwrap();
-    db.get_workspace_member_role(&workspace_id, &principal.username)
+    db.workspace_access(&workspace_id, &principal.username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
 
@@ -4793,7 +4785,7 @@ async fn handle_get_workspace_graph(
     require_password_changed(&state, &principal)?;
 
     let db = state.db.lock().unwrap();
-    db.get_workspace_member_role(&workspace_id, &principal.username)
+    db.workspace_access(&workspace_id, &principal.username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
 
@@ -4814,7 +4806,7 @@ async fn handle_get_workspace_graph(
 
 /// Optimistic-lock upsert of the workspace's graph. The request body carries
 /// the version the editor was loaded with; mismatch ⇒ 409 with the current
-/// version so the editor can refresh + reapply. Viewers cannot write.
+/// version so the editor can refresh + reapply.
 async fn handle_put_workspace_graph(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -4825,12 +4817,9 @@ async fn handle_put_workspace_graph(
     require_password_changed(&state, &principal)?;
 
     let db = state.db.lock().unwrap();
-    let role = db.get_workspace_member_role(&workspace_id, &principal.username)
+    db.workspace_access(&workspace_id, &principal.username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
-    if role == "viewer" {
-        return Err(error_response(StatusCode::FORBIDDEN, "Viewers cannot edit the workspace graph"));
-    }
 
     let config_str = serde_json::to_string(&req.config)
         .map_err(|e| error_response(StatusCode::BAD_REQUEST, &format!("config not serialisable: {}", e)))?;
@@ -4852,7 +4841,6 @@ async fn handle_put_workspace_graph(
 
 /// Register (or refresh) a FusionHub peer for this workspace. Idempotent on
 /// `(workspace_id, host_id)` — re-registration updates `url`/`label`/`last_seen`.
-/// Viewers cannot register peers (read-only role).
 async fn handle_register_workspace_peer(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -4870,12 +4858,9 @@ async fn handle_register_workspace_peer(
     }
 
     let db = state.db.lock().unwrap();
-    let role = db.get_workspace_member_role(&workspace_id, &principal.username)
+    db.workspace_access(&workspace_id, &principal.username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
-    if role == "viewer" {
-        return Err(error_response(StatusCode::FORBIDDEN, "Viewers cannot register peers"));
-    }
 
     db.upsert_workspace_peer(&workspace_id, &req.host_id, &req.url, &req.label, &req.network_id, &principal.username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
@@ -4883,7 +4868,7 @@ async fn handle_register_workspace_peer(
     Ok(Json(serde_json::json!({ "status": "OK" })))
 }
 
-/// Remove a FusionHub peer from this workspace. Viewers cannot revoke.
+/// Remove a FusionHub peer from this workspace.
 async fn handle_delete_workspace_peer(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -4893,12 +4878,9 @@ async fn handle_delete_workspace_peer(
     require_password_changed(&state, &principal)?;
 
     let db = state.db.lock().unwrap();
-    let role = db.get_workspace_member_role(&workspace_id, &principal.username)
+    db.workspace_access(&workspace_id, &principal.username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
-    if role == "viewer" {
-        return Err(error_response(StatusCode::FORBIDDEN, "Viewers cannot remove peers"));
-    }
 
     let removed = db.delete_workspace_peer(&workspace_id, &host_id)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
@@ -4910,7 +4892,7 @@ async fn handle_delete_workspace_peer(
 }
 
 /// Rotate the workspace's federation channel secret. Forces every connected
-/// FusionHub to re-fetch on next poll and rekey. Owner/editor only.
+/// FusionHub to re-fetch on next poll and rekey. Any workspace member.
 async fn handle_rotate_workspace_federation(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -4920,12 +4902,9 @@ async fn handle_rotate_workspace_federation(
     require_password_changed(&state, &principal)?;
 
     let db = state.db.lock().unwrap();
-    let role = db.get_workspace_member_role(&workspace_id, &principal.username)
+    db.workspace_access(&workspace_id, &principal.username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
-    if role == "viewer" {
-        return Err(error_response(StatusCode::FORBIDDEN, "Viewers cannot rotate secrets"));
-    }
 
     let new_secret = db.rotate_workspace_federation_secret(&workspace_id)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
@@ -4944,7 +4923,7 @@ async fn handle_workspace_releases(
 
     let (rows, mut assets_by_id) = {
         let db = state.db.lock().unwrap();
-        db.get_workspace_member_role(&workspace_id, &principal.username)
+        db.workspace_access(&workspace_id, &principal.username)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
             .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
 
@@ -4976,7 +4955,7 @@ async fn handle_workspace_releases(
 }
 
 /// List doc-bearing releases scoped to a single workspace. Workspace members
-/// (any role) and site admins may call this; non-members get 403. Mirrors
+/// and site admins may call this; non-members get 403. Mirrors
 /// `handle_list_doc_releases` but filtered to one workspace.
 async fn handle_list_workspace_doc_releases(
     State(state): State<Arc<AppState>>,
@@ -4985,9 +4964,9 @@ async fn handle_list_workspace_doc_releases(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
     require_password_changed(&state, &principal)?;
-    if !is_site_admin(&state, &principal) {
+    {
         let db = state.db.lock().unwrap();
-        db.get_workspace_member_role(&workspace_id, &principal.username)
+        db.workspace_access(&workspace_id, &principal.username)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
             .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
     }
@@ -5391,6 +5370,7 @@ async fn main() -> Result<()> {
         .route("/api/v1/auth/users/{username}", axum::routing::delete(handle_delete_user))
         .route("/api/v1/auth/users/{username}/email", axum::routing::put(handle_set_user_email))
         .route("/api/v1/auth/users/{username}/rename", post(handle_rename_user))
+        .route("/api/v1/auth/users/{username}/role", axum::routing::put(handle_set_user_role))
         .route("/api/v1/auth/users/{username}/reset-password", post(handle_reset_user_password))
         .route("/api/v1/auth/users/{username}/resend-invitation", post(handle_resend_invitation))
         // Public client endpoints

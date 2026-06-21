@@ -19,14 +19,11 @@ pub struct WorkspaceInfo {
     pub created_at: String,
     #[serde(default)]
     pub updated_at: String,
-    #[serde(default)]
-    pub role: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct WorkspaceMember {
     pub username: String,
-    pub role: String,
     #[serde(default)]
     pub added_at: String,
 }
@@ -256,20 +253,18 @@ impl WorkspaceClient {
         &self,
         workspace_id: &str,
         username: &str,
-        role: &str,
     ) -> Result<(), WorkspaceError> {
-        blocking_run(self.add_member_async(workspace_id, username, role))
+        blocking_run(self.add_member_async(workspace_id, username))
     }
 
     pub async fn add_member_async(
         &self,
         workspace_id: &str,
         username: &str,
-        role: &str,
     ) -> Result<(), WorkspaceError> {
         self.post_void(
             &format!("/api/v1/workspaces/{}/members", workspace_id),
-            &serde_json::json!({ "username": username, "role": role }),
+            &serde_json::json!({ "username": username }),
         )
         .await
     }
