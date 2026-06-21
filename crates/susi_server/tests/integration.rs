@@ -1289,15 +1289,15 @@ fn test_rename_user_migrates_everything() {
 }
 
 /// Rename onto a name that still has orphaned membership rows (e.g. from a
-/// deleted account) must merge instead of failing: one surviving row, the
-/// more privileged role wins, and the whole rename stays atomic.
+/// deleted account) must merge instead of failing: one surviving row, and
+/// the whole rename stays atomic.
 #[test]
 fn test_rename_user_merges_conflicting_memberships() {
     let server = TestServer::start();
     let admin = server.admin_token();
     let client = server.http();
 
-    for (name, _role) in [("merge_x", "viewer"), ("merge_y", "owner")] {
+    for name in ["merge_x", "merge_y"] {
         client
             .post(format!("{}/auth/users", server.api_url))
             .bearer_auth(&admin)
@@ -1323,11 +1323,11 @@ fn test_rename_user_merges_conflicting_memberships() {
         .expect("ws json");
     let ws_id = ws["id"].as_str().expect("ws id").to_string();
 
-    for (name, role) in [("merge_x", "viewer"), ("merge_y", "owner")] {
+    for name in ["merge_x", "merge_y"] {
         client
             .post(format!("{}/workspaces/{}/members", server.api_url, ws_id))
             .bearer_auth(&admin)
-            .json(&json!({"username": name, "role": role}))
+            .json(&json!({"username": name}))
             .send()
             .expect("add member")
             .error_for_status()
@@ -1388,15 +1388,14 @@ fn test_rename_user_merges_conflicting_memberships() {
         .expect("get ws")
         .json::<Value>()
         .expect("ws json");
-    let members: Vec<(&str, &str)> = ws["members"]
+    let members: Vec<&str> = ws["members"]
         .as_array()
         .expect("members")
         .iter()
-        .map(|m| (m["username"].as_str().unwrap(), m["role"].as_str().unwrap()))
+        .map(|m| m["username"].as_str().unwrap())
         .collect();
-    let merge_rows: Vec<_> = members.iter().filter(|(u, _)| *u == "merge_x").collect();
+    let merge_rows: Vec<_> = members.iter().filter(|u| **u == "merge_x").collect();
     assert_eq!(merge_rows.len(), 1, "exactly one surviving membership: {:?}", members);
-    assert_eq!(merge_rows[0].1, "owner", "more privileged role must win: {:?}", members);
 
     // Config-revision authorship follows the rename.
     let configs = client
@@ -1413,4 +1412,192 @@ fn test_rename_user_merges_conflicting_memberships() {
         .clone();
     assert!(!revs.is_empty(), "expected a config revision: {}", configs);
     assert_eq!(revs[0]["author"], json!("merge_x"), "author must follow rename: {}", configs);
+}
+
+/// A site admin who is not a member of a workspace must still have full access
+/// (read detail, manage members, push configs) - the same as an owner/editor
+/// member. Non-admin non-members stay denied.
+#[test]
+fn test_admin_non_member_has_full_workspace_access() {
+    let server = TestServer::start();
+    let admin = server.admin_token();
+    let client = server.http();
+
+    // Admin creates a workspace (auto-added as a member), then removes its own
+    // membership so it is a pure non-member site admin.
+    let ws_id = client
+        .post(format!("{}/workspaces", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({"name": "Admin Access WS", "product": "fusionhub", "description": ""}))
+        .send()
+        .expect("create ws")
+        .json::<Value>()
+        .expect("ws json")["id"]
+        .as_str()
+        .expect("ws id")
+        .to_string();
+
+    client
+        .delete(format!("{}/workspaces/{}/members/admin", server.api_url, ws_id))
+        .bearer_auth(&admin)
+        .send()
+        .expect("remove self membership")
+        .error_for_status()
+        .expect("remove ok");
+
+    // Non-member admin can still read the workspace detail.
+    let resp = client
+        .get(format!("{}/workspaces/{}", server.api_url, ws_id))
+        .bearer_auth(&admin)
+        .send()
+        .expect("get ws");
+    assert!(resp.status().is_success(), "admin get ws: {}", resp.text().unwrap_or_default());
+    let ws = resp.json::<Value>().expect("ws json");
+    assert_eq!(ws["name"], json!("Admin Access WS"), "admin sees workspace detail: {}", ws);
+
+    // ... and manage members.
+    client
+        .post(format!("{}/auth/users", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({"username": "regular_u", "email": "regular_u@example.com", "role": "user", "password": "regularpass123"}))
+        .send()
+        .expect("create user")
+        .error_for_status()
+        .expect("create user ok");
+    let resp = client
+        .post(format!("{}/workspaces/{}/members", server.api_url, ws_id))
+        .bearer_auth(&admin)
+        .json(&json!({"username": "regular_u"}))
+        .send()
+        .expect("add member");
+    assert!(resp.status().is_success(), "admin add member: {}", resp.text().unwrap_or_default());
+
+    // ... and push a config (write access comes with membership).
+    let resp = client
+        .post(format!("{}/workspaces/{}/configs", server.api_url, ws_id))
+        .bearer_auth(&admin)
+        .json(&json!({"config_json": "{}", "name": "admin rev", "description": ""}))
+        .send()
+        .expect("push config");
+    assert_eq!(resp.status().as_u16(), 201, "admin push config: {}", resp.text().unwrap_or_default());
+
+    // A non-admin who is not a member is still denied.
+    client
+        .post(format!("{}/auth/users", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({"username": "outsider", "email": "outsider@example.com", "role": "user", "password": "outsiderpass123"}))
+        .send()
+        .expect("create outsider")
+        .error_for_status()
+        .expect("create outsider ok");
+    let outsider_jwt = client
+        .post(format!("{}/auth/login", server.api_url))
+        .json(&json!({"username": "outsider", "password": "outsiderpass123"}))
+        .send()
+        .expect("login outsider")
+        .json::<Value>()
+        .expect("json")["token"]
+        .as_str()
+        .expect("token")
+        .to_string();
+    client
+        .post(format!("{}/auth/change-password", server.api_url))
+        .bearer_auth(&outsider_jwt)
+        .json(&json!({"current_password": "outsiderpass123", "new_password": "outsiderpass456"}))
+        .send()
+        .expect("change pw")
+        .error_for_status()
+        .expect("change pw ok");
+    let resp = client
+        .get(format!("{}/workspaces/{}", server.api_url, ws_id))
+        .bearer_auth(&outsider_jwt)
+        .send()
+        .expect("outsider get ws");
+    assert_eq!(resp.status().as_u16(), 403, "non-admin non-member must be denied");
+}
+
+/// Admins can promote a user to admin and demote them back, but cannot change
+/// their own role (self-lockout guard). Invalid roles and unknown users are
+/// rejected.
+#[test]
+fn test_set_user_role() {
+    let server = TestServer::start();
+    let admin = server.admin_token();
+    let client = server.http();
+
+    client
+        .post(format!("{}/auth/users", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({"username": "promote_me", "email": "promote_me@example.com", "role": "user", "password": "promotepass123"}))
+        .send()
+        .expect("create user")
+        .error_for_status()
+        .expect("create user ok");
+
+    let role_of = |username: &str| -> String {
+        client
+            .get(format!("{}/auth/users", server.api_url))
+            .bearer_auth(&admin)
+            .send()
+            .expect("list users")
+            .json::<Value>()
+            .expect("json")
+            .as_array()
+            .expect("array")
+            .iter()
+            .find(|u| u["username"] == json!(username))
+            .expect("user present")["role"]
+            .as_str()
+            .expect("role")
+            .to_string()
+    };
+
+    assert_eq!(role_of("promote_me"), "user");
+
+    // Promote, then demote.
+    let resp = client
+        .put(format!("{}/auth/users/promote_me/role", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({"role": "admin"}))
+        .send()
+        .expect("promote");
+    assert!(resp.status().is_success(), "promote: {}", resp.text().unwrap_or_default());
+    assert_eq!(role_of("promote_me"), "admin");
+
+    let resp = client
+        .put(format!("{}/auth/users/promote_me/role", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({"role": "user"}))
+        .send()
+        .expect("demote");
+    assert!(resp.status().is_success(), "demote: {}", resp.text().unwrap_or_default());
+    assert_eq!(role_of("promote_me"), "user");
+
+    // Cannot change own role.
+    let resp = client
+        .put(format!("{}/auth/users/admin/role", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({"role": "user"}))
+        .send()
+        .expect("self role");
+    assert_eq!(resp.status().as_u16(), 400, "self role-change must be rejected");
+    assert_eq!(role_of("admin"), "admin", "admin must remain admin");
+
+    // Invalid role rejected.
+    let resp = client
+        .put(format!("{}/auth/users/promote_me/role", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({"role": "superuser"}))
+        .send()
+        .expect("bad role");
+    assert_eq!(resp.status().as_u16(), 400, "invalid role must be rejected");
+
+    // Unknown user -> 404.
+    let resp = client
+        .put(format!("{}/auth/users/ghost/role", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({"role": "admin"}))
+        .send()
+        .expect("ghost role");
+    assert_eq!(resp.status().as_u16(), 404, "unknown user must 404");
 }

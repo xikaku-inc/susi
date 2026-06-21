@@ -207,7 +207,6 @@ impl LicenseDb {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 workspace_id TEXT NOT NULL,
                 username TEXT NOT NULL,
-                role TEXT NOT NULL DEFAULT 'viewer',
                 added_at TEXT NOT NULL,
                 FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
                 UNIQUE(workspace_id, username)
@@ -528,6 +527,14 @@ impl LicenseDb {
         let _ = self.conn.execute_batch(
             "ALTER TABLE workspace_peers ADD COLUMN network_id TEXT NOT NULL DEFAULT '';",
         );
+
+        // Workspace member roles (viewer/editor/owner) were retired: membership
+        // alone grants full read+write, management stays site-admin-only. Drop
+        // the now-unused column. The error on a fresh DB (no such column) is
+        // ignored.
+        let _ = self
+            .conn
+            .execute_batch("ALTER TABLE workspace_members DROP COLUMN role;");
 
         // Migrate single-admin table to multi-user table
         let has_admin_user: bool = self
@@ -1954,6 +1961,21 @@ impl LicenseDb {
             .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))
     }
 
+    pub fn set_user_role(&self, username: &str, role: &str) -> Result<(), LicenseError> {
+        let now = Utc::now().to_rfc3339();
+        let n = self
+            .conn
+            .execute(
+                "UPDATE users SET role = ?2, updated_at = ?3 WHERE username = ?1",
+                params![username, role, now],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))?;
+        if n == 0 {
+            return Err(LicenseError::Other("User not found".into()));
+        }
+        Ok(())
+    }
+
     /// Single-row fetch of every user attribute the admin gate needs:
     /// (role, must_change_password, totp_enabled). Replaces the three
     /// separate `get_user_role` / `user_must_change_password` /
@@ -1996,9 +2018,8 @@ impl LicenseDb {
     /// Rename a user across every username-keyed table, atomically. Tables
     /// with a uniqueness constraint on (x, username) can already hold rows
     /// under the new name (e.g. left over from an earlier partial rename, or
-    /// memberships added by hand) - those are merged instead of renamed: the
-    /// surviving membership keeps the more privileged role, duplicate rows
-    /// are dropped. Without the merge a plain UPDATE aborts on the unique
+    /// memberships added by hand) - those are merged instead of renamed:
+    /// duplicate membership rows are dropped. Without the merge a plain UPDATE aborts on the unique
     /// constraint and a non-transactional rename leaves half the tables on
     /// the old name.
     pub fn rename_user(&self, old_username: &str, new_username: &str) -> Result<(), LicenseError> {
@@ -2030,13 +2051,8 @@ impl LicenseDb {
                 params![new_username, now, old_username],
             )
             .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))?;
-        // Workspace memberships: upgrade the surviving row where the old
-        // account outranks it (owner > editor > viewer), drop the now
-        // duplicate rows, rename the rest.
-        run("UPDATE workspace_members SET role = 'owner' WHERE username = ?1 AND role != 'owner'
-             AND workspace_id IN (SELECT workspace_id FROM workspace_members WHERE username = ?2 AND role = 'owner')")?;
-        run("UPDATE workspace_members SET role = 'editor' WHERE username = ?1 AND role = 'viewer'
-             AND workspace_id IN (SELECT workspace_id FROM workspace_members WHERE username = ?2 AND role = 'editor')")?;
+        // Workspace memberships: drop the now-duplicate row where the new name
+        // is already a member, then rename the rest.
         run("DELETE FROM workspace_members WHERE username = ?2
              AND workspace_id IN (SELECT workspace_id FROM workspace_members WHERE username = ?1)")?;
         run("UPDATE workspace_members SET username = ?1 WHERE username = ?2")?;
@@ -2091,11 +2107,11 @@ impl LicenseDb {
                 params![id, name, product, description, created_by, now],
             )
             .map_err(|e| LicenseError::Other(format!("DB insert workspace: {}", e)))?;
-        // Add creator as owner
+        // Add creator as a member
         self.conn
             .execute(
-                "INSERT INTO workspace_members (workspace_id, username, role, added_at)
-                 VALUES (?1, ?2, 'owner', ?3)",
+                "INSERT INTO workspace_members (workspace_id, username, added_at)
+                 VALUES (?1, ?2, ?3)",
                 params![id, created_by, now],
             )
             .map_err(|e| LicenseError::Other(format!("DB insert workspace member: {}", e)))?;
@@ -2141,13 +2157,12 @@ impl LicenseDb {
             String,
             String,
             String,
-            String,
         )>,
         LicenseError,
     > {
         let mut stmt = self.conn
             .prepare(
-                "SELECT w.id, w.name, w.product, w.description, w.created_by, w.created_at, w.updated_at, wm.role
+                "SELECT w.id, w.name, w.product, w.description, w.created_by, w.created_at, w.updated_at
                  FROM workspaces w
                  JOIN workspace_members wm ON w.id = wm.workspace_id
                  WHERE wm.username = ?1
@@ -2164,7 +2179,6 @@ impl LicenseDb {
                     r.get::<_, String>(4)?,
                     r.get::<_, String>(5)?,
                     r.get::<_, String>(6)?,
-                    r.get::<_, String>(7)?,
                 ))
             })
             .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
@@ -2173,14 +2187,11 @@ impl LicenseDb {
         Ok(rows)
     }
 
-    /// List every workspace (admin view). `username` is used only to fill in
-    /// the caller's per-workspace role; it is empty where they are not a member.
+    /// List every workspace (admin view).
     pub fn list_all_workspaces(
         &self,
-        username: &str,
     ) -> Result<
         Vec<(
-            String,
             String,
             String,
             String,
@@ -2193,14 +2204,13 @@ impl LicenseDb {
     > {
         let mut stmt = self.conn
             .prepare(
-                "SELECT w.id, w.name, w.product, w.description, w.created_by, w.created_at, w.updated_at, COALESCE(wm.role, '')
-                 FROM workspaces w
-                 LEFT JOIN workspace_members wm ON w.id = wm.workspace_id AND wm.username = ?1
-                 ORDER BY w.name"
+                "SELECT id, name, product, description, created_by, created_at, updated_at
+                 FROM workspaces
+                 ORDER BY name"
             )
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
         let rows = stmt
-            .query_map(params![username], |r| {
+            .query_map([], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
@@ -2209,7 +2219,6 @@ impl LicenseDb {
                     r.get::<_, String>(4)?,
                     r.get::<_, String>(5)?,
                     r.get::<_, String>(6)?,
-                    r.get::<_, String>(7)?,
                 ))
             })
             .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
@@ -2260,15 +2269,14 @@ impl LicenseDb {
         &self,
         workspace_id: &str,
         username: &str,
-        role: &str,
     ) -> Result<(), LicenseError> {
         let now = Utc::now().to_rfc3339();
         self.conn
             .execute(
-                "INSERT INTO workspace_members (workspace_id, username, role, added_at)
-                 VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(workspace_id, username) DO UPDATE SET role = excluded.role",
-                params![workspace_id, username, role, now],
+                "INSERT INTO workspace_members (workspace_id, username, added_at)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(workspace_id, username) DO NOTHING",
+                params![workspace_id, username, now],
             )
             .map_err(|e| LicenseError::Other(format!("DB insert member: {}", e)))?;
         Ok(())
@@ -2292,10 +2300,10 @@ impl LicenseDb {
     pub fn list_workspace_members(
         &self,
         workspace_id: &str,
-    ) -> Result<Vec<(String, String, String)>, LicenseError> {
+    ) -> Result<Vec<(String, String)>, LicenseError> {
         let mut stmt = self.conn
             .prepare(
-                "SELECT username, role, added_at FROM workspace_members WHERE workspace_id = ?1 ORDER BY added_at"
+                "SELECT username, added_at FROM workspace_members WHERE workspace_id = ?1 ORDER BY added_at"
             )
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
         let rows = stmt
@@ -2303,7 +2311,6 @@ impl LicenseDb {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
                 ))
             })
             .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
@@ -2312,17 +2319,24 @@ impl LicenseDb {
         Ok(rows)
     }
 
-    pub fn get_workspace_member_role(
+    /// `Some(())` if the user may access this workspace: a site admin (admins
+    /// can administer any workspace) or a member. `None` otherwise. Membership
+    /// grants full read+write; management (add/remove members, delete) stays
+    /// gated on site-admin in the handler layer.
+    pub fn workspace_access(
         &self,
         workspace_id: &str,
         username: &str,
-    ) -> Result<Option<String>, LicenseError> {
+    ) -> Result<Option<()>, LicenseError> {
+        if self.get_user_role(username).map(|r| r == "admin").unwrap_or(false) {
+            return Ok(Some(()));
+        }
         match self.conn.query_row(
-            "SELECT role FROM workspace_members WHERE workspace_id = ?1 AND username = ?2",
+            "SELECT 1 FROM workspace_members WHERE workspace_id = ?1 AND username = ?2",
             params![workspace_id, username],
-            |r| r.get(0),
+            |_| Ok(()),
         ) {
-            Ok(role) => Ok(Some(role)),
+            Ok(()) => Ok(Some(())),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(LicenseError::Other(format!("DB query: {}", e))),
         }
@@ -5592,12 +5606,11 @@ mod tests {
     }
 
     #[test]
-    fn test_workspace_creator_is_owner() {
+    fn test_workspace_creator_is_member() {
         let db = test_db();
         db.create_workspace("ws-1", "WS", "", "", "admin").unwrap();
 
-        let role = db.get_workspace_member_role("ws-1", "admin").unwrap();
-        assert_eq!(role, Some("owner".to_string()));
+        assert!(db.workspace_access("ws-1", "admin").unwrap().is_some());
     }
 
     #[test]
@@ -5620,36 +5633,25 @@ mod tests {
         let db = test_db();
         db.create_workspace("ws-1", "WS", "", "", "admin").unwrap();
 
-        db.add_workspace_member("ws-1", "user1", "editor").unwrap();
-        db.add_workspace_member("ws-1", "user2", "viewer").unwrap();
+        db.add_workspace_member("ws-1", "user1").unwrap();
+        db.add_workspace_member("ws-1", "user2").unwrap();
 
         let members = db.list_workspace_members("ws-1").unwrap();
         assert_eq!(members.len(), 3); // admin + user1 + user2
 
-        assert_eq!(
-            db.get_workspace_member_role("ws-1", "user1").unwrap(),
-            Some("editor".to_string())
-        );
-        assert_eq!(
-            db.get_workspace_member_role("ws-1", "user2").unwrap(),
-            Some("viewer".to_string())
-        );
-        assert_eq!(
-            db.get_workspace_member_role("ws-1", "nobody").unwrap(),
-            None
-        );
+        assert!(db.workspace_access("ws-1", "user1").unwrap().is_some());
+        assert!(db.workspace_access("ws-1", "user2").unwrap().is_some());
+        assert!(db.workspace_access("ws-1", "nobody").unwrap().is_none());
 
-        // Update role via upsert
-        db.add_workspace_member("ws-1", "user2", "editor").unwrap();
-        assert_eq!(
-            db.get_workspace_member_role("ws-1", "user2").unwrap(),
-            Some("editor".to_string())
-        );
+        // Adding an existing member is idempotent.
+        db.add_workspace_member("ws-1", "user2").unwrap();
+        assert_eq!(db.list_workspace_members("ws-1").unwrap().len(), 3);
 
         // Remove member
         db.remove_workspace_member("ws-1", "user1").unwrap();
         let members = db.list_workspace_members("ws-1").unwrap();
         assert_eq!(members.len(), 2);
+        assert!(db.workspace_access("ws-1", "user1").unwrap().is_none());
     }
 
     #[test]
@@ -5672,7 +5674,7 @@ mod tests {
     fn test_delete_workspace_cascades() {
         let db = test_db();
         db.create_workspace("ws-1", "WS", "", "", "admin").unwrap();
-        db.add_workspace_member("ws-1", "user1", "viewer").unwrap();
+        db.add_workspace_member("ws-1", "user1").unwrap();
         db.push_config_revision("ws-1", "{}", "init", "", "admin")
             .unwrap();
 
