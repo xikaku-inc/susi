@@ -464,6 +464,10 @@ struct UpdateLicenseRequest {
     max_machines: Option<u32>,
     #[serde(default)]
     require_signed_binary: Option<bool>,
+    #[serde(default)]
+    lease_duration_hours: Option<u32>,
+    #[serde(default)]
+    lease_grace_hours: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -2447,7 +2451,9 @@ async fn handle_update_license(
     };
 
     let require_signed_binary = req.require_signed_binary.unwrap_or(license.require_signed_binary);
-    db.update_license(&key, customer, product, expires_rfc.as_deref(), features, max_machines, require_signed_binary)
+    let lease_duration_hours = req.lease_duration_hours.unwrap_or(license.lease_duration_hours);
+    let lease_grace_hours = req.lease_grace_hours.unwrap_or(license.lease_grace_hours);
+    db.update_license(&key, customer, product, expires_rfc.as_deref(), features, max_machines, require_signed_binary, lease_duration_hours, lease_grace_hours)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
     let updated = db
