@@ -677,6 +677,7 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
             <div id="headerActionsMenu" class="dropdown-menu" style="display:none;">
                 <button id="btnUsers" onclick="showUsersModal()" style="display:none;">Users</button>
                 <button id="btn2FA" onclick="show2FAModal()" style="display:none;">2FA</button>
+                <button id="btnSessions" onclick="showSessionsModal()" style="display:none;">Sessions</button>
                 <button id="btnApiTokens" onclick="showApiTokensModal()" style="display:none;">API Tokens</button>
                 <div class="divider"></div>
                 <button class="danger" id="btnLogout" onclick="logout()">Logout</button>
@@ -1741,6 +1742,23 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
     </div>
 </div>
 
+<!-- Active Sessions Modal -->
+<div id="sessionsModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeSessionsModal()">
+    <div class="modal" style="max-width:min(640px,95vw);width:min(640px,95vw);">
+        <h2>Active Sessions</h2>
+        <div class="modal-body">
+            <p style="font-size:12px;color:var(--text2);margin-bottom:12px;">
+                Every signed-in browser session for your account. Revoking a session signs that browser out immediately.
+            </p>
+            <div id="sessionsList"><p class="empty-state">Loading...</p></div>
+        </div>
+        <div class="form-actions">
+            <button class="danger" onclick="revokeOtherSessions()">Sign out everywhere else</button>
+            <button class="secondary" onclick="closeSessionsModal()">Close</button>
+        </div>
+    </div>
+</div>
+
 <!-- Users Management Modal -->
 <div id="usersModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeUsersModal()">
     <div class="modal" style="max-width:min(1200px,95vw);width:min(1200px,95vw);">
@@ -2059,6 +2077,7 @@ function renderNav() {
     document.getElementById('headerActions').style.display = authToken ? '' : 'none';
     document.getElementById('currentUser').style.display = authToken ? '' : 'none';
     document.getElementById('btn2FA').style.display = authToken ? 'block' : 'none';
+    document.getElementById('btnSessions').style.display = authToken ? 'block' : 'none';
     document.getElementById('btnUsers').style.display = (authToken && isAdmin) ? 'block' : 'none';
     document.getElementById('btnApiTokens').style.display = authToken ? 'block' : 'none';
 }
@@ -3158,6 +3177,60 @@ async function doMyExport() {
     } catch (e) {
         toast('Failed: ' + e.message, 'error');
     }
+}
+
+// ---- Active sessions ----
+function showSessionsModal() {
+    document.getElementById('sessionsModal').classList.add('visible');
+    loadSessions();
+}
+
+function closeSessionsModal() {
+    document.getElementById('sessionsModal').classList.remove('visible');
+}
+
+async function loadSessions() {
+    const box = document.getElementById('sessionsList');
+    try {
+        const resp = await fetch(API + '/auth/me/sessions', { headers: authHeaders() });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const sessions = (await resp.json()).sessions || [];
+        if (!sessions.length) { box.innerHTML = '<p class="empty-state">No active sessions.</p>'; return; }
+        box.innerHTML = sessions.map(s =>
+            '<div style="display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--border);">'
+            + '<div style="flex:1;min-width:0;">'
+            + '<div style="font-size:13px;">' + esc(s.device_label || 'Unknown device')
+            + (s.current ? ' <span style="color:var(--green);font-size:11px;font-weight:600;">(this session)</span>' : '') + '</div>'
+            + '<div style="font-size:11px;color:var(--text2);">' + esc(s.ip)
+            + ' · signed in ' + esc(new Date(s.created_at).toLocaleString())
+            + ' · last seen ' + esc(new Date(s.last_seen).toLocaleString()) + '</div>'
+            + '</div>'
+            + (s.current ? '' : '<button class="small danger" onclick="revokeSession(' + s.id + ')">Revoke</button>')
+            + '</div>'
+        ).join('');
+    } catch (e) {
+        box.innerHTML = '<p class="empty-state">Failed to load: ' + esc(e.message) + '</p>';
+    }
+}
+
+async function revokeSession(id) {
+    try {
+        const resp = await fetch(API + '/auth/me/sessions/' + id, { method: 'DELETE', headers: authHeaders() });
+        if (!resp.ok) { const d = await resp.json(); toast('Error: ' + (d.error || resp.status), 'error'); return; }
+        toast('Session revoked', 'success');
+        loadSessions();
+    } catch (e) { toast('Failed: ' + e.message, 'error'); }
+}
+
+async function revokeOtherSessions() {
+    if (!confirm('Sign out every other session for your account?')) return;
+    try {
+        const resp = await fetch(API + '/auth/me/sessions/revoke-others', { method: 'POST', headers: authHeaders() });
+        if (!resp.ok) { const d = await resp.json(); toast('Error: ' + (d.error || resp.status), 'error'); return; }
+        const n = (await resp.json()).revoked || 0;
+        toast('Revoked ' + n + ' session' + (n === 1 ? '' : 's'), 'success');
+        loadSessions();
+    } catch (e) { toast('Failed: ' + e.message, 'error'); }
 }
 
 // 2FA settings

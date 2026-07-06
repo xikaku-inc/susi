@@ -1351,6 +1351,92 @@ fn test_password_change_revokes_sessions() {
     assert!(resp.status().is_success(), "fresh token must be accepted");
 }
 
+/// Sessions are listed per account and individually revocable: revoking a
+/// session kills its token immediately while other sessions keep working,
+/// and revoke-others keeps only the calling session alive.
+#[test]
+fn test_session_list_and_revoke() {
+    let server = TestServer::start();
+    let client = server.http();
+
+    let login = || {
+        client
+            .post(format!("{}/auth/login", server.api_url))
+            .json(&json!({"username": "admin", "password": "changeme"}))
+            .send()
+            .expect("login")
+            .json::<Value>()
+            .expect("json")["token"]
+            .as_str()
+            .expect("token")
+            .to_string()
+    };
+    let token_a = login();
+    let token_b = login();
+
+    // From session A: both sessions visible, exactly one marked current.
+    let sessions = client
+        .get(format!("{}/auth/me/sessions", server.api_url))
+        .bearer_auth(&token_a)
+        .send()
+        .expect("list sessions")
+        .json::<Value>()
+        .expect("json")["sessions"]
+        .as_array()
+        .cloned()
+        .expect("sessions array");
+    assert_eq!(sessions.len(), 2, "sessions: {:?}", sessions);
+    assert_eq!(sessions.iter().filter(|s| s["current"] == json!(true)).count(), 1);
+
+    // Revoke session B from session A: B's token dies, A's keeps working.
+    let b_id = sessions
+        .iter()
+        .find(|s| s["current"] == json!(false))
+        .expect("other session")["id"]
+        .as_i64()
+        .expect("id");
+    let resp = client
+        .delete(format!("{}/auth/me/sessions/{}", server.api_url, b_id))
+        .bearer_auth(&token_a)
+        .send()
+        .expect("revoke");
+    assert!(resp.status().is_success());
+
+    let resp = client
+        .get(format!("{}/auth/status", server.api_url))
+        .bearer_auth(&token_b)
+        .send()
+        .expect("status b");
+    assert_eq!(resp.status().as_u16(), 401, "revoked session must be rejected");
+    let resp = client
+        .get(format!("{}/auth/status", server.api_url))
+        .bearer_auth(&token_a)
+        .send()
+        .expect("status a");
+    assert!(resp.status().is_success());
+
+    // revoke-others keeps only the calling session.
+    let token_c = login();
+    let resp = client
+        .post(format!("{}/auth/me/sessions/revoke-others", server.api_url))
+        .bearer_auth(&token_a)
+        .send()
+        .expect("revoke others");
+    assert!(resp.status().is_success());
+    let resp = client
+        .get(format!("{}/auth/status", server.api_url))
+        .bearer_auth(&token_c)
+        .send()
+        .expect("status c");
+    assert_eq!(resp.status().as_u16(), 401);
+    let resp = client
+        .get(format!("{}/auth/status", server.api_url))
+        .bearer_auth(&token_a)
+        .send()
+        .expect("status a again");
+    assert!(resp.status().is_success());
+}
+
 /// Admin actions land in the audit trail with actor/action/target; the
 /// endpoint itself is admin-only.
 #[test]

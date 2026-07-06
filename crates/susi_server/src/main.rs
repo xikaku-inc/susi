@@ -526,7 +526,16 @@ struct Claims {
     /// tokens issued before the field existed default to 0 and fail the check.
     #[serde(default)]
     tv: i64,
+    /// Session id, checked against the sessions table on every request so
+    /// individual sessions can be listed and revoked. Tokens issued before
+    /// the field existed default to "" and fail the check.
+    #[serde(default)]
+    jti: String,
 }
+
+/// Session JWT lifetime. Also bounds how long a sessions-table row can
+/// matter: anything older holds an expired token.
+const SESSION_JWT_TTL_DAYS: i64 = 30;
 
 /// Short-lived, single-asset download ticket. Lets the dashboard trigger a
 /// native browser download via plain `<a href>` (which can't carry an
@@ -743,30 +752,41 @@ fn create_jwt(
     secret: &[u8; 32],
     username: &str,
     token_version: i64,
+    jti: &str,
 ) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
     let now = Utc::now().timestamp();
     let claims = Claims {
         sub: username.into(),
         iat: now,
-        exp: now + 2_592_000, // 30 days
+        exp: now + SESSION_JWT_TTL_DAYS * 86_400,
         tv: token_version,
+        jti: jti.into(),
     };
     encode(&Header::default(), &claims, &EncodingKey::from_secret(secret))
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))
 }
 
-/// Mint a session JWT carrying the user's current token_version.
+/// Mint a session JWT carrying the user's current token_version and a fresh
+/// session id, and register the session so it shows up in (and can be
+/// revoked from) the active-sessions list.
 fn create_session_jwt(
     state: &AppState,
     username: &str,
+    device_label: &str,
+    ip: IpAddr,
 ) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
+    let jti = uuid::Uuid::new_v4().to_string();
     let tv = {
         let db = state.db.lock();
-        db.get_user_token_version(username)
+        let tv = db
+            .get_user_token_version(username)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
-            .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "Unknown user"))?
+            .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "Unknown user"))?;
+        db.create_session(&jti, username, device_label, &ip.to_string())
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+        tv
     };
-    create_jwt(&state.jwt_secret, username, tv)
+    create_jwt(&state.jwt_secret, username, tv, &jti)
 }
 
 fn mint_download_ticket(
@@ -954,14 +974,22 @@ pub(crate) fn validate_principal(
 
     let claims = validate_jwt(headers, &state.jwt_secret)?;
     // Session revocation: the token is only valid while its embedded version
-    // matches the user's current one. Also rejects tokens of deleted users.
-    let current_tv = {
+    // matches the user's current one (rejects tokens of deleted users too)
+    // AND its session row is alive (rejects individually revoked sessions).
+    {
         let db = state.db.lock();
-        db.get_user_token_version(&claims.sub)
+        let current_tv = db
+            .get_user_token_version(&claims.sub)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+        if current_tv != Some(claims.tv) {
+            return Err(error_response(StatusCode::UNAUTHORIZED, "Session revoked"));
+        }
+        if !db
+            .session_valid(&claims.jti, &claims.sub)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
-    };
-    if current_tv != Some(claims.tv) {
-        return Err(error_response(StatusCode::UNAUTHORIZED, "Session revoked"));
+        {
+            return Err(error_response(StatusCode::UNAUTHORIZED, "Session revoked"));
+        }
     }
     Ok(Principal { username: claims.sub, source: AuthSource::Jwt })
 }
@@ -1427,7 +1455,7 @@ async fn handle_login(
     }
 
     clear_account_failures(&state, &username);
-    let token = create_session_jwt(&state, &username)?;
+    let token = create_session_jwt(&state, &username, &device_label, ip)?;
     Ok(Json(serde_json::json!({
         "token": token,
         "must_change_password": must_change,
@@ -1649,7 +1677,7 @@ async fn handle_signin_code_exchange(
         let _ = db.register_device(&row.username, &row.device_fp, &row.device_label);
     }
 
-    let jwt = create_session_jwt(&state, &row.username)?;
+    let jwt = create_session_jwt(&state, &row.username, &row.device_label, ip)?;
     Ok(Json(serde_json::json!({
         "token": jwt,
         "must_change_password": must_change,
@@ -1798,7 +1826,7 @@ async fn handle_magic_login(
         (username.clone(), role)
     };
 
-    let jwt = create_session_jwt(&state, &username)?;
+    let jwt = create_session_jwt(&state, &username, &summarize_user_agent(&req.device_label), ip)?;
     Ok(Json(serde_json::json!({
         "token": jwt,
         "must_change_password": false,
@@ -1840,6 +1868,7 @@ struct ChangePasswordRequest {
 
 async fn handle_change_password(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(req): Json<ChangePasswordRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
@@ -1869,7 +1898,13 @@ async fn handle_change_password(
     // The password change bumped token_version, revoking every outstanding
     // session (including this one) - hand back a fresh token so the caller
     // stays signed in.
-    let token = create_session_jwt(&state, &principal.username)?;
+    let device_label = summarize_user_agent(
+        headers
+            .get("user-agent")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or(""),
+    );
+    let token = create_session_jwt(&state, &principal.username, &device_label, client_ip(peer, &headers))?;
     Ok(Json(serde_json::json!({ "status": "OK", "token": token })))
 }
 
@@ -3623,6 +3658,85 @@ async fn handle_revoke_my_device(
         return Err(error_response(StatusCode::NOT_FOUND, "Device not found"));
     }
     Ok(Json(serde_json::json!({ "status": "OK" })))
+}
+
+// ---------------------------------------------------------------------------
+// Active sessions (list / revoke). JWT-only: API tokens have no session and
+// get their own revocation flow.
+// ---------------------------------------------------------------------------
+
+/// The caller's own session id, for marking "this session" in lists and
+/// keeping it alive on revoke-others. Errors for non-JWT principals.
+fn current_session_jti(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
+    let claims = validate_jwt(headers, &state.jwt_secret).map_err(|_| {
+        error_response(
+            StatusCode::FORBIDDEN,
+            "Sessions can only be managed from a browser session",
+        )
+    })?;
+    Ok(claims.jti)
+}
+
+async fn handle_list_my_sessions(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    let current_jti = current_session_jti(&state, &headers)?;
+    let rows = {
+        let db = state.db.lock();
+        db.list_sessions(&principal.username, SESSION_JWT_TTL_DAYS)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+    };
+    let sessions: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "id": s.id,
+                "created_at": s.created_at,
+                "last_seen": s.last_seen,
+                "device_label": s.device_label,
+                "ip": s.ip,
+                "current": s.jti == current_jti,
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({ "sessions": sessions })))
+}
+
+async fn handle_revoke_my_session(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    current_session_jti(&state, &headers)?;
+    let revoked = {
+        let db = state.db.lock();
+        db.revoke_session(&principal.username, id)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+    };
+    if !revoked {
+        return Err(error_response(StatusCode::NOT_FOUND, "Session not found"));
+    }
+    Ok(Json(serde_json::json!({ "status": "OK" })))
+}
+
+async fn handle_revoke_other_sessions(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    let current_jti = current_session_jti(&state, &headers)?;
+    let revoked = {
+        let db = state.db.lock();
+        db.revoke_other_sessions(&principal.username, &current_jti)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+    };
+    Ok(Json(serde_json::json!({ "status": "OK", "revoked": revoked })))
 }
 
 // ---------------------------------------------------------------------------
@@ -5673,12 +5787,18 @@ async fn main() -> Result<()> {
             tick.tick().await; // skip immediate fire
             loop {
                 tick.tick().await;
-                let removed = {
+                let (removed, stale_sessions) = {
                     let db = state_bg.db.lock();
-                    db.cleanup_all_expired_leases().unwrap_or(0)
+                    (
+                        db.cleanup_all_expired_leases().unwrap_or(0),
+                        db.purge_stale_sessions(SESSION_JWT_TTL_DAYS + 1).unwrap_or(0),
+                    )
                 };
                 if removed > 0 {
                     log::info!("Lease cleanup: removed {} expired activations", removed);
+                }
+                if stale_sessions > 0 {
+                    log::info!("Session cleanup: purged {} stale sessions", stale_sessions);
                 }
             }
         });
@@ -5732,6 +5852,10 @@ async fn main() -> Result<()> {
         .route("/api/v1/auth/me/email", axum::routing::put(handle_set_my_email))
         .route("/api/v1/auth/me/devices", get(handle_list_my_devices))
         .route("/api/v1/auth/me/devices/{fingerprint}", axum::routing::delete(handle_revoke_my_device))
+        // Active sessions (list / revoke)
+        .route("/api/v1/auth/me/sessions", get(handle_list_my_sessions))
+        .route("/api/v1/auth/me/sessions/{id}", axum::routing::delete(handle_revoke_my_session))
+        .route("/api/v1/auth/me/sessions/revoke-others", post(handle_revoke_other_sessions))
         // API tokens (long-lived bearer tokens for headless clients)
         .route("/api/v1/auth/api-tokens", post(handle_create_api_token).get(handle_list_my_api_tokens))
         .route("/api/v1/auth/api-tokens/{id}", axum::routing::delete(handle_revoke_my_api_token))
