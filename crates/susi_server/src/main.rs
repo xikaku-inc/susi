@@ -1023,6 +1023,45 @@ pub(crate) fn require_password_changed(
     Ok(())
 }
 
+/// Best-effort audit-trail write. Never fails the request - a broken audit
+/// insert is logged and swallowed. Use `audit` when no DB guard is held,
+/// `audit_db` when one already is (the mutex is not reentrant).
+pub(crate) fn audit(state: &AppState, actor: &str, action: &str, target: &str, details: &str) {
+    audit_db(&state.db.lock(), actor, action, target, details);
+}
+
+pub(crate) fn audit_db(db: &LicenseDb, actor: &str, action: &str, target: &str, details: &str) {
+    if let Err(e) = db.insert_audit(actor, action, target, details) {
+        log::error!("audit write failed ({} {} {}): {}", actor, action, target, e);
+    }
+}
+
+/// Admin view of the audit trail, newest first. `before` is the keyset
+/// cursor (smallest id of the previous page).
+#[derive(Deserialize)]
+struct AuditQuery {
+    #[serde(default)]
+    limit: Option<i64>,
+    #[serde(default)]
+    before: Option<i64>,
+}
+
+async fn handle_list_audit(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(q): Query<AuditQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    require_admin_full(&state, &principal)?;
+    let limit = q.limit.unwrap_or(100).clamp(1, 500);
+    let rows = {
+        let db = state.db.lock();
+        db.list_audit(limit, q.before)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+    };
+    Ok(Json(serde_json::json!({ "entries": rows })))
+}
+
 /// Check if a principal is a site admin (without enforcing TOTP).
 fn is_site_admin(state: &AppState, principal: &Principal) -> bool {
     let db = state.db.lock();
@@ -2039,6 +2078,7 @@ async fn handle_verify_2fa(
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
     }
 
+    audit(&state, &principal.username, "auth.2fa_enabled", &principal.username, "");
     let display_codes: Vec<String> =
         raw_codes.iter().map(|c| format_backup_code_for_display(c)).collect();
     Ok(Json(serde_json::json!({
@@ -2077,6 +2117,7 @@ async fn handle_disable_2fa(
     // Wipe backup codes too — they were bound to the (now gone) 2FA factor.
     let _ = db.clear_backup_codes(&principal.username);
 
+    audit_db(&db, &principal.username, "auth.2fa_disabled", &principal.username, "");
     Ok(Json(serde_json::json!({ "status": "OK" })))
 }
 
@@ -2595,6 +2636,13 @@ async fn handle_create_license(
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
     }
 
+    audit_db(
+        &db,
+        &principal.username,
+        "license.create",
+        &license.license_key,
+        &format!("product={} customer={}", license.product, license.customer),
+    );
     let users = db.list_license_users(&license.id).unwrap_or_default();
     Ok((StatusCode::CREATED, Json(license_to_summary(&license, users))))
 }
@@ -2616,6 +2664,7 @@ async fn handle_revoke_license(
         return Err(error_response(StatusCode::NOT_FOUND, "License key not found"));
     }
 
+    audit_db(&db, &principal.username, "license.revoke", &key, "");
     Ok(Json(serde_json::json!({ "status": "revoked" })))
 }
 
@@ -2636,6 +2685,7 @@ async fn handle_delete_license(
         return Err(error_response(StatusCode::NOT_FOUND, "License key not found"));
     }
 
+    audit_db(&db, &principal.username, "license.delete", &key, "");
     Ok(Json(serde_json::json!({ "status": "deleted" })))
 }
 
@@ -2680,6 +2730,7 @@ async fn handle_update_license(
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "License not found after update"))?;
 
+    audit_db(&db, &principal.username, "license.update", &key, "");
     let users = db.list_license_users(&updated.id).unwrap_or_default();
     Ok(Json(license_to_summary(&updated, users)))
 }
@@ -2919,6 +2970,7 @@ async fn handle_assign_license_user(
     db.assign_license_user(&license.id, username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
+    audit_db(&db, &principal.username, "license.assign_user", &key, username);
     let users = db.list_license_users(&license.id).unwrap_or_default();
     Ok(Json(serde_json::json!({ "status": "OK", "users": users })))
 }
@@ -2939,6 +2991,7 @@ async fn handle_unassign_license_user(
     db.unassign_license_user(&license.id, &username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
+    audit_db(&db, &principal.username, "license.unassign_user", &key, &username);
     let users = db.list_license_users(&license.id).unwrap_or_default();
     Ok(Json(serde_json::json!({ "status": "OK", "users": users })))
 }
@@ -3183,6 +3236,7 @@ async fn handle_create_user(
         issue_and_send_invitation(&state, username, &email).await?;
     }
 
+    audit(&state, &principal.username, "user.create", username, &format!("role={}", req.role));
     Ok(Json(serde_json::json!({
         "status": "OK",
         "username": username,
@@ -3219,6 +3273,7 @@ async fn handle_resend_invitation(
 
     issue_and_send_invitation(&state, &username, &email_addr).await?;
 
+    audit(&state, &principal.username, "user.resend_invitation", &username, "");
     Ok(Json(serde_json::json!({ "status": "OK", "invitation_sent": true })))
 }
 
@@ -3238,6 +3293,7 @@ async fn handle_delete_user(
     db.delete_user(&username)
         .map_err(|e| error_response(StatusCode::BAD_REQUEST, &e.to_string()))?;
 
+    audit_db(&db, &principal.username, "user.delete", &username, "");
     Ok(Json(serde_json::json!({ "status": "OK" })))
 }
 
@@ -3275,6 +3331,8 @@ async fn handle_rename_user(
     // cache still maps them to the old username for up to its TTL.
     api_token_cache_clear();
 
+    audit(&state, &principal.username, "user.rename", &username, &format!("new={}", new));
+
     // Renaming yourself invalidates the current JWT (its subject is the old
     // name) - tell the frontend so it can force a re-login.
     let self_renamed = principal.username == username;
@@ -3310,6 +3368,7 @@ async fn handle_set_user_role(
     db.set_user_role(&username, &req.role)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
+    audit_db(&db, &principal.username, "user.set_role", &username, &format!("role={}", req.role));
     Ok(Json(serde_json::json!({ "status": "OK" })))
 }
 
@@ -3336,6 +3395,7 @@ async fn handle_reset_user_password(
     db.reset_user_password(&username, &pw_hash)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
+    audit_db(&db, &principal.username, "user.reset_password", &username, "");
     Ok(Json(serde_json::json!({ "status": "OK" })))
 }
 
@@ -3384,6 +3444,7 @@ async fn handle_create_api_token(
     };
 
     log::info!("API token '{}' (id={}) created by {}", name, id, principal.username);
+    audit(&state, &principal.username, "api_token.create", &prefix, &format!("name={} id={}", name, id));
 
     Ok(Json(serde_json::json!({
         "id": id,
@@ -3435,6 +3496,7 @@ async fn handle_revoke_my_api_token(
     }
     api_token_cache_clear();
     log::info!("API token id={} revoked by {}", id, principal.username);
+    audit(&state, &principal.username, "api_token.revoke", &id.to_string(), "");
     Ok(Json(serde_json::json!({ "status": "OK" })))
 }
 
@@ -3468,6 +3530,7 @@ async fn handle_revoke_any_api_token(
     }
     api_token_cache_clear();
     log::info!("API token id={} revoked by admin {}", id, principal.username);
+    audit(&state, &principal.username, "api_token.revoke_any", &id.to_string(), "");
     Ok(Json(serde_json::json!({ "status": "OK" })))
 }
 
@@ -3530,6 +3593,7 @@ async fn handle_set_user_email(
     }
     db.set_user_email(&username, normalized.as_deref())
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    audit_db(&db, &principal.username, "user.set_email", &username, "");
     Ok(Json(serde_json::json!({ "status": "OK", "email": normalized })))
 }
 
@@ -4129,6 +4193,13 @@ async fn handle_upload_release(
     }
 
     log::info!("Release {} created with assets: {}", tag, asset_names.join(", "));
+    audit(
+        &state,
+        &principal.username,
+        "release.upload",
+        &tag,
+        &format!("product={} assets={}", product, asset_names.join(",")),
+    );
 
     Ok(Json(serde_json::json!({
         "status": "OK",
@@ -4170,6 +4241,7 @@ async fn handle_update_release(
         .flatten();
     db.update_release_metadata(release_id, &req.name, &req.body, req.prerelease, existing_ws.as_deref())
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    audit_db(&db, &principal.username, "release.update", &tag, &format!("product={}", product));
     Ok(Json(serde_json::json!({ "status": "OK" })))
 }
 
@@ -4217,6 +4289,13 @@ async fn handle_move_release(
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
     log::info!("Release {} moved to workspace {:?}", tag, target);
+    audit_db(
+        &db,
+        &principal.username,
+        "release.move",
+        &tag,
+        &format!("product={} workspace={}", product, target.unwrap_or("global")),
+    );
     Ok(Json(serde_json::json!({
         "status": "OK",
         "tag": tag,
@@ -4248,6 +4327,7 @@ async fn handle_delete_release(
     let _ = std::fs::remove_dir_all(&tag_dir);
 
     log::info!("Release {} deleted", tag);
+    audit(&state, &principal.username, "release.delete", &tag, &format!("product={}", product));
 
     Ok(Json(serde_json::json!({ "status": "OK" })))
 }
@@ -4423,6 +4503,7 @@ async fn handle_create_workspace(
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
     log::info!("Workspace '{}' ({}) created by {}", req.name, id, principal.username);
+    audit_db(&db, &principal.username, "workspace.create", &id, &format!("name={}", req.name));
 
     Ok((StatusCode::CREATED, Json(serde_json::json!({
         "id": id,
@@ -4550,6 +4631,7 @@ async fn handle_delete_workspace(
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
     log::info!("Workspace {} deleted by {}", id, principal.username);
+    audit_db(&db, &principal.username, "workspace.delete", &id, "");
     Ok(Json(serde_json::json!({ "status": "OK" })))
 }
 
@@ -4575,6 +4657,7 @@ async fn handle_add_workspace_member(
     db.add_workspace_member(&workspace_id, &req.username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
+    audit_db(&db, &principal.username, "workspace.add_member", &workspace_id, &req.username);
     Ok(Json(serde_json::json!({ "status": "OK" })))
 }
 
@@ -4590,6 +4673,7 @@ async fn handle_remove_workspace_member(
     db.remove_workspace_member(&workspace_id, &username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
+    audit_db(&db, &principal.username, "workspace.remove_member", &workspace_id, &username);
     Ok(Json(serde_json::json!({ "status": "OK" })))
 }
 
@@ -5181,6 +5265,7 @@ async fn handle_rotate_workspace_federation(
     let new_secret = db.rotate_workspace_federation_secret(&workspace_id)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
+    audit_db(&db, &principal.username, "workspace.rotate_federation", &workspace_id, "");
     Ok(Json(serde_json::json!({ "status": "OK", "channel_secret": new_secret })))
 }
 
@@ -5881,6 +5966,8 @@ async fn main() -> Result<()> {
             get(website::handle_admin_get_site_settings)
                 .put(website::handle_admin_put_site_settings),
         )
+        // Admin audit trail (JWT, admin-only)
+        .route("/api/v1/audit", get(handle_list_audit))
         // Output security headers on every response. Inline script/style stay
         // allowed (the dashboard/docs/site/shop shells are inline-heavy SPAs);
         // the external allow-list covers Google Analytics, Cloudflare

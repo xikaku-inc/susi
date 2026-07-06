@@ -1109,6 +1109,33 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
     </div>
 </div><!-- /page-shop -->
 
+<!-- Audit log (admin) -->
+<div id="page-audit" class="dash-page">
+    <div style="margin-top:32px;margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
+        <h2 style="font-size:16px;font-weight:600;">Audit Log</h2>
+        <button class="secondary" onclick="loadAudit()">Refresh</button>
+    </div>
+    <div class="card" style="padding:0;">
+        <table style="width:100%;" id="auditTable">
+            <thead>
+                <tr>
+                    <th style="width:170px;">Time</th>
+                    <th style="width:140px;">Actor</th>
+                    <th style="width:200px;">Action</th>
+                    <th>Target</th>
+                    <th>Details</th>
+                </tr>
+            </thead>
+            <tbody id="auditBody">
+                <tr><td colspan="5" class="empty-state"><p>Loading...</p></td></tr>
+            </tbody>
+        </table>
+    </div>
+    <div style="margin-top:12px;">
+        <button class="secondary" id="auditLoadMore" onclick="loadAudit(true)" style="display:none;">Load more</button>
+    </div>
+</div><!-- /page-audit -->
+
 <!-- Website Pages -->
 <div id="page-website" class="dash-page">
     <div style="margin-top:8px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
@@ -2002,6 +2029,7 @@ function showPage(name) {
     const page = document.getElementById('page-' + name);
     if (page) page.classList.add('active');
     if (name === 'mylicenses' && authToken) loadMyLicenses();
+    if (name === 'audit' && authToken) loadAudit();
     renderNav();
     document.querySelectorAll('#topNav a').forEach(a => {
         a.classList.toggle('active', a.dataset.page === name);
@@ -2021,6 +2049,7 @@ function renderNav() {
         { page: 'licenses', label: 'Licenses', href: '#/licenses', show: !!authToken && isAdmin },
         { page: 'website', label: 'Website', href: '#/website', show: !!authToken && isAdmin },
         { page: 'shop', label: 'Shop', href: '#/shop', show: !!authToken && isAdmin },
+        { page: 'audit', label: 'Audit', href: '#/audit', show: !!authToken && isAdmin },
     ];
     nav.innerHTML = items.filter(i => i.show).map(i =>
         '<a href="' + i.href + '" data-page="' + i.page + '">' + i.label + '</a>'
@@ -5343,6 +5372,39 @@ const escHtml = esc;
 // ---------------------------------------------------------------------------
 let shopOrders = [];
 let viewingOrderId = null;
+
+// ---- Audit log (admin) ----
+let auditCursor = null;   // smallest id seen; keyset cursor for "Load more"
+
+async function loadAudit(more) {
+    const tbody = document.getElementById('auditBody');
+    if (!tbody) return;
+    if (!more) { auditCursor = null; tbody.innerHTML = '<tr><td colspan="5" class="empty-state"><p>Loading...</p></td></tr>'; }
+    const url = API + '/audit?limit=100' + (more && auditCursor ? '&before=' + auditCursor : '');
+    try {
+        const resp = await fetch(url, { headers: authHeaders() });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const entries = (await resp.json()).entries || [];
+        const rows = entries.map(e =>
+            '<tr>'
+            + '<td style="white-space:nowrap;color:var(--text2);">' + escHtml(e.at ? new Date(e.at).toLocaleString() : '') + '</td>'
+            + '<td>' + escHtml(e.actor) + '</td>'
+            + '<td><code>' + escHtml(e.action) + '</code></td>'
+            + '<td>' + escHtml(e.target) + '</td>'
+            + '<td style="color:var(--text2);">' + escHtml(e.details) + '</td>'
+            + '</tr>'
+        ).join('');
+        if (!more) {
+            tbody.innerHTML = rows || '<tr><td colspan="5" class="empty-state"><p>No audit entries yet.</p></td></tr>';
+        } else if (rows) {
+            tbody.insertAdjacentHTML('beforeend', rows);
+        }
+        if (entries.length) auditCursor = entries[entries.length - 1].id;
+        document.getElementById('auditLoadMore').style.display = entries.length === 100 ? '' : 'none';
+    } catch (e) {
+        tbody.innerHTML = '<tr><td colspan="5" class="empty-state"><p>Failed to load: ' + escHtml(e.message) + '</p></td></tr>';
+    }
+}
 
 async function loadShopOrders() {
     const tbody = document.getElementById('shopOrdersBody');

@@ -58,6 +58,16 @@ pub struct ApiTokenInfo {
 }
 
 #[derive(Debug, Serialize)]
+pub struct AuditRow {
+    pub id: i64,
+    pub at: String,
+    pub actor: String,
+    pub action: String,
+    pub target: String,
+    pub details: String,
+}
+
+#[derive(Debug, Serialize)]
 pub struct RecordingRow {
     pub id: i64,
     pub workspace_id: String,
@@ -493,6 +503,17 @@ impl LicenseDb {
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_totp_backup_user ON totp_backup_codes(username);
+
+            -- Append-only admin audit trail: who did what to which object.
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                at TEXT NOT NULL,
+                actor TEXT NOT NULL,
+                action TEXT NOT NULL,
+                target TEXT NOT NULL DEFAULT '',
+                details TEXT NOT NULL DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS idx_audit_log_at ON audit_log(at DESC);
 
             CREATE TABLE IF NOT EXISTS api_tokens (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -5035,6 +5056,60 @@ impl LicenseDb {
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
         let rows = stmt
             .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    // -----------------------------------------------------------------------
+    // Audit log
+    // -----------------------------------------------------------------------
+
+    pub fn insert_audit(
+        &self,
+        actor: &str,
+        action: &str,
+        target: &str,
+        details: &str,
+    ) -> Result<(), LicenseError> {
+        let now = Utc::now().to_rfc3339();
+        self.conn
+            .execute(
+                "INSERT INTO audit_log (at, actor, action, target, details)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![now, actor, action, target, details],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB insert audit: {}", e)))?;
+        Ok(())
+    }
+
+    /// Newest-first page of audit entries. `before_id` is a keyset cursor:
+    /// pass the smallest id of the previous page to fetch the next one.
+    pub fn list_audit(
+        &self,
+        limit: i64,
+        before_id: Option<i64>,
+    ) -> Result<Vec<AuditRow>, LicenseError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, at, actor, action, target, details FROM audit_log
+                 WHERE (?2 IS NULL OR id < ?2)
+                 ORDER BY id DESC LIMIT ?1",
+            )
+            .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
+        let rows: Vec<AuditRow> = stmt
+            .query_map(params![limit, before_id], |r| {
+                Ok(AuditRow {
+                    id: r.get(0)?,
+                    at: r.get(1)?,
+                    actor: r.get(2)?,
+                    action: r.get(3)?,
+                    target: r.get(4)?,
+                    details: r.get(5)?,
+                })
+            })
             .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
             .filter_map(|r| r.ok())
             .collect();

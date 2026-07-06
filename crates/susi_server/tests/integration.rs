@@ -1351,6 +1351,63 @@ fn test_password_change_revokes_sessions() {
     assert!(resp.status().is_success(), "fresh token must be accepted");
 }
 
+/// Admin actions land in the audit trail with actor/action/target; the
+/// endpoint itself is admin-only.
+#[test]
+fn test_audit_log_records_admin_actions() {
+    let server = TestServer::start();
+    let admin = server.admin_token();
+    let client = server.http();
+
+    let license_key = server.create_license(&admin, false);
+    client
+        .post(format!("{}/auth/users", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({"username": "auditee", "email": "auditee@example.com", "role": "user", "password": "auditpass123"}))
+        .send()
+        .expect("create user")
+        .error_for_status()
+        .expect("create user ok");
+
+    let entries = client
+        .get(format!("{}/audit", server.api_url))
+        .bearer_auth(&admin)
+        .send()
+        .expect("audit")
+        .json::<Value>()
+        .expect("json")["entries"]
+        .as_array()
+        .cloned()
+        .expect("entries array");
+
+    let has = |action: &str, target: &str| {
+        entries.iter().any(|e| {
+            e["action"] == json!(action) && e["target"] == json!(target) && e["actor"] == json!("admin")
+        })
+    };
+    assert!(has("license.create", &license_key), "missing license.create: {:?}", entries);
+    assert!(has("user.create", "auditee"), "missing user.create: {:?}", entries);
+    assert!(has("auth.2fa_enabled", "admin"), "missing 2fa_enabled: {:?}", entries);
+
+    // Non-admins are denied.
+    let user_jwt = client
+        .post(format!("{}/auth/login", server.api_url))
+        .json(&json!({"username": "auditee", "password": "auditpass123"}))
+        .send()
+        .expect("login")
+        .json::<Value>()
+        .expect("json")["token"]
+        .as_str()
+        .expect("token")
+        .to_string();
+    let resp = client
+        .get(format!("{}/audit", server.api_url))
+        .bearer_auth(&user_jwt)
+        .send()
+        .expect("audit as user");
+    assert_eq!(resp.status().as_u16(), 403);
+}
+
 /// Stripe-style webhook signature over `{t}.{payload}` with the given secret.
 fn stripe_sig(secret: &str, payload: &str, ts: i64) -> String {
     use hmac::{Hmac, Mac};

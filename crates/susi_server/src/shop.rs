@@ -1258,6 +1258,7 @@ pub async fn handle_upsert_product(
         .map_err(db_err)?;
     }
     crate::website::invalidate_page_cache();
+    crate::audit(&state, &p.username, "shop.product_upsert", &sku, "");
     Ok(Json(json!({ "sku": sku })))
 }
 
@@ -1277,6 +1278,7 @@ pub async fn handle_delete_product(
         return Err(error_response(StatusCode::NOT_FOUND, "Product not found"));
     }
     crate::website::invalidate_page_cache();
+    crate::audit(&state, &p.username, "shop.product_delete", &sku, "");
     Ok(Json(json!({ "status": "OK" })))
 }
 
@@ -1551,6 +1553,13 @@ pub async fn handle_admin_mark_shipped(
         }
     }
 
+    crate::audit(
+        &state,
+        &p.username,
+        "order.ship",
+        &id.to_string(),
+        &format!("carrier={} tracking={}", carrier, tracking),
+    );
     Ok(Json(order_to_json(order)))
 }
 
@@ -1572,6 +1581,7 @@ pub async fn handle_admin_update_order_notes(
         db.update_order_notes(id, &req.notes).map_err(db_err)?
     };
     if !ok { return Err(error_response(StatusCode::NOT_FOUND, "Order not found")); }
+    crate::audit(&state, &p.username, "order.notes", &id.to_string(), "");
     Ok(Json(json!({ "id": id })))
 }
 
@@ -1744,6 +1754,7 @@ pub async fn handle_admin_put_settings(
         let db = state.db.lock();
         db.set_shop_setting(k, &normalized).map_err(db_err)?;
     }
+    crate::audit(&state, &p.username, "shop.settings_update", "", "");
     Ok(Json(json!({ "status": "OK" })))
 }
 
