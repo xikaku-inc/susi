@@ -948,11 +948,10 @@ On first run, the server creates an `admin` user with password `changeme`. Log i
 
 ### 3a. Configure environment variables
 
-The container reads optional integrations from `/opt/susi/.env`. The deploy script seeds it with `SUSI_ADMIN_KEY`; add the rest manually as needed:
+The container reads optional integrations from `/opt/susi/.env`. The deploy script creates an empty file on first deploy; add settings manually as needed:
 
 ```bash
 # /opt/susi/.env  (chmod 600)
-SUSI_ADMIN_KEY=<generated-by-deploy.sh>
 
 # Sign-in code / password-reset / outbound mail (Gmail SMTP relay shown)
 SUSI_SMTP_HOST=smtp.gmail.com

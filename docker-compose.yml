@@ -14,7 +14,6 @@ services:
     ports:
       - "127.0.0.1:3100:3100"
     environment:
-      - SUSI_ADMIN_KEY=${SUSI_ADMIN_KEY:?Set SUSI_ADMIN_KEY in .env}
       - RUST_LOG=info
       # Magic-link login (leave SUSI_SMTP_HOST empty to disable)
       - SUSI_SMTP_HOST=${SUSI_SMTP_HOST:-}
