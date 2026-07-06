@@ -1,9 +1,9 @@
 /target
-Cargo.lock
 *.db
 keys/
 *.pem
 license.json
+.env
 
 # CMake and Conan
 build/

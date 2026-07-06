@@ -20,10 +20,11 @@ RUN mkdir -p crates/susi_core/src && echo "" > crates/susi_core/src/lib.rs && \
 
 RUN cargo build --release --package susi_server 2>/dev/null || true
 
-# Copy real source and rebuild
+# Copy real source and rebuild. --locked makes the committed Cargo.lock
+# authoritative so image builds are reproducible.
 COPY crates/ crates/
 RUN touch crates/susi_core/src/lib.rs crates/susi_server/src/main.rs && \
-    cargo build --release --package susi_server
+    cargo build --release --locked --package susi_server
 
 # Stage 2: Minimal runtime image
 FROM debian:bookworm-slim
