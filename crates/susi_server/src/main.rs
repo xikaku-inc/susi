@@ -20,11 +20,12 @@ use argon2::{self, Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use argon2::password_hash::SaltString;
 use axum::{
     extract::{ConnectInfo, DefaultBodyLimit, Multipart, Path, Query, State},
-    http::{header, HeaderMap, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{Html, IntoResponse},
     routing::{get, post},
     Json, Router,
 };
+use tower_http::set_header::SetResponseHeaderLayer;
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use clap::Parser;
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
@@ -192,6 +193,23 @@ struct AppState {
 // Sign-in code TTL: long enough for a user to switch to their mail client and
 // back, short enough that a leaked code is useless a few minutes later.
 const SIGNIN_CODE_TTL_MINUTES: i64 = 15;
+
+// Content-Security-Policy applied to every response. 'unsafe-inline' is
+// required by the inline-heavy HTML shells; everything else is locked down:
+// no external scripts beyond the analytics/captcha allow-list, no plugins,
+// no framing of our pages (clickjacking), images from anywhere over https
+// (site authors may hotlink), fetches only to self + analytics.
+const SECURITY_CSP: &str = "default-src 'self'; \
+    script-src 'self' 'unsafe-inline' https://www.googletagmanager.com https://challenges.cloudflare.com; \
+    style-src 'self' 'unsafe-inline'; \
+    img-src 'self' data: blob: https:; \
+    font-src 'self' data:; \
+    connect-src 'self' https://*.google-analytics.com https://*.analytics.google.com https://www.googletagmanager.com; \
+    frame-src https://www.youtube.com https://player.vimeo.com https://challenges.cloudflare.com; \
+    object-src 'none'; \
+    frame-ancestors 'none'; \
+    base-uri 'self'; \
+    form-action 'self'";
 
 
 // Sliding-window rate limit on /api/v1/auth/login — throttles brute force
@@ -5713,6 +5731,27 @@ async fn main() -> Result<()> {
             get(website::handle_admin_get_site_settings)
                 .put(website::handle_admin_put_site_settings),
         )
+        // Output security headers on every response. Inline script/style stay
+        // allowed (the dashboard/docs/site/shop shells are inline-heavy SPAs);
+        // the external allow-list covers Google Analytics, Cloudflare
+        // Turnstile, and YouTube/Vimeo embeds used by site content.
+        // `if_not_present` lets an individual handler override.
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(SECURITY_CSP),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::X_FRAME_OPTIONS,
+            HeaderValue::from_static("DENY"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::REFERRER_POLICY,
+            HeaderValue::from_static("strict-origin-when-cross-origin"),
+        ))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&cli.listen)

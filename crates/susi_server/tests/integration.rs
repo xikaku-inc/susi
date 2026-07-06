@@ -1185,6 +1185,41 @@ fn test_request_code_and_magic_login_guards() {
     assert_eq!(resp.status().as_u16(), 401);
 }
 
+/// Every response carries the output security headers set by the global
+/// layer - HTML shells and JSON API alike.
+#[test]
+fn test_security_headers_present() {
+    let server = TestServer::start();
+    for path in ["/", "/health"] {
+        let resp = server
+            .http()
+            .get(format!("{}{}", server.url, path))
+            .send()
+            .expect("request");
+        let h = resp.headers();
+        assert_eq!(
+            h.get("x-frame-options").and_then(|v| v.to_str().ok()),
+            Some("DENY"),
+            "{} missing X-Frame-Options", path
+        );
+        assert_eq!(
+            h.get("x-content-type-options").and_then(|v| v.to_str().ok()),
+            Some("nosniff"),
+            "{} missing X-Content-Type-Options", path
+        );
+        assert_eq!(
+            h.get("referrer-policy").and_then(|v| v.to_str().ok()),
+            Some("strict-origin-when-cross-origin"),
+            "{} missing Referrer-Policy", path
+        );
+        let csp = h
+            .get("content-security-policy")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_else(|| panic!("{} missing Content-Security-Policy", path));
+        assert!(csp.contains("frame-ancestors 'none'"), "CSP incomplete: {}", csp);
+    }
+}
+
 /// Changing the password revokes every outstanding session JWT: the token
 /// used before the change is rejected afterwards, while the fresh token
 /// returned by change-password keeps working.
