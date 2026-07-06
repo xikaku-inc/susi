@@ -20,7 +20,7 @@ use serde::Deserialize;
 use serde_json::json;
 use susi_core::error::LicenseError;
 
-use crate::docs::{safe_filename};
+use crate::docs::{harden_svg_response, safe_filename};
 use crate::{error_response, require_admin_full, validate_principal, AppState, ErrorResponse};
 
 fn assets_dir(state: &AppState) -> std::path::PathBuf {
@@ -127,6 +127,7 @@ pub async fn handle_get_asset(
     resp.insert(header::CONTENT_TYPE, content_type_for(&file_name).parse().unwrap());
     resp.insert(header::CONTENT_LENGTH, bytes.len().into());
     resp.insert(header::CACHE_CONTROL, "public, max-age=300".parse().unwrap());
+    harden_svg_response(&file_name, &mut resp);
     Ok((resp, bytes))
 }
 
@@ -847,10 +848,17 @@ fn try_rewrite_image_at(s: &str) -> Option<(usize, String)> {
     Some((consumed, html))
 }
 
-/// Render markdown body into HTML for SSR injection. Pages are admin-edited
-/// so we don't sanitize — we just render with tables, footnotes, strikethrough,
-/// and task lists enabled. Relative image src/href stay relative; the existing
-/// page CSS handles image sizing.
+/// Render markdown body into HTML for SSR injection, with tables, footnotes,
+/// strikethrough, and task lists enabled. Relative image src/href stay
+/// relative; the existing page CSS handles image sizing.
+///
+/// The output is sanitized: pages are admin-edited, but a leaked admin
+/// credential (API tokens skip the TOTP gate) must not become persistent XSS
+/// on the public site. Ammonia strips script/style/event handlers and
+/// javascript: URLs while keeping document structure; `class`/`id` are
+/// allowed so the image attributes emitted above survive. The client-side
+/// renderer escapes raw HTML entirely, so nothing user-visible relies on
+/// markup this strips.
 fn render_body_html(body_md: &str) -> String {
     use pulldown_cmark::{html, Options, Parser};
     let cleaned = rewrite_pandoc_image_attrs(body_md);
@@ -863,7 +871,10 @@ fn render_body_html(body_md: &str) -> String {
     let parser = Parser::new_ext(&cleaned, opts);
     let mut out = String::with_capacity(cleaned.len() * 2);
     html::push_html(&mut out, parser);
-    out
+    ammonia::Builder::default()
+        .add_generic_attributes(&["class", "id"])
+        .clean(&out)
+        .to_string()
 }
 
 fn first_default_slug(pages: &[(String, String, Option<String>, i64, String, String)]) -> Option<&str> {
@@ -1516,6 +1527,31 @@ mod tests {
         assert!(h.contains("Title"));
         assert!(h.contains("<p>"));
         assert!(h.contains("A paragraph"));
+    }
+
+    #[test]
+    fn render_body_html_strips_xss_vectors() {
+        let md = "<script>alert(1)</script>\n\n\
+                  <img src=\"/x.png\" onerror=\"alert(1)\">\n\n\
+                  [link](javascript:alert(1))\n\n\
+                  <iframe src=\"https://evil.example\"></iframe>";
+        let h = render_body_html(md);
+        assert!(!h.contains("<script"), "got: {}", h);
+        assert!(!h.contains("onerror"), "got: {}", h);
+        assert!(!h.to_lowercase().contains("javascript:"), "got: {}", h);
+        assert!(!h.contains("<iframe"), "got: {}", h);
+    }
+
+    #[test]
+    fn svg_assets_are_download_only() {
+        let mut h = HeaderMap::new();
+        harden_svg_response("diagram.SVG", &mut h);
+        assert_eq!(h.get(header::CONTENT_DISPOSITION).unwrap(), "attachment");
+        assert!(h.get(header::CONTENT_SECURITY_POLICY).is_some());
+
+        let mut h = HeaderMap::new();
+        harden_svg_response("photo.png", &mut h);
+        assert!(h.is_empty());
     }
 
     #[test]

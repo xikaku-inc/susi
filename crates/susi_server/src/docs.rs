@@ -96,6 +96,22 @@ fn content_type_for(name: &str) -> &'static str {
     else { "application/octet-stream" }
 }
 
+/// Uploaded SVG can carry <script>; navigating to the asset URL would run it
+/// in the site's origin. Browsers ignore Content-Disposition on subresource
+/// loads, so <img> embedding keeps rendering - only direct navigation turns
+/// from "execute" into "download". The sandbox CSP (which overrides the
+/// site-wide header) additionally neuters scripts in any context that still
+/// renders the document.
+pub(crate) fn harden_svg_response(file_name: &str, resp: &mut HeaderMap) {
+    if file_name.to_ascii_lowercase().ends_with(".svg") {
+        resp.insert(header::CONTENT_DISPOSITION, HeaderValue::from_static("attachment"));
+        resp.insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static("default-src 'none'; sandbox"),
+        );
+    }
+}
+
 fn db_err(e: LicenseError) -> (StatusCode, Json<ErrorResponse>) {
     error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string())
 }
@@ -419,6 +435,7 @@ async fn get_doc_asset_impl(
     resp.insert(header::CONTENT_LENGTH, bytes.len().into());
     // Allow inline display; long max-age since assets are immutable per release
     resp.insert(header::CACHE_CONTROL, "public, max-age=86400".parse().unwrap());
+    harden_svg_response(file_name, &mut resp);
     Ok((resp, bytes))
 }
 
