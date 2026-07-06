@@ -4304,12 +4304,14 @@ function renderWorkspaces() {
 }
 
 
-async function showWsDetail(id) {
+async function showWsDetail(id, tab) {
     selectedWsId = id;
     renderWorkspaces();
     const panel = document.getElementById('wsDetailPanel');
     panel.classList.add('visible');
-    setWsTab('releases');
+    // Default to Releases when opening the panel fresh; callers that refresh
+    // after an in-tab action (e.g. add/remove member) pass the tab to keep.
+    setWsTab(tab || 'releases');
 
     try {
         const resp = await fetch(API + '/workspaces/' + id, { headers: authHeaders() });
@@ -5013,7 +5015,7 @@ async function addWsMember() {
         }
         document.getElementById('wsNewMember').value = '';
         toast('Member added', 'success');
-        showWsDetail(selectedWsId);
+        showWsDetail(selectedWsId, 'members');
     } catch (e) {
         toast('Failed: ' + e.message, 'error');
     }
@@ -5032,7 +5034,7 @@ async function removeWsMember(wsId, username) {
             return;
         }
         toast('Member removed', 'success');
-        showWsDetail(wsId);
+        showWsDetail(wsId, 'members');
     } catch (e) {
         toast('Failed: ' + e.message, 'error');
     }
