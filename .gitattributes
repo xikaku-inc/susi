@@ -1,0 +1,4 @@
+# Shell scripts must stay LF in the working tree so they run from WSL / Linux
+# even on a Windows checkout (core.autocrlf=true would otherwise rewrite them
+# to CRLF, breaking the `#!/usr/bin/env bash` shebang).
+*.sh text eol=lf
