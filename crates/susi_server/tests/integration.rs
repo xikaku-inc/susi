@@ -183,6 +183,7 @@ impl TestServer {
             .to_string();
 
         // Clearing must_change_password is required before admin endpoints work.
+        // The change revokes the login token; adopt the fresh one it returns.
         let resp = client
             .post(format!("{}/auth/change-password", self.api_url))
             .bearer_auth(&token)
@@ -192,11 +193,13 @@ impl TestServer {
             }))
             .send()
             .expect("change-password");
-        assert!(
-            resp.status().is_success(),
-            "change-password failed: {}",
-            resp.text().unwrap_or_default()
-        );
+        let status = resp.status();
+        let body = resp.text().unwrap_or_default();
+        assert!(status.is_success(), "change-password failed: {}", body);
+        let token = serde_json::from_str::<Value>(&body).expect("change-password json")["token"]
+            .as_str()
+            .expect("fresh token")
+            .to_string();
 
         // Set up 2FA (required before admin endpoints accept requests).
         let resp = client
@@ -382,10 +385,11 @@ fn test_fallback_to_cached_file() {
         .json(&json!({"username": "admin", "password": "changeme"}))
         .send().unwrap();
     let token = resp.json::<Value>().unwrap()["token"].as_str().unwrap().to_string();
-    http.post(format!("{}/auth/change-password", api_url))
+    let resp = http.post(format!("{}/auth/change-password", api_url))
         .bearer_auth(&token)
         .json(&json!({"current_password": "changeme", "new_password": "testpassword1"}))
         .send().unwrap();
+    let token = resp.json::<Value>().unwrap()["token"].as_str().unwrap().to_string();
 
     let resp = http.post(format!("{}/auth/setup-2fa", api_url))
         .bearer_auth(&token).send().unwrap();
@@ -1181,6 +1185,52 @@ fn test_request_code_and_magic_login_guards() {
     assert_eq!(resp.status().as_u16(), 401);
 }
 
+/// Changing the password revokes every outstanding session JWT: the token
+/// used before the change is rejected afterwards, while the fresh token
+/// returned by change-password keeps working.
+#[test]
+fn test_password_change_revokes_sessions() {
+    let server = TestServer::start();
+    let client = server.http();
+
+    let resp = client
+        .post(format!("{}/auth/login", server.api_url))
+        .json(&json!({"username": "admin", "password": "changeme"}))
+        .send()
+        .expect("login");
+    assert!(resp.status().is_success());
+    let old_token = resp.json::<Value>().expect("json")["token"]
+        .as_str()
+        .expect("token")
+        .to_string();
+
+    let resp = client
+        .post(format!("{}/auth/change-password", server.api_url))
+        .bearer_auth(&old_token)
+        .json(&json!({"current_password": "changeme", "new_password": "brandnewpass1"}))
+        .send()
+        .expect("change-password");
+    assert!(resp.status().is_success());
+    let new_token = resp.json::<Value>().expect("json")["token"]
+        .as_str()
+        .expect("fresh token")
+        .to_string();
+
+    let resp = client
+        .get(format!("{}/auth/status", server.api_url))
+        .bearer_auth(&old_token)
+        .send()
+        .expect("status with old token");
+    assert_eq!(resp.status().as_u16(), 401, "pre-change token must be revoked");
+
+    let resp = client
+        .get(format!("{}/auth/status", server.api_url))
+        .bearer_auth(&new_token)
+        .send()
+        .expect("status with new token");
+    assert!(resp.status().is_success(), "fresh token must be accepted");
+}
+
 /// Wrong sign-in code guesses are counted per account: after 5 misses the
 /// exchange endpoint returns 429 for that account instead of another generic
 /// 401, independent of the per-IP limit.
@@ -1281,14 +1331,14 @@ fn test_rename_user_migrates_everything() {
     assert_eq!(body["status"], json!("OK"));
     assert_eq!(body["self_renamed"], json!(false));
 
-    // The old-name JWT no longer resolves to an account with licenses.
+    // The old-name JWT no longer resolves to an existing account - the
+    // token-version check rejects it outright.
     let mine = client
         .get(format!("{}/my/licenses", server.api_url))
         .bearer_auth(&user_jwt)
         .send()
         .expect("my licenses");
-    let licenses = mine.json::<Value>().expect("json");
-    assert_eq!(licenses.as_array().map(|a| a.len()), Some(0), "old-name JWT must see nothing");
+    assert_eq!(mine.status().as_u16(), 401, "old-name JWT must be rejected");
 
     // The API token still works and resolves to the new name.
     let mine = client
@@ -1379,14 +1429,20 @@ fn test_rename_user_merges_conflicting_memberships() {
         .expect("token")
         .to_string();
     // Clear the must-change-password bootstrap gate so the push isn't 403'd.
-    client
+    // Adopt the fresh token (the change revokes the login token).
+    let merge_y_jwt = client
         .post(format!("{}/auth/change-password", server.api_url))
         .bearer_auth(&merge_y_jwt)
         .json(&json!({"current_password": "mergepass123", "new_password": "mergepass456"}))
         .send()
         .expect("change pw")
         .error_for_status()
-        .expect("change pw ok");
+        .expect("change pw ok")
+        .json::<Value>()
+        .expect("json")["token"]
+        .as_str()
+        .expect("token")
+        .to_string();
     client
         .post(format!("{}/workspaces/{}/configs", server.api_url, ws_id))
         .bearer_auth(&merge_y_jwt)
@@ -1533,14 +1589,19 @@ fn test_admin_non_member_has_full_workspace_access() {
         .as_str()
         .expect("token")
         .to_string();
-    client
+    let outsider_jwt = client
         .post(format!("{}/auth/change-password", server.api_url))
         .bearer_auth(&outsider_jwt)
         .json(&json!({"current_password": "outsiderpass123", "new_password": "outsiderpass456"}))
         .send()
         .expect("change pw")
         .error_for_status()
-        .expect("change pw ok");
+        .expect("change pw ok")
+        .json::<Value>()
+        .expect("json")["token"]
+        .as_str()
+        .expect("token")
+        .to_string();
     let resp = client
         .get(format!("{}/workspaces/{}", server.api_url, ws_id))
         .bearer_auth(&outsider_jwt)

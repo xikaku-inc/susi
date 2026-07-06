@@ -425,6 +425,11 @@ struct Claims {
     sub: String,
     iat: i64,
     exp: i64,
+    /// Session version, checked against users.token_version on every request.
+    /// Bumped on password change/reset so outstanding tokens can be revoked;
+    /// tokens issued before the field existed default to 0 and fail the check.
+    #[serde(default)]
+    tv: i64,
 }
 
 /// Short-lived, single-asset download ticket. Lets the dashboard trigger a
@@ -638,15 +643,34 @@ fn error_response(status: StatusCode, msg: &str) -> (StatusCode, Json<ErrorRespo
     )
 }
 
-fn create_jwt(secret: &[u8; 32], username: &str) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
+fn create_jwt(
+    secret: &[u8; 32],
+    username: &str,
+    token_version: i64,
+) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
     let now = Utc::now().timestamp();
     let claims = Claims {
         sub: username.into(),
         iat: now,
         exp: now + 2_592_000, // 30 days
+        tv: token_version,
     };
     encode(&Header::default(), &claims, &EncodingKey::from_secret(secret))
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))
+}
+
+/// Mint a session JWT carrying the user's current token_version.
+fn create_session_jwt(
+    state: &AppState,
+    username: &str,
+) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
+    let tv = {
+        let db = state.db.lock().unwrap();
+        db.get_user_token_version(username)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+            .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "Unknown user"))?
+    };
+    create_jwt(&state.jwt_secret, username, tv)
 }
 
 fn mint_download_ticket(
@@ -833,6 +857,16 @@ pub(crate) fn validate_principal(
     }
 
     let claims = validate_jwt(headers, &state.jwt_secret)?;
+    // Session revocation: the token is only valid while its embedded version
+    // matches the user's current one. Also rejects tokens of deleted users.
+    let current_tv = {
+        let db = state.db.lock().unwrap();
+        db.get_user_token_version(&claims.sub)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+    };
+    if current_tv != Some(claims.tv) {
+        return Err(error_response(StatusCode::UNAUTHORIZED, "Session revoked"));
+    }
     Ok(Principal { username: claims.sub, source: AuthSource::Jwt })
 }
 
@@ -1249,7 +1283,7 @@ async fn handle_login(
         }
     }
 
-    let token = create_jwt(&state.jwt_secret, &username)?;
+    let token = create_session_jwt(&state, &username)?;
     Ok(Json(serde_json::json!({
         "token": token,
         "must_change_password": must_change,
@@ -1467,7 +1501,7 @@ async fn handle_signin_code_exchange(
         let _ = db.register_device(&row.username, &row.device_fp, &row.device_label);
     }
 
-    let jwt = create_jwt(&state.jwt_secret, &row.username)?;
+    let jwt = create_session_jwt(&state, &row.username)?;
     Ok(Json(serde_json::json!({
         "token": jwt,
         "must_change_password": must_change,
@@ -1616,7 +1650,7 @@ async fn handle_magic_login(
         (username.clone(), role)
     };
 
-    let jwt = create_jwt(&state.jwt_secret, &username)?;
+    let jwt = create_session_jwt(&state, &username)?;
     Ok(Json(serde_json::json!({
         "token": jwt,
         "must_change_password": false,
@@ -1684,7 +1718,11 @@ async fn handle_change_password(
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
     }
 
-    Ok(Json(serde_json::json!({ "status": "OK" })))
+    // The password change bumped token_version, revoking every outstanding
+    // session (including this one) - hand back a fresh token so the caller
+    // stays signed in.
+    let token = create_session_jwt(&state, &principal.username)?;
+    Ok(Json(serde_json::json!({ "status": "OK", "token": token })))
 }
 
 // ---------------------------------------------------------------------------

@@ -2224,6 +2224,13 @@ async function submitChangePassword() {
             errEl.classList.add('visible');
             return;
         }
+        // Changing the password revokes all outstanding sessions; adopt the
+        // fresh token from the response so this one stays signed in.
+        const data = await resp.json();
+        if (data.token) {
+            authToken = data.token;
+            localStorage.setItem('auth_token', authToken);
+        }
         document.getElementById('changePasswordOverlay').classList.remove('visible');
         toast('Password changed successfully', 'success');
         // Re-sync auth state from the server. enterDashboard() alone leaves

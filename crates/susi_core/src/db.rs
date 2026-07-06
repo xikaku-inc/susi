@@ -189,6 +189,7 @@ impl LicenseDb {
                 must_change_password INTEGER NOT NULL DEFAULT 1,
                 totp_secret TEXT,
                 totp_enabled INTEGER NOT NULL DEFAULT 0,
+                token_version INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -511,6 +512,13 @@ impl LicenseDb {
         // SEO: per-page meta description override (empty = auto-derive from body_md)
         let _ = self.conn.execute_batch(
             "ALTER TABLE website_pages ADD COLUMN meta_description TEXT NOT NULL DEFAULT '';",
+        );
+
+        // Session-revocation counter: every issued JWT embeds the value at
+        // issue time and is rejected once they diverge. Bumped on password
+        // change/reset so a stolen token can be evicted.
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 1;",
         );
 
         // Distinguish device-trust magic links from password-reset links so a
@@ -1212,11 +1220,26 @@ impl LicenseDb {
         let now = Utc::now().to_rfc3339();
         self.conn
             .execute(
-                "UPDATE users SET password_hash = ?1, must_change_password = 0, updated_at = ?2 WHERE username = ?3",
+                "UPDATE users SET password_hash = ?1, must_change_password = 0,
+                        token_version = token_version + 1, updated_at = ?2
+                 WHERE username = ?3",
                 params![new_hash, now, username],
             )
             .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))?;
         Ok(())
+    }
+
+    /// Current session-JWT version for a user; None when the user doesn't
+    /// exist. A JWT is only valid while its embedded `tv` matches this value.
+    pub fn get_user_token_version(&self, username: &str) -> Result<Option<i64>, LicenseError> {
+        self.conn
+            .query_row(
+                "SELECT token_version FROM users WHERE username = ?1",
+                params![username],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))
     }
 
     /// Clear the must-change-password bootstrap flag without touching the
@@ -2095,7 +2118,9 @@ impl LicenseDb {
         let now = Utc::now().to_rfc3339();
         self.conn
             .execute(
-                "UPDATE users SET password_hash = ?1, must_change_password = 1, updated_at = ?2 WHERE username = ?3",
+                "UPDATE users SET password_hash = ?1, must_change_password = 1,
+                        token_version = token_version + 1, updated_at = ?2
+                 WHERE username = ?3",
                 params![new_hash, now, username],
             )
             .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))?;
