@@ -3477,10 +3477,12 @@ async fn handle_revoke_my_device(
 // Release endpoints
 // ---------------------------------------------------------------------------
 
+/// Validate the `X-License-Key` header and return the product the license is
+/// for, so callers can scope what the key entitles.
 fn validate_license_key(
     state: &AppState,
     headers: &HeaderMap,
-) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
     let key = headers
         .get("x-license-key")
         .and_then(|v| v.to_str().ok())
@@ -3503,7 +3505,7 @@ fn validate_license_key(
         return Err(error_response(StatusCode::FORBIDDEN, "License has expired"));
     }
 
-    Ok(())
+    Ok(license.product)
 }
 
 fn releases_dir(state: &AppState) -> std::path::PathBuf {
@@ -3682,6 +3684,20 @@ async fn handle_get_releases(
     Ok(Json(serde_json::json!({ "releases": releases })))
 }
 
+/// Case-insensitive match between a license's free-text `product` field
+/// (display names like "FusionHub") and a release-product slug
+/// ("fusionhub"). The catalog display name for the slug is accepted too.
+fn license_covers_product(db: &LicenseDb, license_product: &str, product_slug: &str) -> bool {
+    let lp = license_product.trim();
+    if lp.eq_ignore_ascii_case(product_slug) {
+        return true;
+    }
+    db.get_product_name(product_slug)
+        .ok()
+        .flatten()
+        .is_some_and(|name| lp.eq_ignore_ascii_case(name.trim()))
+}
+
 /// Verify the caller is allowed to download `tag`. Returns the principal
 /// username if authentication used a bearer token, or `"license"` if it used a
 /// license key. Encapsulates the license/principal + workspace membership
@@ -3692,9 +3708,9 @@ fn authorize_release_download(
     product: &str,
     tag: &str,
 ) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
-    let license_ok = validate_license_key(state, headers).is_ok();
+    let license_product = validate_license_key(state, headers).ok();
     let principal_opt = validate_principal(headers, state).ok();
-    if !license_ok && principal_opt.is_none() {
+    if license_product.is_none() && principal_opt.is_none() {
         return Err(error_response(StatusCode::UNAUTHORIZED, "Authentication required"));
     }
 
@@ -3716,6 +3732,37 @@ fn authorize_release_download(
                 .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
             if role.is_none() {
                 return Err(error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"));
+            }
+        }
+    } else {
+        // Global release: a license key only entitles its own product's
+        // binaries. A session must be admin or belong to a customer of the
+        // product - a live assigned license or membership in a workspace
+        // scoped to it.
+        let db = state.db.lock();
+        let license_entitled = license_product
+            .as_deref()
+            .is_some_and(|lp| license_covers_product(&db, lp, product));
+        if !license_entitled {
+            let principal = principal_opt.as_ref().ok_or_else(|| {
+                error_response(StatusCode::FORBIDDEN, "License does not cover this product")
+            })?;
+            let is_admin = db.get_user_role(&principal.username)
+                .map(|r| r == "admin")
+                .unwrap_or(false);
+            if !is_admin {
+                let licensed = db
+                    .list_licenses_for_user(&principal.username)
+                    .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+                    .iter()
+                    .any(|l| !l.revoked && !l.is_expired() && license_covers_product(&db, &l.product, product));
+                let entitled = licensed
+                    || db
+                        .user_in_product_workspace(&principal.username, product)
+                        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+                if !entitled {
+                    return Err(error_response(StatusCode::FORBIDDEN, "No license for this product"));
+                }
             }
         }
     }

@@ -2382,6 +2382,25 @@ impl LicenseDb {
         }
     }
 
+    /// True when the user belongs to any workspace scoped to `product`. Used
+    /// as a product-entitlement signal for global release downloads.
+    pub fn user_in_product_workspace(
+        &self,
+        username: &str,
+        product: &str,
+    ) -> Result<bool, LicenseError> {
+        self.conn
+            .query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM workspace_members wm
+                     JOIN workspaces w ON w.id = wm.workspace_id
+                     WHERE wm.username = ?1 AND w.product = ?2)",
+                params![username, product],
+                |r| r.get(0),
+            )
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))
+    }
+
     // -----------------------------------------------------------------------
     // Workspace federation: shared channel secret + peer registry
     // -----------------------------------------------------------------------
@@ -3211,6 +3230,18 @@ impl LicenseDb {
             )
             .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?;
         Ok(count > 0)
+    }
+
+    /// Display name for a release-product slug, if the product exists.
+    pub fn get_product_name(&self, slug: &str) -> Result<Option<String>, LicenseError> {
+        self.conn
+            .query_row(
+                "SELECT name FROM products WHERE slug = ?1",
+                params![slug],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))
     }
 
     /// Insert or update a product. Slug is the immutable key.

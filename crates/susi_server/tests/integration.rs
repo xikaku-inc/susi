@@ -1185,6 +1185,83 @@ fn test_request_code_and_magic_login_guards() {
     assert_eq!(resp.status().as_u16(), 401);
 }
 
+/// Global release binaries require product entitlement: a license key only
+/// unlocks its own product's downloads, a session with no assigned license
+/// gets nothing, and assignment (or admin) opens the gate. Probed via the
+/// download-ticket endpoint, which runs the same authorization without
+/// touching disk: 403 = entitlement denied, 200 = authorized.
+#[test]
+fn test_release_download_product_entitlement() {
+    let server = TestServer::start();
+    let admin = server.admin_token();
+    let client = server.http();
+
+    let mint = |auth_header: Option<&str>, jwt: Option<&str>, product: Option<&str>| {
+        let mut req = client
+            .post(format!("{}/updates/download-ticket", server.api_url))
+            .json(&json!({"tag": "v1.0", "asset": "tool.zip", "product": product}));
+        if let Some(key) = auth_header {
+            req = req.header("X-License-Key", key);
+        }
+        if let Some(t) = jwt {
+            req = req.bearer_auth(t);
+        }
+        req.send().expect("mint ticket").status().as_u16()
+    };
+
+    client
+        .post(format!("{}/products", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({"slug": "otherprod", "name": "Other Product"}))
+        .send()
+        .expect("create product")
+        .error_for_status()
+        .expect("create product ok");
+    let license_key = server.create_license(&admin, false);
+
+    // A default-product license key cannot fetch another product's binaries,
+    // but passes authorization for its own product.
+    assert_eq!(mint(Some(&license_key), None, Some("otherprod")), 403);
+    assert_eq!(mint(Some(&license_key), None, None), 200);
+
+    // A logged-in user with no license assignment is denied.
+    client
+        .post(format!("{}/auth/users", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({"username": "plainuser", "email": "plain@example.com", "role": "user", "password": "plainpass123"}))
+        .send()
+        .expect("create user")
+        .error_for_status()
+        .expect("create user ok");
+    let user_jwt = client
+        .post(format!("{}/auth/login", server.api_url))
+        .json(&json!({"username": "plainuser", "password": "plainpass123"}))
+        .send()
+        .expect("login")
+        .json::<Value>()
+        .expect("json")["token"]
+        .as_str()
+        .expect("token")
+        .to_string();
+    assert_eq!(mint(None, Some(&user_jwt), None), 403);
+
+    // Assigning the license entitles the user to that product - and only
+    // that product.
+    client
+        .post(format!("{}/licenses/{}/users", server.api_url, license_key))
+        .bearer_auth(&admin)
+        .json(&json!({"username": "plainuser"}))
+        .send()
+        .expect("assign license")
+        .error_for_status()
+        .expect("assign license ok");
+    assert_eq!(mint(None, Some(&user_jwt), None), 200);
+    assert_eq!(mint(None, Some(&user_jwt), Some("otherprod")), 403);
+
+    // Admins are entitled to every product.
+    assert_eq!(mint(None, Some(&admin), Some("otherprod")), 200);
+}
+
 /// Every response carries the output security headers set by the global
 /// layer - HTML shells and JSON API alike.
 #[test]
