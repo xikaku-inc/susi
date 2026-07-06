@@ -5345,32 +5345,35 @@ async fn handle_dashboard() -> Html<&'static str> {
 
 /// Load the JWT secret from disk, or generate and persist one on first boot.
 /// Persisting it across restarts means dashboard sessions survive deploys.
-fn load_or_create_jwt_secret(data_dir: &str) -> Result<[u8; 32]> {
-    let path = std::path::Path::new(data_dir).join("jwt_secret.bin");
+/// Load a 32-byte secret from `data_dir/<file_name>`, generating and
+/// persisting a fresh one on first boot. Used for the JWT signing key and
+/// the DB at-rest encryption key.
+fn load_or_create_secret(data_dir: &str, file_name: &str, label: &str) -> Result<[u8; 32]> {
+    let path = std::path::Path::new(data_dir).join(file_name);
     if path.exists() {
         let bytes = std::fs::read(&path)
-            .with_context(|| format!("Failed to read JWT secret at {}", path.display()))?;
+            .with_context(|| format!("Failed to read {} at {}", label, path.display()))?;
         if bytes.len() == 32 {
             let mut secret = [0u8; 32];
             secret.copy_from_slice(&bytes);
-            log::info!("Loaded JWT secret from {}", path.display());
+            log::info!("Loaded {} from {}", label, path.display());
             return Ok(secret);
         }
-        log::warn!("JWT secret at {} has wrong length ({} bytes); regenerating", path.display(), bytes.len());
+        log::warn!("{} at {} has wrong length ({} bytes); regenerating", label, path.display(), bytes.len());
     }
     let secret: [u8; 32] = rand::random();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
     std::fs::write(&path, secret)
-        .with_context(|| format!("Failed to write JWT secret to {}", path.display()))?;
+        .with_context(|| format!("Failed to write {} to {}", label, path.display()))?;
     // Best-effort lock down permissions on Unix; Windows ignores the mode.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
     }
-    log::info!("Generated new JWT secret and saved to {}", path.display());
+    log::info!("Generated new {} and saved to {}", label, path.display());
     Ok(secret)
 }
 
@@ -5417,7 +5420,18 @@ async fn main() -> Result<()> {
         .context("Failed to parse private key")?;
 
     log::info!("Opening database at {}", cli.db);
-    let db = LicenseDb::open(&cli.db).context("Failed to open database")?;
+    let mut db = LicenseDb::open(&cli.db).context("Failed to open database")?;
+
+    // At-rest encryption for stored secrets (TOTP seeds, federation channel
+    // secrets): a leaked DB or backup must not yield working 2FA seeds.
+    let db_key = load_or_create_secret(&cli.data_dir, "db_secret.bin", "DB at-rest key")?;
+    let converted = db
+        .set_at_rest_key(db_key)
+        .context("Failed to encrypt stored secrets at rest")?;
+    if converted > 0 {
+        log::info!("Encrypted {} stored secrets at rest", converted);
+    }
+    let db = db;
 
     let default_hash = hash_password("changeme")
         .await
@@ -5429,7 +5443,7 @@ async fn main() -> Result<()> {
         log::warn!("=== Default admin password is active. Change it at the dashboard! ===");
     }
 
-    let jwt_secret = load_or_create_jwt_secret(&cli.data_dir)
+    let jwt_secret = load_or_create_secret(&cli.data_dir, "jwt_secret.bin", "JWT secret")
         .context("Failed to load or create JWT secret")?;
 
     // Ensure releases asset directory exists

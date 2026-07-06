@@ -73,7 +73,15 @@ pub struct RecordingRow {
 
 pub struct LicenseDb {
     conn: Connection,
+    /// AES-256-GCM key for at-rest encryption of stored secrets (TOTP seeds,
+    /// federation channel secrets). None = read/write plaintext (CLI tools,
+    /// tests); the server always sets one via `set_at_rest_key`.
+    at_rest_key: Option<[u8; 32]>,
 }
+
+/// Marker prefix for at-rest-encrypted secret values:
+/// "enc1:" + base64(nonce(12) || AES-256-GCM ciphertext).
+const AT_REST_PREFIX: &str = "enc1:";
 
 impl LicenseDb {
     pub fn open(path: &str) -> Result<Self, LicenseError> {
@@ -92,9 +100,131 @@ impl LicenseDb {
              PRAGMA foreign_keys=ON;",
         )
         .map_err(|e| LicenseError::Other(format!("DB pragma: {}", e)))?;
-        let db = Self { conn };
+        let db = Self { conn, at_rest_key: None };
         db.init_tables()?;
         Ok(db)
+    }
+
+    /// Enable at-rest encryption of stored secrets with the given key, then
+    /// encrypt any legacy plaintext rows in place (returns how many were
+    /// converted). Reads accept both forms, so rows written before the key
+    /// existed keep working until the sweep converts them.
+    pub fn set_at_rest_key(&mut self, key: [u8; 32]) -> Result<usize, LicenseError> {
+        self.at_rest_key = Some(key);
+        self.encrypt_plaintext_secrets()
+    }
+
+    fn seal_secret(&self, plaintext: &str) -> Result<String, LicenseError> {
+        let Some(key) = &self.at_rest_key else {
+            return Ok(plaintext.to_string());
+        };
+        use aes_gcm::{aead::Aead, Aes256Gcm, KeyInit, Nonce};
+        use base64::Engine as _;
+        use rand::RngCore;
+        let cipher = Aes256Gcm::new_from_slice(key)
+            .map_err(|e| LicenseError::Other(format!("At-rest AES init: {}", e)))?;
+        let mut nonce_bytes = [0u8; 12];
+        rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
+        let ciphertext = cipher
+            .encrypt(Nonce::from_slice(&nonce_bytes), plaintext.as_bytes())
+            .map_err(|e| LicenseError::Other(format!("At-rest encrypt: {}", e)))?;
+        let mut blob = Vec::with_capacity(nonce_bytes.len() + ciphertext.len());
+        blob.extend_from_slice(&nonce_bytes);
+        blob.extend_from_slice(&ciphertext);
+        Ok(format!(
+            "{}{}",
+            AT_REST_PREFIX,
+            base64::engine::general_purpose::STANDARD.encode(blob)
+        ))
+    }
+
+    fn open_secret(&self, stored: &str) -> Result<String, LicenseError> {
+        let Some(b64) = stored.strip_prefix(AT_REST_PREFIX) else {
+            // Legacy plaintext row (or encryption disabled).
+            return Ok(stored.to_string());
+        };
+        let Some(key) = &self.at_rest_key else {
+            return Err(LicenseError::Other(
+                "Stored secret is encrypted but no at-rest key is configured".into(),
+            ));
+        };
+        use aes_gcm::{aead::Aead, Aes256Gcm, KeyInit, Nonce};
+        use base64::Engine as _;
+        let blob = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .map_err(|e| LicenseError::Other(format!("At-rest decode: {}", e)))?;
+        if blob.len() < 12 + 16 {
+            return Err(LicenseError::Other("At-rest blob too short".into()));
+        }
+        let cipher = Aes256Gcm::new_from_slice(key)
+            .map_err(|e| LicenseError::Other(format!("At-rest AES init: {}", e)))?;
+        let plaintext = cipher
+            .decrypt(Nonce::from_slice(&blob[..12]), &blob[12..])
+            .map_err(|_| LicenseError::Other("At-rest decrypt failed (wrong db_secret.bin?)".into()))?;
+        String::from_utf8(plaintext)
+            .map_err(|e| LicenseError::Other(format!("At-rest utf8: {}", e)))
+    }
+
+    /// One-time sweep converting plaintext secret columns to the encrypted
+    /// form. Idempotent: already-encrypted rows carry the prefix and are
+    /// skipped.
+    fn encrypt_plaintext_secrets(&self) -> Result<usize, LicenseError> {
+        let mut converted = 0usize;
+
+        let totp_rows: Vec<(String, String)> = {
+            let mut stmt = self
+                .conn
+                .prepare(
+                    "SELECT username, totp_secret FROM users
+                     WHERE totp_secret IS NOT NULL AND totp_secret != ''
+                       AND totp_secret NOT LIKE 'enc1:%'",
+                )
+                .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
+            let rows: Vec<(String, String)> = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
+                .filter_map(|r| r.ok())
+                .collect();
+            rows
+        };
+        for (username, secret) in totp_rows {
+            let sealed = self.seal_secret(&secret)?;
+            self.conn
+                .execute(
+                    "UPDATE users SET totp_secret = ?1 WHERE username = ?2",
+                    params![sealed, username],
+                )
+                .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))?;
+            converted += 1;
+        }
+
+        let fed_rows: Vec<(String, String)> = {
+            let mut stmt = self
+                .conn
+                .prepare(
+                    "SELECT workspace_id, channel_secret FROM workspace_federation
+                     WHERE channel_secret NOT LIKE 'enc1:%'",
+                )
+                .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
+            let rows: Vec<(String, String)> = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
+                .filter_map(|r| r.ok())
+                .collect();
+            rows
+        };
+        for (workspace_id, secret) in fed_rows {
+            let sealed = self.seal_secret(&secret)?;
+            self.conn
+                .execute(
+                    "UPDATE workspace_federation SET channel_secret = ?1 WHERE workspace_id = ?2",
+                    params![sealed, workspace_id],
+                )
+                .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))?;
+            converted += 1;
+        }
+
+        Ok(converted)
     }
 
     fn init_tables(&self) -> Result<(), LicenseError> {
@@ -1207,13 +1337,15 @@ impl LicenseDb {
     }
 
     pub fn get_user_totp_secret(&self, username: &str) -> Result<Option<String>, LicenseError> {
-        self.conn
+        let stored: Option<String> = self
+            .conn
             .query_row(
                 "SELECT totp_secret FROM users WHERE username = ?1",
                 params![username],
                 |r| r.get(0),
             )
-            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?;
+        stored.map(|s| self.open_secret(&s)).transpose()
     }
 
     pub fn update_user_password(&self, username: &str, new_hash: &str) -> Result<(), LicenseError> {
@@ -1257,11 +1389,12 @@ impl LicenseDb {
     }
 
     pub fn set_user_totp_secret(&self, username: &str, secret: &str) -> Result<(), LicenseError> {
+        let sealed = self.seal_secret(secret)?;
         let now = Utc::now().to_rfc3339();
         self.conn
             .execute(
                 "UPDATE users SET totp_secret = ?1, totp_enabled = 0, updated_at = ?2 WHERE username = ?3",
-                params![secret, now, username],
+                params![sealed, now, username],
             )
             .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))?;
         Ok(())
@@ -2422,7 +2555,7 @@ impl LicenseDb {
             .optional()
             .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?;
         if let Some(s) = existing {
-            return Ok(s);
+            return self.open_secret(&s);
         }
         // Fresh 32 bytes of OS entropy, base64-encoded for transport.
         use base64::Engine as _;
@@ -2430,12 +2563,13 @@ impl LicenseDb {
         let mut buf = [0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut buf);
         let secret = base64::engine::general_purpose::STANDARD.encode(&buf);
+        let sealed = self.seal_secret(&secret)?;
         let now = Utc::now().to_rfc3339();
         self.conn
             .execute(
                 "INSERT INTO workspace_federation (workspace_id, channel_secret, created_at, rotated_at)
                  VALUES (?1, ?2, ?3, ?3)",
-                params![workspace_id, secret, now],
+                params![workspace_id, sealed, now],
             )
             .map_err(|e| LicenseError::Other(format!("DB insert federation: {}", e)))?;
         Ok(secret)
@@ -2453,13 +2587,14 @@ impl LicenseDb {
         let mut buf = [0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut buf);
         let secret = base64::engine::general_purpose::STANDARD.encode(&buf);
+        let sealed = self.seal_secret(&secret)?;
         let now = Utc::now().to_rfc3339();
         let updated = self
             .conn
             .execute(
                 "UPDATE workspace_federation SET channel_secret = ?2, rotated_at = ?3
                  WHERE workspace_id = ?1",
-                params![workspace_id, secret, now],
+                params![workspace_id, sealed, now],
             )
             .map_err(|e| LicenseError::Other(format!("DB update federation: {}", e)))?;
         if updated == 0 {
@@ -2468,7 +2603,7 @@ impl LicenseDb {
                 .execute(
                     "INSERT INTO workspace_federation (workspace_id, channel_secret, created_at, rotated_at)
                      VALUES (?1, ?2, ?3, ?3)",
-                    params![workspace_id, secret, now],
+                    params![workspace_id, sealed, now],
                 )
                 .map_err(|e| LicenseError::Other(format!("DB insert federation: {}", e)))?;
         }
@@ -4927,6 +5062,57 @@ mod tests {
 
     fn test_db() -> LicenseDb {
         LicenseDb::open(":memory:").unwrap()
+    }
+
+    /// TOTP + federation secrets round-trip through at-rest encryption, the
+    /// raw column carries only ciphertext, and legacy plaintext rows are
+    /// converted by the sweep and stay readable.
+    #[test]
+    fn test_at_rest_secret_encryption() {
+        let mut db = test_db();
+        db.create_user("alice", "hash", "user").unwrap();
+        // Legacy plaintext row, written before the key existed.
+        db.set_user_totp_secret("alice", "PLAINSEED").unwrap();
+
+        let n = db.set_at_rest_key([7u8; 32]).unwrap();
+        assert_eq!(n, 1, "sweep must convert the plaintext row");
+        assert_eq!(db.get_user_totp_secret("alice").unwrap().as_deref(), Some("PLAINSEED"));
+
+        // New writes land encrypted and round-trip.
+        db.set_user_totp_secret("alice", "NEWSEED").unwrap();
+        assert_eq!(db.get_user_totp_secret("alice").unwrap().as_deref(), Some("NEWSEED"));
+        let raw: String = db
+            .conn
+            .query_row("SELECT totp_secret FROM users WHERE username = 'alice'", [], |r| r.get(0))
+            .unwrap();
+        assert!(raw.starts_with("enc1:"), "raw column must be ciphertext, got: {}", raw);
+        assert!(!raw.contains("NEWSEED"));
+
+        // Federation channel secret: created encrypted, read back decrypted.
+        db.create_workspace("ws-enc", "WS", "", "", "admin").unwrap();
+        let secret = db.get_or_create_workspace_federation_secret("ws-enc").unwrap();
+        assert_eq!(
+            db.get_or_create_workspace_federation_secret("ws-enc").unwrap(),
+            secret
+        );
+        let raw: String = db
+            .conn
+            .query_row(
+                "SELECT channel_secret FROM workspace_federation WHERE workspace_id = 'ws-enc'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(raw.starts_with("enc1:"));
+        assert!(!raw.contains(&secret));
+
+        // Rotation stays encrypted and returns a fresh plaintext secret.
+        let rotated = db.rotate_workspace_federation_secret("ws-enc").unwrap();
+        assert_ne!(rotated, secret);
+        assert_eq!(
+            db.get_or_create_workspace_federation_secret("ws-enc").unwrap(),
+            rotated
+        );
     }
 
     /// Build an old-schema database (releases keyed by a global-unique `tag`,
