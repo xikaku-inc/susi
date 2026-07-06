@@ -115,7 +115,7 @@ pub(crate) fn seed_user_docs_into_release(
     workspace_id: Option<&str>,
 ) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
     let (src_tag, asset_names) = {
-        let mut db = state.db.lock().unwrap();
+        let mut db = state.db.lock();
         let prior = db
             .latest_prior_release_with_user_docs(dst_id, product, workspace_id)
             .map_err(db_err)?;
@@ -163,7 +163,7 @@ fn release_writer_check_or_admin_create(
     tag: &str,
 ) -> Result<Option<String>, (StatusCode, Json<ErrorResponse>)> {
     crate::require_admin_full(state, principal)?;
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let scoped_ws = db
         .get_release_workspace_id(product, tag)
         .map_err(db_err)?
@@ -182,7 +182,7 @@ fn ensure_release_with_seed(
     workspace_id: Option<&str>,
 ) -> Result<i64, (StatusCode, Json<ErrorResponse>)> {
     let (dst_id, newly_created) = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.ensure_release_created_scoped(product, tag, name, workspace_id)
             .map_err(db_err)?
     };
@@ -208,7 +208,7 @@ async fn list_doc_releases_impl(
     state: &Arc<AppState>,
     product: &str,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let rows = db.list_doc_releases(product).map_err(db_err)?;
     let releases: Vec<_> = rows
         .into_iter()
@@ -242,7 +242,7 @@ async fn latest_doc_release_impl(
     state: &Arc<AppState>,
     product: &str,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let mut rows = db.list_doc_releases(product).map_err(db_err)?;
     if rows.is_empty() {
         return Err(error_response(StatusCode::NOT_FOUND, "No documentation releases"));
@@ -279,7 +279,7 @@ async fn list_doc_pages_impl(
     safe_tag(tag)?;
     let principal_opt = validate_principal(headers, state).ok();
     release_reader_check(state, principal_opt.as_ref(), product, tag)?;
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let release_id = db
         .get_release_by_product_tag(product, tag)
         .map_err(db_err)?
@@ -336,7 +336,7 @@ async fn get_doc_page_impl(
     safe_tag(tag)?;
     let principal_opt = validate_principal(headers, state).ok();
     release_reader_check(state, principal_opt.as_ref(), product, tag)?;
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let release_id = db
         .get_release_by_product_tag(product, tag)
         .map_err(db_err)?
@@ -478,7 +478,7 @@ async fn upsert_doc_page_impl(
         workspace_id.as_deref(),
     )?;
     let id = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.upsert_doc_page(
             release_id,
             slug,
@@ -532,7 +532,7 @@ async fn rename_doc_page_impl(
         return Err(error_response(StatusCode::BAD_REQUEST, "Invalid slug"));
     }
 
-    let mut db = state.db.lock().unwrap();
+    let mut db = state.db.lock();
     let release_id = db
         .get_release_by_product_tag(product, tag)
         .map_err(db_err)?
@@ -581,7 +581,7 @@ async fn delete_doc_page_impl(
     safe_tag(tag)?;
     release_writer_check(state, &principal, product, tag)?;
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let release_id = db
         .get_release_by_product_tag(product, tag)
         .map_err(db_err)?
@@ -711,7 +711,7 @@ async fn bulk_import_docs_impl(
 
     let release_id = ensure_release_with_seed(&state, product, &tag, &release_name, workspace_id.as_deref())?;
     let (written_pages, skipped_user_slugs) = {
-        let mut db = state.db.lock().unwrap();
+        let mut db = state.db.lock();
         db.upsert_doc_pages(release_id, &row_data).map_err(db_err)?
     };
 
@@ -727,7 +727,7 @@ async fn bulk_import_docs_impl(
                 &format!("Cannot create assets dir: {}", e),
             )
         })?;
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         for (name, bytes) in &assets {
             let wrote = db
                 .upsert_doc_asset_pipeline(release_id, name, bytes.len() as u64)
@@ -832,7 +832,7 @@ async fn upload_doc_asset_impl(
     })?;
 
     {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.upsert_doc_asset(release_id, &file_name, bytes.len() as u64)
             .map_err(db_err)?;
     }
@@ -880,13 +880,13 @@ async fn delete_doc_asset_impl(
     release_writer_check(state, &principal, product, tag)?;
 
     let release_id = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.get_release_by_product_tag(product, tag)
             .map_err(db_err)?
             .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Release not found"))?
     };
     let removed = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.delete_doc_asset(release_id, file_name).map_err(db_err)?
     };
     let _ = std::fs::remove_file(assets_dir(state, product, tag).join(file_name));

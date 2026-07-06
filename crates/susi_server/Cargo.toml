@@ -30,6 +30,9 @@ ring = "0.17"
 base64 = "0.22"
 argon2 = "0.5"
 jsonwebtoken = "9"
+# Poison-free locks: a panic while holding the DB mutex must not wedge
+# every subsequent request the way a poisoned std::sync::Mutex would.
+parking_lot = "0.12"
 totp-rs = { version = "5", features = ["qr"] }
 rand = "0.8"
 uuid = { version = "1", features = ["v4"] }

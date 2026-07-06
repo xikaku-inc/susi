@@ -9,10 +9,13 @@ mod s3;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration as StdDuration, Instant};
 
 use anyhow::{Context, Result};
+// Poison-free Mutex: a panic while holding the DB lock must not turn every
+// subsequent request into a 500 the way a poisoned std::sync::Mutex would.
+use parking_lot::Mutex;
 use argon2::{self, Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use argon2::password_hash::SaltString;
 use axum::{
@@ -239,7 +242,7 @@ fn check_ip_rate_limit(
     // a single timer keeps the bookkeeping trivial.
     static NEXT_CLEANUP_UNIX_SECS: AtomicU64 = AtomicU64::new(0);
 
-    let mut map = map_lock.lock().unwrap();
+    let mut map = map_lock.lock();
     let now = Instant::now();
     let entry = map.entry(ip).or_default();
     entry.retain(|t| now.duration_since(*t) < window);
@@ -298,7 +301,7 @@ fn check_signin_guess_limit(
     state: &AppState,
     username: &str,
 ) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
-    let mut map = state.signin_guesses.lock().unwrap();
+    let mut map = state.signin_guesses.lock();
     let now = Instant::now();
     if let Some(times) = map.get_mut(username) {
         times.retain(|t| now.duration_since(*t) < SIGNIN_GUESS_WINDOW);
@@ -321,7 +324,7 @@ fn check_signin_guess_limit(
 // survives a server restart for the remainder of the code TTL.
 fn record_failed_signin_guess(state: &AppState, username: &str) {
     let reached_cap = {
-        let mut map = state.signin_guesses.lock().unwrap();
+        let mut map = state.signin_guesses.lock();
         let now = Instant::now();
         // Opportunistic GC: usernames are attacker-supplied strings, so drop
         // drained entries before inserting to keep the map bounded.
@@ -337,7 +340,7 @@ fn record_failed_signin_guess(state: &AppState, username: &str) {
         entry.len() >= SIGNIN_MAX_GUESSES
     };
     if reached_cap {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         if let Err(e) = db.invalidate_signin_codes(username) {
             log::error!("Failed to invalidate sign-in codes for {}: {}", username, e);
         } else {
@@ -351,7 +354,7 @@ fn record_failed_signin_guess(state: &AppState, username: &str) {
 }
 
 fn clear_signin_guesses(state: &AppState, username: &str) {
-    state.signin_guesses.lock().unwrap().remove(username);
+    state.signin_guesses.lock().remove(username);
 }
 
 fn check_checkout_rate_limit(
@@ -665,7 +668,7 @@ fn create_session_jwt(
     username: &str,
 ) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
     let tv = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.get_user_token_version(username)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
             .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "Unknown user"))?
@@ -842,7 +845,7 @@ pub(crate) fn validate_principal(
 
         // Single round-trip: validate the hash AND bump last_used_at.
         let row = {
-            let db = state.db.lock().unwrap();
+            let db = state.db.lock();
             db.find_and_touch_api_token(&token_hash)
                 .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         };
@@ -860,7 +863,7 @@ pub(crate) fn validate_principal(
     // Session revocation: the token is only valid while its embedded version
     // matches the user's current one. Also rejects tokens of deleted users.
     let current_tv = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.get_user_token_version(&claims.sub)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
     };
@@ -882,7 +885,7 @@ pub(crate) fn require_admin_full(
     // API tokens skip both the password-change gate (UI-only) and the
     // TOTP requirement (the bearer is itself a strong factor).
     let row = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.get_user_admin_check(&principal.username)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
     };
@@ -917,7 +920,7 @@ pub(crate) fn require_password_changed(
     if principal.source == AuthSource::ApiToken {
         return Ok(());
     }
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     if db.user_must_change_password(&principal.username).unwrap_or(true) {
         return Err(error_response(
             StatusCode::FORBIDDEN,
@@ -929,7 +932,7 @@ pub(crate) fn require_password_changed(
 
 /// Check if a principal is a site admin (without enforcing TOTP).
 fn is_site_admin(state: &AppState, principal: &Principal) -> bool {
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     db.get_user_role(&principal.username)
         .map(|r| r == "admin")
         .unwrap_or(false)
@@ -947,7 +950,7 @@ pub(crate) fn release_writer_check(
 ) -> Result<Option<String>, (StatusCode, Json<ErrorResponse>)> {
     require_admin_full(state, principal)?;
     let scoped_ws = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.get_release_workspace_id(product, tag)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
             .flatten()
@@ -964,7 +967,7 @@ pub(crate) fn release_reader_check(
     tag: &str,
 ) -> Result<Option<String>, (StatusCode, Json<ErrorResponse>)> {
     let scoped_ws = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.get_release_workspace_id(product, tag)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
             .flatten()
@@ -977,7 +980,7 @@ pub(crate) fn release_reader_check(
         return Ok(Some(ws_id));
     }
     let role = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.workspace_access(&ws_id, &principal.username)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
     };
@@ -1165,7 +1168,7 @@ async fn handle_login(
     // the lock, then run Argon2 verify off-thread so the ~50 ms CPU spend
     // doesn't serialise every other request behind us.
     let (username, hash, must_change, role, totp_enabled, user_email, device_known) = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         // The identifier may be a username or an email. Exact username wins
         // (usernames can themselves be email addresses); otherwise fall back
         // to a unique-email lookup. Unresolvable identifiers fall through and
@@ -1208,7 +1211,7 @@ async fn handle_login(
             let code = random_signin_code();
             let token_hash = hash_signin_code(&username, &code);
             {
-                let db = state.db.lock().unwrap();
+                let db = state.db.lock();
                 let _ = db.purge_old_login_tokens();
                 db.insert_login_token(
                     &token_hash,
@@ -1275,7 +1278,7 @@ async fn handle_login(
 
     // Phase 4 — register this device as trusted (if fp provided) and issue JWT.
     if !req.device_fp.is_empty() {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         if device_known {
             let _ = db.touch_device(&username, &req.device_fp);
         } else {
@@ -1300,7 +1303,7 @@ fn verify_totp_code(
     username: &str,
     code: &str,
 ) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let secret_b32 = db
         .get_user_totp_secret(username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
@@ -1347,7 +1350,7 @@ fn verify_totp_or_backup(
         return Err(error_response(StatusCode::UNAUTHORIZED, "Invalid 2FA code"));
     }
     let candidates = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.list_unused_backup_codes(username)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
     };
@@ -1357,7 +1360,7 @@ fn verify_totp_or_backup(
             .verify_password(normalized.as_bytes(), &parsed)
             .is_ok()
         {
-            let db = state.db.lock().unwrap();
+            let db = state.db.lock();
             let consumed = db
                 .consume_backup_code(id)
                 .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
@@ -1434,7 +1437,7 @@ async fn handle_signin_code_exchange(
     // addresses). Unresolvable identifiers fall through and fail the token
     // lookup generically (no enumeration).
     let username = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         if req.username.contains('@') && !db.user_exists(&req.username).unwrap_or(false) {
             db.find_unique_username_by_email(&req.username)
                 .ok()
@@ -1452,7 +1455,7 @@ async fn handle_signin_code_exchange(
     // stuck if they entered the code and then had to fetch their auth-app
     // code.
     let row = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.peek_login_token(&token_hash)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
     };
@@ -1462,7 +1465,7 @@ async fn handle_signin_code_exchange(
     })?;
 
     let (must_change, role, totp_enabled) = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         (
             db.user_must_change_password(&row.username).unwrap_or(false),
             db.get_user_role(&row.username).unwrap_or_else(|_| "user".into()),
@@ -1483,7 +1486,7 @@ async fn handle_signin_code_exchange(
     // a concurrent second submission). Anything below this point must
     // succeed, since after consumption a retry would fail.
     let consumed = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.consume_login_token(&token_hash)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
     };
@@ -1497,7 +1500,7 @@ async fn handle_signin_code_exchange(
 
     // Trust this device going forward.
     if !row.device_fp.is_empty() {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         let _ = db.register_device(&row.username, &row.device_fp, &row.device_label);
     }
 
@@ -1549,7 +1552,7 @@ async fn handle_request_signin_code(
 
     let device_label = summarize_user_agent(&req.device_label);
     let (username, email_addr) = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         // Exact username wins (usernames can themselves be email addresses).
         let resolved = if db.user_exists(&identifier).unwrap_or(false) {
             Some(identifier.clone())
@@ -1568,7 +1571,7 @@ async fn handle_request_signin_code(
     let code = random_signin_code();
     let token_hash = hash_signin_code(&username, &code);
     {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         let _ = db.purge_old_login_tokens();
         db.insert_login_token(
             &token_hash,
@@ -1618,7 +1621,7 @@ async fn handle_magic_login(
     let invalid = || error_response(StatusCode::UNAUTHORIZED, "Link is invalid, already used, or expired");
 
     let (username, role) = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         let username = db
             .peek_invitation_token(&token_hash)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
@@ -1665,7 +1668,7 @@ async fn handle_auth_status(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let must_change = db.user_must_change_password(&principal.username).unwrap_or(false);
     let totp_enabled = db.user_totp_enabled(&principal.username).unwrap_or(false);
     let role = db.get_user_role(&principal.username).unwrap_or_else(|_| "user".into());
@@ -1702,7 +1705,7 @@ async fn handle_change_password(
     }
 
     let hash = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.get_user_password_hash(&principal.username)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
     };
@@ -1713,7 +1716,7 @@ async fn handle_change_password(
 
     let new_hash = hash_password(&req.new_password).await?;
     {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.update_user_password(&principal.username, &new_hash)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
     }
@@ -1774,7 +1777,7 @@ async fn handle_forgot_password(
     // Resolve identifier → (username, email). Anything containing '@' is
     // treated as an email; otherwise as a username.
     let (username, email_addr) = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         // Exact username wins (usernames can themselves be email addresses).
         let resolved = if db.user_exists(&identifier).unwrap_or(false) {
             Some(identifier.clone())
@@ -1794,7 +1797,7 @@ async fn handle_forgot_password(
     let raw_token = random_magic_token();
     let token_hash = hash_token(&raw_token);
     {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         let _ = db.purge_old_login_tokens();
         db.insert_password_reset_token(
             &token_hash,
@@ -1841,7 +1844,7 @@ async fn handle_reset_password_submit(
     let token_hash = hash_token(&req.token);
     let new_hash = hash_password(&req.new_password).await?;
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let username = db
         .consume_password_reset_token(&token_hash)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
@@ -1871,7 +1874,7 @@ async fn handle_setup_2fa(
         .get_qr_base64()
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     db.set_user_totp_secret(&principal.username, &secret_b32)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
@@ -1894,7 +1897,7 @@ async fn handle_verify_2fa(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let secret_b32 = db
         .get_user_totp_secret(&principal.username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
@@ -1925,7 +1928,7 @@ async fn handle_verify_2fa(
         hashes.push(hash_backup_code(c)?);
     }
     {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.replace_backup_codes(&principal.username, &hashes)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
     }
@@ -1945,7 +1948,7 @@ async fn handle_disable_2fa(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let secret_b32 = db
         .get_user_totp_secret(&principal.username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
@@ -1986,7 +1989,7 @@ async fn handle_regenerate_backup_codes(
     let principal = validate_principal(&headers, &state)?;
 
     let (hash, totp_enabled) = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         let hash = db
             .get_user_password_hash(&principal.username)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
@@ -2006,7 +2009,7 @@ async fn handle_regenerate_backup_codes(
         hashes.push(hash_backup_code(c)?);
     }
     {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.replace_backup_codes(&principal.username, &hashes)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
     }
@@ -2186,7 +2189,7 @@ async fn handle_activate(
     // Hold the lock only for the DB-bound section; release before the RSA
     // sign so the heartbeat path doesn't serialise every other request.
     let license = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
 
         let license = db
             .get_license_by_key(&req.license_key)
@@ -2264,7 +2267,7 @@ async fn handle_verify(
     Json(req): Json<VerifyRequest>,
 ) -> Result<Json<susi_core::SignedLicense>, (StatusCode, Json<ErrorResponse>)> {
     let license = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
 
         let license = db
             .get_license_by_key(&req.license_key)
@@ -2324,7 +2327,7 @@ async fn handle_deactivate(
     State(state): State<Arc<AppState>>,
     Json(req): Json<DeactivateRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
 
     let license = db
         .get_license_by_key(&req.license_key)
@@ -2361,7 +2364,7 @@ async fn handle_license_status(
     State(state): State<Arc<AppState>>,
     Path(key): Path<String>,
 ) -> Result<Json<PublicLicenseStatus>, (StatusCode, Json<ErrorResponse>)> {
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
 
     let license = db
         .get_license_by_key(&key)
@@ -2405,7 +2408,7 @@ async fn handle_list_licenses(
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let licenses = db
         .list_licenses()
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
@@ -2425,7 +2428,7 @@ async fn handle_get_license(
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let license = db
         .get_license_by_key(&key)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
@@ -2470,7 +2473,7 @@ async fn handle_create_license(
     license.lease_grace_hours = req.lease_grace_hours;
     license.require_signed_binary = req.require_signed_binary;
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     for username in &req.assign_to {
         if !db.user_exists(username).unwrap_or(false) {
             return Err(error_response(
@@ -2498,7 +2501,7 @@ async fn handle_revoke_license(
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let revoked = db
         .revoke_license(&key)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
@@ -2518,7 +2521,7 @@ async fn handle_delete_license(
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let deleted = db
         .delete_license(&key)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
@@ -2539,7 +2542,7 @@ async fn handle_update_license(
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let license = db
         .get_license_by_key(&key)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
@@ -2583,7 +2586,7 @@ fn export_license_file(
     key: &str,
     req: &ExportRequest,
 ) -> Result<(StatusCode, [(axum::http::HeaderName, &'static str); 2], String), (StatusCode, Json<ErrorResponse>)> {
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let license = db
         .get_license_by_key(key)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
@@ -2665,7 +2668,7 @@ async fn handle_export_token(
         return Err(error_response(StatusCode::BAD_REQUEST, "USB serial is required"));
     }
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let license = db
         .get_license_by_key(&key)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
@@ -2737,7 +2740,7 @@ async fn handle_deactivate_machine(
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let license = db
         .get_license_by_key(&key)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
@@ -2768,7 +2771,7 @@ async fn handle_clear_machine_tombstone(
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let license = db
         .get_license_by_key(&key)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
@@ -2798,7 +2801,7 @@ async fn handle_assign_license_user(
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let license = db
         .get_license_by_key(&key)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
@@ -2822,7 +2825,7 @@ async fn handle_unassign_license_user(
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let license = db
         .get_license_by_key(&key)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
@@ -2860,7 +2863,7 @@ async fn handle_my_licenses(
 ) -> Result<Json<Vec<LicenseSummary>>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let licenses = db
         .list_licenses_for_user(&principal.username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
@@ -2879,7 +2882,7 @@ async fn handle_my_export_license(
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
     {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         get_owned_license(&db, &key, &principal)?;
     }
     export_license_file(&state, &key, &req)
@@ -2892,7 +2895,7 @@ async fn handle_my_deactivate_machine(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let license = get_owned_license(&db, &key, &principal)?;
 
     db.remove_machine_activation(&license.id, &machine_code)
@@ -2920,7 +2923,7 @@ async fn handle_list_users(
 ) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let users = db
         .list_users()
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
@@ -2980,7 +2983,7 @@ async fn issue_and_send_invitation(
     let raw_token = random_magic_token();
     let token_hash = hash_token(&raw_token);
     let passwordless = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         let _ = db.purge_old_login_tokens();
         db.invalidate_setup_tokens(username)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
@@ -3063,7 +3066,7 @@ async fn handle_create_user(
     };
 
     {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.create_user(username, &pw_hash, &req.role)
             .map_err(|e| error_response(StatusCode::CONFLICT, &e.to_string()))?;
         db.set_user_email(username, Some(&email))
@@ -3099,7 +3102,7 @@ async fn handle_resend_invitation(
     }
 
     let email_addr = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         if !db.user_exists(&username).unwrap_or(false) {
             return Err(error_response(StatusCode::NOT_FOUND, "User not found"));
         }
@@ -3125,7 +3128,7 @@ async fn handle_delete_user(
         return Err(error_response(StatusCode::BAD_REQUEST, "Cannot delete your own account"));
     }
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     db.delete_user(&username)
         .map_err(|e| error_response(StatusCode::BAD_REQUEST, &e.to_string()))?;
 
@@ -3155,7 +3158,7 @@ async fn handle_rename_user(
     }
 
     {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         if db.user_exists(&new).unwrap_or(false) {
             return Err(error_response(StatusCode::CONFLICT, "Username already taken"));
         }
@@ -3194,7 +3197,7 @@ async fn handle_set_user_role(
         return Err(error_response(StatusCode::BAD_REQUEST, "Cannot change your own role"));
     }
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     if !db.user_exists(&username).unwrap_or(false) {
         return Err(error_response(StatusCode::NOT_FOUND, "User does not exist"));
     }
@@ -3223,7 +3226,7 @@ async fn handle_reset_user_password(
     }
 
     let pw_hash = hash_password(&req.new_password).await?;
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     db.reset_user_password(&username, &pw_hash)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
@@ -3269,7 +3272,7 @@ async fn handle_create_api_token(
     let prefix = raw.chars().take(12).collect::<String>();
 
     let id = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.insert_api_token(&principal.username, name, &token_hash, &prefix)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
     };
@@ -3289,7 +3292,7 @@ async fn handle_list_my_api_tokens(
     headers: HeaderMap,
 ) -> Result<Json<Vec<susi_core::db::ApiTokenInfo>>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let rows = db
         .list_api_tokens_for_user(&principal.username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
@@ -3306,7 +3309,7 @@ async fn handle_revoke_my_api_token(
         return Err(error_response(StatusCode::FORBIDDEN, "API tokens can only be managed from a browser session"));
     }
     let owner = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.get_api_token_owner(id)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
     };
@@ -3317,7 +3320,7 @@ async fn handle_revoke_my_api_token(
         return Err(error_response(StatusCode::FORBIDDEN, "Token belongs to another user"));
     }
     let revoked = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.revoke_api_token(id)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
     };
@@ -3335,7 +3338,7 @@ async fn handle_list_all_api_tokens(
 ) -> Result<Json<Vec<susi_core::db::ApiTokenInfo>>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let rows = db
         .list_all_api_tokens()
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
@@ -3350,7 +3353,7 @@ async fn handle_revoke_any_api_token(
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
     let revoked = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.revoke_api_token(id)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
     };
@@ -3396,7 +3399,7 @@ async fn handle_set_my_email(
         Some(s) => normalize_email(s)?,
         None => None,
     };
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     db.set_user_email(&principal.username, normalized.as_deref())
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
     Ok(Json(serde_json::json!({ "status": "OK", "email": normalized })))
@@ -3415,7 +3418,7 @@ async fn handle_set_user_email(
         Some(s) => normalize_email(s)?,
         None => None,
     };
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     if !db.user_exists(&username).unwrap_or(false) {
         return Err(error_response(StatusCode::NOT_FOUND, "User not found"));
     }
@@ -3429,7 +3432,7 @@ async fn handle_list_my_devices(
     headers: HeaderMap,
 ) -> Result<Json<Vec<susi_core::db::DeviceInfo>>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let devices = db
         .list_devices(&principal.username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
@@ -3442,7 +3445,7 @@ async fn handle_revoke_my_device(
     Path(fingerprint): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let removed = db
         .revoke_device(&principal.username, &fingerprint)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
@@ -3469,7 +3472,7 @@ fn validate_license_key(
         return Err(error_response(StatusCode::UNAUTHORIZED, "Missing X-License-Key header"));
     }
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let license = db
         .get_license_by_key(key)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
@@ -3509,7 +3512,7 @@ fn release_tag_dir(state: &AppState, product: &str, tag: &str) -> std::path::Pat
 async fn handle_list_products(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let rows = db
         .list_release_products()
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
@@ -3545,7 +3548,7 @@ async fn handle_create_product(
     if req.name.trim().is_empty() {
         return Err(error_response(StatusCode::BAD_REQUEST, "Missing product name"));
     }
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     if db
         .product_exists(slug)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
@@ -3576,7 +3579,7 @@ async fn handle_update_product(
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
     docs::safe_product(&product)?;
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     if !db
         .product_exists(&product)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
@@ -3600,7 +3603,7 @@ async fn handle_delete_product(
     if product == DEFAULT_PRODUCT {
         return Err(error_response(StatusCode::BAD_REQUEST, "Cannot delete the default product"));
     }
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let n = db
         .count_releases_for_product(&product)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
@@ -3632,7 +3635,7 @@ async fn handle_get_releases(
     let product = pq.slug();
 
     let (rows, mut assets_by_id) = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         let rows = db
             .list_releases()
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
@@ -3678,7 +3681,7 @@ fn authorize_release_download(
     }
 
     let scoped_ws = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.get_release_workspace_id(product, tag)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
             .flatten()
@@ -3686,7 +3689,7 @@ fn authorize_release_download(
     if let Some(ws_id) = scoped_ws {
         let principal = principal_opt.as_ref()
             .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Workspace membership required"))?;
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         let is_admin = db.get_user_role(&principal.username)
             .map(|r| r == "admin")
             .unwrap_or(false);
@@ -3819,7 +3822,7 @@ async fn handle_list_releases_admin(
     require_admin_full(&state, &principal)?;
 
     let (rows, mut assets_by_id) = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         let rows = db
             .list_releases()
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
@@ -3930,7 +3933,7 @@ async fn handle_upload_release(
     // and the caller was forced to DELETE first, which cascaded and wiped
     // hand-authored documentation pages.
     let (release_id, newly_created) = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         match db.get_release_by_product_tag(&product, &tag)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         {
@@ -3966,7 +3969,7 @@ async fn handle_upload_release(
         std::fs::write(&file_path, data)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("Write error: {}", e)))?;
 
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.add_release_asset(release_id, file_name, data.len() as u64)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
         asset_names.push(file_name.clone());
@@ -4003,7 +4006,7 @@ async fn handle_update_release(
     require_admin_full(&state, &principal)?;
     let product = pq.slug();
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let release_id = db
         .get_release_by_product_tag(product, &tag)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
@@ -4043,7 +4046,7 @@ async fn handle_move_release(
         .map(|s| s.trim())
         .filter(|s| !s.is_empty());
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     if let Some(ws) = target {
         if db
             .get_workspace(ws)
@@ -4079,7 +4082,7 @@ async fn handle_delete_release(
     require_admin_full(&state, &principal)?;
     let product = pq.slug();
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     if !db.delete_release(product, &tag)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
     {
@@ -4110,13 +4113,13 @@ async fn handle_delete_release_asset(
     let product = pq.slug();
 
     let release_id = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.get_release_by_product_tag(product, &tag)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
             .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Release not found"))?
     };
     let removed = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.delete_release_asset(release_id, &file_name)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
     };
@@ -4163,7 +4166,7 @@ async fn handle_replace_release_asset(
     docs::safe_filename(&new_file_name)?;
 
     let release_id = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.get_release_by_product_tag(product, &tag)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
             .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Release not found"))?
@@ -4177,7 +4180,7 @@ async fn handle_replace_release_asset(
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("write: {}", e)))?;
 
     {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.add_release_asset(release_id, &new_file_name, bytes.len() as u64)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
         // Drop the old row only if the new file landed under a different name —
@@ -4262,7 +4265,7 @@ async fn handle_create_workspace(
     }
 
     let id = uuid::Uuid::new_v4().to_string();
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     db.create_workspace(&id, &req.name, &req.product, &req.description, &principal.username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
@@ -4284,7 +4287,7 @@ async fn handle_list_workspaces(
     let principal = validate_principal(&headers, &state)?;
     require_password_changed(&state, &principal)?;
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let is_admin = db.get_user_role(&principal.username)
         .map(|r| r == "admin")
         .unwrap_or(false);
@@ -4318,7 +4321,7 @@ async fn handle_get_workspace(
     let principal = validate_principal(&headers, &state)?;
     require_password_changed(&state, &principal)?;
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     db.workspace_access(&id, &principal.username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
@@ -4353,7 +4356,7 @@ async fn handle_update_workspace(
     let principal = validate_principal(&headers, &state)?;
     require_password_changed(&state, &principal)?;
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     db.workspace_access(&id, &principal.username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
@@ -4389,7 +4392,7 @@ async fn handle_delete_workspace(
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     db.delete_workspace(&id)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
@@ -4410,7 +4413,7 @@ async fn handle_add_workspace_member(
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
 
     if !db.user_exists(&req.username).unwrap_or(false) {
         return Err(error_response(StatusCode::NOT_FOUND, "User does not exist"));
@@ -4430,7 +4433,7 @@ async fn handle_remove_workspace_member(
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     db.remove_workspace_member(&workspace_id, &username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
@@ -4450,7 +4453,7 @@ async fn handle_push_config(
     let principal = validate_principal(&headers, &state)?;
     require_password_changed(&state, &principal)?;
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     db.workspace_access(&workspace_id, &principal.username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
@@ -4476,7 +4479,7 @@ async fn handle_list_configs(
     let principal = validate_principal(&headers, &state)?;
     require_password_changed(&state, &principal)?;
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     db.workspace_access(&workspace_id, &principal.username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
@@ -4505,7 +4508,7 @@ async fn handle_get_config(
     let principal = validate_principal(&headers, &state)?;
     require_password_changed(&state, &principal)?;
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     db.workspace_access(&workspace_id, &principal.username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
@@ -4532,7 +4535,7 @@ async fn handle_get_latest_config(
     let principal = validate_principal(&headers, &state)?;
     require_password_changed(&state, &principal)?;
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     db.workspace_access(&workspace_id, &principal.username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
@@ -4560,7 +4563,7 @@ async fn handle_update_config(
     let principal = validate_principal(&headers, &state)?;
     require_password_changed(&state, &principal)?;
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     db.workspace_access(&workspace_id, &principal.username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
@@ -4582,7 +4585,7 @@ async fn handle_delete_config(
     let principal = validate_principal(&headers, &state)?;
     require_password_changed(&state, &principal)?;
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     db.workspace_access(&workspace_id, &principal.username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
@@ -4642,7 +4645,7 @@ fn assert_workspace_member(
     workspace_id: &str,
     principal: &Principal,
 ) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     db.workspace_access(workspace_id, &principal.username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
@@ -4674,7 +4677,7 @@ async fn handle_init_recording(
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
     let id = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.create_recording(&workspace_id, &s3_key, &safe_name, &req.description, &principal.username)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
     };
@@ -4701,7 +4704,7 @@ async fn handle_complete_recording(
 
     // Look up the row to learn the s3_key.
     let row = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.get_recording(&workspace_id, recording_id)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
             .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Recording not found"))?
@@ -4714,7 +4717,7 @@ async fn handle_complete_recording(
         .ok_or_else(|| error_response(StatusCode::CONFLICT, "Object not yet present in S3"))?;
 
     {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         let ok = db.complete_recording(&workspace_id, recording_id, size)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
         if !ok {
@@ -4739,7 +4742,7 @@ async fn handle_list_recordings(
     assert_workspace_member(&state, &workspace_id, &principal)?;
 
     let rows = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.list_recordings(&workspace_id)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
     };
@@ -4759,7 +4762,7 @@ async fn handle_get_recording_download(
     let s3 = state.s3.as_ref().ok_or_else(s3_unavailable)?;
 
     let row = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.get_recording(&workspace_id, recording_id)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
             .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Recording not found"))?
@@ -4794,7 +4797,7 @@ async fn handle_delete_recording(
     // Tear down DB first to release the s3_key for cleanup; if S3 delete
     // fails the worst case is an orphan object — we log but don't surface.
     let s3_key = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.delete_recording(&workspace_id, recording_id)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
             .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Recording not found"))?
@@ -4836,7 +4839,7 @@ async fn handle_get_workspace_federation(
     let principal = validate_principal(&headers, &state)?;
     require_password_changed(&state, &principal)?;
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     db.workspace_access(&workspace_id, &principal.username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
@@ -4900,7 +4903,7 @@ async fn handle_get_workspace_graph(
     let principal = validate_principal(&headers, &state)?;
     require_password_changed(&state, &principal)?;
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     db.workspace_access(&workspace_id, &principal.username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
@@ -4932,7 +4935,7 @@ async fn handle_put_workspace_graph(
     let principal = validate_principal(&headers, &state)?;
     require_password_changed(&state, &principal)?;
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     db.workspace_access(&workspace_id, &principal.username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
@@ -4973,7 +4976,7 @@ async fn handle_register_workspace_peer(
         return Err(error_response(StatusCode::BAD_REQUEST, "url is required"));
     }
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     db.workspace_access(&workspace_id, &principal.username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
@@ -4993,7 +4996,7 @@ async fn handle_delete_workspace_peer(
     let principal = validate_principal(&headers, &state)?;
     require_password_changed(&state, &principal)?;
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     db.workspace_access(&workspace_id, &principal.username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
@@ -5017,7 +5020,7 @@ async fn handle_rotate_workspace_federation(
     let principal = validate_principal(&headers, &state)?;
     require_password_changed(&state, &principal)?;
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     db.workspace_access(&workspace_id, &principal.username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
@@ -5038,7 +5041,7 @@ async fn handle_workspace_releases(
     require_password_changed(&state, &principal)?;
 
     let (rows, mut assets_by_id) = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.workspace_access(&workspace_id, &principal.username)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
             .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
@@ -5081,13 +5084,13 @@ async fn handle_list_workspace_doc_releases(
     let principal = validate_principal(&headers, &state)?;
     require_password_changed(&state, &principal)?;
     {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.workspace_access(&workspace_id, &principal.username)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
             .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
     }
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let rows = db.list_doc_releases_for_workspace(&workspace_id)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
     let releases: Vec<_> = rows
@@ -5134,7 +5137,7 @@ async fn handle_create_workspace_doc_release(
     // (different workspace, or a global release with the same tag) are
     // rejected — those would change ownership semantics.
     let existing_ws = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.get_release_workspace_id(DEFAULT_PRODUCT, &tag)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
     };
@@ -5142,7 +5145,7 @@ async fn handle_create_workspace_doc_release(
         match existing {
             Some(ws) if ws == &workspace_id => {
                 let id = {
-                    let db = state.db.lock().unwrap();
+                    let db = state.db.lock();
                     db.get_release_by_product_tag(DEFAULT_PRODUCT, &tag)
                         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
                         .ok_or_else(|| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Release vanished"))?
@@ -5165,7 +5168,7 @@ async fn handle_create_workspace_doc_release(
     }
 
     let release_id = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.insert_release(DEFAULT_PRODUCT, &tag, &req.name, "", false, Some(&workspace_id))
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
     };
@@ -5418,7 +5421,7 @@ async fn main() -> Result<()> {
             loop {
                 tick.tick().await;
                 let removed = {
-                    let db = state_bg.db.lock().unwrap();
+                    let db = state_bg.db.lock();
                     db.cleanup_all_expired_leases().unwrap_or(0)
                 };
                 if removed > 0 {

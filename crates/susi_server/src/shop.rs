@@ -115,7 +115,7 @@ pub async fn handle_list_products(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
     let rows = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.list_products(true).map_err(db_err)?
     };
     let products: Vec<Value> = rows.into_iter().map(product_to_json).collect();
@@ -127,7 +127,7 @@ pub async fn handle_get_product(
     Path(sku): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
     let row = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.get_product(&sku).map_err(db_err)?
     }
     .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Product not found"))?;
@@ -252,7 +252,7 @@ pub async fn handle_create_checkout_session(
     // and previously held every other handler off the connection.
     let skus: Vec<String> = req.items.iter().map(|i| i.sku.clone()).collect();
     let products = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.get_products_by_skus(&skus).map_err(db_err)?
     };
 
@@ -283,7 +283,7 @@ pub async fn handle_create_checkout_session(
     // load), pass all active rates and let Stripe's address step handle it;
     // the currency must still match.
     let active_rates = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.list_shipping_rates(true).map_err(db_err)?
     };
     let applicable: Vec<_> = active_rates
@@ -648,7 +648,7 @@ fn split_recipients(s: &str) -> Vec<String> {
 /// install that hasn't visited the Settings tab yet).
 fn effective_admin_recipients(state: &AppState) -> Vec<String> {
     let from_db = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.get_shop_setting(SETTING_NOTIFY_EMAILS).ok().flatten().unwrap_or_default()
     };
     let mut list = split_recipients(&from_db);
@@ -660,7 +660,7 @@ fn effective_admin_recipients(state: &AppState) -> Vec<String> {
 
 fn customer_email_enabled(state: &AppState) -> bool {
     let v = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.get_shop_setting(SETTING_CUSTOMER_EMAIL_ENABLED).ok().flatten()
     };
     // Default ON when unset — most shops want customer confirmations.
@@ -671,7 +671,7 @@ fn customer_email_enabled(state: &AppState) -> bool {
 }
 
 fn get_setting_str(state: &AppState, key: &str) -> String {
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     db.get_shop_setting(key).ok().flatten().unwrap_or_default()
 }
 
@@ -991,7 +991,7 @@ async fn persist_order_from_event(state: &AppState, event: &Value) -> Option<(i6
 
     let now = chrono::Utc::now().to_rfc3339();
     let res = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.insert_order_if_absent(session_id, &now, email, name, amount, currency, &ship_to_json, &line_items_json)
     };
     match res {
@@ -1108,7 +1108,7 @@ pub async fn handle_admin_list_products(
     let p = validate_principal(&headers, &state)?;
     require_admin_full(&state, &p)?;
     let rows = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.list_products(false).map_err(db_err)?
     };
     let products: Vec<Value> = rows.into_iter().map(product_to_json).collect();
@@ -1163,7 +1163,7 @@ pub async fn handle_upsert_product(
         return Err(error_response(StatusCode::BAD_REQUEST, "Price cannot be negative"));
     }
     {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         if let Some(asset) = req.image_asset.as_deref() {
             if !asset.is_empty() && !db.website_asset_exists(asset).map_err(db_err)? {
                 return Err(error_response(
@@ -1198,7 +1198,7 @@ pub async fn handle_delete_product(
     require_admin_full(&state, &p)?;
     validate_sku(&sku)?;
     let removed = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.delete_product(&sku).map_err(db_err)?
     };
     if !removed {
@@ -1215,7 +1215,7 @@ pub async fn handle_list_shipping_rates_admin(
     let p = validate_principal(&headers, &state)?;
     require_admin_full(&state, &p)?;
     let rows = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.list_shipping_rates(false).map_err(db_err)?
     };
     let rates: Vec<Value> = rows.into_iter().map(rate_to_json).collect();
@@ -1275,7 +1275,7 @@ pub async fn handle_create_shipping_rate(
     require_admin_full(&state, &p)?;
     let regions_json = validate_rate_body(&req)?;
     let id = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.insert_shipping_rate(
             &req.label,
             req.amount_cents,
@@ -1300,7 +1300,7 @@ pub async fn handle_update_shipping_rate(
     require_admin_full(&state, &p)?;
     let regions_json = validate_rate_body(&req)?;
     let ok = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.update_shipping_rate(
             id,
             &req.label,
@@ -1327,7 +1327,7 @@ pub async fn handle_delete_shipping_rate(
     let p = validate_principal(&headers, &state)?;
     require_admin_full(&state, &p)?;
     let removed = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.delete_shipping_rate(id).map_err(db_err)?
     };
     if !removed {
@@ -1412,7 +1412,7 @@ pub async fn handle_admin_list_orders(
     require_admin_full(&state, &p)?;
     let status = q.get("status").map(|s| s.as_str());
     let rows = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.list_orders(status).map_err(db_err)?
     };
     let orders: Vec<Value> = rows.into_iter().map(order_to_json).collect();
@@ -1427,7 +1427,7 @@ pub async fn handle_admin_get_order(
     let p = validate_principal(&headers, &state)?;
     require_admin_full(&state, &p)?;
     let row = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.get_order(id).map_err(db_err)?
     }.ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Order not found"))?;
     Ok(Json(order_to_json(row)))
@@ -1457,7 +1457,7 @@ pub async fn handle_admin_mark_shipped(
     }
     let now = chrono::Utc::now().to_rfc3339();
     let order = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         let ok = db.mark_order_shipped(id, carrier, tracking, &now).map_err(db_err)?;
         if !ok { return Err(error_response(StatusCode::NOT_FOUND, "Order not found")); }
         db.get_order(id).map_err(db_err)?
@@ -1496,7 +1496,7 @@ pub async fn handle_admin_update_order_notes(
     let p = validate_principal(&headers, &state)?;
     require_admin_full(&state, &p)?;
     let ok = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.update_order_notes(id, &req.notes).map_err(db_err)?
     };
     if !ok { return Err(error_response(StatusCode::NOT_FOUND, "Order not found")); }
@@ -1612,7 +1612,7 @@ pub async fn handle_admin_get_settings(
     let p = validate_principal(&headers, &state)?;
     require_admin_full(&state, &p)?;
     let pairs = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.list_shop_settings().map_err(db_err)?
     };
     let mut out = serde_json::Map::new();
@@ -1669,7 +1669,7 @@ pub async fn handle_admin_put_settings(
             SETTING_SUPPORT_CONTACT => v.trim().to_string(),
             _ => v.clone(),
         };
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.set_shop_setting(k, &normalized).map_err(db_err)?;
     }
     Ok(Json(json!({ "status": "OK" })))

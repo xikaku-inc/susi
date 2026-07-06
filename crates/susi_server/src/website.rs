@@ -62,7 +62,7 @@ fn safe_slug(slug: &str) -> Result<&str, (StatusCode, Json<ErrorResponse>)> {
 pub async fn handle_list_pages(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let pages = db.list_website_pages().map_err(db_err)?;
     let assets = db.list_website_assets().map_err(db_err)?;
     let pages_json: Vec<_> = pages
@@ -93,7 +93,7 @@ pub async fn handle_get_page(
     Path(slug): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     safe_slug(&slug)?;
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let page = db
         .get_website_page(&slug)
         .map_err(db_err)?
@@ -157,7 +157,7 @@ pub async fn handle_upsert_page(
     safe_slug(&slug)?;
 
     let (id, is_home) = {
-        let mut db = state.db.lock().unwrap();
+        let mut db = state.db.lock();
         let id = db.upsert_website_page(
             &slug,
             &req.title,
@@ -189,7 +189,7 @@ pub async fn handle_list_page_revisions(
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
     safe_slug(&slug)?;
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let rows = db.list_page_revisions(&slug).map_err(db_err)?;
     let revisions: Vec<_> = rows
         .into_iter()
@@ -212,7 +212,7 @@ pub async fn handle_get_page_revision(
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
     safe_slug(&slug)?;
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let row = db
         .get_page_revision(&slug, id)
         .map_err(db_err)?
@@ -234,7 +234,7 @@ pub async fn handle_restore_page_revision(
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
     safe_slug(&slug)?;
-    let mut db = state.db.lock().unwrap();
+    let mut db = state.db.lock();
     let rev = db
         .get_page_revision(&slug, id)
         .map_err(db_err)?
@@ -269,7 +269,7 @@ pub async fn handle_list_assets_with_usage(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let rows = db.list_website_assets_with_usage().map_err(db_err)?;
     let assets: Vec<_> = rows
         .into_iter()
@@ -307,7 +307,7 @@ pub async fn handle_rename_asset(
     safe_filename(new_name)?;
 
     let (ok, n_pages) = {
-        let mut db = state.db.lock().unwrap();
+        let mut db = state.db.lock();
         db.rename_website_asset(&file_name, new_name).map_err(|e| {
             let msg = e.to_string();
             if msg.contains("already exists") {
@@ -362,7 +362,7 @@ pub async fn handle_rename_page(
     }
 
     let result = {
-        let mut db = state.db.lock().unwrap();
+        let mut db = state.db.lock();
         db.rename_website_page(&slug, new_slug)
     };
     match result {
@@ -399,7 +399,7 @@ pub async fn handle_delete_page(
     safe_slug(&slug)?;
 
     let removed = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.delete_website_page(&slug).map_err(db_err)?
     };
     if !removed {
@@ -450,7 +450,7 @@ pub async fn handle_upload_asset(
     })?;
 
     {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.upsert_website_asset(&file_name, bytes.len() as u64)
             .map_err(db_err)?;
     }
@@ -470,7 +470,7 @@ pub async fn handle_delete_asset(
     safe_filename(&file_name)?;
 
     let removed = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.delete_website_asset(&file_name).map_err(db_err)?
     };
     let _ = std::fs::remove_file(assets_dir(&state).join(&file_name));
@@ -1093,7 +1093,7 @@ fn render_website(
     }
 
     let (pages, products) = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         (
             db.list_website_pages().unwrap_or_default(),
             db.list_products(true).unwrap_or_default(),
@@ -1108,7 +1108,7 @@ fn render_website(
         (String, String, String, Option<String>, String) =
         if let Some(s) = slug_owned.as_deref() {
             let row = {
-                let db = state.db.lock().unwrap();
+                let db = state.db.lock();
                 db.get_website_page(s).unwrap_or(None)
             };
             if let Some((t, body, _p, _o, upd, meta)) = row {
@@ -1174,7 +1174,7 @@ fn is_valid_analytics_id(s: &str) -> bool {
 /// or empty string when unset. Called per-request — DB lookup is cheap.
 pub fn analytics_head(state: &Arc<AppState>) -> String {
     let id = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.get_site_setting(SETTING_GOOGLE_ANALYTICS_ID).ok().flatten()
     };
     let Some(id) = id else { return String::new() };
@@ -1227,7 +1227,7 @@ pub async fn handle_sitemap_xml(
     _headers: HeaderMap,
 ) -> impl IntoResponse {
     let pages = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.list_website_pages().unwrap_or_default()
     };
     let home_slug = first_default_slug(&pages).map(|s| s.to_string());
@@ -1259,7 +1259,7 @@ pub async fn handle_llms_txt(
     _headers: HeaderMap,
 ) -> impl IntoResponse {
     let pages = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.list_website_pages().unwrap_or_default()
     };
     let home_slug = first_default_slug(&pages).map(|s| s.to_string());
@@ -1280,7 +1280,7 @@ pub async fn handle_llms_txt(
             meta.clone()
         } else {
             let row = {
-                let db = state.db.lock().unwrap();
+                let db = state.db.lock();
                 db.get_website_page(slug).unwrap_or(None)
             };
             row.map(|(_t, body, _p, _o, _u, _m)| derive_description(&body))
@@ -1315,7 +1315,7 @@ pub async fn handle_admin_get_site_settings(
     let p = validate_principal(&headers, &state)?;
     require_admin_full(&state, &p)?;
     let pairs = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.list_site_settings().map_err(db_err)?
     };
     let mut out = serde_json::Map::new();
@@ -1352,7 +1352,7 @@ pub async fn handle_admin_put_site_settings(
                 "google_analytics_id must contain only letters, digits, '-' or '_' (max 64 chars)",
             ));
         }
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.set_site_setting(k, trimmed).map_err(db_err)?;
     }
     invalidate_page_cache();
@@ -1382,14 +1382,14 @@ fn generate_indexnow_key() -> String {
 /// Fetch the configured IndexNow key, lazily creating one the first time.
 fn get_or_create_indexnow_key(state: &Arc<AppState>) -> Option<String> {
     let existing = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.get_site_setting(SETTING_INDEXNOW_KEY).ok().flatten()
     };
     if let Some(k) = existing.filter(|k| !k.is_empty()) {
         return Some(k);
     }
     let key = generate_indexnow_key();
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     db.set_site_setting(SETTING_INDEXNOW_KEY, &key).ok()?;
     Some(key)
 }
