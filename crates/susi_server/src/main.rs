@@ -164,6 +164,9 @@ struct AppState {
     /// DER bytes of the trusted code-signing CA cert, if configured.
     trusted_signing_ca: Option<Vec<u8>>,
     login_attempts: Mutex<HashMap<IpAddr, Vec<Instant>>>,
+    /// Per-account wrong-guess timestamps for the emailed sign-in code,
+    /// keyed by resolved username (or the raw identifier when unresolvable).
+    signin_guesses: Mutex<HashMap<String, Vec<Instant>>>,
     checkout_attempts: Mutex<HashMap<IpAddr, Vec<Instant>>>,
     webhook_attempts: Mutex<HashMap<IpAddr, Vec<Instant>>>,
     contact_attempts: Mutex<HashMap<IpAddr, Vec<Instant>>>,
@@ -192,6 +195,15 @@ const SIGNIN_CODE_TTL_MINUTES: i64 = 15;
 // against weak passwords and caps credential-stuffing throughput.
 const LOGIN_WINDOW: StdDuration = StdDuration::from_secs(60);
 const LOGIN_MAX_ATTEMPTS: usize = 10;
+
+// Per-account cap on sign-in-code guesses. The per-IP login limit alone
+// can't stop a distributed IP pool from brute-forcing a live 6-digit code
+// within its 15-minute TTL; after this many wrong guesses every outstanding
+// code for the account is invalidated and the exchange endpoint stays locked
+// for the account until the window drains.
+const SIGNIN_GUESS_WINDOW: StdDuration =
+    StdDuration::from_secs(SIGNIN_CODE_TTL_MINUTES as u64 * 60);
+const SIGNIN_MAX_GUESSES: usize = 5;
 
 // Shop checkout creates a Stripe Checkout Session per call (outbound API
 // cost + DB lock). Cap per-IP burst so a script can't run our Stripe quota
@@ -277,6 +289,69 @@ fn check_login_rate_limit(
         "Login",
         "Too many login attempts, try again later",
     )
+}
+
+// Reject a sign-in code exchange for an account that already burned its
+// guesses. Checked before the token lookup so a lockout also covers codes
+// minted after it (an attacker can trigger fresh emails at will).
+fn check_signin_guess_limit(
+    state: &AppState,
+    username: &str,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    let mut map = state.signin_guesses.lock().unwrap();
+    let now = Instant::now();
+    if let Some(times) = map.get_mut(username) {
+        times.retain(|t| now.duration_since(*t) < SIGNIN_GUESS_WINDOW);
+        if times.len() >= SIGNIN_MAX_GUESSES {
+            log::warn!("Sign-in code guess limit exceeded for account {}", username);
+            return Err(error_response(
+                StatusCode::TOO_MANY_REQUESTS,
+                "Too many attempts, request a new code later",
+            ));
+        }
+        if times.is_empty() {
+            map.remove(username);
+        }
+    }
+    Ok(())
+}
+
+// Count a wrong sign-in code guess. On the guess that reaches the cap, every
+// outstanding code for the account is invalidated in the DB so the lockout
+// survives a server restart for the remainder of the code TTL.
+fn record_failed_signin_guess(state: &AppState, username: &str) {
+    let reached_cap = {
+        let mut map = state.signin_guesses.lock().unwrap();
+        let now = Instant::now();
+        // Opportunistic GC: usernames are attacker-supplied strings, so drop
+        // drained entries before inserting to keep the map bounded.
+        if map.len() > 1024 {
+            map.retain(|_, v| {
+                v.retain(|t| now.duration_since(*t) < SIGNIN_GUESS_WINDOW);
+                !v.is_empty()
+            });
+        }
+        let entry = map.entry(username.to_string()).or_default();
+        entry.retain(|t| now.duration_since(*t) < SIGNIN_GUESS_WINDOW);
+        entry.push(now);
+        entry.len() >= SIGNIN_MAX_GUESSES
+    };
+    if reached_cap {
+        let db = state.db.lock().unwrap();
+        if let Err(e) = db.invalidate_signin_codes(username) {
+            log::error!("Failed to invalidate sign-in codes for {}: {}", username, e);
+        } else {
+            log::warn!(
+                "Invalidated outstanding sign-in codes for account {} after {} wrong guesses",
+                username,
+                SIGNIN_MAX_GUESSES
+            );
+        }
+    }
+}
+
+fn clear_signin_guesses(state: &AppState, username: &str) {
+    state.signin_guesses.lock().unwrap().remove(username);
 }
 
 fn check_checkout_rate_limit(
@@ -1335,6 +1410,7 @@ async fn handle_signin_code_exchange(
             req.username.clone()
         }
     };
+    check_signin_guess_limit(&state, &username)?;
     let token_hash = hash_signin_code(&username, &code);
 
     // Peek first so we can surface a TOTP prompt without consuming the
@@ -1347,6 +1423,7 @@ async fn handle_signin_code_exchange(
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
     };
     let row = row.ok_or_else(|| {
+        record_failed_signin_guess(&state, &username);
         error_response(StatusCode::UNAUTHORIZED, "Code is invalid, already used, or expired")
     })?;
 
@@ -1382,6 +1459,7 @@ async fn handle_signin_code_exchange(
             "Code is invalid, already used, or expired",
         ));
     }
+    clear_signin_guesses(&state, &username);
 
     // Trust this device going forward.
     if !row.device_fp.is_empty() {
@@ -5273,6 +5351,7 @@ async fn main() -> Result<()> {
         data_dir: cli.data_dir,
         trusted_signing_ca,
         login_attempts: Mutex::new(HashMap::new()),
+        signin_guesses: Mutex::new(HashMap::new()),
         checkout_attempts: Mutex::new(HashMap::new()),
         webhook_attempts: Mutex::new(HashMap::new()),
         contact_attempts: Mutex::new(HashMap::new()),

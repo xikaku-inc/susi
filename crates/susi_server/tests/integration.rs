@@ -1181,6 +1181,39 @@ fn test_request_code_and_magic_login_guards() {
     assert_eq!(resp.status().as_u16(), 401);
 }
 
+/// Wrong sign-in code guesses are counted per account: after 5 misses the
+/// exchange endpoint returns 429 for that account instead of another generic
+/// 401, independent of the per-IP limit.
+#[test]
+fn test_signin_code_guess_lockout() {
+    let server = TestServer::start();
+    let client = server.http();
+
+    for _ in 0..5 {
+        let resp = client
+            .post(format!("{}/auth/signin-code", server.api_url))
+            .json(&json!({"username": "admin", "code": "000000"}))
+            .send()
+            .expect("signin-code");
+        assert_eq!(resp.status().as_u16(), 401);
+    }
+
+    let resp = client
+        .post(format!("{}/auth/signin-code", server.api_url))
+        .json(&json!({"username": "admin", "code": "000000"}))
+        .send()
+        .expect("signin-code");
+    assert_eq!(resp.status().as_u16(), 429);
+
+    // A different account is unaffected by admin's lockout.
+    let resp = client
+        .post(format!("{}/auth/signin-code", server.api_url))
+        .json(&json!({"username": "someone-else", "code": "000000"}))
+        .send()
+        .expect("signin-code");
+    assert_eq!(resp.status().as_u16(), 401);
+}
+
 /// Renaming a user migrates every username-keyed row: license assignments,
 /// API tokens (and the auth cache), and flags self-renames so the UI can
 /// force a re-login.

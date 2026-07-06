@@ -1563,6 +1563,21 @@ impl LicenseDb {
         Ok(())
     }
 
+    /// Invalidate every outstanding emailed sign-in code for a user - called
+    /// after too many wrong guesses so a live code can't be brute-forced for
+    /// the rest of its TTL.
+    pub fn invalidate_signin_codes(&self, username: &str) -> Result<(), LicenseError> {
+        let now = Utc::now().to_rfc3339();
+        self.conn
+            .execute(
+                "UPDATE login_tokens SET used_at = ?1
+                 WHERE username = ?2 AND used_at IS NULL AND kind = 'device'",
+                params![now, username],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))?;
+        Ok(())
+    }
+
     /// Invalidate every outstanding reset/invite token for a user — used
     /// when re-issuing an invitation so the previous link stops working.
     pub fn invalidate_setup_tokens(&self, username: &str) -> Result<(), LicenseError> {
