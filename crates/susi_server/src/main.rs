@@ -171,6 +171,8 @@ struct AppState {
     /// Per-account wrong-guess timestamps for the emailed sign-in code,
     /// keyed by resolved username (or the raw identifier when unresolvable).
     signin_guesses: Mutex<HashMap<String, Vec<Instant>>>,
+    /// Per-account failed password/2FA attempts at login, same keying.
+    auth_failures: Mutex<HashMap<String, Vec<Instant>>>,
     checkout_attempts: Mutex<HashMap<IpAddr, Vec<Instant>>>,
     webhook_attempts: Mutex<HashMap<IpAddr, Vec<Instant>>>,
     contact_attempts: Mutex<HashMap<IpAddr, Vec<Instant>>>,
@@ -225,6 +227,12 @@ const LOGIN_MAX_ATTEMPTS: usize = 10;
 const SIGNIN_GUESS_WINDOW: StdDuration =
     StdDuration::from_secs(SIGNIN_CODE_TTL_MINUTES as u64 * 60);
 const SIGNIN_MAX_GUESSES: usize = 5;
+
+// Per-account lockout on failed interactive auth (wrong password or wrong
+// 2FA code at login). The per-IP limit alone can't stop a distributed IP
+// pool from targeting one account.
+const ACCOUNT_FAILURE_WINDOW: StdDuration = StdDuration::from_secs(15 * 60);
+const ACCOUNT_MAX_FAILURES: usize = 8;
 
 // Shop checkout creates a Stripe Checkout Session per call (outbound API
 // cost + DB lock). Cap per-IP burst so a script can't run our Stripe quota
@@ -312,6 +320,55 @@ fn check_login_rate_limit(
     )
 }
 
+// Sliding-window failure counter keyed by account name. Errors with 429
+// once the account has burned `max` failures inside `window`.
+fn check_account_failure_limit(
+    map_lock: &Mutex<HashMap<String, Vec<Instant>>>,
+    key: &str,
+    window: StdDuration,
+    max: usize,
+    label: &str,
+    user_message: &str,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    let mut map = map_lock.lock();
+    let now = Instant::now();
+    if let Some(times) = map.get_mut(key) {
+        times.retain(|t| now.duration_since(*t) < window);
+        if times.len() >= max {
+            log::warn!("{} limit exceeded for account {}", label, key);
+            return Err(error_response(StatusCode::TOO_MANY_REQUESTS, user_message));
+        }
+        if times.is_empty() {
+            map.remove(key);
+        }
+    }
+    Ok(())
+}
+
+// Record one failure for the account; returns true when this failure reached
+// the cap.
+fn record_account_failure(
+    map_lock: &Mutex<HashMap<String, Vec<Instant>>>,
+    key: &str,
+    window: StdDuration,
+    max: usize,
+) -> bool {
+    let mut map = map_lock.lock();
+    let now = Instant::now();
+    // Opportunistic GC: keys are attacker-supplied strings, so drop drained
+    // entries before inserting to keep the map bounded.
+    if map.len() > 1024 {
+        map.retain(|_, v| {
+            v.retain(|t| now.duration_since(*t) < window);
+            !v.is_empty()
+        });
+    }
+    let entry = map.entry(key.to_string()).or_default();
+    entry.retain(|t| now.duration_since(*t) < window);
+    entry.push(now);
+    entry.len() >= max
+}
+
 // Reject a sign-in code exchange for an account that already burned its
 // guesses. Checked before the token lookup so a lockout also covers codes
 // minted after it (an attacker can trigger fresh emails at will).
@@ -319,45 +376,26 @@ fn check_signin_guess_limit(
     state: &AppState,
     username: &str,
 ) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
-    let mut map = state.signin_guesses.lock();
-    let now = Instant::now();
-    if let Some(times) = map.get_mut(username) {
-        times.retain(|t| now.duration_since(*t) < SIGNIN_GUESS_WINDOW);
-        if times.len() >= SIGNIN_MAX_GUESSES {
-            log::warn!("Sign-in code guess limit exceeded for account {}", username);
-            return Err(error_response(
-                StatusCode::TOO_MANY_REQUESTS,
-                "Too many attempts, request a new code later",
-            ));
-        }
-        if times.is_empty() {
-            map.remove(username);
-        }
-    }
-    Ok(())
+    check_account_failure_limit(
+        &state.signin_guesses,
+        username,
+        SIGNIN_GUESS_WINDOW,
+        SIGNIN_MAX_GUESSES,
+        "Sign-in code guess",
+        "Too many attempts, request a new code later",
+    )
 }
 
 // Count a wrong sign-in code guess. On the guess that reaches the cap, every
 // outstanding code for the account is invalidated in the DB so the lockout
 // survives a server restart for the remainder of the code TTL.
 fn record_failed_signin_guess(state: &AppState, username: &str) {
-    let reached_cap = {
-        let mut map = state.signin_guesses.lock();
-        let now = Instant::now();
-        // Opportunistic GC: usernames are attacker-supplied strings, so drop
-        // drained entries before inserting to keep the map bounded.
-        if map.len() > 1024 {
-            map.retain(|_, v| {
-                v.retain(|t| now.duration_since(*t) < SIGNIN_GUESS_WINDOW);
-                !v.is_empty()
-            });
-        }
-        let entry = map.entry(username.to_string()).or_default();
-        entry.retain(|t| now.duration_since(*t) < SIGNIN_GUESS_WINDOW);
-        entry.push(now);
-        entry.len() >= SIGNIN_MAX_GUESSES
-    };
-    if reached_cap {
+    if record_account_failure(
+        &state.signin_guesses,
+        username,
+        SIGNIN_GUESS_WINDOW,
+        SIGNIN_MAX_GUESSES,
+    ) {
         let db = state.db.lock();
         if let Err(e) = db.invalidate_signin_codes(username) {
             log::error!("Failed to invalidate sign-in codes for {}: {}", username, e);
@@ -373,6 +411,43 @@ fn record_failed_signin_guess(state: &AppState, username: &str) {
 
 fn clear_signin_guesses(state: &AppState, username: &str) {
     state.signin_guesses.lock().remove(username);
+}
+
+// Reject interactive auth for an account that already burned its failures
+// (wrong password or wrong 2FA). Complements the per-IP limit: a distributed
+// IP pool gets at most ACCOUNT_MAX_FAILURES guesses per window against any
+// one account.
+fn check_account_lockout(
+    state: &AppState,
+    username: &str,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    check_account_failure_limit(
+        &state.auth_failures,
+        username,
+        ACCOUNT_FAILURE_WINDOW,
+        ACCOUNT_MAX_FAILURES,
+        "Account auth failure",
+        "Too many failed login attempts, try again later",
+    )
+}
+
+fn record_failed_account_auth(state: &AppState, username: &str) {
+    if record_account_failure(
+        &state.auth_failures,
+        username,
+        ACCOUNT_FAILURE_WINDOW,
+        ACCOUNT_MAX_FAILURES,
+    ) {
+        log::warn!(
+            "Account {} locked out after {} failed auth attempts",
+            username,
+            ACCOUNT_MAX_FAILURES
+        );
+    }
+}
+
+fn clear_account_failures(state: &AppState, username: &str) {
+    state.auth_failures.lock().remove(username);
 }
 
 fn check_checkout_rate_limit(
@@ -1201,9 +1276,7 @@ async fn handle_login(
         } else {
             req.username.clone()
         };
-        let hash = db
-            .get_user_password_hash(&username)
-            .map_err(|_| error_response(StatusCode::UNAUTHORIZED, "Invalid credentials"))?;
+        let hash = db.get_user_password_hash(&username).ok();
         let must_change = db.user_must_change_password(&username).unwrap_or(false);
         let role = db.get_user_role(&username).unwrap_or_else(|_| "user".into());
         let totp_enabled = db.user_totp_enabled(&username).unwrap_or(false);
@@ -1212,7 +1285,15 @@ async fn handle_login(
             && db.is_device_known(&username, &req.device_fp).unwrap_or(false);
         (username, hash, must_change, role, totp_enabled, email, device_known)
     };
+    // Per-account lockout, checked before the (expensive) password verify so
+    // a locked account rejects cheaply and uniformly.
+    check_account_lockout(&state, &username)?;
+    let Some(hash) = hash else {
+        record_failed_account_auth(&state, &username);
+        return Err(error_response(StatusCode::UNAUTHORIZED, "Invalid credentials"));
+    };
     if !verify_password(&req.password, &hash).await? {
+        record_failed_account_auth(&state, &username);
         return Err(error_response(StatusCode::UNAUTHORIZED, "Invalid credentials"));
     }
 
@@ -1289,7 +1370,9 @@ async fn handle_login(
                 })));
             }
             Some(code) => {
-                verify_totp_or_backup(&state, &username, code)?;
+                verify_totp_or_backup(&state, &username, code).inspect_err(|_| {
+                    record_failed_account_auth(&state, &username);
+                })?;
             }
         }
     }
@@ -1304,6 +1387,7 @@ async fn handle_login(
         }
     }
 
+    clear_account_failures(&state, &username);
     let token = create_session_jwt(&state, &username)?;
     Ok(Json(serde_json::json!({
         "token": token,
@@ -1466,6 +1550,7 @@ async fn handle_signin_code_exchange(
         }
     };
     check_signin_guess_limit(&state, &username)?;
+    check_account_lockout(&state, &username)?;
     let token_hash = hash_signin_code(&username, &code);
 
     // Peek first so we can surface a TOTP prompt without consuming the
@@ -1497,7 +1582,9 @@ async fn handle_signin_code_exchange(
                 "totp_required": true,
             })));
         };
-        verify_totp_or_backup(&state, &row.username, tcode)?;
+        verify_totp_or_backup(&state, &row.username, tcode).inspect_err(|_| {
+            record_failed_account_auth(&state, &username);
+        })?;
     }
 
     // All gates passed — NOW consume the code (atomic flip; guards against
@@ -1515,6 +1602,7 @@ async fn handle_signin_code_exchange(
         ));
     }
     clear_signin_guesses(&state, &username);
+    clear_account_failures(&state, &username);
 
     // Trust this device going forward.
     if !row.device_fp.is_empty() {
@@ -5458,6 +5546,7 @@ async fn main() -> Result<()> {
         trusted_signing_ca,
         login_attempts: Mutex::new(HashMap::new()),
         signin_guesses: Mutex::new(HashMap::new()),
+        auth_failures: Mutex::new(HashMap::new()),
         checkout_attempts: Mutex::new(HashMap::new()),
         webhook_attempts: Mutex::new(HashMap::new()),
         contact_attempts: Mutex::new(HashMap::new()),

@@ -1343,6 +1343,37 @@ fn test_password_change_revokes_sessions() {
     assert!(resp.status().is_success(), "fresh token must be accepted");
 }
 
+/// Failed password logins are counted per account, not just per IP: after 8
+/// misses the account locks and even the correct password is rejected with
+/// 429 until the window drains.
+#[test]
+fn test_login_account_lockout() {
+    let server = TestServer::start();
+    let client = server.http();
+
+    for _ in 0..8 {
+        let resp = client
+            .post(format!("{}/auth/login", server.api_url))
+            .json(&json!({"username": "admin", "password": "wrong-password"}))
+            .send()
+            .expect("login");
+        assert_eq!(resp.status().as_u16(), 401);
+    }
+
+    let resp = client
+        .post(format!("{}/auth/login", server.api_url))
+        .json(&json!({"username": "admin", "password": "changeme"}))
+        .send()
+        .expect("login");
+    assert_eq!(resp.status().as_u16(), 429);
+    let body = resp.json::<Value>().expect("json");
+    assert!(
+        body["error"].as_str().unwrap_or("").contains("failed login"),
+        "expected account-lockout message, got: {}",
+        body
+    );
+}
+
 /// Wrong sign-in code guesses are counted per account: after 5 misses the
 /// exchange endpoint returns 429 for that account instead of another generic
 /// 401, independent of the per-IP limit.
