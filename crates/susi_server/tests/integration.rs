@@ -109,6 +109,12 @@ impl TestServer {
     /// Spawn a server with a freshly-generated 2048-bit RSA keypair, wait
     /// until `/health` responds, and return the handle.
     fn start() -> Self {
+        Self::start_with_env(&[])
+    }
+
+    /// Like `start`, with extra environment variables for the child process
+    /// (e.g. STRIPE_WEBHOOK_SECRET to enable the webhook endpoint).
+    fn start_with_env(envs: &[(&str, &str)]) -> Self {
         let dir = tempfile::tempdir().expect("temp dir");
 
         let (private_key, public_key) = generate_keypair(2048).expect("keygen");
@@ -123,13 +129,15 @@ impl TestServer {
         let url = format!("http://127.0.0.1:{}", port);
         let api_url = format!("{}/api/v1", url);
 
-        let child = Command::new(env!("CARGO_BIN_EXE_susi-server"))
-            .arg("--private-key").arg(&key_path)
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_susi-server"));
+        cmd.arg("--private-key").arg(&key_path)
             .arg("--db").arg(&db_path)
             .arg("--listen").arg(format!("127.0.0.1:{}", port))
-            .arg("--data-dir").arg(dir.path())
-            .spawn()
-            .expect("spawn susi-server");
+            .arg("--data-dir").arg(dir.path());
+        for (k, v) in envs {
+            cmd.env(k, v);
+        }
+        let child = cmd.spawn().expect("spawn susi-server");
 
         let server = TestServer {
             child,
@@ -1341,6 +1349,104 @@ fn test_password_change_revokes_sessions() {
         .send()
         .expect("status with new token");
     assert!(resp.status().is_success(), "fresh token must be accepted");
+}
+
+/// Stripe-style webhook signature over `{t}.{payload}` with the given secret.
+fn stripe_sig(secret: &str, payload: &str, ts: i64) -> String {
+    use hmac::{Hmac, Mac};
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+    mac.update(ts.to_string().as_bytes());
+    mac.update(b".");
+    mac.update(payload.as_bytes());
+    format!("t={},v1={}", ts, hex::encode(mac.finalize().into_bytes()))
+}
+
+/// checkout.session.completed only records an order as 'paid' when Stripe
+/// says the payment settled; delayed methods land as 'pending_payment' and
+/// flip to 'paid' on checkout.session.async_payment_succeeded.
+#[test]
+fn test_webhook_respects_payment_status() {
+    const SECRET: &str = "whsec_testsecret";
+    let server = TestServer::start_with_env(&[("STRIPE_WEBHOOK_SECRET", SECRET)]);
+    let admin = server.admin_token();
+    let client = server.http();
+
+    let post_event = |event: &Value| {
+        let payload = event.to_string();
+        let sig = stripe_sig(SECRET, &payload, chrono_now());
+        client
+            .post(format!("{}/shop/webhook", server.api_url))
+            .header("Stripe-Signature", sig)
+            .header("Content-Type", "application/json")
+            .body(payload)
+            .send()
+            .expect("post webhook")
+    };
+    let order_status = |session_id: &str| -> Option<String> {
+        let orders = client
+            .get(format!("{}/shop/admin/orders", server.api_url))
+            .bearer_auth(&admin)
+            .send()
+            .expect("list orders")
+            .json::<Value>()
+            .expect("orders json")["orders"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        orders
+            .iter()
+            .find(|o| o["stripe_session_id"] == json!(session_id))
+            .and_then(|o| o["status"].as_str().map(String::from))
+    };
+    let session_event = |event_type: &str, session_id: &str, payment_status: &str| {
+        json!({
+            "type": event_type,
+            "data": { "object": {
+                "id": session_id,
+                "payment_status": payment_status,
+                "amount_total": 4200,
+                "currency": "usd",
+                "customer_details": { "email": "buyer@example.com", "name": "Buyer" },
+            }}
+        })
+    };
+
+    // Card-style settled session records as paid immediately.
+    let resp = post_event(&session_event("checkout.session.completed", "cs_card", "paid"));
+    assert!(resp.status().is_success());
+    assert_eq!(order_status("cs_card").as_deref(), Some("paid"));
+
+    // Delayed method: completed but unpaid -> pending_payment, not paid.
+    let resp = post_event(&session_event("checkout.session.completed", "cs_sepa", "unpaid"));
+    assert!(resp.status().is_success());
+    assert_eq!(order_status("cs_sepa").as_deref(), Some("pending_payment"));
+
+    // Settlement arrives -> order flips to paid.
+    let resp = post_event(&session_event(
+        "checkout.session.async_payment_succeeded",
+        "cs_sepa",
+        "paid",
+    ));
+    assert!(resp.status().is_success());
+    assert_eq!(order_status("cs_sepa").as_deref(), Some("paid"));
+
+    // A failed delayed payment is marked, not shipped.
+    let resp = post_event(&session_event("checkout.session.completed", "cs_fail", "unpaid"));
+    assert!(resp.status().is_success());
+    let resp = post_event(&session_event(
+        "checkout.session.async_payment_failed",
+        "cs_fail",
+        "unpaid",
+    ));
+    assert!(resp.status().is_success());
+    assert_eq!(order_status("cs_fail").as_deref(), Some("payment_failed"));
+}
+
+fn chrono_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
 }
 
 /// Failed password logins are counted per account, not just per IP: after 8

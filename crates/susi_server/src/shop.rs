@@ -487,20 +487,90 @@ pub async fn handle_stripe_webhook(
     let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
     log::info!("Stripe webhook received: {}", event_type);
 
-    if event_type == "checkout.session.completed" {
-        // Persist a shadow-row in shop_orders so we can drive fulfillment
-        // from the admin UI without a round-trip to Stripe for every list.
-        // `inserted == false` means a previous delivery already created the
-        // order — Stripe is retrying. Skip emails so the customer doesn't
-        // get a duplicate confirmation.
-        let persisted = persist_order_from_event(&state, &event).await;
-        let order_id = persisted.map(|(id, _)| id);
-        let is_new_order = persisted.map(|(_, ins)| ins).unwrap_or(false);
-        if !is_new_order {
-            log::info!("Stripe webhook retry for already-recorded session — skipping emails");
-            return Ok(Json(json!({ "received": true, "duplicate": true })));
+    match event_type {
+        "checkout.session.completed" => {
+            // Persist a shadow-row in shop_orders so we can drive fulfillment
+            // from the admin UI without a round-trip to Stripe for every list.
+            // Only sessions whose payment actually settled are recorded as
+            // 'paid': delayed methods (ACH/SEPA/BNPL) complete the session
+            // with payment_status='unpaid' and settle later via
+            // checkout.session.async_payment_succeeded.
+            let payment_status = event
+                .pointer("/data/object/payment_status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let settled = matches!(payment_status, "paid" | "no_payment_required");
+            let status = if settled { "paid" } else { "pending_payment" };
+            let persisted = persist_order_from_event(&state, &event, status).await;
+            if !settled {
+                log::info!(
+                    "Checkout session completed with payment_status={} - order recorded as pending_payment, awaiting settlement",
+                    payment_status
+                );
+                return Ok(Json(json!({ "received": true, "pending": true })));
+            }
+            // `inserted == false` means a previous delivery already created
+            // the order — Stripe is retrying. Skip emails so the customer
+            // doesn't get a duplicate confirmation.
+            let order_id = persisted.map(|(id, _)| id);
+            let is_new_order = persisted.map(|(_, ins)| ins).unwrap_or(false);
+            if !is_new_order {
+                log::info!("Stripe webhook retry for already-recorded session — skipping emails");
+                return Ok(Json(json!({ "received": true, "duplicate": true })));
+            }
+            send_order_notifications(&state, &event, order_id).await;
         }
+        "checkout.session.async_payment_succeeded" => {
+            // A delayed payment settled. The conditional pending->paid
+            // transition makes the email side effects run exactly once across
+            // retries; insert-if-absent first covers a session whose
+            // completed event was never delivered.
+            let persisted = persist_order_from_event(&state, &event, "paid").await;
+            let order_id = persisted.map(|(id, _)| id);
+            let inserted = persisted.map(|(_, ins)| ins).unwrap_or(false);
+            let session_id = event
+                .pointer("/data/object/id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let flipped = {
+                let db = state.db.lock();
+                db.transition_order_status_by_session(session_id, "pending_payment", "paid")
+                    .unwrap_or(false)
+            };
+            if inserted || flipped {
+                send_order_notifications(&state, &event, order_id).await;
+            } else {
+                log::info!("async_payment_succeeded retry for already-paid session — skipping emails");
+            }
+        }
+        "checkout.session.async_payment_failed" => {
+            let session_id = event
+                .pointer("/data/object/id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let failed = {
+                let db = state.db.lock();
+                db.transition_order_status_by_session(session_id, "pending_payment", "payment_failed")
+                    .unwrap_or(false)
+            };
+            if failed {
+                log::warn!(
+                    "Delayed payment failed for session {} - order marked payment_failed",
+                    session_id
+                );
+            }
+        }
+        _ => {}
+    }
 
+    Ok(Json(json!({ "received": true })))
+}
+
+/// Fetch line items + invoice and send the admin notification and customer
+/// confirmation for a settled order. Callers must guarantee at-most-once
+/// delivery (fresh insert or a conditional status transition).
+async fn send_order_notifications(state: &Arc<AppState>, event: &Value, order_id: Option<i64>) {
+    {
         // Fetch line items + invoice PDF in parallel — both via Stripe API,
         // both best-effort (we still send emails even if one is unavailable).
         let session_id = event
@@ -616,8 +686,6 @@ pub async fn handle_stripe_webhook(
             }
         }
     }
-
-    Ok(Json(json!({ "received": true })))
 }
 
 // ---------------------------------------------------------------------------
@@ -964,12 +1032,16 @@ async fn fetch_line_items(state: &AppState, session_id: &str) -> Vec<Value> {
     }
 }
 
-/// Persist a Stripe Checkout Session as a shop_orders row. Returns
-/// `(local_order_id, inserted)` on success — `inserted == false` means the
-/// row already existed (Stripe retry) and side effects (emails) should be
-/// skipped. Returns `None` on any error (still ack 200 so Stripe stops
-/// retrying after the first DB success).
-async fn persist_order_from_event(state: &AppState, event: &Value) -> Option<(i64, bool)> {
+/// Persist a Stripe Checkout Session as a shop_orders row with the given
+/// status ('paid' or 'pending_payment'). Returns `(local_order_id, inserted)`
+/// on success — `inserted == false` means the row already existed (Stripe
+/// retry) and side effects (emails) should be skipped. Returns `None` on any
+/// error (still ack 200 so Stripe stops retrying after the first DB success).
+async fn persist_order_from_event(
+    state: &AppState,
+    event: &Value,
+    status: &str,
+) -> Option<(i64, bool)> {
     let obj = event.pointer("/data/object")?;
     let session_id = obj.get("id")?.as_str()?;
 
@@ -992,7 +1064,7 @@ async fn persist_order_from_event(state: &AppState, event: &Value) -> Option<(i6
     let now = chrono::Utc::now().to_rfc3339();
     let res = {
         let db = state.db.lock();
-        db.insert_order_if_absent(session_id, &now, email, name, amount, currency, &ship_to_json, &line_items_json)
+        db.insert_order_if_absent(session_id, &now, email, name, amount, currency, status, &ship_to_json, &line_items_json)
     };
     match res {
         Ok((id, inserted)) => Some((id, inserted)),

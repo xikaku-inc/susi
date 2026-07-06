@@ -4599,6 +4599,8 @@ impl LicenseDb {
     /// Insert a shop order keyed on `stripe_session_id`. Returns `(id, inserted)`;
     /// `inserted == false` means the row already existed (Stripe webhook retry).
     /// Callers use that flag to skip side effects (emails) on retries.
+    /// `status` is 'paid' for settled sessions, 'pending_payment' for delayed
+    /// payment methods still awaiting settlement.
     pub fn insert_order_if_absent(
         &self,
         stripe_session_id: &str,
@@ -4607,6 +4609,7 @@ impl LicenseDb {
         customer_name: &str,
         amount_total_cents: i64,
         currency: &str,
+        status: &str,
         ship_to_json: &str,
         line_items_json: &str,
     ) -> Result<(i64, bool), LicenseError> {
@@ -4616,7 +4619,7 @@ impl LicenseDb {
                 "INSERT OR IGNORE INTO shop_orders
                (stripe_session_id, created_at, customer_email, customer_name,
                 amount_total_cents, currency, status, ship_to_json, line_items_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'paid', ?7, ?8)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     stripe_session_id,
                     created_at,
@@ -4624,6 +4627,7 @@ impl LicenseDb {
                     customer_name,
                     amount_total_cents,
                     currency,
+                    status,
                     ship_to_json,
                     line_items_json,
                 ],
@@ -4638,6 +4642,27 @@ impl LicenseDb {
             )
             .map_err(|e| LicenseError::Other(format!("DB lookup order: {}", e)))?;
         Ok((id, n > 0))
+    }
+
+    /// Conditionally flip an order's status from `from` to `to`, keyed by
+    /// Stripe session id. Returns whether a row changed - false means the
+    /// order is missing or already past `from` (e.g. a webhook retry), so
+    /// side effects tied to the transition must be skipped.
+    pub fn transition_order_status_by_session(
+        &self,
+        stripe_session_id: &str,
+        from: &str,
+        to: &str,
+    ) -> Result<bool, LicenseError> {
+        let n = self
+            .conn
+            .execute(
+                "UPDATE shop_orders SET status = ?3
+                 WHERE stripe_session_id = ?1 AND status = ?2",
+                params![stripe_session_id, from, to],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB update order status: {}", e)))?;
+        Ok(n > 0)
     }
 
     #[allow(clippy::type_complexity)]

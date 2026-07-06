@@ -57,3 +57,7 @@ reqwest = { workspace = true }
 tempfile = "3"
 rcgen = "0.13"
 totp-rs = { version = "5", features = ["gen_secret"] }
+# Sign synthetic Stripe webhook payloads in integration tests.
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
