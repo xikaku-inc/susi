@@ -79,6 +79,18 @@ pub struct AuditRow {
 }
 
 #[derive(Debug, Serialize)]
+pub struct BackupRunRow {
+    pub id: i64,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+    pub status: String,
+    pub source: String,
+    pub archive_name: String,
+    pub size_bytes: i64,
+    pub error: String,
+}
+
+#[derive(Debug, Serialize)]
 pub struct RecordingRow {
     pub id: i64,
     pub workspace_id: String,
@@ -642,7 +654,26 @@ impl LicenseDb {
                 FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_workspace_recordings_ws
-                ON workspace_recordings(workspace_id, created_at DESC);",
+                ON workspace_recordings(workspace_id, created_at DESC);
+
+            -- Dropbox backup config/state (schedule, retention, sealed OAuth
+            -- refresh token). KV so new settings don't need a migration.
+            CREATE TABLE IF NOT EXISTS backup_state (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+
+            -- One row per backup attempt (scheduled or manual).
+            CREATE TABLE IF NOT EXISTS backup_runs (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                started_at   TEXT    NOT NULL,
+                finished_at  TEXT,
+                status       TEXT    NOT NULL DEFAULT 'running',
+                source       TEXT    NOT NULL DEFAULT 'manual',
+                archive_name TEXT    NOT NULL DEFAULT '',
+                size_bytes   INTEGER NOT NULL DEFAULT 0,
+                error        TEXT    NOT NULL DEFAULT ''
+            );",
             )
             .map_err(|e| LicenseError::Other(format!("DB init: {}", e)))?;
         self.migrate()?;
@@ -1269,6 +1300,7 @@ mod website;
 mod shop;
 mod sessions;
 mod audit;
+mod backup;
 
 
 fn row_to_api_token_info(r: &rusqlite::Row<'_>) -> rusqlite::Result<ApiTokenInfo> {

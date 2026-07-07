@@ -39,12 +39,16 @@ uuid = { version = "1", features = ["v4"] }
 sha2 = "0.10"
 hex = "0.4"
 lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "builder", "smtp-transport"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 hmac = "0.12"
 url = "2"
 printpdf = { version = "0.7", default-features = false, features = ["embedded_images"] }
 ammonia = "4"
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+# Dropbox backups: tar.gz the data dir, encrypt with chunked AES-256-GCM.
+tar = "0.4"
+flate2 = "1"
+aes-gcm = "0.10"
 # S3 storage for workspace recordings. Susi only generates presigned URLs +
 # does HeadObject/DeleteObject; bytes never traverse the susi server.
 aws-config = { version = "1", features = ["behavior-version-latest"] }
@@ -56,6 +60,11 @@ susi_core = { path = "../susi_core" }
 reqwest = { workspace = true }
 tempfile = "3"
 rcgen = "0.13"
+# Mock Dropbox endpoint for backup integration tests + archive inspection.
+axum = "0.8"
+tokio = { workspace = true }
+tar = "0.4"
+flate2 = "1"
 totp-rs = { version = "5", features = ["gen_secret"] }
 # Sign synthetic Stripe webhook payloads in integration tests.
 hmac = "0.12"

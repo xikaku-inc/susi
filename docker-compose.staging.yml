@@ -40,6 +40,13 @@ services:
       - SUSI_S3_REGION=${SUSI_S3_REGION:-}
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      # Dropbox backups: shares the prod app + encryption key from
+      # /opt/susi/.env, but archives are always prefixed `staging` so
+      # rotation never touches the production archives.
+      - SUSI_DROPBOX_APP_KEY=${SUSI_DROPBOX_APP_KEY:-}
+      - SUSI_DROPBOX_APP_SECRET=${SUSI_DROPBOX_APP_SECRET:-}
+      - SUSI_BACKUP_KEY=${SUSI_BACKUP_KEY:-}
+      - SUSI_BACKUP_PREFIX=staging
     volumes:
       - susi-data-staging:/data
     healthcheck:

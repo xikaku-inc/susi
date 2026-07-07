@@ -2087,3 +2087,458 @@ fn test_set_user_role() {
         .expect("ghost role");
     assert_eq!(resp.status().as_u16(), 404, "unknown user must 404");
 }
+
+// ---------------------------------------------------------------------------
+// Dropbox backup tests (mock Dropbox server)
+// ---------------------------------------------------------------------------
+
+mod mock_dropbox {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    use axum::extract::State;
+    use axum::http::{HeaderMap, StatusCode};
+    use axum::routing::post;
+    use axum::{Form, Json, Router};
+    use serde_json::{json, Value};
+
+    #[derive(Default)]
+    pub struct MockState {
+        pub files: Mutex<HashMap<String, Vec<u8>>>,
+        pub sessions: Mutex<HashMap<String, Vec<u8>>>,
+        pub next_session: Mutex<u64>,
+    }
+
+    fn api_arg(headers: &HeaderMap) -> Value {
+        headers
+            .get("Dropbox-API-Arg")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or(Value::Null)
+    }
+
+    async fn oauth_token(Form(form): Form<HashMap<String, String>>) -> (StatusCode, Json<Value>) {
+        match form.get("grant_type").map(String::as_str) {
+            Some("authorization_code") if form.get("code").map(String::as_str) == Some("test-code") => (
+                StatusCode::OK,
+                Json(json!({"access_token": "at-1", "refresh_token": "rt-1", "token_type": "bearer"})),
+            ),
+            Some("refresh_token") if form.get("refresh_token").map(String::as_str) == Some("rt-1") => {
+                (StatusCode::OK, Json(json!({"access_token": "at-1", "token_type": "bearer"})))
+            }
+            _ => (StatusCode::BAD_REQUEST, Json(json!({"error": "invalid_grant"}))),
+        }
+    }
+
+    async fn session_start(
+        State(st): State<Arc<MockState>>,
+        headers: HeaderMap,
+        body: axum::body::Bytes,
+    ) -> Json<Value> {
+        let _ = api_arg(&headers);
+        let mut n = st.next_session.lock().unwrap();
+        *n += 1;
+        let id = format!("sess-{}", n);
+        st.sessions.lock().unwrap().insert(id.clone(), body.to_vec());
+        Json(json!({"session_id": id}))
+    }
+
+    async fn session_append(
+        State(st): State<Arc<MockState>>,
+        headers: HeaderMap,
+        body: axum::body::Bytes,
+    ) -> (StatusCode, Json<Value>) {
+        let arg = api_arg(&headers);
+        let id = arg["cursor"]["session_id"].as_str().unwrap_or("").to_string();
+        let offset = arg["cursor"]["offset"].as_u64().unwrap_or(0);
+        let mut sessions = st.sessions.lock().unwrap();
+        let Some(buf) = sessions.get_mut(&id) else {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": "unknown session"})));
+        };
+        if buf.len() as u64 != offset {
+            return (StatusCode::CONFLICT, Json(json!({"error": "bad offset"})));
+        }
+        buf.extend_from_slice(&body);
+        (StatusCode::OK, Json(json!({})))
+    }
+
+    async fn session_finish(
+        State(st): State<Arc<MockState>>,
+        headers: HeaderMap,
+        body: axum::body::Bytes,
+    ) -> (StatusCode, Json<Value>) {
+        let arg = api_arg(&headers);
+        let id = arg["cursor"]["session_id"].as_str().unwrap_or("").to_string();
+        let offset = arg["cursor"]["offset"].as_u64().unwrap_or(0);
+        let path = arg["commit"]["path"].as_str().unwrap_or("").to_string();
+        let mut sessions = st.sessions.lock().unwrap();
+        let Some(mut buf) = sessions.remove(&id) else {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": "unknown session"})));
+        };
+        if buf.len() as u64 != offset {
+            return (StatusCode::CONFLICT, Json(json!({"error": "bad offset"})));
+        }
+        buf.extend_from_slice(&body);
+        let name = path.trim_start_matches('/').to_string();
+        let size = buf.len();
+        st.files.lock().unwrap().insert(name.clone(), buf);
+        (StatusCode::OK, Json(json!({"name": name, "size": size})))
+    }
+
+    async fn list_folder(State(st): State<Arc<MockState>>) -> Json<Value> {
+        let files = st.files.lock().unwrap();
+        let entries: Vec<Value> = files
+            .iter()
+            .map(|(name, data)| json!({".tag": "file", "name": name, "size": data.len()}))
+            .collect();
+        Json(json!({"entries": entries, "has_more": false, "cursor": ""}))
+    }
+
+    async fn delete_v2(
+        State(st): State<Arc<MockState>>,
+        Json(body): Json<Value>,
+    ) -> (StatusCode, Json<Value>) {
+        let name = body["path"].as_str().unwrap_or("").trim_start_matches('/').to_string();
+        if st.files.lock().unwrap().remove(&name).is_some() {
+            (StatusCode::OK, Json(json!({"metadata": {".tag": "file", "name": name}})))
+        } else {
+            (StatusCode::CONFLICT, Json(json!({"error": "not_found"})))
+        }
+    }
+
+    async fn get_account() -> Json<Value> {
+        Json(json!({"email": "backup-tester@example.com", "name": {"display_name": "Backup Tester"}}))
+    }
+
+    async fn space_usage() -> Json<Value> {
+        Json(json!({"used": 1234, "allocation": {".tag": "individual", "allocated": 2_000_000_000u64}}))
+    }
+
+    async fn revoke() -> Json<Value> {
+        Json(json!({}))
+    }
+
+    /// Start the mock on an ephemeral port inside a dedicated thread+runtime
+    /// (the tests themselves are sync). Returns (base_url, state).
+    pub fn start() -> (String, Arc<MockState>) {
+        let state = Arc::new(MockState::default());
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock dropbox");
+        let addr = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let app_state = Arc::clone(&state);
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("mock dropbox runtime");
+            rt.block_on(async move {
+                let app = Router::new()
+                    .route("/oauth2/token", post(oauth_token))
+                    .route("/2/files/upload_session/start", post(session_start))
+                    .route("/2/files/upload_session/append_v2", post(session_append))
+                    .route("/2/files/upload_session/finish", post(session_finish))
+                    .route("/2/files/list_folder", post(list_folder))
+                    .route("/2/files/delete_v2", post(delete_v2))
+                    .route("/2/users/get_current_account", post(get_account))
+                    .route("/2/users/get_space_usage", post(space_usage))
+                    .route("/2/auth/token/revoke", post(revoke))
+                    .with_state(app_state);
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                axum::serve(listener, app).await.unwrap();
+            });
+        });
+        (format!("http://{}", addr), state)
+    }
+}
+
+const TEST_BACKUP_KEY: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+
+fn start_backup_server(mock_url: &str) -> TestServer {
+    TestServer::start_with_env(&[
+        ("SUSI_DROPBOX_APP_KEY", "test-app-key"),
+        ("SUSI_DROPBOX_APP_SECRET", "test-app-secret"),
+        ("SUSI_BACKUP_KEY", TEST_BACKUP_KEY),
+        ("SUSI_BACKUP_PREFIX", "test"),
+        ("SUSI_DROPBOX_API_BASE", mock_url),
+        ("SUSI_DROPBOX_CONTENT_BASE", mock_url),
+    ])
+}
+
+/// Poll the status endpoint until no run is in progress and the newest
+/// history row is terminal; returns the full status JSON.
+fn wait_backup_done(server: &TestServer, token: &str) -> Value {
+    let client = server.http();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let st: Value = client
+            .get(format!("{}/admin/backup/status", server.api_url))
+            .bearer_auth(token)
+            .send()
+            .expect("status")
+            .json()
+            .expect("status json");
+        let running = st["running"].as_bool().unwrap_or(false);
+        let newest_terminal = st["history"]
+            .as_array()
+            .and_then(|h| h.first())
+            .map(|r| r["status"] != "running")
+            .unwrap_or(false);
+        if !running && newest_terminal {
+            return st;
+        }
+        if Instant::now() > deadline {
+            panic!("backup did not finish in time: {}", st);
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+#[test]
+fn test_backup_end_to_end() {
+    let (mock_url, mock) = mock_dropbox::start();
+    let server = start_backup_server(&mock_url);
+    let token = server.admin_token();
+    let client = server.http();
+
+    // Not connected yet.
+    let st: Value = client
+        .get(format!("{}/admin/backup/status", server.api_url))
+        .bearer_auth(&token)
+        .send()
+        .expect("status")
+        .json()
+        .expect("status json");
+    assert_eq!(st["configured"], true);
+    assert_eq!(st["connected"], false);
+    assert_eq!(st["prefix"], "test");
+    assert_eq!(st["settings"]["keep_daily"], 7);
+
+    // Running a backup while disconnected must be rejected.
+    let resp = client
+        .post(format!("{}/admin/backup/run", server.api_url))
+        .bearer_auth(&token)
+        .send()
+        .expect("run");
+    assert_eq!(resp.status().as_u16(), 409);
+
+    // Connect URL points at the real Dropbox consent page.
+    let v: Value = client
+        .get(format!("{}/admin/backup/connect-url", server.api_url))
+        .bearer_auth(&token)
+        .send()
+        .expect("connect-url")
+        .json()
+        .expect("connect-url json");
+    let url = v["url"].as_str().unwrap();
+    assert!(url.starts_with("https://www.dropbox.com/oauth2/authorize"), "{}", url);
+    assert!(url.contains("client_id=test-app-key"));
+    assert!(url.contains("token_access_type=offline"));
+
+    // A bad code is rejected; the good one connects.
+    let resp = client
+        .post(format!("{}/admin/backup/connect", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({"code": "wrong"}))
+        .send()
+        .expect("connect");
+    assert_eq!(resp.status().as_u16(), 502);
+    let resp = client
+        .post(format!("{}/admin/backup/connect", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({"code": "test-code"}))
+        .send()
+        .expect("connect");
+    assert!(resp.status().is_success());
+    let v: Value = resp.json().unwrap();
+    assert_eq!(v["account"], "backup-tester@example.com");
+
+    let st: Value = client
+        .get(format!("{}/admin/backup/status", server.api_url))
+        .bearer_auth(&token)
+        .send()
+        .expect("status")
+        .json()
+        .expect("status json");
+    assert_eq!(st["connected"], true);
+    assert_eq!(st["account"], "backup-tester@example.com");
+    assert_eq!(st["space_allocated"], 2_000_000_000u64);
+
+    // Trigger a manual backup and wait for it to finish.
+    let resp = client
+        .post(format!("{}/admin/backup/run", server.api_url))
+        .bearer_auth(&token)
+        .send()
+        .expect("run");
+    assert!(resp.status().is_success(), "{}", resp.text().unwrap_or_default());
+    let st = wait_backup_done(&server, &token);
+    let run = &st["history"][0];
+    assert_eq!(run["status"], "ok", "backup failed: {}", run["error"]);
+    assert_eq!(run["source"], "manual");
+    let archive_name = run["archive_name"].as_str().unwrap().to_string();
+    assert!(archive_name.starts_with("test-backup-"), "{}", archive_name);
+    assert!(archive_name.ends_with(".tar.gz.enc"));
+    let size = run["size_bytes"].as_u64().unwrap();
+    assert!(size > 0);
+
+    // The mock now holds exactly that archive, byte count matching.
+    let uploaded = {
+        let files = mock.files.lock().unwrap();
+        assert_eq!(files.len(), 1, "expected exactly one archive: {:?}", files.keys());
+        files.get(&archive_name).expect("uploaded archive").clone()
+    };
+    assert_eq!(uploaded.len() as u64, size);
+
+    // Decrypt with the CLI subcommand and inspect the tarball.
+    let dir = tempfile::tempdir().unwrap();
+    let enc_path = dir.path().join(&archive_name);
+    std::fs::write(&enc_path, &uploaded).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_susi-server"))
+        .arg("decrypt-backup")
+        .arg(&enc_path)
+        .arg("--key")
+        .arg(TEST_BACKUP_KEY)
+        .output()
+        .expect("decrypt-backup");
+    assert!(
+        out.status.success(),
+        "decrypt-backup failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let tar_gz = enc_path.with_extension(""); // strips .enc
+    let gz = flate2::read::GzDecoder::new(std::fs::File::open(&tar_gz).unwrap());
+    let mut archive = tar::Archive::new(gz);
+    let mut entries: Vec<String> = Vec::new();
+    let mut db_head = Vec::new();
+    for entry in archive.entries().unwrap() {
+        let mut entry = entry.unwrap();
+        let path = entry.path().unwrap().to_string_lossy().replace('\\', "/");
+        if path == "licenses.db" {
+            use std::io::Read;
+            let mut buf = [0u8; 16];
+            entry.read_exact(&mut buf).unwrap();
+            db_head = buf.to_vec();
+        }
+        entries.push(path);
+    }
+    for expected in ["licenses.db", "private.pem", "db_secret.bin", "jwt_secret.bin"] {
+        assert!(entries.iter().any(|e| e == expected), "missing {} in {:?}", expected, entries);
+    }
+    assert_eq!(&db_head, b"SQLite format 3\0", "snapshot is not a SQLite db");
+
+    // Wrong key must fail loudly.
+    let out = Command::new(env!("CARGO_BIN_EXE_susi-server"))
+        .arg("decrypt-backup")
+        .arg(&enc_path)
+        .arg("--output")
+        .arg(dir.path().join("bad.tar.gz"))
+        .arg("--key")
+        .arg("ff0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1eff")
+        .output()
+        .expect("decrypt-backup wrong key");
+    assert!(!out.status.success(), "wrong key must fail");
+
+    // Disconnect revokes and clears the connection.
+    let resp = client
+        .post(format!("{}/admin/backup/disconnect", server.api_url))
+        .bearer_auth(&token)
+        .send()
+        .expect("disconnect");
+    assert!(resp.status().is_success());
+    let st: Value = client
+        .get(format!("{}/admin/backup/status", server.api_url))
+        .bearer_auth(&token)
+        .send()
+        .expect("status")
+        .json()
+        .expect("status json");
+    assert_eq!(st["connected"], false);
+}
+
+#[test]
+fn test_backup_rotation_deletes_stale_archives() {
+    let (mock_url, mock) = mock_dropbox::start();
+    let server = start_backup_server(&mock_url);
+    let token = server.admin_token();
+    let client = server.http();
+
+    // Aggressive retention: only 1 daily, nothing else. The 48 h safety net
+    // still protects fresh archives, so use ancient timestamps for the stale
+    // ones and a foreign prefix + junk file to prove rotation leaves them be.
+    let resp = client
+        .put(format!("{}/admin/backup/settings", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({
+            "enabled": false, "hour_utc": 3, "include_releases": false,
+            "keep_daily": 1, "keep_weekly": 0, "keep_monthly": 0
+        }))
+        .send()
+        .expect("settings");
+    assert!(resp.status().is_success(), "{}", resp.text().unwrap_or_default());
+
+    {
+        let mut files = mock.files.lock().unwrap();
+        files.insert("test-backup-20200103-030000.tar.gz.enc".into(), vec![1]);
+        files.insert("test-backup-20200104-030000.tar.gz.enc".into(), vec![2]);
+        files.insert("prod-backup-20200101-030000.tar.gz.enc".into(), vec![3]);
+        files.insert("notes.txt".into(), vec![4]);
+    }
+
+    let resp = client
+        .post(format!("{}/admin/backup/connect", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({"code": "test-code"}))
+        .send()
+        .expect("connect");
+    assert!(resp.status().is_success());
+    let resp = client
+        .post(format!("{}/admin/backup/run", server.api_url))
+        .bearer_auth(&token)
+        .send()
+        .expect("run");
+    assert!(resp.status().is_success());
+    let st = wait_backup_done(&server, &token);
+    assert_eq!(st["history"][0]["status"], "ok", "backup failed: {}", st["history"][0]["error"]);
+
+    let files = mock.files.lock().unwrap();
+    let names: Vec<&String> = files.keys().collect();
+    // Both stale own-prefix archives rotated out; foreign prefix + junk kept.
+    assert!(!files.contains_key("test-backup-20200103-030000.tar.gz.enc"), "{:?}", names);
+    assert!(!files.contains_key("test-backup-20200104-030000.tar.gz.enc"), "{:?}", names);
+    assert!(files.contains_key("prod-backup-20200101-030000.tar.gz.enc"), "{:?}", names);
+    assert!(files.contains_key("notes.txt"), "{:?}", names);
+    // Exactly one fresh archive of our own remains.
+    let own: Vec<&String> = files.keys().filter(|n| n.starts_with("test-backup-")).collect();
+    assert_eq!(own.len(), 1, "{:?}", names);
+}
+
+#[test]
+fn test_backup_admin_endpoints_require_admin() {
+    let (mock_url, _mock) = mock_dropbox::start();
+    let server = start_backup_server(&mock_url);
+    let client = server.http();
+    // Unauthenticated requests bounce.
+    for (method, path) in [
+        ("GET", "admin/backup/status"),
+        ("PUT", "admin/backup/settings"),
+        ("GET", "admin/backup/connect-url"),
+        ("POST", "admin/backup/connect"),
+        ("POST", "admin/backup/disconnect"),
+        ("POST", "admin/backup/run"),
+    ] {
+        let url = format!("{}/{}", server.api_url, path);
+        // Bodies must deserialize, otherwise axum answers 422 before the
+        // handler's auth check ever runs.
+        let req = match (method, path) {
+            ("GET", _) => client.get(&url),
+            ("PUT", _) => client.put(&url).json(&json!({
+                "enabled": false, "hour_utc": 3, "include_releases": false,
+                "keep_daily": 7, "keep_weekly": 4, "keep_monthly": 12
+            })),
+            (_, "admin/backup/connect") => client.post(&url).json(&json!({"code": "x"})),
+            _ => client.post(&url),
+        };
+        let resp = req.send().expect(path);
+        assert_eq!(resp.status().as_u16(), 401, "{} {} must require auth", method, path);
+    }
+}
+

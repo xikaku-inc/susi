@@ -6,6 +6,7 @@ mod invoice_pdf;
 mod contact;
 mod s3;
 mod auth;
+mod backup;
 mod client_api;
 mod licenses;
 mod users;
@@ -14,7 +15,7 @@ mod workspaces;
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration as StdDuration, Instant};
 
@@ -48,6 +49,9 @@ use crate::email::{EmailConfig, EmailService};
 #[derive(Parser)]
 #[command(name = "susi-server", about = "Susi License Server")]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<CliCommand>,
+
     /// Path to private key PEM file
     #[arg(long, default_value = "private.pem")]
     private_key: String,
@@ -164,6 +168,52 @@ struct Cli {
     /// Cloudflare Turnstile site key (public, embedded in the form).
     #[arg(long, env = "SUSI_TURNSTILE_SITE_KEY", default_value = "")]
     turnstile_site_key: String,
+
+    // -------- Dropbox backups --------
+    //
+    // All three must be set to enable the feature; the admin then connects
+    // the Dropbox account once via the dashboard (Backups page).
+
+    /// Dropbox app key (scoped app with app-folder access). Empty disables backups.
+    #[arg(long, env = "SUSI_DROPBOX_APP_KEY", default_value = "")]
+    dropbox_app_key: String,
+
+    /// Dropbox app secret.
+    #[arg(long, env = "SUSI_DROPBOX_APP_SECRET", default_value = "")]
+    dropbox_app_secret: String,
+
+    /// 64 hex chars (32 bytes). Archives are encrypted with this key before
+    /// upload; keep a copy off-server or the backups are unreadable.
+    #[arg(long, env = "SUSI_BACKUP_KEY", default_value = "")]
+    backup_key: String,
+
+    /// Archive name prefix, distinguishes instances sharing one app folder
+    /// (e.g. `prod` / `staging`).
+    #[arg(long, env = "SUSI_BACKUP_PREFIX", default_value = "susi")]
+    backup_prefix: String,
+
+    /// Override Dropbox endpoints (integration tests only).
+    #[arg(long, env = "SUSI_DROPBOX_API_BASE", default_value = "https://api.dropboxapi.com", hide = true)]
+    dropbox_api_base: String,
+
+    #[arg(long, env = "SUSI_DROPBOX_CONTENT_BASE", default_value = "https://content.dropboxapi.com", hide = true)]
+    dropbox_content_base: String,
+}
+
+#[derive(clap::Subcommand)]
+enum CliCommand {
+    /// Decrypt a Dropbox backup archive produced by this server.
+    /// Restore: decrypt, then untar into a fresh data volume.
+    DecryptBackup {
+        /// Path to the downloaded .tar.gz.enc archive.
+        input: String,
+        /// Output path (default: input without the .enc suffix).
+        #[arg(long, short)]
+        output: Option<String>,
+        /// The 64-hex-char backup key (SUSI_BACKUP_KEY).
+        #[arg(long, env = "SUSI_BACKUP_KEY")]
+        key: String,
+    },
 }
 
 struct AppState {
@@ -196,6 +246,9 @@ struct AppState {
     turnstile_site_key: String,
     http: reqwest::Client,
     s3: Option<s3::S3Storage>,
+    backup: backup::BackupConfig,
+    /// Guards against concurrent backup runs (scheduler + manual trigger).
+    backup_running: AtomicBool,
 }
 
 // Sign-in code TTL: long enough for a user to switch to their mail client and
@@ -2463,6 +2516,10 @@ async fn main() -> Result<()> {
     env_logger::init();
     let cli = Cli::parse();
 
+    if let Some(CliCommand::DecryptBackup { input, output, key }) = &cli.command {
+        return backup::cli_decrypt(input, output.as_deref(), key);
+    }
+
     log::info!("Loading private key from {}", cli.private_key);
     let priv_pem = std::fs::read_to_string(&cli.private_key)
         .with_context(|| format!("Failed to read private key from {}", cli.private_key))?;
@@ -2602,6 +2659,34 @@ async fn main() -> Result<()> {
         }
     };
 
+    // Dropbox backups. Uploads need far longer per-request timeouts than the
+    // shared 15 s client, so the backup module gets its own client.
+    let backup_config = backup::BackupConfig {
+        app_key: cli.dropbox_app_key,
+        app_secret: cli.dropbox_app_secret,
+        archive_key: backup::parse_archive_key(&cli.backup_key)
+            .context("Invalid SUSI_BACKUP_KEY")?,
+        prefix: cli.backup_prefix,
+        private_key_path: cli.private_key.clone(),
+        api_base: cli.dropbox_api_base.trim_end_matches('/').to_string(),
+        content_base: cli.dropbox_content_base.trim_end_matches('/').to_string(),
+        http: reqwest::Client::builder()
+            .connect_timeout(StdDuration::from_secs(15))
+            .timeout(StdDuration::from_secs(300))
+            .build()
+            .context("Failed to build backup HTTP client")?,
+    };
+    if backup_config.configured() {
+        log::info!("Dropbox backups configured (prefix `{}`)", backup_config.prefix);
+        match db.mark_interrupted_backup_runs() {
+            Ok(n) if n > 0 => log::warn!("Marked {} interrupted backup run(s) from a previous process", n),
+            Err(e) => log::warn!("Could not mark interrupted backup runs: {}", e),
+            _ => {}
+        }
+    } else {
+        log::info!("Dropbox backups not configured (SUSI_DROPBOX_APP_KEY / SUSI_DROPBOX_APP_SECRET / SUSI_BACKUP_KEY)");
+    }
+
     let state = Arc::new(AppState {
         db: Mutex::new(db),
         private_key,
@@ -2626,7 +2711,14 @@ async fn main() -> Result<()> {
         turnstile_site_key: cli.turnstile_site_key,
         http,
         s3: s3_storage,
+        backup: backup_config,
+        backup_running: AtomicBool::new(false),
     });
+
+    // Nightly Dropbox backup scheduler (no-op until enabled + connected).
+    if state.backup.configured() {
+        backup::spawn_scheduler(Arc::clone(&state));
+    }
 
     // Periodic lease cleanup. Replaces the per-read DELETE that ran inside
     // every `get_license_by_key` call: under load, every heartbeat issued a
@@ -2941,6 +3033,16 @@ async fn main() -> Result<()> {
             get(website::handle_admin_get_site_settings)
                 .put(website::handle_admin_put_site_settings),
         )
+        // Dropbox backups (JWT, admin-only)
+        .route("/api/v1/admin/backup/status", get(backup::handle_backup_status))
+        .route(
+            "/api/v1/admin/backup/settings",
+            axum::routing::put(backup::handle_backup_put_settings),
+        )
+        .route("/api/v1/admin/backup/connect-url", get(backup::handle_backup_connect_url))
+        .route("/api/v1/admin/backup/connect", post(backup::handle_backup_connect))
+        .route("/api/v1/admin/backup/disconnect", post(backup::handle_backup_disconnect))
+        .route("/api/v1/admin/backup/run", post(backup::handle_backup_run))
         // Admin audit trail (JWT, admin-only)
         .route("/api/v1/audit", get(handle_list_audit))
         // Output security headers on every response. Inline script/style stay

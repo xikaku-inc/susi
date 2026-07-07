@@ -1137,6 +1137,115 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
     </div>
 </div><!-- /page-audit -->
 
+<!-- Backups (Dropbox) -->
+<div id="page-backups" class="dash-page">
+    <div style="margin-top:32px;margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
+        <h2 style="font-size:16px;font-weight:600;">Backups — Dropbox</h2>
+        <div style="display:flex;gap:8px;">
+            <button class="secondary" onclick="loadBackupPage()">Refresh</button>
+            <button id="backupRunBtn" onclick="runBackupNow()">Back up now</button>
+        </div>
+    </div>
+
+    <div id="backupNotConfigured" class="card" style="display:none;margin-bottom:20px;">
+        <p style="font-size:13px;margin:0;">
+            Backups are not configured on this server. Set <code>SUSI_DROPBOX_APP_KEY</code>,
+            <code>SUSI_DROPBOX_APP_SECRET</code> and <code>SUSI_BACKUP_KEY</code> in the host
+            environment (<code>/opt/susi/.env</code>) and restart the container.
+        </p>
+    </div>
+
+    <div id="backupMain" style="display:none;">
+        <div class="card settings-card" style="margin-bottom:20px;">
+            <div class="detail-header">
+                <h3>Dropbox connection</h3>
+                <span id="backupConnBadge" class="badge revoked">not connected</span>
+            </div>
+            <div class="detail-body">
+                <div id="backupConnInfo" style="font-size:13px;margin-bottom:10px;"></div>
+                <div id="backupConnectFlow" style="display:none;">
+                    <p style="font-size:12px;color:var(--text2);margin:0 0 10px;">
+                        1. Open the Dropbox authorization page and approve access.
+                        2. Dropbox shows a one-time code — paste it below and connect.
+                        Backups only ever see the app's own folder (Apps/&lt;app name&gt;).
+                    </p>
+                    <button class="secondary" onclick="openBackupAuthorize()">Open Dropbox authorization</button>
+                    <div class="form-row" style="margin-top:12px;">
+                        <label for="backupAuthCode">Authorization code</label>
+                        <input type="text" id="backupAuthCode" placeholder="Paste the code shown by Dropbox">
+                    </div>
+                    <button onclick="submitBackupCode()">Connect Dropbox</button>
+                </div>
+                <div id="backupDisconnectRow" style="display:none;">
+                    <button class="secondary" onclick="disconnectBackup()">Disconnect</button>
+                </div>
+                <div id="backupConnError" class="form-error" style="display:none;margin-top:10px;"></div>
+            </div>
+        </div>
+
+        <div class="card settings-card" style="margin-bottom:20px;">
+            <div class="detail-header">
+                <h3>Schedule &amp; retention</h3>
+            </div>
+            <div class="detail-body">
+                <div class="form-row">
+                    <label style="display:flex;align-items:center;gap:8px;">
+                        <input type="checkbox" id="backupEnabled" style="width:auto;"> Nightly backup enabled
+                    </label>
+                </div>
+                <div class="form-row">
+                    <label for="backupHour">Backup hour (UTC)</label>
+                    <input type="number" id="backupHour" min="0" max="23" style="width:100px;">
+                    <div class="field-help">One backup per day at this hour. Failed runs are retried hourly.</div>
+                </div>
+                <div class="form-row">
+                    <label style="display:flex;align-items:center;gap:8px;">
+                        <input type="checkbox" id="backupIncludeReleases" style="width:auto;"> Include release binaries
+                    </label>
+                    <div class="field-help">Off by default: release installers are large, rebuildable artifacts. The database, signing key, secrets and docs are always included.</div>
+                </div>
+                <div style="display:flex;gap:16px;flex-wrap:wrap;">
+                    <div class="form-row">
+                        <label for="backupKeepDaily">Keep daily</label>
+                        <input type="number" id="backupKeepDaily" min="1" max="60" style="width:100px;">
+                    </div>
+                    <div class="form-row">
+                        <label for="backupKeepWeekly">Keep weekly</label>
+                        <input type="number" id="backupKeepWeekly" min="0" max="52" style="width:100px;">
+                    </div>
+                    <div class="form-row">
+                        <label for="backupKeepMonthly">Keep monthly</label>
+                        <input type="number" id="backupKeepMonthly" min="0" max="120" style="width:100px;">
+                    </div>
+                </div>
+                <div class="field-help">Rotation keeps the newest archive per day/week/month up to these counts and deletes the rest. Anything younger than 48 h is never deleted.</div>
+                <div id="backupSetError" class="form-error" style="display:none;"></div>
+            </div>
+            <div class="form-footer">
+                <button class="primary" onclick="saveBackupSettings()">Save settings</button>
+            </div>
+        </div>
+
+        <div class="card" style="padding:0;">
+            <table style="width:100%;">
+                <thead>
+                    <tr>
+                        <th style="width:170px;">Started</th>
+                        <th style="width:90px;">Status</th>
+                        <th style="width:100px;">Trigger</th>
+                        <th>Archive</th>
+                        <th style="width:100px;">Size</th>
+                        <th>Error</th>
+                    </tr>
+                </thead>
+                <tbody id="backupHistoryBody">
+                    <tr><td colspan="6" class="empty-state"><p>Loading...</p></td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div><!-- /page-backups -->
+
 <!-- Website Pages -->
 <div id="page-website" class="dash-page">
     <div style="margin-top:8px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
@@ -2048,6 +2157,7 @@ function showPage(name) {
     if (page) page.classList.add('active');
     if (name === 'mylicenses' && authToken) loadMyLicenses();
     if (name === 'audit' && authToken) loadAudit();
+    if (name === 'backups' && authToken) loadBackupPage();
     renderNav();
     document.querySelectorAll('#topNav a').forEach(a => {
         a.classList.toggle('active', a.dataset.page === name);
@@ -2068,6 +2178,7 @@ function renderNav() {
         { page: 'website', label: 'Website', href: '#/website', show: !!authToken && isAdmin },
         { page: 'shop', label: 'Shop', href: '#/shop', show: !!authToken && isAdmin },
         { page: 'audit', label: 'Audit', href: '#/audit', show: !!authToken && isAdmin },
+        { page: 'backups', label: 'Backups', href: '#/backups', show: !!authToken && isAdmin },
     ];
     nav.innerHTML = items.filter(i => i.show).map(i =>
         '<a href="' + i.href + '" data-page="' + i.page + '">' + i.label + '</a>'
@@ -5478,6 +5589,174 @@ async function loadAudit(more) {
         document.getElementById('auditLoadMore').style.display = entries.length === 100 ? '' : 'none';
     } catch (e) {
         tbody.innerHTML = '<tr><td colspan="5" class="empty-state"><p>Failed to load: ' + escHtml(e.message) + '</p></td></tr>';
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Backups (Dropbox)
+// ---------------------------------------------------------------------------
+
+let backupPollTimer = null;
+let backupWasRunning = false;
+
+async function loadBackupPage() {
+    if (backupPollTimer) { clearTimeout(backupPollTimer); backupPollTimer = null; }
+    const errEl = document.getElementById('backupConnError');
+    errEl.style.display = 'none';
+    try {
+        const resp = await fetch(API + '/admin/backup/status', { headers: authHeaders() });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        renderBackupPage(await resp.json());
+    } catch (e) {
+        errEl.textContent = 'Failed to load backup status: ' + e.message;
+        errEl.style.display = '';
+        document.getElementById('backupMain').style.display = '';
+    }
+}
+
+function renderBackupPage(st) {
+    document.getElementById('backupNotConfigured').style.display = st.configured ? 'none' : '';
+    document.getElementById('backupMain').style.display = st.configured ? '' : 'none';
+    document.getElementById('backupRunBtn').style.display = (st.configured && st.connected) ? '' : 'none';
+    if (!st.configured) return;
+
+    const badge = document.getElementById('backupConnBadge');
+    const info = document.getElementById('backupConnInfo');
+    if (st.running) {
+        badge.className = 'badge expired';
+        badge.textContent = 'backup running…';
+    } else {
+        badge.className = st.connected ? 'badge active' : 'badge revoked';
+        badge.textContent = st.connected ? 'connected' : 'not connected';
+    }
+    if (st.connected) {
+        let space = '';
+        if (st.space_used != null && st.space_allocated) {
+            space = ' — ' + formatSize(st.space_used) + ' of ' + formatSize(st.space_allocated) + ' used';
+        }
+        info.innerHTML = 'Account: <strong>' + escHtml(st.account || '(unknown)') + '</strong>'
+            + escHtml(space)
+            + '<br><span style="color:var(--text2);font-size:12px;">Archives are named '
+            + escHtml(st.prefix) + '-backup-&lt;timestamp&gt;.tar.gz.enc in the app folder.</span>';
+    } else {
+        info.textContent = '';
+    }
+    document.getElementById('backupConnectFlow').style.display = st.connected ? 'none' : '';
+    document.getElementById('backupDisconnectRow').style.display = st.connected ? '' : 'none';
+
+    const s = st.settings || {};
+    document.getElementById('backupEnabled').checked = !!s.enabled;
+    document.getElementById('backupHour').value = s.hour_utc ?? 3;
+    document.getElementById('backupIncludeReleases').checked = !!s.include_releases;
+    document.getElementById('backupKeepDaily').value = s.keep_daily ?? 7;
+    document.getElementById('backupKeepWeekly').value = s.keep_weekly ?? 4;
+    document.getElementById('backupKeepMonthly').value = s.keep_monthly ?? 12;
+
+    const tbody = document.getElementById('backupHistoryBody');
+    const rows = (st.history || []).map(r => {
+        const cls = r.status === 'ok' ? 'active' : (r.status === 'running' ? 'expired' : 'revoked');
+        return '<tr>'
+            + '<td style="white-space:nowrap;color:var(--text2);">' + escHtml(r.started_at ? new Date(r.started_at).toLocaleString() : '') + '</td>'
+            + '<td><span class="badge ' + cls + '">' + escHtml(r.status) + '</span></td>'
+            + '<td>' + escHtml(r.source) + '</td>'
+            + '<td><code style="font-size:11px;">' + escHtml(r.archive_name || '') + '</code></td>'
+            + '<td>' + (r.size_bytes ? formatSize(r.size_bytes) : '') + '</td>'
+            + '<td style="color:var(--red);font-size:12px;">' + escHtml(r.error || '') + '</td>'
+            + '</tr>';
+    }).join('');
+    tbody.innerHTML = rows || '<tr><td colspan="6" class="empty-state"><p>No backups yet.</p></td></tr>';
+
+    if (st.running) {
+        backupWasRunning = true;
+        backupPollTimer = setTimeout(loadBackupPage, 3000);
+    } else if (backupWasRunning) {
+        backupWasRunning = false;
+    }
+}
+
+async function openBackupAuthorize() {
+    const errEl = document.getElementById('backupConnError');
+    errEl.style.display = 'none';
+    try {
+        const resp = await fetch(API + '/admin/backup/connect-url', { headers: authHeaders() });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status));
+        window.open(data.url, '_blank', 'noopener');
+    } catch (e) {
+        errEl.textContent = e.message;
+        errEl.style.display = '';
+    }
+}
+
+async function submitBackupCode() {
+    const errEl = document.getElementById('backupConnError');
+    errEl.style.display = 'none';
+    const code = document.getElementById('backupAuthCode').value.trim();
+    if (!code) { errEl.textContent = 'Paste the authorization code first.'; errEl.style.display = ''; return; }
+    try {
+        const resp = await fetch(API + '/admin/backup/connect', {
+            method: 'POST', headers: authHeaders(), body: JSON.stringify({ code })
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status));
+        document.getElementById('backupAuthCode').value = '';
+        loadBackupPage();
+    } catch (e) {
+        errEl.textContent = e.message;
+        errEl.style.display = '';
+    }
+}
+
+async function disconnectBackup() {
+    if (!confirm('Disconnect Dropbox? Scheduled backups will stop until reconnected. Existing archives stay in Dropbox.')) return;
+    const errEl = document.getElementById('backupConnError');
+    errEl.style.display = 'none';
+    try {
+        const resp = await fetch(API + '/admin/backup/disconnect', { method: 'POST', headers: authHeaders() });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status));
+        loadBackupPage();
+    } catch (e) {
+        errEl.textContent = e.message;
+        errEl.style.display = '';
+    }
+}
+
+async function saveBackupSettings() {
+    const errEl = document.getElementById('backupSetError');
+    errEl.style.display = 'none';
+    const body = {
+        enabled: document.getElementById('backupEnabled').checked,
+        hour_utc: parseInt(document.getElementById('backupHour').value, 10) || 0,
+        include_releases: document.getElementById('backupIncludeReleases').checked,
+        keep_daily: parseInt(document.getElementById('backupKeepDaily').value, 10) || 7,
+        keep_weekly: parseInt(document.getElementById('backupKeepWeekly').value, 10) || 0,
+        keep_monthly: parseInt(document.getElementById('backupKeepMonthly').value, 10) || 0,
+    };
+    try {
+        const resp = await fetch(API + '/admin/backup/settings', {
+            method: 'PUT', headers: authHeaders(), body: JSON.stringify(body)
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status));
+        loadBackupPage();
+    } catch (e) {
+        errEl.textContent = e.message;
+        errEl.style.display = '';
+    }
+}
+
+async function runBackupNow() {
+    const errEl = document.getElementById('backupConnError');
+    errEl.style.display = 'none';
+    try {
+        const resp = await fetch(API + '/admin/backup/run', { method: 'POST', headers: authHeaders() });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status));
+        setTimeout(loadBackupPage, 500);
+    } catch (e) {
+        errEl.textContent = e.message;
+        errEl.style.display = '';
     }
 }
 

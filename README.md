@@ -894,6 +894,50 @@ Served at the `/site` chrome and disabled (503) unless `SUSI_CONTACT_TO_ADDR` an
 | `GET` | `/api/v1/contact/config` | None | Returns whether the form is enabled and the public Turnstile site key |
 | `POST` | `/api/v1/contact` | None | Submit a contact-form message |
 
+## Dropbox Backups
+
+Rotating, encrypted offsite backups of the whole `/data` volume (SQLite DB via
+`VACUUM INTO`, `private.pem`, `db_secret.bin`, `jwt_secret.bin`, `docs/`,
+optionally `releases/`) to a Dropbox App Folder. Redundant to the primary AWS
+backups; managed from the dashboard's admin-only Backups page.
+
+Setup:
+
+1. Create a scoped Dropbox app (App folder access) with permissions
+   `files.content.write`, `files.content.read`, `files.metadata.read`.
+2. Set in the server environment (`/opt/susi/.env`):
+   - `SUSI_DROPBOX_APP_KEY` / `SUSI_DROPBOX_APP_SECRET`
+   - `SUSI_BACKUP_KEY` - 64 hex chars (`openssl rand -hex 32`). Archives are
+     encrypted with chunked AES-256-GCM under this key before upload. Keep a
+     copy off-server (password manager) - without it backups are unreadable.
+   - `SUSI_BACKUP_PREFIX` - archive name prefix (`prod` / `staging`); rotation
+     only ever touches archives with the instance's own prefix.
+3. On the dashboard Backups page: Connect Dropbox (opens the consent page,
+   paste the one-time code back), then enable the nightly backup.
+
+Scheduling: one backup per day at the configured UTC hour, retried hourly on
+failure. Rotation is grandfather-father-son - newest archive per day/week/month
+up to the configured counts (default 7/4/12), and nothing younger than 48 h is
+ever deleted. The OAuth refresh token is stored sealed with the DB at-rest key;
+access tokens are minted per run and never persisted.
+
+Restore:
+
+```bash
+# Download the archive from Dropbox (Apps/<app name>/), then:
+susi-server decrypt-backup prod-backup-20260706-030000.tar.gz.enc --key <SUSI_BACKUP_KEY>
+tar -xzf prod-backup-20260706-030000.tar.gz   # unpack into a fresh /data volume
+```
+
+| Method | Endpoint | Auth | Description |
+|---|---|---|---|
+| `GET` | `/api/v1/admin/backup/status` | Admin JWT | Settings, connection state, run history |
+| `PUT` | `/api/v1/admin/backup/settings` | Admin JWT | Schedule + retention |
+| `GET` | `/api/v1/admin/backup/connect-url` | Admin JWT | Dropbox consent URL |
+| `POST` | `/api/v1/admin/backup/connect` | Admin JWT | Exchange pasted code for a refresh token |
+| `POST` | `/api/v1/admin/backup/disconnect` | Admin JWT | Revoke + forget the connection |
+| `POST` | `/api/v1/admin/backup/run` | Admin JWT | Trigger a manual backup |
+
 ## Deploying to AWS Lightsail
 
 The project includes a Dockerfile, docker-compose.yml, and a deploy script for one-command deployment to an AWS Lightsail (or any EC2/VPS) instance.
