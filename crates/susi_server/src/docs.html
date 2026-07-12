@@ -79,7 +79,11 @@ body {
     padding: 0 20px;
     position: sticky;
     top: 0;
-    z-index: 10;
+    /* Above the mobile sidebar drawer (150) and its overlay (140) so the
+       header dropdowns (kebab, More) paint over them; below the image
+       lightbox (200). The sticky header is a stacking context, so its
+       children can never exceed this value. */
+    z-index: 160;
 }
 .header h1 {
     font-size: 16px;
@@ -91,6 +95,7 @@ body {
 .header-left .brand {
     color: inherit; text-decoration: none;
     font-size: 15px; font-weight: 600;
+    white-space: nowrap;
 }
 .top-nav { display: flex; gap: 4px; align-items: center; }
 .top-nav a {
@@ -101,6 +106,7 @@ body {
     font-size: 13px;
     font-weight: 500;
     border: 1px solid transparent;
+    white-space: nowrap;
 }
 .top-nav a:hover { background: var(--bg3); color: var(--text1); }
 .top-nav a.active {
@@ -118,6 +124,7 @@ body {
     font-weight: 500;
     font-family: inherit;
     cursor: pointer;
+    white-space: nowrap;
 }
 .nav-group > button:hover { background: var(--bg3); color: var(--text1); }
 .nav-group-menu {
@@ -142,6 +149,8 @@ body {
     font-size: 13px;
 }
 .nav-group-menu a:hover { background: var(--bg3); }
+.nav-group-menu a.active { color: var(--accent); }
+.nav-group-menu .menu-divider { height: 1px; background: var(--border); margin: 4px 0; }
 /* Mobile-only header kebab menu; the edit/login controls are DOM-moved into
    it (and the pickers into the sidebar drawer) below 720px. */
 .docs-more { position: relative; display: none; }
@@ -170,7 +179,10 @@ body {
     border-radius: var(--radius);
     font-size: 13px;
     font-family: "SF Mono", "Consolas", monospace;
-    min-width: 130px;
+    /* Shrinkable: the pickers absorb width pressure before anything else
+       in the header has to give. */
+    min-width: 60px;
+    max-width: 200px;
 }
 .release-picker:focus { outline: 1px solid var(--accent); }
 .btn {
@@ -183,6 +195,7 @@ body {
     cursor: pointer;
     font-family: inherit;
     min-height: 32px;
+    white-space: nowrap;
 }
 .btn:hover { background: var(--bg3); }
 .nav-toggle {
@@ -584,6 +597,12 @@ body {
     :root { --sidebar-width: 220px; }
     .content { padding: 28px 28px; }
 }
+@media (max-width: 1150px) {
+    /* Mid widths: the edit/login buttons collapse into the header kebab and
+       the workspace banner goes; pickers shrink but stay in the header. */
+    #wsBanner { display: none !important; }
+    .docs-more { display: inline-block; }
+}
 @media (max-width: 720px) {
     .layout,
     .layout.no-toc { grid-template-columns: 1fr; }
@@ -610,10 +629,6 @@ body {
     .header-left { gap: 8px; }
     .header-left .brand { font-size: 14px; }
     .top-nav { display: none; }
-    /* Header slims down to hamburger, brand, theme, kebab. The workspace
-       banner, pickers, and edit/login buttons move into drawer + kebab. */
-    #wsBanner { display: none !important; }
-    .docs-more { display: inline-block; }
     .site-nav-mobile {
         display: block;
         padding: 4px 8px 8px;
@@ -893,27 +908,57 @@ async function renderTopNav() {
         { label: 'Backups',       href: '/#/backups',    active: false,  show: !!authToken() && isAdmin, group: 'admin' },
     ];
     const visible = items.filter(i => i.show);
-    const link = i => '<a href="' + i.href + '"' + (i.active ? ' class="active"' : '') + '>' + i.label + '</a>';
-    const plainLink = i => '<a href="' + i.href + '">' + i.label + '</a>';
-    const flat = visible.filter(i => !i.group);
-    const admin = visible.filter(i => i.group === 'admin');
-    let html = flat.map(link).join('');
-    if (admin.length) {
-        html += '<span class="nav-group">' +
-            '<button type="button" onclick="toggleNavGroup(event)">Admin &#9662;</button>' +
-            '<div id="navAdminMenu" class="nav-group-menu">' + admin.map(plainLink).join('') + '</div></span>';
-    }
-    nav.innerHTML = html;
+    docNavFlat = visible.filter(i => !i.group);
+    docNavAdmin = visible.filter(i => i.group === 'admin');
+    layoutDocsNav();
     // Mobile: the same links live in the collapsed "Susi Server" accordion
     // at the top of the sidebar drawer.
     const siteNav = document.getElementById('siteNavLinks');
     if (siteNav) {
-        siteNav.innerHTML = flat.map(plainLink).join('') +
-            (admin.length ? '<div class="site-nav-label">Admin</div>' + admin.map(plainLink).join('') : '');
+        siteNav.innerHTML = docNavFlat.map(docNavPlain).join('') +
+            (docNavAdmin.length ? '<div class="site-nav-label">Admin</div>' + docNavAdmin.map(docNavPlain).join('') : '');
     }
     document.getElementById('navLoginBtn').style.display = authToken() ? 'none' : '';
     document.getElementById('navLogoutBtn').style.display = authToken() ? '' : 'none';
 }
+
+// Priority+ top nav (keep in sync with layoutTopNav() in dashboard.html):
+// flat items that don't fit the header width collapse into the trailing
+// dropdown, labelled "Admin" while it only holds the admin group and "More"
+// once flat items overflow into it.
+let docNavFlat = [], docNavAdmin = [];
+const docNavLink = i => '<a href="' + i.href + '"' + (i.active ? ' class="active"' : '') + '>' + i.label + '</a>';
+const docNavPlain = i => '<a href="' + i.href + '">' + i.label + '</a>';
+
+function renderDocsNavHtml(n) {
+    const shown = docNavFlat.slice(0, n);
+    const overflow = docNavFlat.slice(n);
+    let html = shown.map(docNavLink).join('');
+    if (overflow.length || docNavAdmin.length) {
+        const label = overflow.length ? 'More' : 'Admin';
+        const divider = (overflow.length && docNavAdmin.length) ? '<div class="menu-divider"></div>' : '';
+        html += '<span class="nav-group">' +
+            '<button type="button" onclick="toggleNavGroup(event)">' + label + ' &#9662;</button>' +
+            '<div id="navAdminMenu" class="nav-group-menu">' +
+            overflow.map(docNavLink).join('') + divider + docNavAdmin.map(docNavPlain).join('') + '</div></span>';
+    }
+    document.getElementById('topNav').innerHTML = html;
+}
+
+function layoutDocsNav() {
+    const header = document.querySelector('.header');
+    if (!header || !document.getElementById('topNav')) return;
+    for (let n = docNavFlat.length; n >= 0; n--) {
+        renderDocsNavHtml(n);
+        if (header.scrollWidth <= header.clientWidth) break;
+    }
+}
+
+let docNavResizeTimer;
+window.addEventListener('resize', () => {
+    clearTimeout(docNavResizeTimer);
+    docNavResizeTimer = setTimeout(layoutDocsNav, 120);
+});
 
 function toggleNavGroup(event) {
     event.stopPropagation();
@@ -937,29 +982,36 @@ document.addEventListener('click', () => {
     });
 });
 
-// Below 720px the pickers move into the sidebar drawer and the edit/login
-// buttons into the header kebab menu; the elements are DOM-moved (not
-// duplicated) so all existing visibility logic keeps working on them.
+// Responsive header control relocation. Below 1150px the edit/login buttons
+// move into the header kebab menu; below 720px the pickers additionally move
+// into the sidebar drawer. Elements are DOM-moved (not duplicated) so all
+// existing visibility logic keeps working on them.
 const docsMobileMq = window.matchMedia('(max-width: 720px)');
+const docsMidMq = window.matchMedia('(max-width: 1150px)');
 function relocateHeaderControls() {
+    const headerRight = document.querySelector('.header-right');
+    const theme = document.getElementById('btnTheme');
     const pickers = ['productPicker', 'releasePicker'].map(id => document.getElementById(id));
     const actions = ['newVersionBtn', 'editBtn', 'newPageBtn', 'navLoginBtn', 'navLogoutBtn']
         .map(id => document.getElementById(id));
     if (docsMobileMq.matches) {
         const pickerSlot = document.getElementById('drawerPickers');
-        const menu = document.getElementById('docsMoreMenu');
         pickers.forEach(el => pickerSlot.appendChild(el));
+    } else {
+        pickers.forEach(el => headerRight.insertBefore(el, theme));
+    }
+    if (docsMidMq.matches) {
+        const menu = document.getElementById('docsMoreMenu');
         actions.forEach(el => menu.appendChild(el));
     } else {
-        const headerRight = document.querySelector('.header-right');
-        const theme = document.getElementById('btnTheme');
-        pickers.forEach(el => headerRight.insertBefore(el, theme));
         actions.slice(0, 3).forEach(el => headerRight.insertBefore(el, theme));
         actions.slice(3).forEach(el => headerRight.appendChild(el));
     }
+    layoutDocsNav();
 }
 relocateHeaderControls();
 docsMobileMq.addEventListener('change', relocateHeaderControls);
+docsMidMq.addEventListener('change', relocateHeaderControls);
 
 function logoutFromDocs() {
     localStorage.removeItem('auth_token');

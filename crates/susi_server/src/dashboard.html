@@ -70,7 +70,8 @@ a:hover { color: var(--accent-hover); }
     justify-content: space-between;
 }
 .header h1 { font-size: 18px; font-weight: 600; }
-.header .status { font-size: 13px; color: var(--text2); }
+.header .status { font-size: 13px; color: var(--text2); white-space: nowrap; }
+#currentUser { white-space: nowrap; }
 .header .status.ok { color: var(--green); }
 .header .status.err { color: var(--red); }
 
@@ -616,6 +617,7 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
 .header-left .brand {
     color: inherit; text-decoration: none;
     font-size: 15px; font-weight: 600;
+    white-space: nowrap;
 }
 .top-nav { display: flex; gap: 4px; align-items: center; }
 .top-nav a {
@@ -626,6 +628,7 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
     font-size: 13px;
     font-weight: 500;
     border: 1px solid transparent;
+    white-space: nowrap;
 }
 .top-nav a:hover { background: var(--bg2); color: var(--text1); }
 .top-nav a.active {
@@ -642,6 +645,7 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
     font-size: 13px;
     font-weight: 500;
     border: 1px solid transparent;
+    white-space: nowrap;
 }
 .top-nav .nav-group > button:hover { background: var(--bg2); color: var(--text1); }
 .top-nav .nav-group > button.active {
@@ -1387,31 +1391,57 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
         /* Scoped overrides - the global button/badge min-width:180px from the
            status-pill design elsewhere is wrong for inline row actions here. */
         #page-users .role-pill { min-width: 0; padding: 2px 10px; }
-        #page-users td, #page-users th { white-space: nowrap; }
-        #page-users td.col-actions { text-align: right; }
+        #page-users th { white-space: nowrap; }
+        #page-users td.col-actions { text-align: right; white-space: nowrap; }
         #page-users button.small { min-width: 0; margin-left: 4px; }
-        /* Keep the Set/Edit button pinned to the right edge of the email
-           column so the buttons line up across rows regardless of the
-           address length. */
-        #page-users .email-cell {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            min-width: 260px;
+        #page-users tr.user-row { cursor: pointer; }
+        #page-users td.col-chev { width: 24px; color: var(--text2); font-size: 11px; }
+        #page-users .user-name { font-weight: 500; }
+        #page-users .user-email {
+            font-size: 12px;
+            color: var(--text2);
+            max-width: 340px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
         }
-        #page-users .email-cell > .email-value { flex: 1 1 auto; }
+        #page-users tr.user-detail td {
+            background: var(--bg);
+            font-size: 13px;
+        }
+        #page-users .user-detail-grid {
+            display: flex;
+            gap: 28px;
+            flex-wrap: wrap;
+            padding: 2px 6px;
+        }
+        #page-users .user-detail-grid .label {
+            display: block;
+            font-size: 11px;
+            color: var(--text2);
+            text-transform: uppercase;
+            letter-spacing: 0.4px;
+            margin-bottom: 3px;
+        }
     </style>
     <div style="margin-top:32px;margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
         <h2 style="font-size:16px;font-weight:600;">User Management</h2>
         <button class="secondary" onclick="loadUsers()">Refresh</button>
     </div>
-    <div class="card" style="padding:0;margin-bottom:20px;">
+    <div class="toolbar">
+        <input type="text" id="userSearch" placeholder="Search users (name, email, role, license)..." oninput="onUserSearch()">
+        <span id="userCount" style="font-size:12px;color:var(--text2);white-space:nowrap;"></span>
+    </div>
+    <div class="card" style="padding:0;margin-bottom:12px;">
         <div id="usersTableContainer" style="overflow:auto;">
             <table style="width:100%;">
-                <thead><tr><th>Username</th><th>Role</th><th>Email</th><th>Licenses</th><th>2FA</th><th>Status</th><th></th></tr></thead>
-                <tbody id="usersTableBody"><tr><td colspan="7">Loading...</td></tr></tbody>
+                <thead><tr><th></th><th>User</th><th>Role</th><th>Status</th><th></th></tr></thead>
+                <tbody id="usersTableBody"><tr><td colspan="5">Loading...</td></tr></tbody>
             </table>
         </div>
+    </div>
+    <div style="margin-bottom:20px;">
+        <button class="secondary" id="usersShowMore" style="display:none;" onclick="showMoreUsers()">Show more</button>
     </div>
     <div class="card">
         <h3 style="font-size:14px;margin-bottom:12px;">Add User</h3>
@@ -2240,6 +2270,49 @@ async function handleWelcomeLink() {
     }
 }
 
+// Priority+ top nav: flat items that don't fit the header width collapse
+// into the trailing dropdown, labelled "Admin" while it only holds the admin
+// group and "More" once flat items overflow into it. Declared before init()
+// because renderNav() runs synchronously during startup.
+let navFlatItems = [], navAdminItems = [], activeNavPage = '';
+const navLink = i => '<a href="' + i.href + '" data-page="' + i.page + '">' + i.label + '</a>';
+
+function renderTopNavHtml(n) {
+    const shown = navFlatItems.slice(0, n);
+    const overflow = navFlatItems.slice(n);
+    let html = shown.map(navLink).join('');
+    if (overflow.length || navAdminItems.length) {
+        const label = overflow.length ? 'More' : 'Admin';
+        const divider = (overflow.length && navAdminItems.length) ? '<div class="divider"></div>' : '';
+        html += '<span class="dropdown nav-group">' +
+            '<button id="navAdminBtn" onclick="toggleDropdown(event,\'navAdminMenu\')">' + label + ' &#9662;</button>' +
+            '<div id="navAdminMenu" class="dropdown-menu" style="display:none;">' +
+            overflow.map(navLink).join('') + divider + navAdminItems.map(navLink).join('') + '</div></span>';
+    }
+    document.getElementById('topNav').innerHTML = html;
+}
+
+function layoutTopNav() {
+    const nav = document.getElementById('topNav');
+    const header = document.querySelector('.header');
+    if (!nav || !header) return;
+    for (let n = navFlatItems.length; n >= 0; n--) {
+        renderTopNavHtml(n);
+        if (header.scrollWidth <= header.clientWidth) break;
+    }
+    nav.querySelectorAll('a').forEach(a => {
+        a.classList.toggle('active', a.dataset.page === activeNavPage);
+    });
+    const adminBtn = document.getElementById('navAdminBtn');
+    if (adminBtn) adminBtn.classList.toggle('active', !!document.querySelector('#navAdminMenu a.active'));
+}
+
+let navResizeTimer;
+window.addEventListener('resize', () => {
+    clearTimeout(navResizeTimer);
+    navResizeTimer = setTimeout(layoutTopNav, 120);
+});
+
 (function init() {
     authToken = localStorage.getItem('auth_token') || '';
 
@@ -2291,12 +2364,11 @@ function showPage(name) {
     if (name === 'audit' && authToken) loadAudit();
     if (name === 'backups' && authToken) loadBackupPage();
     if (name === 'users' && authToken) loadUsers();
+    activeNavPage = name;
     renderNav();
-    document.querySelectorAll('#topNav a, #navDrawerLinks a').forEach(a => {
+    document.querySelectorAll('#navDrawerLinks a').forEach(a => {
         a.classList.toggle('active', a.dataset.page === name);
     });
-    const adminBtn = document.getElementById('navAdminBtn');
-    if (adminBtn) adminBtn.classList.toggle('active', !!document.querySelector('#navAdminMenu a.active'));
 }
 
 // Mobile nav drawer
@@ -2336,20 +2408,12 @@ function renderNav() {
         { page: 'backups', label: 'Backups', href: '#/backups', show: !!authToken && isAdmin, group: 'admin' },
     ];
     const visible = items.filter(i => i.show);
-    const link = i => '<a href="' + i.href + '" data-page="' + i.page + '">' + i.label + '</a>';
-    const flat = visible.filter(i => !i.group);
-    const admin = visible.filter(i => i.group === 'admin');
-    let html = flat.map(link).join('');
-    if (admin.length) {
-        html += '<span class="dropdown nav-group">' +
-            '<button id="navAdminBtn" onclick="toggleDropdown(event,\'navAdminMenu\')">Admin &#9662;</button>' +
-            '<div id="navAdminMenu" class="dropdown-menu" style="display:none;">' +
-            admin.map(link).join('') + '</div></span>';
-    }
-    nav.innerHTML = html;
+    navFlatItems = visible.filter(i => !i.group);
+    navAdminItems = visible.filter(i => i.group === 'admin');
+    layoutTopNav();
     // The mobile drawer mirrors the same items as a flat list.
-    document.getElementById('navDrawerLinks').innerHTML = flat.map(link).join('') +
-        (admin.length ? '<div class="drawer-section">Admin</div>' + admin.map(link).join('') : '');
+    document.getElementById('navDrawerLinks').innerHTML = navFlatItems.map(navLink).join('') +
+        (navAdminItems.length ? '<div class="drawer-section">Admin</div>' + navAdminItems.map(navLink).join('') : '');
     document.getElementById('navDrawerAccount').style.display = authToken ? '' : 'none';
     // Login/logout button visibility
     document.getElementById('btnLogin').style.display = authToken ? 'none' : '';
@@ -3718,80 +3782,144 @@ async function disable2FA() {
 }
 
 // User management
+let allUsers = [];
+const usersExpanded = new Set();
+const USERS_PAGE_SIZE = 100;
+let usersShownCount = USERS_PAGE_SIZE;
+
 async function loadUsers() {
     try {
         const resp = await fetch(API + '/auth/users', { headers: authHeaders() });
         if (!resp.ok) return;
-        const users = await resp.json();
-        const tbody = document.getElementById('usersTableBody');
-        tbody.innerHTML = users.map(u => {
-            const isSelf = u.username === currentUsername;
-            let status;
-            if (u.pending_invitation) {
-                status = '<span style="color:var(--accent);">Invited (pending)</span>';
-            } else if (u.must_change_password) {
-                status = '<span style="color:var(--yellow);">Must change password</span>';
-            } else {
-                status = '<span style="color:var(--green);">Active</span>';
-            }
-            const tfa = u.totp_enabled ? '<span style="color:var(--green);">Enabled</span>' : '<span style="color:var(--text2);">Off</span>';
-            const roleBadge = u.role === 'admin'
-                ? '<span class="badge role-pill" style="background:rgba(108,140,255,0.15);color:var(--accent);">admin</span>'
-                : '<span class="badge role-pill" style="background:var(--bg3);color:var(--text2);">user</span>';
-            // esc(JSON.stringify(x)) is HTML-safe for both the " and ' in the
-            // inline onclick attribute. A bare JSON.stringify would break the
-            // attribute quoting, which silently stopped the Edit action from
-            // firing when dispatched from the dropdown.
-            const emailArg = u.email ? esc(JSON.stringify(u.email)) : "''";
-            const emailCell = u.email
-                ? '<span class="email-value">' + esc(u.email) + '</span>'
-                : '<span class="email-value" style="color:var(--text2);font-size:11px;">(none)</span>';
-            // Resend appears for any user still on must_change_password=1 and
-            // with an email on file — covers both pending and expired-invite cases.
-            const canResend = !isSelf && u.must_change_password && u.email;
-            const uname = esc(u.username);
-            const menuId = 'user-menu-' + u.username.replace(/[^a-zA-Z0-9_-]/g, '_');
-            const resendItem = canResend
-                ? '<button onclick="resendInvitation(\'' + uname + '\')">' +
-                  (u.pending_invitation ? 'Resend invite' : 'Send invite') + '</button>'
-                : '';
-            const roleItem = u.role === 'admin'
-                ? '<button onclick="setUserRole(\'' + uname + '\',\'user\')">Revoke admin</button>'
-                : '<button onclick="setUserRole(\'' + uname + '\',\'admin\')">Make admin</button>';
-            const emailItem = '<button onclick="setUserEmail(\'' + uname + '\',' + emailArg + ')">' +
-                              (u.email ? 'Edit email' : 'Set email') + '</button>';
-            // Self row keeps a reduced Actions menu (rename + email) so admins
-            // can manage their own account without exposing the destructive
-            // items that would lock them out. Self-rename forces a re-login
-            // (the session token is bound to the old name).
-            const actions = isSelf
-                ? '<span class="dropdown" onclick="event.stopPropagation();">' +
-                    '<button class="small secondary" onclick="toggleDropdown(event,\'' + menuId + '\')">Actions &#9662;</button>' +
-                    '<div id="' + menuId + '" class="dropdown-menu" style="display:none;">' +
-                      '<button onclick="renameUser(\'' + uname + '\')">Rename</button>' +
-                      emailItem +
-                    '</div>' +
-                  '</span>'
-                : '<span class="dropdown" onclick="event.stopPropagation();">' +
-                    '<button class="small secondary" onclick="toggleDropdown(event,\'' + menuId + '\')">Actions &#9662;</button>' +
-                    '<div id="' + menuId + '" class="dropdown-menu" style="display:none;">' +
-                      '<button onclick="renameUser(\'' + uname + '\')">Rename</button>' +
-                      emailItem +
-                      resendItem +
-                      '<button onclick="resetUserPassword(\'' + uname + '\')">Reset password</button>' +
-                      roleItem +
-                      '<div class="divider"></div>' +
-                      '<button class="danger" onclick="deleteUser(\'' + uname + '\')">Delete</button>' +
-                    '</div>' +
-                  '</span>';
-            const licCell = (u.licenses && u.licenses.length)
-                ? u.licenses.map(l => '<span class="feature-tag" title="' + esc(l.license_key) + '">' + esc(l.product) + '</span>').join(' ')
-                : '<span style="color:var(--text2);font-size:11px;">(none)</span>';
-            return '<tr><td>' + esc(u.username) + '</td><td>' + roleBadge + '</td><td class="col-email">' + emailCell + '</td><td>' + licCell + '</td><td>' + tfa + '</td><td>' + status + '</td><td class="col-actions">' + actions + '</td></tr>';
-        }).join('');
+        allUsers = await resp.json();
+        renderUsers();
     } catch (e) {
         toast('Failed to load users: ' + e.message, 'error');
     }
+}
+
+function onUserSearch() {
+    usersShownCount = USERS_PAGE_SIZE;
+    renderUsers();
+}
+
+function showMoreUsers() {
+    usersShownCount += 2 * USERS_PAGE_SIZE;
+    renderUsers();
+}
+
+function toggleUserRow(username) {
+    if (usersExpanded.has(username)) usersExpanded.delete(username);
+    else usersExpanded.add(username);
+    renderUsers();
+}
+
+function filteredUsers() {
+    const q = (document.getElementById('userSearch').value || '').trim().toLowerCase();
+    if (!q) return allUsers;
+    return allUsers.filter(u => {
+        const hay = u.username + ' ' + (u.email || '') + ' ' + u.role + ' ' +
+            (u.licenses || []).map(l => l.product + ' ' + l.license_key).join(' ');
+        return hay.toLowerCase().includes(q);
+    });
+}
+
+function renderUsers() {
+    const tbody = document.getElementById('usersTableBody');
+    const filtered = filteredUsers();
+    const shown = filtered.slice(0, usersShownCount);
+    const countEl = document.getElementById('userCount');
+    countEl.textContent = shown.length < filtered.length
+        ? shown.length + ' of ' + filtered.length + ' users'
+        : filtered.length + ' user' + (filtered.length === 1 ? '' : 's');
+    document.getElementById('usersShowMore').style.display =
+        shown.length < filtered.length ? '' : 'none';
+    if (!shown.length) {
+        tbody.innerHTML = '<tr><td colspan="5" style="color:var(--text2);">No matching users.</td></tr>';
+        return;
+    }
+    tbody.innerHTML = shown.map(u => {
+        const isSelf = u.username === currentUsername;
+        let status;
+        if (u.pending_invitation) {
+            status = '<span style="color:var(--accent);">Invited (pending)</span>';
+        } else if (u.must_change_password) {
+            status = '<span style="color:var(--yellow);">Must change password</span>';
+        } else {
+            status = '<span style="color:var(--green);">Active</span>';
+        }
+        const tfa = u.totp_enabled ? '<span style="color:var(--green);">Enabled</span>' : '<span style="color:var(--text2);">Off</span>';
+        const roleBadge = u.role === 'admin'
+            ? '<span class="badge role-pill" style="background:rgba(108,140,255,0.15);color:var(--accent);">admin</span>'
+            : '<span class="badge role-pill" style="background:var(--bg3);color:var(--text2);">user</span>';
+        // esc(JSON.stringify(x)) is HTML-safe for both the " and ' in the
+        // inline onclick attribute. A bare JSON.stringify would break the
+        // attribute quoting, which silently stopped the Edit action from
+        // firing when dispatched from the dropdown.
+        const emailArg = u.email ? esc(JSON.stringify(u.email)) : "''";
+        // Resend appears for any user still on must_change_password=1 and
+        // with an email on file — covers both pending and expired-invite cases.
+        const canResend = !isSelf && u.must_change_password && u.email;
+        const uname = esc(u.username);
+        const menuId = 'user-menu-' + u.username.replace(/[^a-zA-Z0-9_-]/g, '_');
+        const resendItem = canResend
+            ? '<button onclick="resendInvitation(\'' + uname + '\')">' +
+              (u.pending_invitation ? 'Resend invite' : 'Send invite') + '</button>'
+            : '';
+        const roleItem = u.role === 'admin'
+            ? '<button onclick="setUserRole(\'' + uname + '\',\'user\')">Revoke admin</button>'
+            : '<button onclick="setUserRole(\'' + uname + '\',\'admin\')">Make admin</button>';
+        const emailItem = '<button onclick="setUserEmail(\'' + uname + '\',' + emailArg + ')">' +
+                          (u.email ? 'Edit email' : 'Set email') + '</button>';
+        // Self row keeps a reduced Actions menu (rename + email) so admins
+        // can manage their own account without exposing the destructive
+        // items that would lock them out. Self-rename forces a re-login
+        // (the session token is bound to the old name).
+        const actions = isSelf
+            ? '<span class="dropdown" onclick="event.stopPropagation();">' +
+                '<button class="small secondary" onclick="toggleDropdown(event,\'' + menuId + '\')">Actions &#9662;</button>' +
+                '<div id="' + menuId + '" class="dropdown-menu" style="display:none;">' +
+                  '<button onclick="renameUser(\'' + uname + '\')">Rename</button>' +
+                  emailItem +
+                '</div>' +
+              '</span>'
+            : '<span class="dropdown" onclick="event.stopPropagation();">' +
+                '<button class="small secondary" onclick="toggleDropdown(event,\'' + menuId + '\')">Actions &#9662;</button>' +
+                '<div id="' + menuId + '" class="dropdown-menu" style="display:none;">' +
+                  '<button onclick="renameUser(\'' + uname + '\')">Rename</button>' +
+                  emailItem +
+                  resendItem +
+                  '<button onclick="resetUserPassword(\'' + uname + '\')">Reset password</button>' +
+                  roleItem +
+                  '<div class="divider"></div>' +
+                  '<button class="danger" onclick="deleteUser(\'' + uname + '\')">Delete</button>' +
+                '</div>' +
+              '</span>';
+        const expanded = usersExpanded.has(u.username);
+        const chev = expanded ? '&#9662;' : '&#9656;';
+        const emailLine = u.email
+            ? '<div class="user-email">' + esc(u.email) + '</div>'
+            : '<div class="user-email">(no email)</div>';
+        let rows = '<tr class="user-row" onclick="toggleUserRow(\'' + uname + '\')">' +
+            '<td class="col-chev">' + chev + '</td>' +
+            '<td><span class="user-name">' + esc(u.username) + '</span>' + emailLine + '</td>' +
+            '<td>' + roleBadge + '</td>' +
+            '<td>' + status + '</td>' +
+            '<td class="col-actions">' + actions + '</td></tr>';
+        if (expanded) {
+            const licDetail = (u.licenses && u.licenses.length)
+                ? u.licenses.map(l => '<span class="feature-tag" title="' + esc(l.license_key) + '">' + esc(l.product) + '</span>').join(' ')
+                : '<span style="color:var(--text2);">(none)</span>';
+            rows += '<tr class="user-detail"><td></td><td colspan="4">' +
+                '<div class="user-detail-grid">' +
+                    '<div><span class="label">Email</span>' + (u.email ? esc(u.email) : '<span style="color:var(--text2);">(none)</span>') + '</div>' +
+                    '<div><span class="label">Licenses</span>' + licDetail + '</div>' +
+                    '<div><span class="label">2FA</span>' + tfa + '</div>' +
+                '</div>' +
+            '</td></tr>';
+        }
+        return rows;
+    }).join('');
 }
 
 async function createUser() {
