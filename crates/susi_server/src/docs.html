@@ -107,6 +107,44 @@ body {
     color: var(--accent);
     background: rgba(106,169,255,0.10);
 }
+.nav-group { position: relative; display: inline-block; }
+.nav-group > button {
+    background: none;
+    border: 1px solid transparent;
+    color: var(--text2);
+    padding: 6px 12px;
+    border-radius: var(--radius);
+    font-size: 13px;
+    font-weight: 500;
+    font-family: inherit;
+    cursor: pointer;
+}
+.nav-group > button:hover { background: var(--bg3); color: var(--text1); }
+.nav-group-menu {
+    display: none;
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.25);
+    min-width: 160px;
+    padding: 4px 0;
+    z-index: 500;
+}
+.nav-group-menu.open { display: block; }
+.nav-group-menu a {
+    display: block;
+    padding: 8px 14px;
+    color: var(--text1);
+    text-decoration: none;
+    font-size: 13px;
+}
+.nav-group-menu a:hover { background: var(--bg3); }
+/* Site nav inside the mobile sidebar drawer - hidden on desktop where the
+   top nav is visible. */
+.site-nav-mobile { display: none; }
 .header-right { display: flex; gap: 10px; align-items: center; }
 .release-picker {
     background: var(--bg);
@@ -556,6 +594,26 @@ body {
     .header-left { gap: 8px; }
     .header-left .brand { font-size: 14px; }
     .top-nav { display: none; }
+    .site-nav-mobile {
+        display: block;
+        padding: 8px;
+        border-bottom: 1px solid var(--border);
+    }
+    .site-nav-mobile a {
+        display: block;
+        padding: 10px 14px;
+        border-left: none;
+        border-radius: var(--radius);
+        font-size: 14px;
+    }
+    .site-nav-mobile .site-nav-label {
+        padding: 12px 14px 4px;
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        color: var(--text2);
+    }
     .header-right { gap: 4px; }
     .header-right .btn, .release-picker { padding: 8px 10px; font-size: 13px; min-height: 36px; min-width: 0; }
     .release-picker { min-width: 100px; max-width: 130px; }
@@ -591,7 +649,8 @@ body {
 
 <div class="layout no-toc" id="layout">
     <aside class="sidebar" id="sidebar">
-        <div class="empty">Loading...</div>
+        <div id="siteNavMobile" class="site-nav-mobile"></div>
+        <div id="sidebarTree"><div class="empty">Loading...</div></div>
     </aside>
     <main class="content" id="content">
         <div class="empty-state">Loading documentation…</div>
@@ -745,22 +804,53 @@ async function renderTopNav() {
     // page and are workspace-scoped).
     const verBtn = document.getElementById('newVersionBtn');
     if (verBtn) verBtn.style.display = (isAdmin && !currentWorkspaceId) ? '' : 'none';
+    // Keep in sync with renderNav() in dashboard.html. group:'admin' items
+    // collapse into the Admin dropdown on desktop and an Admin section in
+    // the mobile sidebar drawer.
     const items = [
         { label: 'Documentation', href: '/docs', active: true,           show: true },
         { label: 'My Licenses',   href: '/#/mylicenses', active: false,  show: !!authToken() && !isAdmin },
         { label: 'Workspaces',    href: '/#/workspaces', active: false,  show: !!authToken() },
         { label: 'Releases',      href: '/#/releases',   active: false,  show: !!authToken() },
-        { label: 'Products',      href: '/#/products',   active: false,  show: !!authToken() && isAdmin },
         { label: 'Licenses',      href: '/#/licenses',   active: false,  show: !!authToken() && isAdmin },
-        { label: 'Website',       href: '/#/website',    active: false,  show: !!authToken() && isAdmin },
-        { label: 'Shop',          href: '/#/shop',       active: false,  show: !!authToken() && isAdmin },
+        { label: 'Users',         href: '/#/users',      active: false,  show: !!authToken() && isAdmin },
+        { label: 'Products',      href: '/#/products',   active: false,  show: !!authToken() && isAdmin, group: 'admin' },
+        { label: 'Website',       href: '/#/website',    active: false,  show: !!authToken() && isAdmin, group: 'admin' },
+        { label: 'Shop',          href: '/#/shop',       active: false,  show: !!authToken() && isAdmin, group: 'admin' },
+        { label: 'Audit',         href: '/#/audit',      active: false,  show: !!authToken() && isAdmin, group: 'admin' },
+        { label: 'Backups',       href: '/#/backups',    active: false,  show: !!authToken() && isAdmin, group: 'admin' },
     ];
-    nav.innerHTML = items.filter(i => i.show).map(i =>
-        '<a href="' + i.href + '"' + (i.active ? ' class="active"' : '') + '>' + i.label + '</a>'
-    ).join('');
+    const visible = items.filter(i => i.show);
+    const link = i => '<a href="' + i.href + '"' + (i.active ? ' class="active"' : '') + '>' + i.label + '</a>';
+    const plainLink = i => '<a href="' + i.href + '">' + i.label + '</a>';
+    const flat = visible.filter(i => !i.group);
+    const admin = visible.filter(i => i.group === 'admin');
+    let html = flat.map(link).join('');
+    if (admin.length) {
+        html += '<span class="nav-group">' +
+            '<button type="button" onclick="toggleNavGroup(event)">Admin &#9662;</button>' +
+            '<div id="navAdminMenu" class="nav-group-menu">' + admin.map(plainLink).join('') + '</div></span>';
+    }
+    nav.innerHTML = html;
+    // Mobile: the same links live at the top of the sidebar drawer.
+    const siteNav = document.getElementById('siteNavMobile');
+    if (siteNav) {
+        siteNav.innerHTML = flat.map(plainLink).join('') +
+            (admin.length ? '<div class="site-nav-label">Admin</div>' + admin.map(plainLink).join('') : '');
+    }
     document.getElementById('navLoginBtn').style.display = authToken() ? 'none' : '';
     document.getElementById('navLogoutBtn').style.display = authToken() ? '' : 'none';
 }
+
+function toggleNavGroup(event) {
+    event.stopPropagation();
+    const m = document.getElementById('navAdminMenu');
+    if (m) m.classList.toggle('open');
+}
+document.addEventListener('click', () => {
+    const m = document.getElementById('navAdminMenu');
+    if (m) m.classList.remove('open');
+});
 
 function logoutFromDocs() {
     localStorage.removeItem('auth_token');
@@ -1101,7 +1191,7 @@ async function loadPage(slug) {
 // ---------------------------------------------------------------------------
 
 function renderSidebar() {
-    const sb = document.getElementById('sidebar');
+    const sb = document.getElementById('sidebarTree');
     if (pages.length === 0) {
         sb.innerHTML = '<div class="empty">No pages yet.</div>';
         return;

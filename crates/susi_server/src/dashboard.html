@@ -632,6 +632,109 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
     color: var(--accent);
     background: rgba(106,169,255,0.10);
 }
+.top-nav .nav-group > button {
+    background: none;
+    min-width: 0;
+    min-height: 0;
+    padding: 6px 12px;
+    border-radius: var(--radius);
+    color: var(--text2);
+    font-size: 13px;
+    font-weight: 500;
+    border: 1px solid transparent;
+}
+.top-nav .nav-group > button:hover { background: var(--bg2); color: var(--text1); }
+.top-nav .nav-group > button.active {
+    color: var(--accent);
+    background: rgba(106,169,255,0.10);
+}
+
+/* Mobile hamburger + slide-in nav drawer. Hidden on desktop; the 768px
+   breakpoint swaps the flat .top-nav for these. */
+.nav-toggle {
+    display: none;
+    background: none;
+    border: none;
+    color: var(--text1);
+    padding: 6px;
+    min-width: 0;
+    min-height: 0;
+    align-items: center;
+    justify-content: center;
+}
+.nav-toggle svg { width: 22px; height: 22px; stroke: currentColor; }
+.nav-toggle:hover { background: var(--bg3); }
+.nav-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.45);
+    z-index: 400;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease;
+}
+.nav-backdrop.visible { opacity: 1; pointer-events: auto; }
+.nav-drawer {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: 280px;
+    max-width: 85vw;
+    background: var(--bg2);
+    border-right: 1px solid var(--border);
+    z-index: 410;
+    transform: translateX(-100%);
+    transition: transform 0.2s ease;
+    padding: 12px;
+    overflow-y: auto;
+}
+.nav-drawer.open { transform: translateX(0); }
+.nav-drawer .drawer-brand {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 4px 14px 12px;
+    font-size: 15px;
+    font-weight: 600;
+}
+.nav-drawer .drawer-brand button {
+    background: none;
+    border: none;
+    color: var(--text2);
+    font-size: 20px;
+    min-width: 0;
+    min-height: 0;
+    padding: 0 4px;
+}
+.nav-drawer a,
+.nav-drawer .drawer-actions button {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 11px 14px;
+    border-radius: var(--radius);
+    color: var(--text1);
+    text-decoration: none;
+    font-size: 14px;
+    background: none;
+    border: none;
+    min-width: 0;
+    min-height: 0;
+}
+.nav-drawer a:hover,
+.nav-drawer .drawer-actions button:hover { background: var(--bg3); }
+.nav-drawer a.active { color: var(--accent); background: rgba(106,169,255,0.10); }
+.nav-drawer .drawer-section {
+    padding: 14px 14px 4px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text2);
+}
+.nav-drawer .drawer-divider { height: 1px; background: var(--border); margin: 10px 0; }
+.nav-drawer .drawer-actions button.danger { color: var(--red); }
 
 .dash-page { display: none; }
 .dash-page.active { display: block; }
@@ -645,6 +748,9 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
     .header-left { gap: 8px; flex-wrap: wrap; }
     .header-left .brand { font-size: 14px; }
     .top-nav { display: none; }
+    .nav-toggle { display: inline-flex; }
+    /* Account actions live in the drawer on mobile. */
+    #headerActions { display: none !important; }
     .header-actions { gap: 6px; flex-wrap: wrap; }
     .header-actions button { min-width: 0 !important; padding: 8px 10px; min-height: 36px; }
     button { min-width: 0; padding: 10px 14px; min-height: 40px; }
@@ -665,6 +771,13 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
 
 <div class="header">
     <div class="header-left">
+        <button class="nav-toggle" onclick="openNavDrawer()" aria-label="Open menu">
+            <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="3" y1="6" x2="21" y2="6"></line>
+                <line x1="3" y1="12" x2="21" y2="12"></line>
+                <line x1="3" y1="18" x2="21" y2="18"></line>
+            </svg>
+        </button>
         <a href="/" class="brand">Susi Server</a>
         <nav class="top-nav" id="topNav"></nav>
     </div>
@@ -675,7 +788,6 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
         <span class="dropdown" id="headerActions" style="display:none;">
             <button class="small secondary" onclick="toggleDropdown(event,'headerActionsMenu')">Actions &#9662;</button>
             <div id="headerActionsMenu" class="dropdown-menu" style="display:none;">
-                <button id="btnUsers" onclick="showUsersModal()" style="display:none;">Users</button>
                 <button id="btn2FA" onclick="show2FAModal()" style="display:none;">2FA</button>
                 <button id="btnSessions" onclick="showSessionsModal()" style="display:none;">Sessions</button>
                 <button id="btnApiTokens" onclick="showApiTokensModal()" style="display:none;">API Tokens</button>
@@ -686,6 +798,20 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
         <button id="btnLogin" class="small secondary" onclick="showLogin()" style="display:none;">Login</button>
     </div>
 </div>
+
+<!-- Mobile nav drawer (opened by the header hamburger) -->
+<div id="navBackdrop" class="nav-backdrop" onclick="closeNavDrawer()"></div>
+<nav id="navDrawer" class="nav-drawer">
+    <div class="drawer-brand">Susi Server <button onclick="closeNavDrawer()" aria-label="Close menu">&times;</button></div>
+    <div id="navDrawerLinks"></div>
+    <div id="navDrawerAccount" class="drawer-actions" style="display:none;">
+        <div class="drawer-divider"></div>
+        <button onclick="show2FAModal()">2FA</button>
+        <button onclick="showSessionsModal()">Sessions</button>
+        <button onclick="showApiTokensModal()">API Tokens</button>
+        <button class="danger" onclick="logout()">Logout</button>
+    </div>
+</nav>
 
 <div class="container">
 
@@ -1245,6 +1371,59 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
         </div>
     </div>
 </div><!-- /page-backups -->
+
+<!-- Users page -->
+<div id="page-users" class="dash-page">
+    <style>
+        /* Scoped overrides - the global button/badge min-width:180px from the
+           status-pill design elsewhere is wrong for inline row actions here. */
+        #page-users .role-pill { min-width: 0; padding: 2px 10px; }
+        #page-users td, #page-users th { white-space: nowrap; }
+        #page-users td.col-actions { text-align: right; }
+        #page-users button.small { min-width: 0; margin-left: 4px; }
+        /* Keep the Set/Edit button pinned to the right edge of the email
+           column so the buttons line up across rows regardless of the
+           address length. */
+        #page-users .email-cell {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            min-width: 260px;
+        }
+        #page-users .email-cell > .email-value { flex: 1 1 auto; }
+    </style>
+    <div style="margin-top:32px;margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
+        <h2 style="font-size:16px;font-weight:600;">User Management</h2>
+        <button class="secondary" onclick="loadUsers()">Refresh</button>
+    </div>
+    <div class="card" style="padding:0;margin-bottom:20px;">
+        <div id="usersTableContainer" style="overflow:auto;">
+            <table style="width:100%;">
+                <thead><tr><th>Username</th><th>Role</th><th>Email</th><th>Licenses</th><th>2FA</th><th>Status</th><th></th></tr></thead>
+                <tbody id="usersTableBody"><tr><td colspan="7">Loading...</td></tr></tbody>
+            </table>
+        </div>
+    </div>
+    <div class="card">
+        <h3 style="font-size:14px;margin-bottom:12px;">Add User</h3>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+            <input type="text" id="newUsername" placeholder="Username" style="flex:1;min-width:120px;">
+            <input type="email" id="newUserEmail" placeholder="Email" style="flex:1;min-width:160px;" required>
+            <select id="newUserRole" style="width:90px;">
+                <option value="user">User</option>
+                <option value="admin">Admin</option>
+            </select>
+            <button onclick="createUser()" style="width:auto;">Send invitation</button>
+        </div>
+        <details style="margin-top:10px;">
+            <summary style="font-size:12px;color:var(--text2);cursor:pointer;">Advanced: set a password manually (no email sent)</summary>
+            <div style="display:flex;gap:8px;align-items:center;margin-top:10px;">
+                <input type="password" id="newPassword" placeholder="Password (min 8)" style="flex:1;min-width:160px;">
+                <span style="font-size:11px;color:var(--text2);">Use only if SMTP isn't configured. Plaintext must be couriered to the user.</span>
+            </div>
+        </details>
+    </div>
+</div><!-- /page-users -->
 
 <!-- Website Pages -->
 <div id="page-website" class="dash-page">
@@ -1868,62 +2047,6 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
     </div>
 </div>
 
-<!-- Users Management Modal -->
-<div id="usersModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeUsersModal()">
-    <div class="modal" style="max-width:min(1200px,95vw);width:min(1200px,95vw);">
-        <style>
-            /* Scoped overrides — the global button/badge has a min-width:180px
-               from the status-pill design elsewhere that's wrong for inline
-               row actions here. */
-            #usersModal .role-pill { min-width: 0; padding: 2px 10px; }
-            #usersModal td, #usersModal th { white-space: nowrap; }
-            #usersModal td.col-actions { text-align: right; }
-            #usersModal button.small { min-width: 0; margin-left: 4px; }
-            /* Keep the Set/Edit button pinned to the right edge of the email
-               column so the buttons line up across rows regardless of the
-               address length. */
-            #usersModal .email-cell {
-                display: flex;
-                align-items: center;
-                gap: 8px;
-                min-width: 260px;
-            }
-            #usersModal .email-cell > .email-value { flex: 1 1 auto; }
-        </style>
-        <h2>User Management</h2>
-        <div class="modal-body">
-            <div id="usersTableContainer" style="margin-bottom:16px;max-height:50vh;overflow:auto;">
-                <table>
-                    <thead><tr><th>Username</th><th>Role</th><th>Email</th><th>Licenses</th><th>2FA</th><th>Status</th><th></th></tr></thead>
-                    <tbody id="usersTableBody"><tr><td colspan="7">Loading...</td></tr></tbody>
-                </table>
-            </div>
-            <div style="border-top:1px solid var(--border);padding-top:16px;">
-                <h3 style="font-size:14px;margin-bottom:12px;">Add User</h3>
-                <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
-                    <input type="text" id="newUsername" placeholder="Username" style="flex:1;min-width:120px;">
-                    <input type="email" id="newUserEmail" placeholder="Email" style="flex:1;min-width:160px;" required>
-                    <select id="newUserRole" style="width:90px;">
-                        <option value="user">User</option>
-                        <option value="admin">Admin</option>
-                    </select>
-                    <button onclick="createUser()" style="width:auto;">Send invitation</button>
-                </div>
-                <details style="margin-top:10px;">
-                    <summary style="font-size:12px;color:var(--text2);cursor:pointer;">Advanced: set a password manually (no email sent)</summary>
-                    <div style="display:flex;gap:8px;align-items:center;margin-top:10px;">
-                        <input type="password" id="newPassword" placeholder="Password (min 8)" style="flex:1;min-width:160px;">
-                        <span style="font-size:11px;color:var(--text2);">Use only if SMTP isn't configured. Plaintext must be couriered to the user.</span>
-                    </div>
-                </details>
-            </div>
-        </div>
-        <div class="form-actions">
-            <button class="secondary" onclick="closeUsersModal()">Close</button>
-        </div>
-    </div>
-</div>
-
 <!-- API Tokens Modal -->
 <div id="apiTokensModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeApiTokensModal()">
     <div class="modal" style="max-width:min(1000px,95vw);width:min(1000px,95vw);">
@@ -2158,38 +2281,73 @@ function showPage(name) {
     if (name === 'mylicenses' && authToken) loadMyLicenses();
     if (name === 'audit' && authToken) loadAudit();
     if (name === 'backups' && authToken) loadBackupPage();
+    if (name === 'users' && authToken) loadUsers();
     renderNav();
-    document.querySelectorAll('#topNav a').forEach(a => {
+    document.querySelectorAll('#topNav a, #navDrawerLinks a').forEach(a => {
         a.classList.toggle('active', a.dataset.page === name);
     });
+    const adminBtn = document.getElementById('navAdminBtn');
+    if (adminBtn) adminBtn.classList.toggle('active', !!document.querySelector('#navAdminMenu a.active'));
 }
+
+// Mobile nav drawer
+function openNavDrawer() {
+    document.getElementById('navDrawer').classList.add('open');
+    document.getElementById('navBackdrop').classList.add('visible');
+}
+
+function closeNavDrawer() {
+    document.getElementById('navDrawer').classList.remove('open');
+    document.getElementById('navBackdrop').classList.remove('visible');
+}
+
+// Any tap on a drawer link or button navigates / opens a modal - close the drawer.
+document.getElementById('navDrawer').addEventListener('click', e => {
+    if (e.target.closest('a,button')) closeNavDrawer();
+});
 
 function renderNav() {
     const nav = document.getElementById('topNav');
     if (!nav) return;
     const isAdmin = userRole === 'admin';
+    // Keep in sync with renderTopNav() in docs.html. group:'admin' items
+    // collapse into the Admin dropdown on desktop and an Admin section in
+    // the mobile drawer.
     const items = [
         { page: 'docs', label: 'Documentation', href: '/docs', show: true },
         { page: 'mylicenses', label: 'My Licenses', href: '#/mylicenses', show: !!authToken && !isAdmin },
         { page: 'workspaces', label: 'Workspaces', href: '#/workspaces', show: !!authToken },
         { page: 'releases', label: 'Releases', href: '#/releases', show: !!authToken },
-        { page: 'products', label: 'Products', href: '#/products', show: !!authToken && isAdmin },
         { page: 'licenses', label: 'Licenses', href: '#/licenses', show: !!authToken && isAdmin },
-        { page: 'website', label: 'Website', href: '#/website', show: !!authToken && isAdmin },
-        { page: 'shop', label: 'Shop', href: '#/shop', show: !!authToken && isAdmin },
-        { page: 'audit', label: 'Audit', href: '#/audit', show: !!authToken && isAdmin },
-        { page: 'backups', label: 'Backups', href: '#/backups', show: !!authToken && isAdmin },
+        { page: 'users', label: 'Users', href: '#/users', show: !!authToken && isAdmin },
+        { page: 'products', label: 'Products', href: '#/products', show: !!authToken && isAdmin, group: 'admin' },
+        { page: 'website', label: 'Website', href: '#/website', show: !!authToken && isAdmin, group: 'admin' },
+        { page: 'shop', label: 'Shop', href: '#/shop', show: !!authToken && isAdmin, group: 'admin' },
+        { page: 'audit', label: 'Audit', href: '#/audit', show: !!authToken && isAdmin, group: 'admin' },
+        { page: 'backups', label: 'Backups', href: '#/backups', show: !!authToken && isAdmin, group: 'admin' },
     ];
-    nav.innerHTML = items.filter(i => i.show).map(i =>
-        '<a href="' + i.href + '" data-page="' + i.page + '">' + i.label + '</a>'
-    ).join('');
+    const visible = items.filter(i => i.show);
+    const link = i => '<a href="' + i.href + '" data-page="' + i.page + '">' + i.label + '</a>';
+    const flat = visible.filter(i => !i.group);
+    const admin = visible.filter(i => i.group === 'admin');
+    let html = flat.map(link).join('');
+    if (admin.length) {
+        html += '<span class="dropdown nav-group">' +
+            '<button id="navAdminBtn" onclick="toggleDropdown(event,\'navAdminMenu\')">Admin &#9662;</button>' +
+            '<div id="navAdminMenu" class="dropdown-menu" style="display:none;">' +
+            admin.map(link).join('') + '</div></span>';
+    }
+    nav.innerHTML = html;
+    // The mobile drawer mirrors the same items as a flat list.
+    document.getElementById('navDrawerLinks').innerHTML = flat.map(link).join('') +
+        (admin.length ? '<div class="drawer-section">Admin</div>' + admin.map(link).join('') : '');
+    document.getElementById('navDrawerAccount').style.display = authToken ? '' : 'none';
     // Login/logout button visibility
     document.getElementById('btnLogin').style.display = authToken ? 'none' : '';
     document.getElementById('headerActions').style.display = authToken ? '' : 'none';
     document.getElementById('currentUser').style.display = authToken ? '' : 'none';
     document.getElementById('btn2FA').style.display = authToken ? 'block' : 'none';
     document.getElementById('btnSessions').style.display = authToken ? 'block' : 'none';
-    document.getElementById('btnUsers').style.display = (authToken && isAdmin) ? 'block' : 'none';
     document.getElementById('btnApiTokens').style.display = authToken ? 'block' : 'none';
 }
 
@@ -3551,15 +3709,6 @@ async function disable2FA() {
 }
 
 // User management
-async function showUsersModal() {
-    document.getElementById('usersModal').classList.add('visible');
-    await loadUsers();
-}
-
-function closeUsersModal() {
-    document.getElementById('usersModal').classList.remove('visible');
-}
-
 async function loadUsers() {
     try {
         const resp = await fetch(API + '/auth/users', { headers: authHeaders() });
@@ -3713,7 +3862,6 @@ async function renameUser(username) {
         if (data.self_renamed) {
             // The session token is bound to the old username - start over.
             toast('Username changed to "' + newName.trim() + '" - sign in again', 'success');
-            closeUsersModal();
             logout();
             return;
         }
@@ -5233,10 +5381,10 @@ async function createWorkspace() {
 // Keyboard shortcuts
 document.addEventListener('keydown', e => {
     if (e.key === 'Escape') {
+        closeNavDrawer();
         closeCreateModal();
         closeExportModal();
         closeTFAModal();
-        closeUsersModal();
         closeUploadReleaseModal();
         closeCreateWorkspaceModal();
         closeProductModal();
