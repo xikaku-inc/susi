@@ -87,7 +87,7 @@ This creates `private.pem` (keep secret) and `public.pem` (distribute with your 
 ### 2. Create a license
 
 ```bash
-# Time-limited license with lease enforcement (default: 7-day lease, 24h grace)
+# Time-limited license with lease enforcement (default: 3-day lease, 24h grace)
 susi-admin create \
   --customer "Acme Corp" \
   --product "MyApp" \
@@ -659,7 +659,7 @@ curl -X POST http://localhost:3100/api/v1/licenses \
     "days": 365,
     "features": ["pro"],
     "max_machines": 2,
-    "lease_duration_hours": 168,
+    "lease_duration_hours": 72,
     "lease_grace_hours": 24
   }'
 ```
@@ -718,14 +718,17 @@ Leases prevent customers from running more concurrent machines than they've paid
 
 ```
 Customer activates on Machine A:
-  → Server grants a 7-day lease
+  → Server grants a 3-day lease
   → Client stores the signed license (includes lease_expires timestamp)
   → Client calls /activate or /verify periodically to renew
 
 Customer wants to move to Machine B:
   → They stop running on Machine A
-  → After 7 days, Machine A's lease expires and is cleaned up
-  → Machine B can now activate (the seat is freed)
+  → After 3 days, Machine A's lease expires and the seat is freed
+  → Machine B can now activate
+  → Machine A's record is kept as history ("stale" in the dashboard,
+    with a last-seen timestamp) so activations stay visible even when
+    a customer goes offline after activating
 
 Customer tries to run on both:
   → Machine A has an active lease
@@ -737,7 +740,7 @@ Customer tries to run on both:
 
 | Parameter | Default | Description |
 |---|---|---|
-| `--lease-duration` | `168` (7 days) | Lease duration in hours. `0` disables lease enforcement. |
+| `--lease-duration` | `72` (3 days) | Lease duration in hours. `0` disables lease enforcement. |
 | `--lease-grace` | `24` (1 day) | Grace period in hours after lease expiry. The software continues working during the grace period but should attempt to renew urgently. |
 
 Lease parameters are set per-license at creation time, so different customers can have different lease windows.
@@ -753,6 +756,10 @@ Lease parameters are set per-license at creation time, so different customers ca
 ### Disabling Leases
 
 Set `--lease-duration 0` when creating a license to disable lease enforcement entirely. Machine activations become permanent (the original behavior), suitable for trusted customers or air-gapped environments.
+
+### Offline Exports Carry No Lease
+
+Exported license files (dashboard export, self-serve "Activate offline machine", `susi-admin export`) and USB tokens never contain a lease, regardless of the license's lease settings - an offline machine cannot phone home to renew, so a leased file would stop validating after lease + grace. The license expiry date still applies. The exported machine holds its seat until it is removed manually in the dashboard.
 
 ## Managing Licenses
 
@@ -1062,7 +1069,7 @@ curl -X POST $SERVER/api/v1/licenses \
     "days": 365,
     "features": ["pro"],
     "max_machines": 2,
-    "lease_duration_hours": 168,
+    "lease_duration_hours": 72,
     "lease_grace_hours": 24
   }'
 

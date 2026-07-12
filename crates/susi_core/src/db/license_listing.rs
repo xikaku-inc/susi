@@ -53,9 +53,9 @@ impl LicenseDb {
             .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?;
 
         // Materialise the parent rows first so we can issue a single batch
-        // query for activations instead of N round-trips. Lease cleanup runs
-        // periodically in the background (`spawn_lease_cleanup_task`); doing
-        // it here would issue another DELETE per license per list call.
+        // query for activations instead of N round-trips. Lease-expired
+        // activations are included on purpose: they are the "seen but stale"
+        // history shown in the dashboard.
         let parents: Vec<_> = rows.filter_map(|r| r.ok()).collect();
         let ids: Vec<String> = parents.iter().map(|r| r.0.clone()).collect();
         let mut machines_by_id = self

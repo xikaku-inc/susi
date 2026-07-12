@@ -349,6 +349,95 @@ fn test_lease_renewal_via_server() {
     assert!(status.is_valid(), "renewal: expected Valid, got: {:?}", status);
 }
 
+/// A machine whose lease has expired stays visible as history (stale, with a
+/// last-seen timestamp) but stops counting toward the seat limit, so another
+/// machine can claim the seat.
+#[test]
+fn test_expired_lease_kept_as_history_and_seat_freed() {
+    let server = TestServer::start();
+    let token = server.admin_token();
+
+    let resp = server
+        .http()
+        .post(format!("{}/licenses", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({
+            "customer": "Seat Test",
+            "days": 30,
+            "features": [],
+            "max_machines": 1,
+        }))
+        .send()
+        .expect("create license");
+    assert_eq!(resp.status().as_u16(), 201);
+    let license_key = resp.json::<Value>().expect("license json")["license_key"]
+        .as_str()
+        .expect("license_key")
+        .to_string();
+
+    let make_client = |code: char| {
+        let cache = server._dir.path().join(format!("machine_code_{}", code));
+        std::fs::write(&cache, code.to_string().repeat(64)).expect("write code");
+        LicenseClient::with_server(&server.public_key_pem, server.api_url.clone())
+            .expect("LicenseClient")
+            .with_machine_code_cache(cache)
+    };
+
+    let client_a = make_client('a');
+    let path_a = server._dir.path().join("license_a.json");
+    let status = client_a.activate(&path_a, &license_key, Some("Machine A"));
+    assert!(status.is_valid(), "A activate: {:?}", status);
+
+    // The single seat is taken - B is rejected.
+    let client_b = make_client('b');
+    let path_b = server._dir.path().join("license_b.json");
+    let status = client_b.activate(&path_b, &license_key, Some("Machine B"));
+    assert!(!status.is_valid(), "B must be blocked while A holds the seat");
+
+    // Backdate A's lease directly in the DB - simulates a machine that
+    // activated and then went quiet past the lease window.
+    let conn = rusqlite::Connection::open(server._dir.path().join("licenses.db")).expect("db");
+    conn.busy_timeout(Duration::from_secs(5)).expect("busy timeout");
+    let past = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+    let n = conn
+        .execute(
+            "UPDATE machine_activations SET lease_expires_at = ?1",
+            rusqlite::params![past],
+        )
+        .expect("backdate lease");
+    assert_eq!(n, 1);
+    drop(conn);
+
+    // The seat is free now, so B activates fine.
+    let status = client_b.activate(&path_b, &license_key, Some("Machine B"));
+    assert!(status.is_valid(), "B after A's lease expiry: {:?}", status);
+
+    // A's record is retained as stale history in the admin view.
+    let lic = server
+        .http()
+        .get(format!("{}/licenses/{}", server.api_url, license_key))
+        .bearer_auth(&token)
+        .send()
+        .expect("get license")
+        .json::<Value>()
+        .expect("license summary");
+    assert_eq!(lic["active_machine_count"], 1);
+    assert_eq!(lic["total_machine_count"], 2);
+    let machines = lic["machines"].as_array().expect("machines");
+    assert_eq!(machines.len(), 2);
+    let stale = machines
+        .iter()
+        .find(|m| m["friendly_name"] == "Machine A")
+        .expect("Machine A retained");
+    assert_eq!(stale["lease_active"], false);
+    assert!(!stale["last_seen_at"].as_str().unwrap_or("").is_empty());
+    let active = machines
+        .iter()
+        .find(|m| m["friendly_name"] == "Machine B")
+        .expect("Machine B present");
+    assert_eq!(active["lease_active"], true);
+}
+
 /// When the server is unreachable after the license has been cached locally,
 /// [`LicenseClient::verify_and_refresh`] falls back to the cached file and
 /// still returns `Valid`.
@@ -1107,6 +1196,17 @@ fn test_license_user_self_serve_flow() {
     assert!(resp.status().is_success(), "export: {}", resp.text().unwrap_or_default());
     let signed = resp.json::<Value>().expect("signed license json");
     assert!(signed["signature"].is_string(), "missing signature: {}", signed);
+
+    // Offline exports must not embed a lease - the machine cannot phone home
+    // to renew it. Only the license expiry date limits the file's validity.
+    let payload: Value =
+        serde_json::from_str(signed["license_data"].as_str().expect("license_data"))
+            .expect("payload json");
+    assert!(
+        payload.get("lease_expires").is_none(),
+        "offline export must not carry a lease: {}",
+        payload
+    );
 
     let mine = client
         .get(format!("{}/my/licenses", server.api_url))

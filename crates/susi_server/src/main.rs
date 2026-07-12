@@ -663,7 +663,7 @@ struct CreateLicenseRequest {
     features: Vec<String>,
     #[serde(default = "default_max_machines")]
     max_machines: u32,
-    /// Lease duration in hours. 0 = no lease enforcement. Default: 168 (7 days).
+    /// Lease duration in hours. 0 = no lease enforcement. Default: 72 (3 days).
     #[serde(default = "default_lease_duration")]
     lease_duration_hours: u32,
     /// Grace period in hours after lease expires. Default: 24.
@@ -755,6 +755,7 @@ struct MachineSummary {
     machine_code: String,
     friendly_name: String,
     activated_at: String,
+    last_seen_at: String,
     lease_expires_at: Option<String>,
     lease_active: bool,
 }
@@ -784,6 +785,7 @@ fn license_to_summary(lic: &License, users: Vec<String>) -> LicenseSummary {
                 machine_code: m.machine_code.clone(),
                 friendly_name: m.friendly_name.clone(),
                 activated_at: m.activated_at.to_rfc3339(),
+                last_seen_at: m.last_seen().to_rfc3339(),
                 lease_expires_at: m.lease_expires_at.map(|dt| dt.to_rfc3339()),
                 lease_active: m.is_lease_active(now),
             })
@@ -1810,8 +1812,11 @@ fn export_license_file(
         req.friendly_name.clone()
     };
 
-    let lease_expires = compute_lease_expires(&license);
-    db.add_machine_activation(&license.id, &req.machine_code, &name, lease_expires)
+    // Offline exports carry no lease: the machine cannot phone home to renew,
+    // so a leased file would stop validating after lease + grace. Same policy
+    // as USB token exports. The seat is held until the machine is removed in
+    // the dashboard; the license expiry date still applies.
+    db.add_machine_activation(&license.id, &req.machine_code, &name, None)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
     // Re-fetch with the activation
@@ -2720,9 +2725,9 @@ async fn main() -> Result<()> {
         backup::spawn_scheduler(Arc::clone(&state));
     }
 
-    // Periodic lease cleanup. Replaces the per-read DELETE that ran inside
-    // every `get_license_by_key` call: under load, every heartbeat issued a
-    // DELETE on the licenses table competing for the global write lock.
+    // Periodic session cleanup. Lease-expired machine activations are NOT
+    // deleted anymore — they persist as "seen but stale" history for the
+    // dashboard and simply stop counting toward the seat limit.
     {
         let state_bg = Arc::clone(&state);
         tokio::spawn(async move {
@@ -2730,16 +2735,10 @@ async fn main() -> Result<()> {
             tick.tick().await; // skip immediate fire
             loop {
                 tick.tick().await;
-                let (removed, stale_sessions) = {
+                let stale_sessions = {
                     let db = state_bg.db.lock();
-                    (
-                        db.cleanup_all_expired_leases().unwrap_or(0),
-                        db.purge_stale_sessions(SESSION_JWT_TTL_DAYS + 1).unwrap_or(0),
-                    )
+                    db.purge_stale_sessions(SESSION_JWT_TTL_DAYS + 1).unwrap_or(0)
                 };
-                if removed > 0 {
-                    log::info!("Lease cleanup: removed {} expired activations", removed);
-                }
                 if stale_sessions > 0 {
                     log::info!("Session cleanup: purged {} stale sessions", stale_sessions);
                 }

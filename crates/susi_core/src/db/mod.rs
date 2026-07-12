@@ -273,7 +273,7 @@ impl LicenseDb {
                 features TEXT NOT NULL,
                 max_machines INTEGER NOT NULL DEFAULT 0,
                 revoked INTEGER NOT NULL DEFAULT 0,
-                lease_duration_hours INTEGER NOT NULL DEFAULT 168,
+                lease_duration_hours INTEGER NOT NULL DEFAULT 72,
                 lease_grace_hours INTEGER NOT NULL DEFAULT 24,
                 require_signed_binary INTEGER NOT NULL DEFAULT 0
             );
@@ -284,6 +284,7 @@ impl LicenseDb {
                 machine_code TEXT NOT NULL,
                 friendly_name TEXT NOT NULL DEFAULT '',
                 activated_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL DEFAULT '',
                 lease_expires_at TEXT NOT NULL DEFAULT '',
                 FOREIGN KEY (license_id) REFERENCES licenses(id),
                 UNIQUE(license_id, machine_code)
@@ -683,7 +684,7 @@ impl LicenseDb {
     fn migrate(&self) -> Result<(), LicenseError> {
         // Add lease columns to existing databases
         let _ = self.conn.execute_batch(
-            "ALTER TABLE licenses ADD COLUMN lease_duration_hours INTEGER NOT NULL DEFAULT 168;
+            "ALTER TABLE licenses ADD COLUMN lease_duration_hours INTEGER NOT NULL DEFAULT 72;
              ALTER TABLE licenses ADD COLUMN lease_grace_hours INTEGER NOT NULL DEFAULT 24;
              ALTER TABLE machine_activations ADD COLUMN lease_expires_at TEXT NOT NULL DEFAULT '';",
         );
@@ -830,37 +831,15 @@ impl LicenseDb {
             params![Utc::now().to_rfc3339()],
         );
 
+        // Track last server contact separately from the first activation.
+        // Existing rows fall back to activated_at, which the old code
+        // refreshed on every renewal.
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE machine_activations ADD COLUMN last_seen_at TEXT NOT NULL DEFAULT '';",
+        );
+
         // >> Add new migrations as own execute_batch statements here <<
         Ok(())
-    }
-
-    /// Delete machine activations whose lease has expired (cleanup on access).
-    pub fn cleanup_expired_leases(&self, license_id: &str) -> Result<(), LicenseError> {
-        let now = Utc::now().to_rfc3339();
-        self.conn
-            .execute(
-                "DELETE FROM machine_activations
-                 WHERE license_id = ?1 AND lease_expires_at != '' AND lease_expires_at < ?2",
-                params![license_id, now],
-            )
-            .map_err(|e| LicenseError::Other(format!("DB cleanup: {}", e)))?;
-        Ok(())
-    }
-
-    /// Single sweep across every license. Returns the number of rows removed.
-    /// Run periodically from a background task instead of on every license
-    /// read — the per-row variant turned every heartbeat into a DELETE.
-    pub fn cleanup_all_expired_leases(&self) -> Result<usize, LicenseError> {
-        let now = Utc::now().to_rfc3339();
-        let n = self
-            .conn
-            .execute(
-                "DELETE FROM machine_activations
-                 WHERE lease_expires_at != '' AND lease_expires_at < ?1",
-                params![now],
-            )
-            .map_err(|e| LicenseError::Other(format!("DB cleanup: {}", e)))?;
-        Ok(n)
     }
 
     pub fn insert_license(&self, license: &License) -> Result<(), LicenseError> {
@@ -945,9 +924,8 @@ impl LicenseDb {
             .get(9)
             .map_err(|e| LicenseError::Other(format!("DB get: {}", e)))?;
 
-        // Lease cleanup runs in a background task (`cleanup_all_expired_leases`),
-        // not on every read — issuing a DELETE on every heartbeat dominated the
-        // verify path and competed for the write lock with no benefit.
+        // Lease-expired activations are kept as history (they stop counting
+        // toward the seat limit via is_lease_active), so no cleanup here.
 
         let mut license = License {
             id: id.clone(),
@@ -1002,7 +980,7 @@ impl LicenseDb {
             .collect::<Vec<_>>()
             .join(",");
         let sql = format!(
-            "SELECT license_id, machine_code, friendly_name, activated_at, lease_expires_at
+            "SELECT license_id, machine_code, friendly_name, activated_at, last_seen_at, lease_expires_at
              FROM machine_activations WHERE license_id IN ({})",
             placeholders,
         );
@@ -1022,17 +1000,22 @@ impl LicenseDb {
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
                 ))
             })
             .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?;
         for r in rows.flatten() {
-            let (license_id, machine_code, friendly_name, activated_str, lease_str) = r;
+            let (license_id, machine_code, friendly_name, activated_str, seen_str, lease_str) = r;
             let Some(activated_at) = DateTime::parse_from_rfc3339(&activated_str)
                 .ok()
                 .map(|d| d.with_timezone(&Utc))
             else {
                 continue;
             };
+            let last_seen_at = DateTime::parse_from_rfc3339(&seen_str)
+                .ok()
+                .map(|d| d.with_timezone(&Utc))
+                .or(Some(activated_at));
             let lease_expires_at = if lease_str.is_empty() {
                 None
             } else {
@@ -1044,6 +1027,7 @@ impl LicenseDb {
                 machine_code,
                 friendly_name,
                 activated_at,
+                last_seen_at,
                 lease_expires_at,
             });
         }
@@ -1057,7 +1041,7 @@ impl LicenseDb {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT machine_code, friendly_name, activated_at, lease_expires_at
+                "SELECT machine_code, friendly_name, activated_at, last_seen_at, lease_expires_at
              FROM machine_activations WHERE license_id = ?1",
             )
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
@@ -1069,14 +1053,19 @@ impl LicenseDb {
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
                 ))
             })
             .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
             .filter_map(|r| r.ok())
-            .filter_map(|(machine_code, friendly_name, activated_str, lease_str)| {
+            .filter_map(|(machine_code, friendly_name, activated_str, seen_str, lease_str)| {
                 let activated_at = DateTime::parse_from_rfc3339(&activated_str)
                     .ok()?
                     .with_timezone(&Utc);
+                let last_seen_at = DateTime::parse_from_rfc3339(&seen_str)
+                    .ok()
+                    .map(|d| d.with_timezone(&Utc))
+                    .or(Some(activated_at));
                 let lease_expires_at = if lease_str.is_empty() {
                     None
                 } else {
@@ -1090,6 +1079,7 @@ impl LicenseDb {
                     machine_code,
                     friendly_name,
                     activated_at,
+                    last_seen_at,
                     lease_expires_at,
                 })
             })
@@ -1108,13 +1098,14 @@ impl LicenseDb {
         let lease_str = lease_expires_at
             .map(|dt| dt.to_rfc3339())
             .unwrap_or_default();
+        // Renewal keeps activated_at (first activation) and bumps last_seen_at.
         self.conn
             .execute(
-                "INSERT INTO machine_activations (license_id, machine_code, friendly_name, activated_at, lease_expires_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+                "INSERT INTO machine_activations (license_id, machine_code, friendly_name, activated_at, last_seen_at, lease_expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?4, ?5)
              ON CONFLICT(license_id, machine_code) DO UPDATE SET
                 friendly_name = excluded.friendly_name,
-                activated_at = excluded.activated_at,
+                last_seen_at = excluded.last_seen_at,
                 lease_expires_at = excluded.lease_expires_at",
                 params![
                     license_id,
@@ -1946,7 +1937,7 @@ mod tests {
     }
 
     #[test]
-    fn test_expired_lease_cleaned_by_sweep() {
+    fn test_expired_lease_kept_as_history_and_frees_seat() {
         let db = test_db();
         let license = License::new(
             "FusionHub".to_string(),
@@ -1962,23 +1953,27 @@ mod tests {
         db.add_machine_activation(&license.id, "old_machine", "Old", expired_lease)
             .unwrap();
 
-        // Reads no longer trigger cleanup — that ran on every heartbeat and
-        // dominated the verify path. Background `cleanup_all_expired_leases`
-        // is what now removes expired rows.
+        // The row persists as history but no longer counts as active or
+        // toward the seat limit.
         let retrieved = db
             .get_license_by_key(&license.license_key)
             .unwrap()
             .unwrap();
         assert_eq!(retrieved.machines.len(), 1);
+        assert_eq!(retrieved.active_machine_count(), 0);
+        assert!(!retrieved.is_machine_activated("old_machine"));
+        assert!(retrieved.can_add_machine());
 
-        let removed = db.cleanup_all_expired_leases().unwrap();
-        assert_eq!(removed, 1);
-
+        // A returning machine renews in place instead of inserting a new row.
+        let fresh_lease = Some(Utc::now() + Duration::hours(168));
+        db.add_machine_activation(&license.id, "old_machine", "Old", fresh_lease)
+            .unwrap();
         let retrieved = db
             .get_license_by_key(&license.license_key)
             .unwrap()
             .unwrap();
-        assert_eq!(retrieved.machines.len(), 0);
+        assert_eq!(retrieved.machines.len(), 1);
+        assert_eq!(retrieved.active_machine_count(), 1);
     }
 
     #[test]
@@ -2128,6 +2123,69 @@ mod tests {
             .unwrap();
         assert_eq!(retrieved.machines.len(), 1);
         assert_eq!(retrieved.machines[0].friendly_name, "M1 again");
+    }
+
+    #[test]
+    fn test_renewal_keeps_activated_at_and_bumps_last_seen() {
+        let db = test_db();
+        let license = License::new(
+            "FusionHub".to_string(),
+            "Test".to_string(),
+            None,
+            vec![],
+            0,
+        );
+        db.insert_license(&license).unwrap();
+
+        db.add_machine_activation(&license.id, "machine1", "M1", lease_expires(168))
+            .unwrap();
+
+        // Backdate both timestamps to simulate an old activation.
+        let old = (Utc::now() - Duration::days(30)).to_rfc3339();
+        db.conn
+            .execute(
+                "UPDATE machine_activations SET activated_at = ?1, last_seen_at = ?1",
+                params![old],
+            )
+            .unwrap();
+
+        db.add_machine_activation(&license.id, "machine1", "M1", lease_expires(168))
+            .unwrap();
+
+        let retrieved = db
+            .get_license_by_key(&license.license_key)
+            .unwrap()
+            .unwrap();
+        let m = &retrieved.machines[0];
+        assert!((Utc::now() - m.activated_at).num_days() >= 29);
+        assert!((Utc::now() - m.last_seen()).num_minutes() < 5);
+    }
+
+    #[test]
+    fn test_last_seen_falls_back_to_activated_at() {
+        let db = test_db();
+        let license = License::new(
+            "FusionHub".to_string(),
+            "Test".to_string(),
+            None,
+            vec![],
+            0,
+        );
+        db.insert_license(&license).unwrap();
+
+        db.add_machine_activation(&license.id, "machine1", "M1", None)
+            .unwrap();
+        // Simulate a pre-migration row with an empty last_seen_at.
+        db.conn
+            .execute("UPDATE machine_activations SET last_seen_at = ''", [])
+            .unwrap();
+
+        let retrieved = db
+            .get_license_by_key(&license.license_key)
+            .unwrap()
+            .unwrap();
+        let m = &retrieved.machines[0];
+        assert_eq!(m.last_seen(), m.activated_at);
     }
 
     // -----------------------------------------------------------------------

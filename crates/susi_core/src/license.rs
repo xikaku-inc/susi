@@ -15,7 +15,7 @@ pub struct License {
     pub features: Vec<String>,
     pub max_machines: u32,
     /// Lease duration in hours. 0 means no lease enforcement (perpetual activations).
-    /// Default: 168 (7 days).
+    /// Default: 72 (3 days).
     pub lease_duration_hours: u32,
     /// Grace period in hours after lease expiry. Default: 24.
     pub lease_grace_hours: u32,
@@ -25,12 +25,19 @@ pub struct License {
     pub require_signed_binary: bool,
 }
 
-/// A machine activation record.
+/// A machine activation record. Kept after the lease expires so the
+/// dashboard retains activation history; only lease-active machines count
+/// toward the seat limit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MachineActivation {
     pub machine_code: String,
     pub friendly_name: String,
+    /// First activation. Not refreshed on renewal.
     pub activated_at: DateTime<Utc>,
+    /// Last successful activate/verify contact. `None` only on rows written
+    /// before this field existed; use `last_seen()` for display.
+    #[serde(default)]
+    pub last_seen_at: Option<DateTime<Utc>>,
     /// When the lease expires. `None` means no lease (perpetual activation).
     pub lease_expires_at: Option<DateTime<Utc>>,
 }
@@ -71,7 +78,7 @@ pub struct SignedLicense {
     pub signature: String,
 }
 
-pub const DEFAULT_LEASE_DURATION_HOURS: u32 = 168; // 7 days
+pub const DEFAULT_LEASE_DURATION_HOURS: u32 = 72; // 3 days
 pub const DEFAULT_LEASE_GRACE_HOURS: u32 = 24;
 
 impl License {
@@ -181,12 +188,13 @@ impl License {
             .find(|m| m.machine_code == machine_code)
         {
             existing.lease_expires_at = lease_expires_at;
-            existing.activated_at = Utc::now();
+            existing.last_seen_at = Some(Utc::now());
         } else {
             self.machines.push(MachineActivation {
                 machine_code,
                 friendly_name,
                 activated_at: Utc::now(),
+                last_seen_at: Some(Utc::now()),
                 lease_expires_at,
             });
         }
@@ -207,6 +215,12 @@ impl MachineActivation {
             Some(dt) => now < dt,
             None => true, // no lease = perpetual activation
         }
+    }
+
+    /// Last server contact. Rows from before `last_seen_at` existed fall back
+    /// to `activated_at`, which the old code refreshed on every renewal.
+    pub fn last_seen(&self) -> DateTime<Utc> {
+        self.last_seen_at.unwrap_or(self.activated_at)
     }
 }
 
