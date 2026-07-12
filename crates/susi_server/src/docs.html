@@ -142,9 +142,25 @@ body {
     font-size: 13px;
 }
 .nav-group-menu a:hover { background: var(--bg3); }
-/* Site nav inside the mobile sidebar drawer - hidden on desktop where the
-   top nav is visible. */
+/* Mobile-only header kebab menu; the edit/login controls are DOM-moved into
+   it (and the pickers into the sidebar drawer) below 720px. */
+.docs-more { position: relative; display: none; }
+.docs-more-menu { left: auto; right: 0; }
+.docs-more-menu .btn {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: none;
+    border: none;
+    border-radius: 0;
+    padding: 8px 14px;
+    min-height: 0;
+}
+.docs-more-menu .btn:hover { background: var(--bg3); }
+/* Site nav + picker slots inside the mobile sidebar drawer - hidden on
+   desktop where the top nav and header controls are visible. */
 .site-nav-mobile { display: none; }
+.drawer-pickers { display: none; }
 .header-right { display: flex; gap: 10px; align-items: center; }
 .release-picker {
     background: var(--bg);
@@ -594,11 +610,35 @@ body {
     .header-left { gap: 8px; }
     .header-left .brand { font-size: 14px; }
     .top-nav { display: none; }
+    /* Header slims down to hamburger, brand, theme, kebab. The workspace
+       banner, pickers, and edit/login buttons move into drawer + kebab. */
+    #wsBanner { display: none !important; }
+    .docs-more { display: inline-block; }
     .site-nav-mobile {
         display: block;
-        padding: 8px;
+        padding: 4px 8px 8px;
         border-bottom: 1px solid var(--border);
     }
+    .site-nav-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        width: 100%;
+        background: none;
+        border: none;
+        color: var(--text1);
+        font-family: inherit;
+        font-size: 14px;
+        font-weight: 600;
+        padding: 10px 14px;
+        border-radius: var(--radius);
+        cursor: pointer;
+    }
+    .site-nav-head:hover { background: var(--bg3); }
+    .site-nav-head .chev { color: var(--text2); transition: transform 0.15s ease; }
+    .site-nav-mobile.open .site-nav-head .chev { transform: rotate(90deg); }
+    #siteNavLinks { display: none; }
+    .site-nav-mobile.open #siteNavLinks { display: block; }
     .site-nav-mobile a {
         display: block;
         padding: 10px 14px;
@@ -614,9 +654,26 @@ body {
         letter-spacing: 0.5px;
         color: var(--text2);
     }
+    .drawer-pickers {
+        display: block;
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--border);
+    }
+    .drawer-pickers .drawer-ws-name {
+        font-size: 12px;
+        color: var(--text2);
+        padding: 0 2px 6px;
+    }
+    .drawer-pickers select {
+        display: block;
+        width: 100%;
+        max-width: none;
+        margin: 6px 0;
+    }
     .header-right { gap: 4px; }
     .header-right .btn, .release-picker { padding: 8px 10px; font-size: 13px; min-height: 36px; min-width: 0; }
     .release-picker { min-width: 100px; max-width: 130px; }
+    .docs-more-menu .btn { min-height: 40px; }
 }
 </style>
 </head>
@@ -642,6 +699,10 @@ body {
         <button id="editBtn" class="btn" onclick="enterEditMode()" style="display:none;">Edit</button>
         <button id="newPageBtn" class="btn" onclick="newPage()" style="display:none;">+ Page</button>
         <button id="btnTheme" class="btn" onclick="cycleTheme()" title="Toggle theme">🌓</button>
+        <span class="docs-more">
+            <button class="btn" onclick="toggleDocsMore(event)" aria-label="More actions">&#8943;</button>
+            <div id="docsMoreMenu" class="nav-group-menu docs-more-menu"></div>
+        </span>
         <button id="navLoginBtn" class="btn" onclick="location.href='/'" style="display:none;">Login</button>
         <button id="navLogoutBtn" class="btn" onclick="logoutFromDocs()" style="display:none;">Logout</button>
     </div>
@@ -649,7 +710,13 @@ body {
 
 <div class="layout no-toc" id="layout">
     <aside class="sidebar" id="sidebar">
-        <div id="siteNavMobile" class="site-nav-mobile"></div>
+        <div id="siteNavMobile" class="site-nav-mobile">
+            <button class="site-nav-head" onclick="toggleSiteNav()">Susi Server <span class="chev">&#9656;</span></button>
+            <div id="siteNavLinks"></div>
+        </div>
+        <div id="drawerPickers" class="drawer-pickers">
+            <div id="drawerWsName" class="drawer-ws-name" style="display:none;"></div>
+        </div>
         <div id="sidebarTree"><div class="empty">Loading...</div></div>
     </aside>
     <main class="content" id="content">
@@ -771,7 +838,7 @@ function refreshEditButtons() {
     const editBtn = document.getElementById('editBtn');
     const newBtn = document.getElementById('newPageBtn');
     if (editBtn && currentPage) editBtn.style.display = canEditDocs() ? '' : 'none';
-    if (newBtn) newBtn.style.display = canEditDocs() ? '' : 'none';
+    if (newBtn) newBtn.style.display = (canEditDocs() && currentTag) ? '' : 'none';
     // "+ Version" lets an admin start a fresh version for the current product.
     // Hidden in workspace mode (releases there are created from the Workspaces
     // page and are workspace-scoped).
@@ -837,8 +904,9 @@ async function renderTopNav() {
             '<div id="navAdminMenu" class="nav-group-menu">' + admin.map(plainLink).join('') + '</div></span>';
     }
     nav.innerHTML = html;
-    // Mobile: the same links live at the top of the sidebar drawer.
-    const siteNav = document.getElementById('siteNavMobile');
+    // Mobile: the same links live in the collapsed "Susi Server" accordion
+    // at the top of the sidebar drawer.
+    const siteNav = document.getElementById('siteNavLinks');
     if (siteNav) {
         siteNav.innerHTML = flat.map(plainLink).join('') +
             (admin.length ? '<div class="site-nav-label">Admin</div>' + admin.map(plainLink).join('') : '');
@@ -852,10 +920,46 @@ function toggleNavGroup(event) {
     const m = document.getElementById('navAdminMenu');
     if (m) m.classList.toggle('open');
 }
+
+function toggleDocsMore(event) {
+    event.stopPropagation();
+    document.getElementById('docsMoreMenu').classList.toggle('open');
+}
+
+function toggleSiteNav() {
+    document.getElementById('siteNavMobile').classList.toggle('open');
+}
+
 document.addEventListener('click', () => {
-    const m = document.getElementById('navAdminMenu');
-    if (m) m.classList.remove('open');
+    ['navAdminMenu', 'docsMoreMenu'].forEach(id => {
+        const m = document.getElementById(id);
+        if (m) m.classList.remove('open');
+    });
 });
+
+// Below 720px the pickers move into the sidebar drawer and the edit/login
+// buttons into the header kebab menu; the elements are DOM-moved (not
+// duplicated) so all existing visibility logic keeps working on them.
+const docsMobileMq = window.matchMedia('(max-width: 720px)');
+function relocateHeaderControls() {
+    const pickers = ['productPicker', 'releasePicker'].map(id => document.getElementById(id));
+    const actions = ['newVersionBtn', 'editBtn', 'newPageBtn', 'navLoginBtn', 'navLogoutBtn']
+        .map(id => document.getElementById(id));
+    if (docsMobileMq.matches) {
+        const pickerSlot = document.getElementById('drawerPickers');
+        const menu = document.getElementById('docsMoreMenu');
+        pickers.forEach(el => pickerSlot.appendChild(el));
+        actions.forEach(el => menu.appendChild(el));
+    } else {
+        const headerRight = document.querySelector('.header-right');
+        const theme = document.getElementById('btnTheme');
+        pickers.forEach(el => headerRight.insertBefore(el, theme));
+        actions.slice(0, 3).forEach(el => headerRight.insertBefore(el, theme));
+        actions.slice(3).forEach(el => headerRight.appendChild(el));
+    }
+}
+relocateHeaderControls();
+docsMobileMq.addEventListener('change', relocateHeaderControls);
 
 function logoutFromDocs() {
     localStorage.removeItem('auth_token');
@@ -878,6 +982,9 @@ if (currentWorkspaceId) {
                 const el = document.getElementById('wsBanner');
                 document.getElementById('wsBannerName').textContent = currentWorkspaceName;
                 el.style.display = '';
+                const dn = document.getElementById('drawerWsName');
+                dn.textContent = 'Workspace: ' + currentWorkspaceName;
+                dn.style.display = '';
                 // The workspace endpoint only answers for members and site
                 // admins, so a 200 here means this user may author docs.
                 isWorkspaceEditor = true;
@@ -1150,11 +1257,13 @@ async function loadReleases() {
         ? API + '/workspaces/' + encodeURIComponent(currentWorkspaceId) + '/docs/releases'
         : API + '/products/' + encodeURIComponent(currentProduct) + '/docs/releases';
     const resp = await fetch(url, { headers: docHeaders() });
+    // null = fetch denied/failed (error state already rendered), so route()
+    // won't overwrite it with the "no releases yet" hint.
     if (!resp.ok) {
         renderEmptyState(currentWorkspaceId
             ? 'Could not load workspace documentation. Are you signed in as a workspace member?'
             : 'Could not load documentation index.');
-        return false;
+        return null;
     }
     const data = await resp.json();
     releases = data.releases || [];
@@ -1760,9 +1869,11 @@ async function route() {
             renderSidebar();
             document.getElementById('editBtn').style.display = 'none';
             document.getElementById('newPageBtn').style.display = 'none';
-            renderEmptyState(currentWorkspaceId
-                ? 'No documentation releases in this workspace yet. Create one from the Workspaces page.'
-                : 'No documentation has been published yet.');
+            if (ok !== null) {
+                renderEmptyState(currentWorkspaceId
+                    ? 'No documentation releases in this workspace yet. Create one from the Workspaces page.'
+                    : 'No documentation has been published yet.');
+            }
             return;
         }
     }
