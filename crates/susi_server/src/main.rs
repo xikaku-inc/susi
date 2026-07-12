@@ -1159,8 +1159,10 @@ fn is_site_admin(state: &AppState, principal: &Principal) -> bool {
         .unwrap_or(false)
 }
 
-/// Permission gate for editing a doc release. Admin-only (TOTP enforced),
-/// regardless of whether the release is workspace-scoped or global. Returns
+/// Permission gate for editing a doc release. Global releases - and tags that
+/// don't exist yet (callers may auto-create them as global) - are admin-only
+/// (TOTP enforced). Workspace-scoped releases accept site admins and workspace
+/// members, matching the write policy of other workspace resources. Returns
 /// the release's workspace id (if any) so callers can keep doc seeding scope-
 /// correct.
 pub(crate) fn release_writer_check(
@@ -1169,14 +1171,23 @@ pub(crate) fn release_writer_check(
     product: &str,
     tag: &str,
 ) -> Result<Option<String>, (StatusCode, Json<ErrorResponse>)> {
-    require_admin_full(state, principal)?;
     let scoped_ws = {
         let db = state.db.lock();
         db.get_release_workspace_id(product, tag)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
             .flatten()
     };
-    Ok(scoped_ws)
+    match scoped_ws {
+        Some(ws_id) => {
+            require_password_changed(state, principal)?;
+            assert_workspace_member(state, &ws_id, principal)?;
+            Ok(Some(ws_id))
+        }
+        None => {
+            require_admin_full(state, principal)?;
+            Ok(None)
+        }
+    }
 }
 
 /// Permission gate for reading a doc release. Workspace releases require

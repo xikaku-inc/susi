@@ -852,6 +852,7 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
 
             <div class="ws-tabs" role="tablist">
                 <button class="ws-tab active" data-ws-tab="releases" onclick="setWsTab('releases')">Releases</button>
+                <button class="ws-tab" data-ws-tab="docs" onclick="setWsTab('docs')">Docs</button>
                 <button class="ws-tab" data-ws-tab="configs" onclick="setWsTab('configs')">Configs</button>
                 <button class="ws-tab" data-ws-tab="recordings" onclick="setWsTab('recordings')">Recordings</button>
                 <button class="ws-tab" data-ws-tab="members" onclick="setWsTab('members')">Members</button>
@@ -862,10 +863,18 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
                 <div class="detail-section-title" style="display:flex;align-items:center;justify-content:space-between;">
                     <span>Releases</span>
                     <span style="display:flex;gap:6px;">
-                        <button id="wsCreateDocReleaseBtn" class="small" style="display:none;" onclick="createWsDocRelease()">Add release</button>
+                        <button id="wsUploadSoftwareBtn" class="small" style="display:none;" onclick="showUploadReleaseModal(selectedWsId)">Upload software</button>
                     </span>
                 </div>
                 <div id="wsDetailReleases" class="machines-list"></div>
+            </div>
+
+            <div class="ws-tab-panel" data-ws-panel="docs">
+                <div class="detail-section-title" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Documentation</span>
+                    <button class="small" onclick="createWsDocCollection()">New documentation</button>
+                </div>
+                <div id="wsDetailDocs" class="machines-list"></div>
             </div>
 
             <div class="ws-tab-panel" data-ws-panel="configs">
@@ -4663,10 +4672,9 @@ async function showWsDetail(id, tab) {
             }
         }
 
-        // Only site admins create doc releases or upload software, even into
-        // a workspace they're a member of. Workspace members can read.
-        const canEdit = userRole === 'admin';
-        document.getElementById('wsCreateDocReleaseBtn').style.display = canEdit ? '' : 'none';
+        // Only site admins upload software, even into a workspace they're a
+        // member of. Documentation (Docs tab) is member-writable.
+        document.getElementById('wsUploadSoftwareBtn').style.display = userRole === 'admin' ? '' : 'none';
 
         // Load configs and the unified releases list.
         loadWsConfigs(id);
@@ -4967,26 +4975,30 @@ async function saveWsProperties() {
     }
 }
 
-async function createWsDocRelease() {
+// Create a member-only documentation collection (a doc-only release row under
+// the hood; the tag is derived from the name) and jump straight into the
+// editor so the first page can be written immediately.
+async function createWsDocCollection() {
     if (!selectedWsId) return;
-    const tag = prompt('Release tag (e.g. v1.0):');
-    if (!tag) return;
-    const trimmed = tag.trim();
-    if (!trimmed) return;
-    const name = prompt('Release name (optional):', trimmed) || '';
+    const name = prompt('Documentation name (e.g. "Sales Handbook"):');
+    if (!name || !name.trim()) return;
+    const trimmedName = name.trim();
+    let tag = trimmedName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+    if (!tag) tag = 'doc-' + Date.now().toString(36);
     try {
         const resp = await fetch(API + '/workspaces/' + selectedWsId + '/docs/releases', {
             method: 'POST',
             headers: authHeaders(),
-            body: JSON.stringify({ tag: trimmed, name }),
+            body: JSON.stringify({ tag, name: trimmedName }),
         });
         if (!resp.ok) {
             const data = await resp.json().catch(() => ({}));
-            toast('Error: ' + (data.error || 'Could not create release'), 'error');
+            toast('Error: ' + (data.error || 'Could not create documentation'), 'error');
             return;
         }
-        toast('Release ' + trimmed + ' created', 'success');
+        toast('Documentation "' + trimmedName + '" created', 'success');
         loadWsReleases(selectedWsId);
+        window.open('/docs?workspace=' + encodeURIComponent(selectedWsId) + '&tag=' + encodeURIComponent(tag), '_blank');
     } catch (e) {
         toast('Failed: ' + e.message, 'error');
     }
@@ -5038,16 +5050,25 @@ async function loadWsReleases(wsId) {
     }
 }
 
+// Rows with software files render in the Releases tab; rows without any are
+// documentation collections and render in the Docs tab instead.
 function renderWsReleases() {
-    const container = document.getElementById('wsDetailReleases');
     const { wsId, allRels, docPageCounts } = wsReleasesData;
     if (!wsId) return;
-    if (allRels.length === 0) {
-        container.innerHTML = '<div style="color:var(--text2);font-size:13px;">No releases yet. Upload software or create an empty release to start adding documentation.</div>';
+    const software = allRels.filter(r => (r.assets || []).length > 0);
+    const docs = allRels.filter(r => (r.assets || []).length === 0);
+    renderWsSoftwareReleases(software, docPageCounts);
+    renderWsDocCollections(docs, docPageCounts);
+}
+
+function renderWsSoftwareReleases(rels, docPageCounts) {
+    const container = document.getElementById('wsDetailReleases');
+    if (rels.length === 0) {
+        container.innerHTML = '<div style="color:var(--text2);font-size:13px;">No software releases yet.</div>';
         return;
     }
     const isAdmin = userRole === 'admin';
-    container.innerHTML = allRels.map(r => {
+    container.innerHTML = rels.map(r => {
         const pre = r.prerelease ? ' <span style="background:rgba(251,191,36,0.15);color:var(--yellow);font-size:10px;font-weight:600;padding:1px 6px;border-radius:4px;">Pre</span>' : '';
         const menuId = 'rel-menu-' + r.tag.replace(/[^a-zA-Z0-9_-]/g, '_');
         const adminBtns = isAdmin
@@ -5066,7 +5087,7 @@ function renderWsReleases() {
             : '';
         const expanded = wsExpandedTags.has(r.tag);
         const chev = expanded ? '&#9662;' : '&#9656;';
-        const expandedBlock = expanded ? renderWsReleaseExpansion(r, docPageCounts.has(r.tag)) : '';
+        const expandedBlock = expanded ? renderWsReleaseExpansion(r, docPageCounts.has(r.tag), false) : '';
         return '<div class="ws-release-row' + (expanded ? ' open' : '') + '">' +
             '<div class="machine-item ws-release-head" style="flex-wrap:wrap;gap:8px;cursor:pointer;" onclick="toggleWsRelease(\'' + esc(r.tag) + '\')">' +
                 '<span style="flex:1;min-width:200px;display:flex;align-items:center;gap:6px;">' +
@@ -5084,7 +5105,51 @@ function renderWsReleases() {
     }).join('');
 }
 
-function renderWsReleaseExpansion(r, hasDocReleaseRow) {
+function renderWsDocCollections(rels, docPageCounts) {
+    const container = document.getElementById('wsDetailDocs');
+    if (rels.length === 0) {
+        container.innerHTML = '<div style="color:var(--text2);font-size:13px;">No documentation yet. Create member-only pages - handbooks, guides, internal notes - with "New documentation".</div>';
+        return;
+    }
+    const isAdmin = userRole === 'admin';
+    const wsId = wsReleasesData.wsId;
+    container.innerHTML = rels.map(r => {
+        const menuId = 'doc-menu-' + r.tag.replace(/[^a-zA-Z0-9_-]/g, '_');
+        const pageCount = docPageCounts.get(r.tag) || 0;
+        const adminBtns = isAdmin
+            ? ' <span class="dropdown" onclick="event.stopPropagation();">' +
+                '<button class="small secondary" onclick="toggleDropdown(event,\'' + menuId + '\')">Actions &#9662;</button>' +
+                '<div id="' + menuId + '" class="dropdown-menu" style="display:none;">' +
+                    '<button onclick="editWsRelease(\'' + esc(r.tag) + '\')">Rename</button>' +
+                    '<button onclick="moveWsRelease(\'' + esc(r.tag) + '\')">Move to workspace…</button>' +
+                    '<div class="divider"></div>' +
+                    '<button class="danger" onclick="deleteWsRelease(\'' + esc(r.tag) + '\')">Delete</button>' +
+                '</div>' +
+              '</span>'
+            : '';
+        const openUrl = '/docs?workspace=' + encodeURIComponent(wsId) + '&tag=' + encodeURIComponent(r.tag);
+        const expanded = wsExpandedTags.has(r.tag);
+        const chev = expanded ? '&#9662;' : '&#9656;';
+        const expandedBlock = expanded ? renderWsReleaseExpansion(r, docPageCounts.has(r.tag), true) : '';
+        return '<div class="ws-release-row' + (expanded ? ' open' : '') + '">' +
+            '<div class="machine-item ws-release-head" style="flex-wrap:wrap;gap:8px;cursor:pointer;" onclick="toggleWsRelease(\'' + esc(r.tag) + '\')">' +
+                '<span style="flex:1;min-width:200px;display:flex;align-items:center;gap:6px;">' +
+                    '<span class="ws-release-chev" style="color:var(--text2);width:12px;display:inline-block;">' + chev + '</span>' +
+                    '<strong>' + esc(r.name || r.tag) + '</strong>' +
+                    ' <span style="color:var(--text2);margin-left:6px;font-size:11px;">' + pageCount + (pageCount === 1 ? ' page' : ' pages') + ' · ' + formatDate(r.published_at) + '</span>' +
+                '</span>' +
+                '<span style="display:flex;gap:4px;flex-wrap:wrap;align-items:center;justify-content:flex-end;" onclick="event.stopPropagation();">' +
+                    '<button class="small secondary" onclick="window.open(\'' + openUrl + '\',\'_blank\')">Open</button>' +
+                    '<button class="small" onclick="editWsReleaseDocs(\'' + esc(r.tag) + '\')">Edit pages</button>' +
+                    adminBtns +
+                '</span>' +
+            '</div>' +
+            expandedBlock +
+        '</div>';
+    }).join('');
+}
+
+function renderWsReleaseExpansion(r, hasDocReleaseRow, docOnly) {
     const wsId = wsReleasesData.wsId;
     const tag = r.tag;
     const pages = wsReleasePages.get(tag);
@@ -5105,6 +5170,12 @@ function renderWsReleaseExpansion(r, hasDocReleaseRow) {
                 return '<li style="padding-left:' + indent + ';"><a href="' + pageUrl + '" style="color:var(--accent);text-decoration:none;font-size:13px;">' + esc(p.title) + '</a></li>';
             }).join('') +
         '</ul>';
+    }
+
+    if (docOnly) {
+        return '<div class="ws-release-expand" style="padding:8px 12px 12px 30px;background:var(--bg);border-radius:0 0 var(--radius) var(--radius);">' +
+            '<div><div class="field-label">Pages</div>' + pagesHtml + '</div>' +
+        '</div>';
     }
 
     let filesHtml;

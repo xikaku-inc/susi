@@ -19,7 +19,7 @@ use susi_core::error::LicenseError;
 
 use crate::{
     error_response, release_reader_check, release_writer_check, validate_principal, AppState,
-    ErrorResponse, Principal,
+    ErrorResponse,
 };
 
 // ---------------------------------------------------------------------------
@@ -166,25 +166,6 @@ pub(crate) fn seed_user_docs_into_release(
         }
     }
     Ok(())
-}
-
-/// Permission gate for doc write endpoints that may auto-create a release.
-/// Admin-only. Returns the existing release's workspace id (if any) so seeding
-/// stays scope-correct; returns `None` if the release does not yet exist (the
-/// caller will create it as a global release).
-fn release_writer_check_or_admin_create(
-    state: &AppState,
-    principal: &Principal,
-    product: &str,
-    tag: &str,
-) -> Result<Option<String>, (StatusCode, Json<ErrorResponse>)> {
-    crate::require_admin_full(state, principal)?;
-    let db = state.db.lock();
-    let scoped_ws = db
-        .get_release_workspace_id(product, tag)
-        .map_err(db_err)?
-        .flatten();
-    Ok(scoped_ws)
 }
 
 /// Ensure the release row for `(product, tag)` exists and, if it was just
@@ -485,7 +466,7 @@ async fn upsert_doc_page_impl(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(headers, state)?;
     safe_tag(tag)?;
-    let workspace_id = release_writer_check_or_admin_create(state, &principal, product, tag)?;
+    let workspace_id = release_writer_check(state, &principal, product, tag)?;
 
     let release_id = ensure_release_with_seed(
         state,
@@ -650,7 +631,7 @@ async fn bulk_import_docs_impl(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
     safe_tag(&tag)?;
-    let workspace_id = release_writer_check_or_admin_create(&state, &principal, product, &tag)?;
+    let workspace_id = release_writer_check(&state, &principal, product, &tag)?;
 
     let mut release_name = String::new();
     let mut manifest: HashMap<String, PageManifestEntry> = HashMap::new();
@@ -811,7 +792,7 @@ async fn upload_doc_asset_impl(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
     safe_tag(&tag)?;
-    let workspace_id = release_writer_check_or_admin_create(&state, &principal, product, &tag)?;
+    let workspace_id = release_writer_check(&state, &principal, product, &tag)?;
 
     // Pull the first "file" field from the multipart body.
     let mut file_name = String::new();

@@ -2642,3 +2642,143 @@ fn test_backup_admin_endpoints_require_admin() {
     }
 }
 
+
+/// Workspace members can author their workspace's documentation: create doc
+/// collections (doc-only releases), write pages, and read them back.
+/// Non-members stay denied, and global (workspace-less) docs remain admin-only.
+#[test]
+fn test_workspace_member_doc_authoring() {
+    let server = TestServer::start();
+    let admin = server.admin_token();
+    let client = server.http();
+
+    // A non-admin user with the password-change bootstrap gate cleared.
+    let user_token = |name: &str| -> String {
+        client
+            .post(format!("{}/auth/users", server.api_url))
+            .bearer_auth(&admin)
+            .json(&json!({
+                "username": name,
+                "email": format!("{}@example.com", name),
+                "role": "user",
+                "password": "docpass123",
+            }))
+            .send()
+            .expect("create user")
+            .error_for_status()
+            .expect("create user ok");
+        let token = client
+            .post(format!("{}/auth/login", server.api_url))
+            .json(&json!({"username": name, "password": "docpass123"}))
+            .send()
+            .expect("login")
+            .json::<Value>()
+            .expect("login json")["token"]
+            .as_str()
+            .expect("token")
+            .to_string();
+        client
+            .post(format!("{}/auth/change-password", server.api_url))
+            .bearer_auth(&token)
+            .json(&json!({"current_password": "docpass123", "new_password": "docpass456"}))
+            .send()
+            .expect("change pw")
+            .json::<Value>()
+            .expect("change pw json")["token"]
+            .as_str()
+            .expect("fresh token")
+            .to_string()
+    };
+    let member = user_token("doc_member");
+    let outsider = user_token("doc_outsider");
+
+    let ws = client
+        .post(format!("{}/workspaces", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({"name": "Docs WS", "product": "fusionhub", "description": ""}))
+        .send()
+        .expect("create ws")
+        .json::<Value>()
+        .expect("ws json");
+    let ws_id = ws["id"].as_str().expect("ws id").to_string();
+    client
+        .post(format!("{}/workspaces/{}/members", server.api_url, ws_id))
+        .bearer_auth(&admin)
+        .json(&json!({"username": "doc_member"}))
+        .send()
+        .expect("add member")
+        .error_for_status()
+        .expect("add member ok");
+
+    // Member creates a doc collection in their workspace.
+    let resp = client
+        .post(format!("{}/workspaces/{}/docs/releases", server.api_url, ws_id))
+        .bearer_auth(&member)
+        .json(&json!({"tag": "sales-handbook", "name": "Sales Handbook"}))
+        .send()
+        .expect("member create collection");
+    assert!(resp.status().is_success(), "member creates collection: {}", resp.text().unwrap_or_default());
+
+    // Member writes and reads back a page.
+    let resp = client
+        .put(format!("{}/docs/sales-handbook/pages/intro", server.api_url))
+        .bearer_auth(&member)
+        .json(&json!({"title": "Intro", "body_md": "# Hello Xikaku"}))
+        .send()
+        .expect("member write page");
+    assert!(resp.status().is_success(), "member writes page: {}", resp.text().unwrap_or_default());
+    let page = client
+        .get(format!("{}/docs/sales-handbook/pages/intro", server.api_url))
+        .bearer_auth(&member)
+        .send()
+        .expect("member read page")
+        .json::<Value>()
+        .expect("page json");
+    assert_eq!(page["body_md"], json!("# Hello Xikaku"), "member reads page back: {}", page);
+
+    // Admins keep full access to workspace docs.
+    let resp = client
+        .put(format!("{}/docs/sales-handbook/pages/admin-note", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({"title": "Admin Note", "body_md": "note"}))
+        .send()
+        .expect("admin write page");
+    assert!(resp.status().is_success(), "admin writes workspace page: {}", resp.text().unwrap_or_default());
+
+    // Non-members are denied: collection creation, page writes, page reads.
+    let resp = client
+        .post(format!("{}/workspaces/{}/docs/releases", server.api_url, ws_id))
+        .bearer_auth(&outsider)
+        .json(&json!({"tag": "intruder", "name": "Intruder"}))
+        .send()
+        .expect("outsider create collection");
+    assert_eq!(resp.status().as_u16(), 403, "outsider cannot create collection");
+    let resp = client
+        .put(format!("{}/docs/sales-handbook/pages/intro", server.api_url))
+        .bearer_auth(&outsider)
+        .json(&json!({"title": "Hacked", "body_md": "x"}))
+        .send()
+        .expect("outsider write page");
+    assert_eq!(resp.status().as_u16(), 403, "outsider cannot write workspace page");
+    let resp = client
+        .get(format!("{}/docs/sales-handbook/pages/intro", server.api_url))
+        .bearer_auth(&outsider)
+        .send()
+        .expect("outsider read page");
+    assert_eq!(resp.status().as_u16(), 403, "outsider cannot read workspace page");
+    let resp = client
+        .get(format!("{}/docs/sales-handbook/pages/intro", server.api_url))
+        .send()
+        .expect("anon read page");
+    assert_eq!(resp.status().as_u16(), 401, "anonymous cannot read workspace page");
+
+    // Global docs (no workspace scope, including not-yet-existing tags) stay
+    // admin-only for writes.
+    let resp = client
+        .put(format!("{}/docs/v-global/pages/intro", server.api_url))
+        .bearer_auth(&member)
+        .json(&json!({"title": "Nope", "body_md": "x"}))
+        .send()
+        .expect("member write global page");
+    assert_eq!(resp.status().as_u16(), 403, "member cannot write global docs");
+}

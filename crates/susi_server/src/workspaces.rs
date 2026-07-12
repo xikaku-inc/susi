@@ -771,8 +771,9 @@ pub(crate) async fn handle_list_workspace_doc_releases(
     Ok(Json(serde_json::json!({ "releases": releases })))
 }
 
-/// Create a workspace-scoped doc release. Admin-only. Re-using a tag that
-/// belongs to a different workspace (or to global) is rejected.
+/// Create a workspace-scoped doc release. Site admins and workspace members
+/// may call this (members author their workspace's documentation). Re-using a
+/// tag that belongs to a different workspace (or to global) is rejected.
 pub(crate) async fn handle_create_workspace_doc_release(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -780,7 +781,13 @@ pub(crate) async fn handle_create_workspace_doc_release(
     Json(req): Json<CreateWorkspaceDocReleaseRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
-    require_admin_full(&state, &principal)?;
+    require_password_changed(&state, &principal)?;
+    {
+        let db = state.db.lock();
+        db.workspace_access(&workspace_id, &principal.username)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+            .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
+    }
 
     let tag = req.tag.trim().to_string();
     docs::safe_tag(&tag)?;

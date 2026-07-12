@@ -759,12 +759,25 @@ function syncProductInUrl() {
     history.replaceState(null, '', url.toString());
 }
 
-// Admin detection. We confirm against the server in renderTopNav() and update
-// `isAdminUser` so edit/new-page buttons only show for actual admins; a JWT
-// alone (e.g. a workspace member's session) is not enough.
+// Edit-permission detection. Site admins can edit any docs; in workspace mode
+// a workspace member can too (`isWorkspaceEditor` flips once the workspace
+// fetch below succeeds, which the backend only allows for members/admins).
+// Both are confirmed against the server; a JWT alone is not enough.
 function authToken() { return localStorage.getItem('auth_token') || ''; }
 let isAdminUser = false;
-function isPotentialAdmin() { return isAdminUser; }
+let isWorkspaceEditor = false;
+function canEditDocs() { return isAdminUser || isWorkspaceEditor; }
+function refreshEditButtons() {
+    const editBtn = document.getElementById('editBtn');
+    const newBtn = document.getElementById('newPageBtn');
+    if (editBtn && currentPage) editBtn.style.display = canEditDocs() ? '' : 'none';
+    if (newBtn) newBtn.style.display = canEditDocs() ? '' : 'none';
+    // "+ Version" lets an admin start a fresh version for the current product.
+    // Hidden in workspace mode (releases there are created from the Workspaces
+    // page and are workspace-scoped).
+    const verBtn = document.getElementById('newVersionBtn');
+    if (verBtn) verBtn.style.display = (isAdminUser && !currentWorkspaceId) ? '' : 'none';
+}
 
 // Build fetch options that automatically include Authorization when we have a
 // token. Workspace doc reads require auth on the backend, so we send it for
@@ -795,15 +808,7 @@ async function renderTopNav() {
     isAdminUser = isAdmin;
     // The buttons may have already been laid out by route() before the role
     // check resolved. Re-apply visibility now that we know the answer.
-    const editBtn = document.getElementById('editBtn');
-    const newBtn = document.getElementById('newPageBtn');
-    if (editBtn && currentPage) editBtn.style.display = isAdmin ? '' : 'none';
-    if (newBtn) newBtn.style.display = isAdmin ? '' : 'none';
-    // "+ Version" lets an admin start a fresh version for the current product.
-    // Hidden in workspace mode (releases there are created from the Workspaces
-    // page and are workspace-scoped).
-    const verBtn = document.getElementById('newVersionBtn');
-    if (verBtn) verBtn.style.display = (isAdmin && !currentWorkspaceId) ? '' : 'none';
+    refreshEditButtons();
     // Keep in sync with renderNav() in dashboard.html. group:'admin' items
     // collapse into the Admin dropdown on desktop and an Admin section in
     // the mobile sidebar drawer.
@@ -873,6 +878,10 @@ if (currentWorkspaceId) {
                 const el = document.getElementById('wsBanner');
                 document.getElementById('wsBannerName').textContent = currentWorkspaceName;
                 el.style.display = '';
+                // The workspace endpoint only answers for members and site
+                // admins, so a 200 here means this user may author docs.
+                isWorkspaceEditor = true;
+                refreshEditButtons();
             }
         } catch (e) {}
     })();
@@ -1252,14 +1261,17 @@ function renderPage() {
         if (layout) layout.classList.add('no-toc');
         return;
     }
-    document.getElementById('editBtn').style.display = isPotentialAdmin() ? '' : 'none';
-    document.getElementById('newPageBtn').style.display = isPotentialAdmin() ? '' : 'none';
+    document.getElementById('editBtn').style.display = canEditDocs() ? '' : 'none';
+    document.getElementById('newPageBtn').style.display = canEditDocs() ? '' : 'none';
     if (editMode) {
         if (layout) layout.classList.add('no-toc');
         renderEditor();
         return;
     }
-    const meta = '<div class="meta">Release <code>' + escHtml(currentTag) + '</code> · '
+    // Workspace docs are often standalone collections (handbooks, guides)
+    // where a "Release <tag>" prefix would be confusing noise.
+    const meta = '<div class="meta">'
+        + (currentWorkspaceId ? '' : 'Release <code>' + escHtml(currentTag) + '</code> · ')
         + 'Updated ' + escHtml(formatDate(currentPage.updated_at)) + '</div>';
     let html = meta + renderMarkdown(currentPage.body_md || '');
     const { html: withIds, headings } = injectHeadingIds(html);
@@ -1501,7 +1513,7 @@ function easymdePreviewRender(plainText) {
 /// EasyMDE-compatible image uploader.
 /// Signature: (file, onSuccess(url), onError(msg))
 async function easymdeImageUpload(file, onSuccess, onError) {
-    if (!isPotentialAdmin()) { onError('Login required'); return; }
+    if (!canEditDocs()) { onError('Login required'); return; }
     if (!currentTag) { onError('No release selected'); return; }
     const name = generateAssetName(file);
     try {
@@ -1562,7 +1574,7 @@ function formatDate(s) {
 
 function enterEditMode() {
     if (!currentPage) return;
-    if (!isPotentialAdmin()) { toast('Login required', 'error'); return; }
+    if (!canEditDocs()) { toast('Login required', 'error'); return; }
     editMode = true;
     renderPage();
 }
@@ -1671,7 +1683,7 @@ async function deletePage() {
 }
 
 async function newPage() {
-    if (!isPotentialAdmin()) { toast('Login required', 'error'); return; }
+    if (!canEditDocs()) { toast('Login required', 'error'); return; }
     const slug = prompt('New page slug (lowercase, no spaces):');
     if (!slug) return;
     const cleanSlug = slug.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '-');
@@ -1703,7 +1715,7 @@ async function newPage() {
 // created on the backend when the first page is saved (ensure_release_with_seed),
 // so here we just point the editor at the new tag with an empty sidebar.
 async function newVersion() {
-    if (!isPotentialAdmin()) { toast('Login required', 'error'); return; }
+    if (!canEditDocs()) { toast('Login required', 'error'); return; }
     const tag = prompt('New version tag (e.g. v1.0):');
     if (!tag) return;
     const cleanTag = tag.trim();
@@ -1763,7 +1775,7 @@ async function route() {
         // so they can create the first page. Otherwise newly-created workspace
         // releases would have no entry point.
         document.getElementById('content').innerHTML = '<div class="empty-state"><h2>No pages in this release</h2><p style="color:var(--text2);margin-top:8px;">Click <strong>+ Page</strong> to create the first one.</p></div>';
-        document.getElementById('newPageBtn').style.display = isPotentialAdmin() ? '' : 'none';
+        document.getElementById('newPageBtn').style.display = canEditDocs() ? '' : 'none';
         document.getElementById('editBtn').style.display = 'none';
         return;
     }
