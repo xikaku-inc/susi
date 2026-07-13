@@ -833,7 +833,7 @@ pub(crate) async fn handle_create_workspace_doc_release(
 
     let release_id = {
         let db = state.db.lock();
-        db.insert_release(DEFAULT_PRODUCT, &tag, &req.name, "", false, Some(&workspace_id))
+        db.insert_release(DEFAULT_PRODUCT, &tag, &req.name, "", false, Some(&workspace_id), "docs")
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
     };
     docs::seed_user_docs_into_release(&state, release_id, DEFAULT_PRODUCT, &tag, Some(&workspace_id))?;

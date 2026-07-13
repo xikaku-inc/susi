@@ -342,10 +342,14 @@ pub(crate) async fn handle_upload_release(
             Some(existing_id) => {
                 db.update_release_metadata(existing_id, &name, &body, prerelease, workspace_id.as_deref())
                     .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+                // Binaries are being attached, so a doc-only collection with
+                // this tag becomes a software release.
+                db.set_release_kind(existing_id, "software")
+                    .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
                 (existing_id, false)
             }
             None => {
-                let id = db.insert_release(&product, &tag, &name, &body, prerelease, workspace_id.as_deref())
+                let id = db.insert_release(&product, &tag, &name, &body, prerelease, workspace_id.as_deref(), "software")
                     .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
                 (id, true)
             }

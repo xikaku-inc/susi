@@ -372,7 +372,9 @@ impl LicenseDb {
         if let Some(id) = self.get_release_by_product_tag(product, tag)? {
             return Ok((id, false));
         }
-        let id = self.insert_release(product, tag, name, "", false, workspace_id)?;
+        // Only doc handlers create releases through here, so a fresh row is a
+        // doc-only collection. A later binary upload promotes it to 'software'.
+        let id = self.insert_release(product, tag, name, "", false, workspace_id, "docs")?;
         Ok((id, true))
     }
 

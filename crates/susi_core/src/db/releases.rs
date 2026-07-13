@@ -5,6 +5,9 @@ impl LicenseDb {
     // Releases (with workspace scoping)
     // -----------------------------------------------------------------------
 
+    /// `kind` is 'software' for binary releases, 'docs' for doc-only
+    /// collections (which live in the same table so doc_pages/doc_assets can
+    /// FK on release_id, but must not surface in software release listings).
     pub fn insert_release(
         &self,
         product: &str,
@@ -13,15 +16,28 @@ impl LicenseDb {
         body: &str,
         prerelease: bool,
         workspace_id: Option<&str>,
+        kind: &str,
     ) -> Result<i64, LicenseError> {
         let now = Utc::now().to_rfc3339();
         self.conn
             .execute(
-                "INSERT INTO releases (product, tag, name, body, prerelease, created_at, workspace_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![product, tag, name, body, prerelease as i32, now, workspace_id],
+                "INSERT INTO releases (product, tag, name, body, prerelease, created_at, workspace_id, kind) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![product, tag, name, body, prerelease as i32, now, workspace_id, kind],
             )
             .map_err(|e| LicenseError::Other(format!("DB insert release: {}", e)))?;
         Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Promote a doc-only collection to a software release once binaries get
+    /// attached to it (upload reusing an existing tag).
+    pub fn set_release_kind(&self, release_id: i64, kind: &str) -> Result<(), LicenseError> {
+        self.conn
+            .execute(
+                "UPDATE releases SET kind = ?1 WHERE id = ?2",
+                params![kind, release_id],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB update release kind: {}", e)))?;
+        Ok(())
     }
 
     pub fn add_release_asset(
@@ -80,7 +96,7 @@ impl LicenseDb {
     ) -> Result<Vec<(i64, String, String, String, bool, String, Option<String>, String)>, LicenseError>
     {
         let mut stmt = self.conn
-            .prepare("SELECT id, tag, name, body, prerelease, created_at, workspace_id, product FROM releases ORDER BY id DESC")
+            .prepare("SELECT id, tag, name, body, prerelease, created_at, workspace_id, product FROM releases WHERE kind = 'software' ORDER BY id DESC")
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
         let rows = stmt
             .query_map([], |r| {
@@ -112,7 +128,7 @@ impl LicenseDb {
             .conn
             .prepare(
                 "SELECT id, tag, name, body, prerelease, created_at FROM releases
-                 WHERE workspace_id = ?1
+                 WHERE workspace_id = ?1 AND kind = 'software'
                  ORDER BY id DESC",
             )
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;

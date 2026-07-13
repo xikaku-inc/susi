@@ -2745,6 +2745,25 @@ fn test_workspace_member_doc_authoring() {
         .expect("admin write page");
     assert!(resp.status().is_success(), "admin writes workspace page: {}", resp.text().unwrap_or_default());
 
+    // Doc-only collections are kind='docs' and stay out of the software
+    // release listings (admin, user-facing, and workspace).
+    for url in [
+        format!("{}/releases", server.api_url),
+        format!("{}/updates/releases", server.api_url),
+        format!("{}/workspaces/{}/releases", server.api_url, ws_id),
+    ] {
+        let body = client
+            .get(&url)
+            .bearer_auth(&admin)
+            .send()
+            .expect("list releases")
+            .json::<Value>()
+            .expect("releases json");
+        let tags: Vec<&str> = body["releases"].as_array().unwrap().iter()
+            .map(|r| r["tag"].as_str().unwrap()).collect();
+        assert!(!tags.contains(&"sales-handbook"), "{} must hide doc collections, got {:?}", url, tags);
+    }
+
     // Non-members are denied: collection creation, page writes, page reads.
     let resp = client
         .post(format!("{}/workspaces/{}/docs/releases", server.api_url, ws_id))
