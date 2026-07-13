@@ -203,6 +203,21 @@ impl LicenseDb {
         }
     }
 
+    /// Any username holding this email (case-insensitive), even when several
+    /// do. Used to block creating a second account with the same address.
+    pub fn any_username_by_email(&self, email: &str) -> Result<Option<String>, LicenseError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT username FROM users WHERE LOWER(email) = LOWER(?1) LIMIT 1")
+            .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
+        let rows: Vec<String> = stmt
+            .query_map(params![email], |r| r.get::<_, String>(0))
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows.into_iter().next())
+    }
+
     pub fn set_user_email(&self, username: &str, email: Option<&str>) -> Result<(), LicenseError> {
         let now = Utc::now().to_rfc3339();
         self.conn

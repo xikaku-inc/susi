@@ -290,43 +290,15 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
     flex-shrink: 0;
 }
 
-.advanced-options {
-    margin-bottom: 12px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    overflow: hidden;
-}
-.advanced-options summary {
-    padding: 8px 12px;
-    cursor: pointer;
+.advanced-options { margin-top: 16px; margin-bottom: 12px; }
+.advanced-options .advanced-title {
     font-size: 12px;
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text2);
-    user-select: none;
-    list-style: none;
+    margin-bottom: 8px;
 }
-.advanced-options summary::-webkit-details-marker { display: none; }
-.advanced-options summary::before { content: '▶ '; font-size: 10px; }
-.advanced-options[open] summary::before { content: '▼ '; }
-.advanced-options .advanced-body {
-    padding: 8px 12px 12px;
-    border-top: 1px solid var(--border);
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 12px;
-}
-.advanced-options .adv-field label {
-    display: block;
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--text2);
-    margin-bottom: 4px;
-}
-.advanced-options .adv-field input { width: 100%; }
 
 .toast {
     position: fixed;
@@ -384,11 +356,6 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
     padding-bottom: 4px;
     border-bottom: 1px solid var(--border);
 }
-.detail-advanced summary { cursor: pointer; user-select: none; list-style: none; }
-.detail-advanced summary::-webkit-details-marker { display: none; }
-.detail-advanced summary::after { content: ' ▶'; font-size: 9px; }
-.detail-advanced[open] summary::after { content: ' ▼'; }
-
 /* Tabs styled like the top-nav menu items: pill hover with rounded corners,
    accent-tinted active state. No underline. */
 .ws-tabs {
@@ -1116,9 +1083,8 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                     </div>
                 </div>
             </div>
-            <details class="detail-advanced">
-                <summary class="detail-section-title">Advanced Options</summary>
-                <div class="detail-grid" style="margin-top:8px;">
+            <div class="detail-section-title">Advanced Options</div>
+            <div class="detail-grid">
                     <div class="detail-field">
                         <div class="field-label">Lease Duration (hours)</div>
                         <div class="field-value" id="detailLeaseDuration"></div>
@@ -1131,8 +1097,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                         <div class="field-label">Requires Signed Binary</div>
                         <div class="field-value" id="detailRequireSignedBinary"></div>
                     </div>
-                </div>
-            </details>
+            </div>
             <div class="detail-section-title">Activated Machines</div>
             <div id="detailMachines" class="machines-list"></div>
         </div>
@@ -1708,22 +1673,20 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                 <label>Max Machines (0 = unlimited)</label>
                 <input type="number" id="createMaxMachines" placeholder="1" min="0">
             </div>
-            <details class="advanced-options">
-                <summary>Advanced Options</summary>
-                <div class="advanced-body">
-                    <div class="adv-field">
-                        <label>Lease Duration<br>(hours, 0 = disable lease)</label>
-                        <input type="number" id="createLeaseDuration" placeholder="72" min="0">
-                    </div>
-                    <div class="adv-field">
-                        <label>Grace Period<br>(hours)</label>
-                        <input type="number" id="createLeaseGrace" placeholder="24" min="0">
-                    </div>
-                    <div class="adv-field" style="grid-column:1/-1;">
-                        <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;font-weight:400;text-transform:none;letter-spacing:0;color:var(--text);margin:0;"><input type="checkbox" id="createRequireSignedBinary" style="width:auto;margin:0;"> Require signed binary</label>
-                    </div>
+            <div class="advanced-options">
+                <div class="advanced-title">Advanced Options</div>
+                <div class="form-row">
+                    <label>Lease Duration (hours, 0 = disable lease)</label>
+                    <input type="number" id="createLeaseDuration" placeholder="72" min="0">
                 </div>
-            </details>
+                <div class="form-row">
+                    <label>Grace Period (hours)</label>
+                    <input type="number" id="createLeaseGrace" placeholder="24" min="0">
+                </div>
+                <div class="form-row">
+                    <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;"><input type="checkbox" id="createRequireSignedBinary" style="width:auto;margin:0;"> Require signed binary</label>
+                </div>
+            </div>
         </div>
         <div class="form-actions">
             <button class="secondary" onclick="closeCreateModal()">Cancel</button>
@@ -3191,7 +3154,6 @@ function showCreateModal() {
     document.getElementById('createLeaseDuration').value = '';
     document.getElementById('createLeaseGrace').value = '';
     document.getElementById('createRequireSignedBinary').checked = false;
-    document.querySelector('#createModal .advanced-options').open = false;
     document.getElementById('createModal').classList.add('visible');
     document.getElementById('createCustomer').focus();
 }
@@ -3258,7 +3220,7 @@ async function createLicense() {
     const assignEmail = document.getElementById('createAssignEmail').value.trim();
     let assignTo = [];
     if (assignEmail) {
-        const username = await ensurePortalUser(assignEmail);
+        const username = await ensurePortalUser(assignEmail, customer);
         if (!username) return;
         assignTo = [username];
     }
@@ -3363,9 +3325,21 @@ async function loadAssignableUsers() {
 
 // Resolve a username-or-email to an existing account; create + invite a new
 // portal user when given an unknown email. Returns the username or null.
-async function ensurePortalUser(identifier) {
+// Suggest a portal username in the manual convention (FirstLastCompany),
+// derived from the email local part plus the license customer.
+function suggestUsername(email, customer) {
+    const name = email.split('@')[0].split(/[._-]+/).filter(Boolean)
+        .map(p => p.charAt(0).toUpperCase() + p.slice(1)).join('');
+    const company = (customer || '').replace(/[^a-zA-Z0-9]+/g, '');
+    return (name + company) || email;
+}
+
+async function ensurePortalUser(identifier, customer) {
     const id = identifier.trim();
     if (!id) return null;
+    // Refresh before matching: a user created moments ago (e.g. via the Users
+    // page) must be found here, not shadowed by a stale login-time snapshot.
+    await loadAssignableUsers();
     const user = assignableUsers.find(u => u.username === id) ||
                  assignableUsers.find(u => (u.email || '').toLowerCase() === id.toLowerCase());
     if (user) return user.username;
@@ -3373,11 +3347,17 @@ async function ensurePortalUser(identifier) {
         toast('No user "' + id + '" - enter an email address to create one', 'error');
         return null;
     }
+    // New account: confirm the username instead of silently using the email,
+    // so shortcut-created accounts follow the same naming convention as
+    // manually created ones.
+    const proposed = prompt('New portal account for ' + id + '\nUsername:', suggestUsername(id, customer));
+    if (proposed === null) return null;
+    const username = proposed.trim() || id;
     try {
         const resp = await fetch(API + '/auth/users', {
             method: 'POST',
             headers: authHeaders(),
-            body: JSON.stringify({ username: id, email: id, role: 'user' }),
+            body: JSON.stringify({ username, email: id, role: 'user' }),
         });
         const data = await resp.json().catch(() => ({}));
         if (!resp.ok) {
@@ -3386,7 +3366,7 @@ async function ensurePortalUser(identifier) {
         }
         toast('Invitation sent to ' + id, 'success');
         await loadAssignableUsers();
-        return id;
+        return username;
     } catch (e) {
         toast('Failed: ' + e.message, 'error');
         return null;
@@ -3395,7 +3375,8 @@ async function ensurePortalUser(identifier) {
 
 async function assignLicenseUser() {
     if (!selectedKey) return;
-    const username = await ensurePortalUser(document.getElementById('assignUserInput').value);
+    const lic = licenses.find(l => l.license_key === selectedKey);
+    const username = await ensurePortalUser(document.getElementById('assignUserInput').value, lic ? lic.customer : '');
     if (!username) return;
     try {
         const resp = await fetch(API + '/licenses/' + encodeURIComponent(selectedKey) + '/users', {

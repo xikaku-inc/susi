@@ -56,6 +56,21 @@ pub(crate) async fn handle_create_user(
     let email = normalize_email(&req.email)?
         .ok_or_else(|| error_response(StatusCode::BAD_REQUEST, "Email is required"))?;
 
+    // One account per address: a duplicate email is almost always a stale UI
+    // acting on outdated data (the Quartermaster double-account incident).
+    {
+        let db = state.db.lock();
+        if let Some(existing) = db
+            .any_username_by_email(&email)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        {
+            return Err(error_response(
+                StatusCode::CONFLICT,
+                &format!("A user with this email already exists: {}", existing),
+            ));
+        }
+    }
+
     // Two paths: explicit manual password from admin, or invite-by-email
     // (default). Manual path needs the usual length floor; invite path stores
     // a random unusable hash so password login is impossible until the

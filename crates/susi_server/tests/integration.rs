@@ -924,6 +924,28 @@ fn test_create_user_with_explicit_password_skips_invite() {
     assert!(resp.status().is_success(), "login by email: {}", resp.text().unwrap_or_default());
     let body = resp.json::<Value>().expect("login json");
     assert_eq!(body["username"], json!("manual_alice"));
+
+    // A second account with the same email (any case) is rejected, naming the
+    // existing account - duplicate addresses used to create double accounts.
+    let resp = server
+        .http()
+        .post(format!("{}/auth/users", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({
+            "username": "manual_alice_two",
+            "email": "Manual_Alice@Example.com",
+            "role": "user",
+            "password": "anotherpw123",
+        }))
+        .send()
+        .expect("duplicate email create");
+    assert_eq!(resp.status().as_u16(), 409, "duplicate email must 409");
+    let body = resp.json::<Value>().expect("conflict json");
+    assert!(
+        body["error"].as_str().unwrap_or("").contains("manual_alice"),
+        "conflict error should name the existing account: {}",
+        body
+    );
 }
 
 /// Without SMTP configured, asking for the invite path (no password) returns
