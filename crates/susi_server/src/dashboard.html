@@ -743,9 +743,24 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
 .dash-page { display: none; }
 .dash-page.active { display: block; }
 
-/* Shared "peek" expansion anatomy - the label/value grid used by every
-   expandable list row (users, releases) so quick details look identical
-   across pages. */
+/* Symbol-only buttons (back arrows etc.): exempt from the project-wide
+   button min-width - a lone glyph shouldn't stretch to pill width. */
+button.icon-btn {
+    min-width: 0;
+    width: auto;
+    padding: 4px 12px;
+}
+
+/* Shared "peek" expansion anatomy - inset panel + label/value grid used by
+   every expandable list row (users, releases) so quick details look
+   identical across pages. */
+.peek-body {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 10px 14px;
+    margin-top: 8px;
+}
 .peek-grid {
     display: flex;
     gap: 28px;
@@ -846,8 +861,10 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
 <!-- Workspaces page -->
 <div id="page-workspaces" class="dash-page">
     <div id="workspaceListSection">
-    <div style="margin-top:32px;margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;">
-        <h2 style="font-size:16px;font-weight:600;">Workspaces</h2>
+    <h2 style="font-size:16px;font-weight:600;margin-top:32px;margin-bottom:16px;">Workspaces</h2>
+    <div class="toolbar">
+        <input type="text" id="wsSearch" placeholder="Search workspaces..." oninput="renderWorkspaces()">
+        <div class="spacer"></div>
         <button id="btnCreateWorkspace" onclick="showCreateWorkspaceModal()">+ New Workspace</button>
     </div>
     <div id="workspacesContainer" style="margin-bottom:20px;"></div>
@@ -857,7 +874,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
     <div id="wsDetailPanel" class="detail-panel card">
         <div class="detail-header">
             <div style="display:flex;align-items:center;gap:10px;min-width:0;">
-                <button class="small secondary" onclick="closeWsDetail()" title="Back to all workspaces">&larr;</button>
+                <button class="small secondary icon-btn" onclick="closeWsDetail()" title="Back to all workspaces">&larr;</button>
                 <h3 id="wsDetailTitle">Workspace</h3>
             </div>
             <div></div>
@@ -962,8 +979,10 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
 <!-- Releases page -->
 <div id="page-releases" class="dash-page">
     <div id="adminReleasesSection" style="margin-top:32px;">
-        <div style="margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;">
-            <h2 style="font-size:16px;font-weight:600;">Software Releases</h2>
+        <h2 style="font-size:16px;font-weight:600;margin-bottom:16px;">Software Releases</h2>
+        <div class="toolbar">
+            <input type="text" id="releaseSearch" placeholder="Search releases..." oninput="renderReleases()">
+            <div class="spacer"></div>
             <button id="btnUploadRelease" onclick="showUploadReleaseModal()">+ Upload Release</button>
         </div>
         <div class="card" id="releasesCard">
@@ -1014,7 +1033,6 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
     <div id="adminLicenseToolbar" class="toolbar">
         <input type="text" id="searchInput" placeholder="Search licenses...">
         <div class="spacer"></div>
-        <button class="secondary" onclick="loadLicenses()">Refresh</button>
         <button onclick="showCreateModal()">+ New License</button>
     </div>
 
@@ -1043,7 +1061,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
     <div id="detailPanel" class="detail-panel card">
         <div class="detail-header">
             <div style="display:flex;align-items:center;gap:10px;min-width:0;">
-                <button class="small secondary" onclick="closeDetail()" title="Back to all licenses">&larr;</button>
+                <button class="small secondary icon-btn" onclick="closeDetail()" title="Back to all licenses">&larr;</button>
                 <h3 id="detailTitle">License Details</h3>
             </div>
             <div>
@@ -1434,17 +1452,21 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
             white-space: nowrap;
         }
         #page-users tr.user-detail td {
-            background: var(--bg);
             font-size: 13px;
+            padding-top: 0;
         }
+        #page-users tr.user-detail .peek-body { margin-top: 0; }
+        /* Match the releases accordion: no hover highlight, and no divider
+           between an expanded row and its peek panel. */
+        #page-users tr:hover td { background: none; }
+        #page-users tr.user-row.expanded td { border-bottom: none; }
     </style>
-    <div style="margin-top:32px;margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
-        <h2 style="font-size:16px;font-weight:600;">User Management</h2>
-        <button class="secondary" onclick="loadUsers()">Refresh</button>
-    </div>
+    <h2 style="font-size:16px;font-weight:600;margin-top:32px;margin-bottom:16px;">User Management</h2>
     <div class="toolbar">
         <input type="text" id="userSearch" placeholder="Search users (name, email, role, license)..." oninput="onUserSearch()">
         <span id="userCount" style="font-size:12px;color:var(--text2);white-space:nowrap;"></span>
+        <div class="spacer"></div>
+        <button onclick="showAddUserModal()">+ Add User</button>
     </div>
     <div class="card" style="padding:0;margin-bottom:12px;">
         <div id="usersTableContainer" style="overflow:auto;">
@@ -1456,25 +1478,6 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
     </div>
     <div style="margin-bottom:20px;">
         <button class="secondary" id="usersShowMore" style="display:none;" onclick="showMoreUsers()">Show more</button>
-    </div>
-    <div class="card">
-        <h3 style="font-size:14px;margin-bottom:12px;">Add User</h3>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
-            <input type="text" id="newUsername" placeholder="Username" style="flex:1;min-width:120px;">
-            <input type="email" id="newUserEmail" placeholder="Email" style="flex:1;min-width:160px;" required>
-            <select id="newUserRole" style="width:90px;">
-                <option value="user">User</option>
-                <option value="admin">Admin</option>
-            </select>
-            <button onclick="createUser()" style="width:auto;">Send invitation</button>
-        </div>
-        <details style="margin-top:10px;">
-            <summary style="font-size:12px;color:var(--text2);cursor:pointer;">Advanced: set a password manually (no email sent)</summary>
-            <div style="display:flex;gap:8px;align-items:center;margin-top:10px;">
-                <input type="password" id="newPassword" placeholder="Password (min 8)" style="flex:1;min-width:160px;">
-                <span style="font-size:11px;color:var(--text2);">Use only if SMTP isn't configured. Plaintext must be couriered to the user.</span>
-            </div>
-        </details>
     </div>
 </div><!-- /page-users -->
 
@@ -1921,6 +1924,42 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
         <div class="form-actions">
             <button class="secondary" onclick="closeCreateWorkspaceModal()">Cancel</button>
             <button onclick="createWorkspace()">Create</button>
+        </div>
+    </div>
+</div>
+
+<!-- Add User Modal -->
+<div id="addUserModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeAddUserModal()">
+    <div class="modal">
+        <h2>Add User</h2>
+        <div class="modal-body">
+            <div class="form-row">
+                <label>Username</label>
+                <input type="text" id="newUsername" placeholder="e.g. AliceDemoCorp">
+            </div>
+            <div class="form-row">
+                <label>Email</label>
+                <input type="email" id="newUserEmail" placeholder="user@company.com">
+            </div>
+            <div class="form-row">
+                <label>Role</label>
+                <select id="newUserRole">
+                    <option value="user">User</option>
+                    <option value="admin">Admin</option>
+                </select>
+            </div>
+            <details style="margin-top:10px;">
+                <summary style="font-size:12px;color:var(--text2);cursor:pointer;">Advanced: set a password manually (no email sent)</summary>
+                <div class="form-row" style="margin-top:10px;">
+                    <label>Password (min 8)</label>
+                    <input type="password" id="newPassword">
+                </div>
+                <p style="font-size:11px;color:var(--text2);margin:6px 0 0;">Use only if SMTP isn't configured. Plaintext must be couriered to the user.</p>
+            </details>
+        </div>
+        <div class="form-actions">
+            <button class="secondary" onclick="closeAddUserModal()">Cancel</button>
+            <button onclick="createUser()">Send invitation</button>
         </div>
     </div>
 </div>
@@ -3847,6 +3886,19 @@ async function loadUsers() {
     }
 }
 
+function showAddUserModal() {
+    document.getElementById('newUsername').value = '';
+    document.getElementById('newUserEmail').value = '';
+    document.getElementById('newPassword').value = '';
+    document.getElementById('newUserRole').value = 'user';
+    document.getElementById('addUserModal').classList.add('visible');
+    setTimeout(() => document.getElementById('newUsername').focus(), 50);
+}
+
+function closeAddUserModal() {
+    document.getElementById('addUserModal').classList.remove('visible');
+}
+
 function onUserSearch() {
     usersShownCount = USERS_PAGE_SIZE;
     renderUsers();
@@ -3949,7 +4001,7 @@ function renderUsers() {
         const emailLine = u.email
             ? '<div class="user-email">' + esc(u.email) + '</div>'
             : '<div class="user-email">(no email)</div>';
-        let rows = '<tr class="user-row" onclick="toggleUserRow(\'' + uname + '\')">' +
+        let rows = '<tr class="user-row' + (expanded ? ' expanded' : '') + '" onclick="toggleUserRow(\'' + uname + '\')">' +
             '<td class="col-chev">' + chev + '</td>' +
             '<td><span class="user-name">' + esc(u.username) + '</span>' + emailLine + '</td>' +
             '<td>' + roleBadge + '</td>' +
@@ -3960,11 +4012,11 @@ function renderUsers() {
                 ? u.licenses.map(l => '<a class="feature-tag" href="#/licenses/' + encodeURIComponent(l.license_key) + '" title="' + esc(l.license_key) + '">' + esc(l.product) + '</a>').join(' ')
                 : '<span style="color:var(--text2);">(none)</span>';
             rows += '<tr class="user-detail"><td></td><td colspan="4">' +
-                '<div class="peek-grid">' +
+                '<div class="peek-body"><div class="peek-grid">' +
                     '<div><span class="label">Email</span>' + (u.email ? esc(u.email) : '<span style="color:var(--text2);">(none)</span>') + '</div>' +
                     '<div><span class="label">Licenses</span>' + licDetail + '</div>' +
                     '<div><span class="label">2FA</span>' + tfa + '</div>' +
-                '</div>' +
+                '</div></div>' +
             '</td></tr>';
         }
         return rows;
@@ -4002,6 +4054,7 @@ async function createUser() {
         document.getElementById('newUserEmail').value = '';
         document.getElementById('newPassword').value = '';
         document.getElementById('newUserRole').value = 'user';
+        closeAddUserModal();
         const msg = data.invitation_sent
             ? 'Invitation sent to ' + email
             : 'User "' + username + '" created';
@@ -4385,8 +4438,15 @@ function renderReleases() {
         container.innerHTML = '<span style="color:var(--text2);">No releases uploaded yet</span>';
         return;
     }
+    const q = (document.getElementById('releaseSearch').value || '').trim().toLowerCase();
+    const shown = q ? releases.filter(r =>
+        (r.tag + ' ' + (r.name || '') + ' ' + (r.product || '')).toLowerCase().includes(q)) : releases;
+    if (shown.length === 0) {
+        container.innerHTML = '<span style="color:var(--text2);">No matching releases.</span>';
+        return;
+    }
     const isAdmin = userRole === 'admin';
-    container.innerHTML = releases.map(r => {
+    container.innerHTML = shown.map(r => {
         const expanded = expandedRelease === r.tag;
         const prodSlug = r.product || DEFAULT_PRODUCT;
         const assets = (r.assets || []).map(a =>
@@ -4405,17 +4465,18 @@ function renderReleases() {
             const label = ws ? ws.name : r.workspace_id;
             scope = ' <span style="background:rgba(96,165,250,0.15);color:var(--accent);font-size:11px;font-weight:600;padding:2px 8px;border-radius:4px;" title="Workspace-scoped release">' + esc(label) + '</span>';
         }
-        const dlBtns = (r.assets || []).filter(a => /\.(msi|zip)$/i.test(a.name)).map(a =>
-            '<button class="small" onclick="event.stopPropagation();downloadAsset(event,\'' + esc(prodSlug) + '\',\'' + esc(r.tag) + '\',\'' + esc(a.name) + '\')" title="' + esc(a.name) + ' (' + formatSize(a.size) + ')">' +
-            a.name.match(/\.(msi|zip)$/i)[1].toUpperCase() + '</button>'
-        ).join('');
-        const deleteBtn = isAdmin ? '<button class="small danger" onclick="event.stopPropagation();deleteRelease(\'' + esc(prodSlug) + '\',\'' + esc(r.tag) + '\')">Delete</button>' : '';
         const arrow = '<span style="color:var(--text2);font-size:11px;margin-right:6px;">' + (expanded ? '&#9662;' : '&#9656;') + '</span>';
+        const deleteRow = isAdmin
+            ? '<div style="display:flex;justify-content:flex-end;margin-top:10px;padding-top:8px;border-top:1px solid var(--border);">' +
+                '<button class="small danger" onclick="deleteRelease(\'' + esc(prodSlug) + '\',\'' + esc(r.tag) + '\')">Delete release</button>' +
+              '</div>'
+            : '';
         const body = expanded ? (
-            '<div style="padding:10px 14px;border-radius:var(--radius);background:var(--bg);margin-top:8px;">' +
+            '<div class="peek-body">' +
                 (r.body ? '<div style="color:var(--text1);font-size:13px;line-height:1.5;">' + renderMarkdown(r.body) + '</div>'
                         : '<div style="color:var(--text2);font-size:13px;font-style:italic;">No release notes.</div>') +
                 (assets ? '<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--border);"><div class="peek-grid" style="padding:0;"><div><span class="label">Assets</span>' + assets + '</div></div></div>' : '') +
+                deleteRow +
             '</div>'
         ) : '';
         return '<div style="padding:10px 0;border-bottom:1px solid var(--border);" class="release-item">' +
@@ -4425,7 +4486,6 @@ function renderReleases() {
                     (r.name && r.name !== r.tag ? '<div style="font-size:13px;color:var(--text2);margin-left:18px;">' + esc(r.name) + '</div>' : '') +
                     '<div style="font-size:12px;color:var(--text2);margin-top:4px;margin-left:18px;">' + formatDateTime(r.published_at) + '</div>' +
                 '</div>' +
-                '<div style="display:flex;gap:6px;align-items:center;flex-shrink:0;">' + dlBtns + deleteBtn + '</div>' +
             '</div>' +
             body +
         '</div>';
@@ -4744,6 +4804,13 @@ function renderWorkspaces() {
         container.innerHTML = '<div class="empty-state" style="width:100%;padding:24px;"><p>No workspaces yet.</p></div>';
         return;
     }
+    const q = (document.getElementById('wsSearch').value || '').trim().toLowerCase();
+    const shown = q ? workspaces.filter(ws =>
+        (ws.name + ' ' + (ws.product || '') + ' ' + (ws.description || '') + ' ' + (ws.created_by || '')).toLowerCase().includes(q)) : workspaces;
+    if (shown.length === 0) {
+        container.innerHTML = '<div class="empty-state" style="width:100%;padding:24px;"><p>No matching workspaces.</p></div>';
+        return;
+    }
     container.innerHTML = `
         <div class="card">
             <table>
@@ -4756,7 +4823,7 @@ function renderWorkspaces() {
                     </tr>
                 </thead>
                 <tbody>
-                    ${workspaces.map(ws => `
+                    ${shown.map(ws => `
                         <tr class="ws-row${ws.id === selectedWsId ? ' selected' : ''}" onclick="location.hash='#/workspaces/${encodeURIComponent(ws.id)}'">
                             <td style="font-weight:600;">${esc(ws.name)}</td>
                             <td>${ws.product ? `<span class="badge active">${esc(ws.product)}</span>` : ''}</td>
@@ -5666,6 +5733,7 @@ document.addEventListener('keydown', e => {
         closeCreateModal();
         closeExportModal();
         closeTFAModal();
+        closeAddUserModal();
         closeUploadReleaseModal();
         closeCreateWorkspaceModal();
         closeProductModal();
