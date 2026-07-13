@@ -2596,6 +2596,29 @@ mod tests {
     }
 
     #[test]
+    fn test_delete_user_removes_dependent_rows() {
+        let db = test_db();
+        db.create_user("bob", "hash", "user").unwrap();
+        db.create_user("keeper", "hash", "user").unwrap();
+        db.create_workspace("ws-del", "WS", "", "", "keeper").unwrap();
+        db.add_workspace_member("ws-del", "bob").unwrap();
+        db.add_workspace_member("ws-del", "keeper").unwrap();
+
+        db.delete_user("bob").unwrap();
+
+        // The deleted account must not linger as a workspace member; the
+        // other member is untouched.
+        let members: Vec<String> = db
+            .list_workspace_members("ws-del")
+            .unwrap()
+            .into_iter()
+            .map(|(u, _)| u)
+            .collect();
+        assert!(!members.contains(&"bob".to_string()));
+        assert!(members.contains(&"keeper".to_string()));
+    }
+
+    #[test]
     fn test_doc_release_listings_are_scope_separated() {
         let db = test_db();
         db.create_workspace("ws-a", "A", "", "", "admin").unwrap();

@@ -185,11 +185,37 @@ impl LicenseDb {
             return Err(LicenseError::Other("Cannot delete the last user".into()));
         }
         self.conn
-            .execute("DELETE FROM users WHERE username = ?1", params![username])
-            .map_err(|e| LicenseError::Other(format!("DB delete: {}", e)))?;
-        self.conn
-            .execute("DELETE FROM license_users WHERE username = ?1", params![username])
-            .map_err(|e| LicenseError::Other(format!("DB delete: {}", e)))?;
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(|e| LicenseError::Other(format!("DB begin: {}", e)))?;
+        let result = self.delete_user_inner(username);
+        if result.is_ok() {
+            self.conn
+                .execute_batch("COMMIT")
+                .map_err(|e| LicenseError::Other(format!("DB commit: {}", e)))?;
+        } else {
+            let _ = self.conn.execute_batch("ROLLBACK");
+        }
+        result
+    }
+
+    fn delete_user_inner(&self, username: &str) -> Result<(), LicenseError> {
+        let run = |sql: &str| {
+            self.conn
+                .execute(sql, params![username])
+                .map(|_| ())
+                .map_err(|e| LicenseError::Other(format!("DB delete: {}", e)))
+        };
+        // Per-user rows go with the account. Attribution columns (revision
+        // authors, recording uploaders, page editors) deliberately stay as
+        // historical record.
+        run("DELETE FROM users WHERE username = ?1")?;
+        run("DELETE FROM license_users WHERE username = ?1")?;
+        run("DELETE FROM workspace_members WHERE username = ?1")?;
+        run("DELETE FROM sessions WHERE username = ?1")?;
+        run("DELETE FROM known_devices WHERE username = ?1")?;
+        run("DELETE FROM login_tokens WHERE username = ?1")?;
+        run("DELETE FROM totp_backup_codes WHERE username = ?1")?;
+        run("DELETE FROM api_tokens WHERE username = ?1")?;
         Ok(())
     }
 
