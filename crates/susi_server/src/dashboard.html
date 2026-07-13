@@ -743,6 +743,27 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
 .dash-page { display: none; }
 .dash-page.active { display: block; }
 
+/* Shared "peek" expansion anatomy - the label/value grid used by every
+   expandable list row (users, releases) so quick details look identical
+   across pages. */
+.peek-grid {
+    display: flex;
+    gap: 28px;
+    flex-wrap: wrap;
+    padding: 2px 6px;
+    font-size: 13px;
+}
+.peek-grid .label {
+    display: block;
+    font-size: 11px;
+    color: var(--text2);
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    margin-bottom: 3px;
+}
+a.feature-tag { text-decoration: none; cursor: pointer; }
+a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
+
 @media (max-width: 768px) {
     .container { padding: 12px; }
     .detail-grid { grid-template-columns: 1fr; }
@@ -824,19 +845,22 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
 
 <!-- Workspaces page -->
 <div id="page-workspaces" class="dash-page">
+    <div id="workspaceListSection">
     <div style="margin-top:32px;margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;">
         <h2 style="font-size:16px;font-weight:600;">Workspaces</h2>
         <button id="btnCreateWorkspace" onclick="showCreateWorkspaceModal()">+ New Workspace</button>
     </div>
     <div id="workspacesContainer" style="margin-bottom:20px;"></div>
+    </div><!-- /workspaceListSection -->
 
-    <!-- Workspace detail panel -->
+    <!-- Workspace detail panel (routed: #/workspaces/{id}/{tab} replaces the list view) -->
     <div id="wsDetailPanel" class="detail-panel card">
         <div class="detail-header">
-            <h3 id="wsDetailTitle">Workspace</h3>
-            <div>
-                <button class="small secondary" onclick="closeWsDetail()">&times; Close</button>
+            <div style="display:flex;align-items:center;gap:10px;min-width:0;">
+                <button class="small secondary" onclick="closeWsDetail()" title="Back to all workspaces">&larr;</button>
+                <h3 id="wsDetailTitle">Workspace</h3>
             </div>
+            <div></div>
         </div>
         <div class="detail-body">
             <div class="detail-grid">
@@ -855,12 +879,12 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
             </div>
 
             <div class="ws-tabs" role="tablist">
-                <button class="ws-tab active" data-ws-tab="releases" onclick="setWsTab('releases')">Releases</button>
-                <button class="ws-tab" data-ws-tab="docs" onclick="setWsTab('docs')">Docs</button>
-                <button class="ws-tab" data-ws-tab="configs" onclick="setWsTab('configs')">Configs</button>
-                <button class="ws-tab" data-ws-tab="recordings" onclick="setWsTab('recordings')">Recordings</button>
-                <button class="ws-tab" data-ws-tab="members" onclick="setWsTab('members')">Members</button>
-                <button class="ws-tab" data-ws-tab="settings" data-ws-admin-only onclick="setWsTab('settings')">Settings</button>
+                <button class="ws-tab active" data-ws-tab="releases" onclick="wsNavTab('releases')">Releases</button>
+                <button class="ws-tab" data-ws-tab="docs" onclick="wsNavTab('docs')">Docs</button>
+                <button class="ws-tab" data-ws-tab="configs" onclick="wsNavTab('configs')">Configs</button>
+                <button class="ws-tab" data-ws-tab="recordings" onclick="wsNavTab('recordings')">Recordings</button>
+                <button class="ws-tab" data-ws-tab="members" onclick="wsNavTab('members')">Members</button>
+                <button class="ws-tab" data-ws-tab="settings" data-ws-admin-only onclick="wsNavTab('settings')">Settings</button>
             </div>
 
             <div class="ws-tab-panel active" data-ws-panel="releases">
@@ -984,6 +1008,7 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
 <!-- Licenses page -->
 <div id="page-licenses" class="dash-page">
     <div id="adminLicenseTableSection">
+    <div id="licenseListSection">
     <h2 style="font-size:16px;font-weight:600;margin-top:32px;margin-bottom:16px;">Licenses</h2>
 
     <div id="adminLicenseToolbar" class="toolbar">
@@ -993,16 +1018,39 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
         <button onclick="showCreateModal()">+ New License</button>
     </div>
 
-    <!-- Detail panel -->
+    <!-- License table -->
+    <div class="card">
+        <table>
+            <thead>
+                <tr>
+                    <th>Key</th>
+                    <th>Customer</th>
+                    <th>Product</th>
+                    <th>Status</th>
+                    <th>Expires</th>
+                    <th>Machines</th>
+                    <th>Features</th>
+                </tr>
+            </thead>
+            <tbody id="licenseTableBody">
+                <tr><td colspan="7" class="empty-state"><p>Loading...</p></td></tr>
+            </tbody>
+        </table>
+    </div>
+    </div><!-- /licenseListSection -->
+
+    <!-- Detail panel (routed: #/licenses/{key} replaces the list view) -->
     <div id="detailPanel" class="detail-panel card">
         <div class="detail-header">
-            <h3 id="detailTitle">License Details</h3>
+            <div style="display:flex;align-items:center;gap:10px;min-width:0;">
+                <button class="small secondary" onclick="closeDetail()" title="Back to all licenses">&larr;</button>
+                <h3 id="detailTitle">License Details</h3>
+            </div>
             <div>
                 <button class="small secondary" id="btnEdit" onclick="startEditLicense()">Edit</button>
                 <button class="small secondary" onclick="exportLicense()">Export</button>
                 <button class="small danger" id="btnRevoke" onclick="revokeLicense()">Revoke</button>
                 <button class="small danger" id="btnDelete" onclick="deleteLicense()">Delete</button>
-                <button class="small secondary" onclick="closeDetail()">&times; Close</button>
             </div>
         </div>
         <!-- View mode -->
@@ -1105,26 +1153,6 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
                 <button onclick="saveEditLicense()">Save Changes</button>
             </div>
         </div>
-    </div>
-
-    <!-- License table -->
-    <div class="card">
-        <table>
-            <thead>
-                <tr>
-                    <th>Key</th>
-                    <th>Customer</th>
-                    <th>Product</th>
-                    <th>Status</th>
-                    <th>Expires</th>
-                    <th>Machines</th>
-                    <th>Features</th>
-                </tr>
-            </thead>
-            <tbody id="licenseTableBody">
-                <tr><td colspan="7" class="empty-state"><p>Loading...</p></td></tr>
-            </tbody>
-        </table>
     </div>
     </div>
 </div><!-- /page-licenses -->
@@ -1408,20 +1436,6 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
         #page-users tr.user-detail td {
             background: var(--bg);
             font-size: 13px;
-        }
-        #page-users .user-detail-grid {
-            display: flex;
-            gap: 28px;
-            flex-wrap: wrap;
-            padding: 2px 6px;
-        }
-        #page-users .user-detail-grid .label {
-            display: block;
-            font-size: 11px;
-            color: var(--text2);
-            text-transform: uppercase;
-            letter-spacing: 0.4px;
-            margin-bottom: 3px;
         }
     </style>
     <div style="margin-top:32px;margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
@@ -2335,9 +2349,13 @@ window.addEventListener('resize', () => {
 })();
 
 /// Decide which dash-page to show based on the hash route + auth state.
+/// Entity sub-routes: #/licenses/{key}, #/workspaces/{id}[/{tab}] open the
+/// routed detail view in place of the list; #/users/{query} prefills search.
 function route() {
-    const hash = location.hash.replace(/^#\/?/, '').split('/')[0] || '';
-    let target = hash;
+    const segs = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean).map(s => {
+        try { return decodeURIComponent(s); } catch (_) { return s; }
+    });
+    let target = segs[0] || '';
     const allowedAnon = new Set(['', 'home']);
     if (!authToken && !allowedAnon.has(target)) {
         // Protected page requested by anonymous user — show login.
@@ -2353,7 +2371,14 @@ function route() {
         target = (userRole === 'admin') ? 'releases' : 'mylicenses';
         if (location.hash !== '#/' + target) location.hash = '#/' + target;
     }
+    if (authToken && target === 'users' && segs[1]) {
+        document.getElementById('userSearch').value = segs[1];
+    }
     showPage(target);
+    if (authToken) {
+        if (target === 'licenses') setLicenseRoute(segs[1] || null);
+        if (target === 'workspaces') setWorkspaceRoute(segs[1] || null, segs[2] || null);
+    }
 }
 
 function showPage(name) {
@@ -2921,7 +2946,7 @@ function renderTable() {
     tbody.innerHTML = filtered.map(l => {
         const status = getStatus(l);
         const features = l.features.map(f => '<span class="feature-tag">' + esc(f) + '</span>').join(' ');
-        return '<tr style="cursor:pointer" onclick="selectLicense(\'' + esc(l.license_key) + '\')">' +
+        return '<tr style="cursor:pointer" onclick="location.hash=\'#/licenses/' + encodeURIComponent(l.license_key) + '\'">' +
             '<td><span class="key-display">' + esc(l.license_key) + '</span></td>' +
             '<td>' + esc(l.customer) + '</td>' +
             '<td>' + esc(l.product) + '</td>' +
@@ -2941,11 +2966,34 @@ function esc(s) {
     return d.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
+// Routed license detail: #/licenses/{key} replaces the list view.
+function setLicenseRoute(key) {
+    if (key) {
+        selectedKey = key;
+        document.getElementById('licenseListSection').style.display = 'none';
+        // With data present select immediately; otherwise loadLicenses()
+        // re-selects via its selectedKey tail once the list arrives.
+        if (licenses.length) selectLicense(key);
+    } else {
+        hideLicenseDetail();
+    }
+}
+
+function hideLicenseDetail() {
+    selectedKey = null;
+    document.getElementById('detailPanel').classList.remove('visible');
+    document.getElementById('licenseListSection').style.display = '';
+}
+
 // Detail panel
 function selectLicense(key) {
     selectedKey = key;
     const lic = licenses.find(l => l.license_key === key);
-    if (!lic) return;
+    if (!lic) {
+        // Deep link to a key that doesn't exist (or was deleted).
+        if (licenses.length) { toast('License not found', 'error'); closeDetail(); }
+        return;
+    }
 
     const status = getStatus(lic);
     document.getElementById('detailTitle').textContent = 'License: ' + lic.customer;
@@ -2969,7 +3017,9 @@ function selectLicense(key) {
                 ? '<span class="machine-code" style="margin-left:12px;">' + esc(account.email) + '</span>'
                 : '';
             return '<div class="machine-item">' +
-                '<div style="display:flex;align-items:baseline;"><strong>' + esc(u) + '</strong>' + email + '</div>' +
+                '<div style="display:flex;align-items:baseline;">' +
+                    '<a href="#/users/' + encodeURIComponent(u) + '" style="font-weight:600;color:var(--accent);text-decoration:none;" title="Open in user management">' + esc(u) + '</a>' + email +
+                '</div>' +
                 '<button class="small danger" onclick="unassignLicenseUser(\'' + esc(lic.license_key) + '\',\'' + esc(u) + '\')">Remove</button>' +
                 '</div>';
         }).join('');
@@ -2998,14 +3048,13 @@ function selectLicense(key) {
     document.getElementById('detailView').style.display = '';
     document.getElementById('detailEdit').style.display = 'none';
     document.getElementById('btnEdit').style.display = '';
-    const panel = document.getElementById('detailPanel');
-    panel.classList.add('visible');
-    panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    document.getElementById('licenseListSection').style.display = 'none';
+    document.getElementById('detailPanel').classList.add('visible');
 }
 
 function closeDetail() {
-    selectedKey = null;
-    document.getElementById('detailPanel').classList.remove('visible');
+    hideLicenseDetail();
+    if (location.hash.startsWith('#/licenses/')) location.hash = '#/licenses';
 }
 
 function startEditLicense() {
@@ -3210,7 +3259,7 @@ async function createLicense() {
         toast('License created: ' + lic.license_key, 'success');
         closeCreateModal();
         await loadLicenses();
-        selectLicense(lic.license_key);
+        location.hash = '#/licenses/' + encodeURIComponent(lic.license_key);
     } catch (e) {
         toast('Failed: ' + e.message, 'error');
     }
@@ -3908,10 +3957,10 @@ function renderUsers() {
             '<td class="col-actions">' + actions + '</td></tr>';
         if (expanded) {
             const licDetail = (u.licenses && u.licenses.length)
-                ? u.licenses.map(l => '<span class="feature-tag" title="' + esc(l.license_key) + '">' + esc(l.product) + '</span>').join(' ')
+                ? u.licenses.map(l => '<a class="feature-tag" href="#/licenses/' + encodeURIComponent(l.license_key) + '" title="' + esc(l.license_key) + '">' + esc(l.product) + '</a>').join(' ')
                 : '<span style="color:var(--text2);">(none)</span>';
             rows += '<tr class="user-detail"><td></td><td colspan="4">' +
-                '<div class="user-detail-grid">' +
+                '<div class="peek-grid">' +
                     '<div><span class="label">Email</span>' + (u.email ? esc(u.email) : '<span style="color:var(--text2);">(none)</span>') + '</div>' +
                     '<div><span class="label">Licenses</span>' + licDetail + '</div>' +
                     '<div><span class="label">2FA</span>' + tfa + '</div>' +
@@ -4361,12 +4410,12 @@ function renderReleases() {
             a.name.match(/\.(msi|zip)$/i)[1].toUpperCase() + '</button>'
         ).join('');
         const deleteBtn = isAdmin ? '<button class="small danger" onclick="event.stopPropagation();deleteRelease(\'' + esc(prodSlug) + '\',\'' + esc(r.tag) + '\')">Delete</button>' : '';
-        const arrow = '<span style="color:var(--text2);font-size:10px;margin-right:4px;display:inline-block;transition:transform 0.15s;transform:rotate(' + (expanded ? '90' : '0') + 'deg);">&#9654;</span>';
+        const arrow = '<span style="color:var(--text2);font-size:11px;margin-right:6px;">' + (expanded ? '&#9662;' : '&#9656;') + '</span>';
         const body = expanded ? (
-            '<div style="padding:8px 0 4px 18px;border-top:1px solid var(--border);margin-top:8px;">' +
+            '<div style="padding:10px 14px;border-radius:var(--radius);background:var(--bg);margin-top:8px;">' +
                 (r.body ? '<div style="color:var(--text1);font-size:13px;line-height:1.5;">' + renderMarkdown(r.body) + '</div>'
                         : '<div style="color:var(--text2);font-size:13px;font-style:italic;">No release notes.</div>') +
-                (assets ? '<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--border);"><div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:4px;">Assets</div>' + assets + '</div>' : '') +
+                (assets ? '<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--border);"><div class="peek-grid" style="padding:0;"><div><span class="label">Assets</span>' + assets + '</div></div></div>' : '') +
             '</div>'
         ) : '';
         return '<div style="padding:10px 0;border-bottom:1px solid var(--border);" class="release-item">' +
@@ -4708,7 +4757,7 @@ function renderWorkspaces() {
                 </thead>
                 <tbody>
                     ${workspaces.map(ws => `
-                        <tr class="ws-row${ws.id === selectedWsId ? ' selected' : ''}" onclick="showWsDetail('${ws.id}')">
+                        <tr class="ws-row${ws.id === selectedWsId ? ' selected' : ''}" onclick="location.hash='#/workspaces/${encodeURIComponent(ws.id)}'">
                             <td style="font-weight:600;">${esc(ws.name)}</td>
                             <td>${ws.product ? `<span class="badge active">${esc(ws.product)}</span>` : ''}</td>
                             <td style="color:var(--text2);">${ws.description ? esc(ws.description) : ''}</td>
@@ -4722,9 +4771,43 @@ function renderWorkspaces() {
 }
 
 
+// Routed workspace detail: #/workspaces/{id}[/{tab}] replaces the list view.
+// Tab switches re-route with the same id, which must NOT refetch everything -
+// wsDetailLoadedId tracks which workspace the panel currently holds.
+let wsDetailLoadedId = null;
+
+function setWorkspaceRoute(id, tab) {
+    if (!id) {
+        hideWsDetail();
+        return;
+    }
+    document.getElementById('workspaceListSection').style.display = 'none';
+    if (wsDetailLoadedId === id) {
+        document.getElementById('wsDetailPanel').classList.add('visible');
+        setWsTab(tab || 'releases');
+    } else {
+        showWsDetail(id, tab);
+    }
+}
+
+function hideWsDetail() {
+    selectedWsId = null;
+    wsDetailLoadedId = null;
+    document.getElementById('wsDetailPanel').classList.remove('visible');
+    document.getElementById('workspaceListSection').style.display = '';
+    renderWorkspaces();
+}
+
+function wsNavTab(name) {
+    if (!selectedWsId) return;
+    location.hash = '#/workspaces/' + encodeURIComponent(selectedWsId) + '/' + name;
+}
+
 async function showWsDetail(id, tab) {
     selectedWsId = id;
+    wsDetailLoadedId = id;
     renderWorkspaces();
+    document.getElementById('workspaceListSection').style.display = 'none';
     const panel = document.getElementById('wsDetailPanel');
     panel.classList.add('visible');
     // Default to Releases when opening the panel fresh; callers that refresh
@@ -5358,9 +5441,8 @@ async function toggleWsRelease(tag) {
 }
 
 function closeWsDetail() {
-    selectedWsId = null;
-    document.getElementById('wsDetailPanel').classList.remove('visible');
-    renderWorkspaces();
+    hideWsDetail();
+    if (location.hash.startsWith('#/workspaces/')) location.hash = '#/workspaces';
 }
 
 async function loadWsConfigs(wsId) {
