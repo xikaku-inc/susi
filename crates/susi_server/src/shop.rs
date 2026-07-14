@@ -1,4 +1,4 @@
-//! Shop endpoints — Stripe-backed checkout for physical goods.
+//! Shop endpoints - Stripe-backed checkout for physical goods.
 //!
 //! - Public: list products, get product, create checkout session, webhook.
 //! - Admin (JWT): CRUD for products + shipping rates.
@@ -154,7 +154,7 @@ pub struct CheckoutRequest {
     pub destination_country: String,
 }
 
-/// Region match — `*` is a wildcard for "any country".
+/// Region match - `*` is a wildcard for "any country".
 fn rate_applies(regions: &[String], country: &str) -> bool {
     regions.iter().any(|r| r == "*" || r.eq_ignore_ascii_case(country))
 }
@@ -218,7 +218,7 @@ pub async fn handle_create_checkout_session(
     }
     // ISO-3166-1 alpha-2 country codes are 2 letters; allow empty (initial
     // page load before the country selector is rendered). Shop only serves
-    // the US and Canada — reject all other destinations.
+    // the US and Canada - reject all other destinations.
     if !req.destination_country.is_empty() {
         if req.destination_country.len() != 2
             || !req.destination_country.chars().all(|c| c.is_ascii_alphabetic())
@@ -237,7 +237,7 @@ pub async fn handle_create_checkout_session(
         if item.qty <= 0 || item.qty > 1000 {
             return Err(error_response(StatusCode::BAD_REQUEST, "Invalid quantity"));
         }
-        // Mirror admin validate_sku — bound length and character set so a
+        // Mirror admin validate_sku - bound length and character set so a
         // pathological client can't waste a DB lookup with megabyte SKUs.
         if item.sku.is_empty()
             || item.sku.len() > 64
@@ -248,7 +248,7 @@ pub async fn handle_create_checkout_session(
     }
 
     // Single batch lookup instead of one round-trip per cart line. Releases
-    // the DB lock before the Stripe HTTP call below — that call is 100–500 ms
+    // the DB lock before the Stripe HTTP call below - that call is 100-500 ms
     // and previously held every other handler off the connection.
     let skus: Vec<String> = req.items.iter().map(|i| i.sku.clone()).collect();
     let products = {
@@ -309,7 +309,7 @@ pub async fn handle_create_checkout_session(
     // Always collect a billing address so receipts / invoices have one,
     // and so we can show it separately from the shipping address.
     form.push(("billing_address_collection".into(), "required".into()));
-    // Require phone number — needed by carriers for shipping.
+    // Require phone number - needed by carriers for shipping.
     form.push(("phone_number_collection[enabled]".into(), "true".into()));
     // Tell Stripe to generate a hosted invoice + PDF for every paid session.
     // The webhook event then references the invoice id, which we fetch and
@@ -382,7 +382,7 @@ pub async fn handle_create_checkout_session(
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        log::error!("Stripe checkout.sessions create failed: {} — {}", status, body);
+        log::error!("Stripe checkout.sessions create failed: {} - {}", status, body);
         let short = if body.len() > 400 { &body[..400] } else { &body };
         return Err(error_response(
             StatusCode::BAD_GATEWAY,
@@ -405,7 +405,7 @@ pub async fn handle_create_checkout_session(
 // Stripe signs each webhook with an HMAC-SHA256 over `{timestamp}.{raw_body}`.
 // We verify using the whsec_… secret + constant-time tag compare, then act on
 // `checkout.session.completed` by emailing a short order summary to the shop
-// owner. No DB writes — Stripe is the source of truth for orders.
+// owner. No DB writes - Stripe is the source of truth for orders.
 // ---------------------------------------------------------------------------
 
 fn parse_stripe_signature_header(h: &str) -> (Option<i64>, Vec<String>) {
@@ -510,12 +510,12 @@ pub async fn handle_stripe_webhook(
                 return Ok(Json(json!({ "received": true, "pending": true })));
             }
             // `inserted == false` means a previous delivery already created
-            // the order — Stripe is retrying. Skip emails so the customer
+            // the order - Stripe is retrying. Skip emails so the customer
             // doesn't get a duplicate confirmation.
             let order_id = persisted.map(|(id, _)| id);
             let is_new_order = persisted.map(|(_, ins)| ins).unwrap_or(false);
             if !is_new_order {
-                log::info!("Stripe webhook retry for already-recorded session — skipping emails");
+                log::info!("Stripe webhook retry for already-recorded session - skipping emails");
                 return Ok(Json(json!({ "received": true, "duplicate": true })));
             }
             send_order_notifications(&state, &event, order_id).await;
@@ -540,7 +540,7 @@ pub async fn handle_stripe_webhook(
             if inserted || flipped {
                 send_order_notifications(&state, &event, order_id).await;
             } else {
-                log::info!("async_payment_succeeded retry for already-paid session — skipping emails");
+                log::info!("async_payment_succeeded retry for already-paid session - skipping emails");
             }
         }
         "checkout.session.async_payment_failed" => {
@@ -571,7 +571,7 @@ pub async fn handle_stripe_webhook(
 /// delivery (fresh insert or a conditional status transition).
 async fn send_order_notifications(state: &Arc<AppState>, event: &Value, order_id: Option<i64>) {
     {
-        // Fetch line items + invoice PDF in parallel — both via Stripe API,
+        // Fetch line items + invoice PDF in parallel - both via Stripe API,
         // both best-effort (we still send emails even if one is unavailable).
         let session_id = event
             .pointer("/data/object/id")
@@ -593,7 +593,7 @@ async fn send_order_notifications(state: &Arc<AppState>, event: &Value, order_id
                     (Value::Null, String::new())
                 } else {
                     // We need the Stripe invoice for its number + creation
-                    // timestamp, but we render the PDF ourselves below — see
+                    // timestamp, but we render the PDF ourselves below - see
                     // invoice_pdf::generate for why.
                     let inv = fetch_invoice(&state, &invoice_id).await;
                     let number = inv.get("number").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -606,7 +606,7 @@ async fn send_order_notifications(state: &Arc<AppState>, event: &Value, order_id
 
         // Render our own paid-invoice PDF. Stripe's PDF for Checkout-paid
         // invoices is rendered once at finalization (status=open) and never
-        // refreshed, so it always carries a "Pay online" CTA — useless for
+        // refreshed, so it always carries a "Pay online" CTA - useless for
         // a post-payment receipt.
         let pdf_bytes = match invoice_pdf::generate(&event, &line_items, &invoice_obj, order_id) {
             Ok(b) => b,
@@ -640,7 +640,7 @@ async fn send_order_notifications(state: &Arc<AppState>, event: &Value, order_id
                     let to = to.clone();
                     let subject = subject.clone();
                     let body = body.clone();
-                    // Refcount-bump clone — `bytes: Arc<[u8]>`, no PDF copy.
+                    // Refcount-bump clone - `bytes: Arc<[u8]>`, no PDF copy.
                     let attach = pdf_attachment.as_ref().map(|a| EmailAttachment {
                         file_name: a.file_name.clone(),
                         mime_type: a.mime_type.clone(),
@@ -689,7 +689,7 @@ async fn send_order_notifications(state: &Arc<AppState>, event: &Value, order_id
 }
 
 // ---------------------------------------------------------------------------
-// Settings — well-known keys and lookup helpers
+// Settings - well-known keys and lookup helpers
 // ---------------------------------------------------------------------------
 
 const SETTING_NOTIFY_EMAILS: &str = "notification_emails";
@@ -731,7 +731,7 @@ fn customer_email_enabled(state: &AppState) -> bool {
         let db = state.db.lock();
         db.get_shop_setting(SETTING_CUSTOMER_EMAIL_ENABLED).ok().flatten()
     };
-    // Default ON when unset — most shops want customer confirmations.
+    // Default ON when unset - most shops want customer confirmations.
     match v.as_deref() {
         Some("0") | Some("false") | Some("off") => false,
         _ => true,
@@ -788,7 +788,7 @@ fn build_customer_confirmation(
     text.push_str(&format!("Tax:       {}\n", fmt_money(amount_tax, currency)));
     text.push_str(&format!("Total:     {}\n\n", fmt_money(amount_total, currency)));
 
-    // Ship-to confirmation in the customer email — reassures them the address
+    // Ship-to confirmation in the customer email - reassures them the address
     // we'll ship to is what they entered. Always show ship-to and bill-to as
     // separate blocks (even when they match) so the customer can see both.
     let ship_text = address_block_text(obj.get("shipping_details"), name);
@@ -829,7 +829,7 @@ fn build_customer_confirmation(
     }
 
     // Always render ship-to and bill-to as separate blocks, even when they
-    // match — keeps the email layout consistent and lets the customer verify
+    // match - keeps the email layout consistent and lets the customer verify
     // both addresses at a glance.
     let ship_html = address_block_html(obj.get("shipping_details"), name);
     let bill_html = address_block_html(obj.get("customer_details"), name);
@@ -853,7 +853,7 @@ fn build_customer_confirmation(
         )
     };
 
-    // Address sections — always two columns when both are present so the
+    // Address sections - always two columns when both are present so the
     // customer sees ship-to and bill-to side by side, even when identical.
     let address_section = if ship_html.is_empty() && bill_html.is_empty() {
         String::new()
@@ -1013,7 +1013,7 @@ async fn fetch_invoice(state: &AppState, invoice_id: &str) -> Value {
 }
 
 /// Pull line items from the Stripe API (the webhook payload doesn't include
-/// them — Stripe explicitly omits expandable fields on webhook events).
+/// them - Stripe explicitly omits expandable fields on webhook events).
 async fn fetch_line_items(state: &AppState, session_id: &str) -> Vec<Value> {
     if state.stripe_secret_key.is_empty() { return Vec::new(); }
     let url = format!("{}/checkout/sessions/{}/line_items?limit=100", STRIPE_API_BASE, session_id);
@@ -1034,7 +1034,7 @@ async fn fetch_line_items(state: &AppState, session_id: &str) -> Vec<Value> {
 
 /// Persist a Stripe Checkout Session as a shop_orders row with the given
 /// status ('paid' or 'pending_payment'). Returns `(local_order_id, inserted)`
-/// on success — `inserted == false` means the row already existed (Stripe
+/// on success - `inserted == false` means the row already existed (Stripe
 /// retry) and side effects (emails) should be skipped. Returns `None` on any
 /// error (still ack 200 so Stripe stops retrying after the first DB success).
 async fn persist_order_from_event(
@@ -1104,7 +1104,7 @@ fn format_order_summary(event: &Value, line_items: &[Value], order_id: Option<i6
     }
 
     // Always render ship-to and bill-to as separate sections so the operator
-    // sees both — even when they match — and can spot a mismatch instantly.
+    // sees both - even when they match - and can spot a mismatch instantly.
     let ship_text = address_block_text(obj.get("shipping_details"), name);
     let bill_text = address_block_text(obj.get("customer_details"), name);
     if ship_text.is_empty() && bill_text.is_empty() {
@@ -1442,7 +1442,7 @@ fn order_to_json(
 }
 
 /// Build a customer-facing tracking URL from carrier name + tracking number.
-/// Returns None for unknown carriers — the email then shows just the number.
+/// Returns None for unknown carriers - the email then shows just the number.
 fn tracking_url(carrier: &str, tracking: &str) -> Option<String> {
     if tracking.is_empty() { return None; }
     let n = urlencoding_encode(tracking);
@@ -1459,7 +1459,7 @@ fn tracking_url(carrier: &str, tracking: &str) -> Option<String> {
     Some(url)
 }
 
-/// Lightweight URL encoder — only escapes the ASCII chars that need escaping
+/// Lightweight URL encoder - only escapes the ASCII chars that need escaping
 /// in a query value. Avoids pulling in a separate dep just for this one use.
 fn urlencoding_encode(s: &str) -> String {
     const HEX: &[u8] = b"0123456789ABCDEF";
@@ -1767,9 +1767,9 @@ pub async fn handle_admin_put_settings(
 // ---------------------------------------------------------------------------
 
 pub async fn handle_shop_page(State(state): State<Arc<AppState>>) -> axum::response::Html<String> {
-    let head = "<title>Shop — Xikaku</title>\n\
+    let head = "<title>Shop - Xikaku</title>\n\
                 <meta name=\"description\" content=\"Order Xikaku IMU and inertial sensors directly. Shipped from our Los Angeles office.\">\n\
-                <meta property=\"og:title\" content=\"Shop — Xikaku\">\n\
+                <meta property=\"og:title\" content=\"Shop - Xikaku\">\n\
                 <meta property=\"og:type\" content=\"website\">\n";
     let analytics = crate::website::analytics_head(&state);
     let html = crate::website::WEBSITE_HTML
@@ -1829,7 +1829,7 @@ mod tests {
         mac.update(payload);
         let sig = hex::encode(mac.finalize().into_bytes());
         let header = format!("t={},v1={}", ts, sig);
-        // 10 min later — outside 5 min tolerance.
+        // 10 min later - outside 5 min tolerance.
         assert!(verify_stripe_signature(secret, &header, payload, ts + 600).is_err());
     }
 

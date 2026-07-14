@@ -2,7 +2,7 @@
 //!
 //! Simple single-site page store at `/api/v1/website/...`. Public reads for
 //! viewing pages + assets; admin writes (JWT/API-token) for editing. Unlike
-//! `docs`, there's no release concept and no pipeline/user origin split —
+//! `docs`, there's no release concept and no pipeline/user origin split -
 //! all content is hand-authored via the in-browser editor.
 
 use std::collections::HashMap;
@@ -63,7 +63,7 @@ fn safe_slug(slug: &str) -> Result<&str, (StatusCode, Json<ErrorResponse>)> {
 /// (slug, title, parent_slug, ord, updated_at, meta_description, hidden).
 type PageRow = (String, String, Option<String>, i64, String, String, bool);
 
-/// Drop hidden pages — applied before any public-facing use of the page list
+/// Drop hidden pages - applied before any public-facing use of the page list
 /// (nav, SSR head, sitemap, llms.txt).
 fn visible_pages(mut pages: Vec<PageRow>) -> Vec<PageRow> {
     pages.retain(|p| !p.6);
@@ -656,7 +656,7 @@ pub fn invalidate_page_cache() {
     }
 }
 
-// Returns the static byte slice unchanged — axum's IntoResponse for
+// Returns the static byte slice unchanged - axum's IntoResponse for
 // `&'static [u8]` wraps it via `Body::from_static`, so no per-request copy.
 fn cached_image(content_type: &'static str, bytes: &'static [u8]) -> (HeaderMap, &'static [u8]) {
     let mut h = HeaderMap::new();
@@ -809,7 +809,7 @@ fn first_image_url(body_md: &str) -> Option<String> {
 /// pulldown-cmark doesn't understand pandoc syntax; without this the `{...}`
 /// either rendered as literal text or (when only stripped) dropped classes
 /// like `.logo-light`/`.logo-dark` that the page CSS uses to pick the right
-/// asset for the active theme — causing both logos to flash on load.
+/// asset for the active theme - causing both logos to flash on load.
 fn rewrite_pandoc_image_attrs(body_md: &str) -> String {
     let bytes = body_md.as_bytes();
     let mut out = String::with_capacity(body_md.len());
@@ -1010,12 +1010,12 @@ fn render_seo_head(
     let is_home = home_slug == Some(slug);
     let canonical = canonical_page_url(slug, is_home);
     let full_title = if is_home {
-        format!("{} — {}", SITE_NAME, SITE_TAGLINE)
+        format!("{} - {}", SITE_NAME, SITE_TAGLINE)
     } else {
-        format!("{} — {}", page_title, SITE_NAME)
+        format!("{} - {}", page_title, SITE_NAME)
     };
 
-    // Organization JSON-LD is identical across every page — built once at
+    // Organization JSON-LD is identical across every page - built once at
     // module init by `ORG_JSONLD: LazyLock<String>`.
     let org_jsonld: &str = &ORG_JSONLD;
 
@@ -1178,7 +1178,7 @@ fn render_website(
         first_default_slug(&pages).map(|s| s.to_string())
     });
     // If the requested slug is unknown, render the shell anyway (SPA shows "Page not found")
-    // but omit the SEO head — better than 500'ing.
+    // but omit the SEO head - better than 500'ing.
     let (title, description, updated_at, valid_slug, body_md):
         (String, String, String, Option<String>, String) =
         if let Some(s) = slug_owned.as_deref() {
@@ -1187,7 +1187,7 @@ fn render_website(
                 db.get_website_page(s).unwrap_or(None)
             };
             // A hidden page renders like an unknown slug: bare shell, no SEO
-            // head, no body — the SPA shows "Page not found" to visitors.
+            // head, no body - the SPA shows "Page not found" to visitors.
             if let Some((t, body, _p, _o, upd, meta, false)) = row {
                 let desc = if !meta.trim().is_empty() {
                     meta
@@ -1248,7 +1248,7 @@ fn is_valid_analytics_id(s: &str) -> bool {
 }
 
 /// Render the analytics `<script>` block from the configured Measurement ID,
-/// or empty string when unset. Called per-request — DB lookup is cheap.
+/// or empty string when unset. Called per-request - DB lookup is cheap.
 pub fn analytics_head(state: &Arc<AppState>) -> String {
     let id = {
         let db = state.db.lock();
@@ -1437,7 +1437,7 @@ pub async fn handle_admin_put_site_settings(
 }
 
 // ---------------------------------------------------------------------------
-// IndexNow — push page changes to Bing/Yandex/Naver/Seznam (Google opts out).
+// IndexNow - push page changes to Bing/Yandex/Naver/Seznam (Google opts out).
 //
 // Spec: https://www.indexnow.org/documentation
 // We generate a 32-hex-char key on first use, persist it in site_settings,
@@ -1541,7 +1541,7 @@ mod tests {
     #[test]
     fn derive_description_cuts_on_sentence_boundary() {
         let md = "The Xikaku LPMS series delivers 9-axis and 6-axis inertial measurement \
-            across a wide range of applications — from wearables to autonomous vehicles \
+            across a wide range of applications - from wearables to autonomous vehicles \
             to structural monitoring. All models expose raw data, Euler angles, and \
             quaternions, and are configurable through LPMS-Control software. \
             Pick a sensor to see specs, datasheets, and application notes.";
