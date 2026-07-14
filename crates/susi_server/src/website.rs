@@ -274,16 +274,22 @@ pub async fn handle_list_assets_with_usage(
     let rows = db.list_website_assets_with_usage().map_err(db_err)?;
     let assets: Vec<_> = rows
         .into_iter()
-        .map(|(name, size, usage_count, pages_csv)| {
+        .map(|(name, size, usage_count, pages_csv, products_csv)| {
             let pages: Vec<&str> = if pages_csv.is_empty() {
                 Vec::new()
             } else {
                 pages_csv.split(',').collect()
             };
+            let products: Vec<&str> = if products_csv.is_empty() {
+                Vec::new()
+            } else {
+                products_csv.split(',').collect()
+            };
             json!({
                 "name": name, "size": size,
                 "usage_count": usage_count,
                 "pages": pages,
+                "products": products,
             })
         })
         .collect();

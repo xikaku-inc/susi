@@ -3148,4 +3148,35 @@ mod tests {
             .unwrap();
         assert_eq!(fresh.len(), 44);
     }
+
+    #[test]
+    fn test_asset_usage_and_rename_covers_shop_products() {
+        let mut db = test_db();
+        db.upsert_website_asset("sensor.png", 123).unwrap();
+        db.upsert_website_page("intro", "Intro", "![img](sensor.png)", None, 0, "", None)
+            .unwrap();
+        db.upsert_product("lpms-b2", "LPMS-B2", "", 34900, "usd", Some("sensor.png"), "txcd", true, 0)
+            .unwrap();
+
+        let rows = db.list_website_assets_with_usage().unwrap();
+        assert_eq!(rows.len(), 1);
+        let (name, size, usage, pages_csv, products_csv) = rows[0].clone();
+        assert_eq!(name, "sensor.png");
+        assert_eq!(size, 123);
+        assert_eq!(usage, 1);
+        assert_eq!(pages_csv, "intro");
+        assert_eq!(products_csv, "lpms-b2");
+
+        // Rename rewrites both page markdown and the product image reference.
+        let (ok, n_pages) = db.rename_website_asset("sensor.png", "imu.png").unwrap();
+        assert!(ok);
+        assert_eq!(n_pages, 1);
+        let body = db.get_website_page("intro").unwrap().unwrap().1;
+        assert!(body.contains("](imu.png)"), "page body not rewritten: {}", body);
+        let img: Option<String> = db
+            .conn
+            .query_row("SELECT image_asset FROM shop_products WHERE sku = 'lpms-b2'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(img.as_deref(), Some("imu.png"));
+    }
 }

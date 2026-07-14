@@ -139,11 +139,12 @@ impl LicenseDb {
             .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))
     }
 
-    /// Assets with usage: (file_name, file_size, usage_count, pages_csv).
-    /// A page is counted if its body contains the literal filename substring.
+    /// Assets with usage: (file_name, file_size, usage_count, pages_csv, products_csv).
+    /// A page is counted if its body contains the literal filename substring;
+    /// products_csv lists shop SKUs whose image_asset is this file.
     pub fn list_website_assets_with_usage(
         &self,
-    ) -> Result<Vec<(String, i64, i64, String)>, LicenseError> {
+    ) -> Result<Vec<(String, i64, i64, String, String)>, LicenseError> {
         let mut stmt = self
             .conn
             .prepare(
@@ -154,7 +155,12 @@ impl LicenseDb {
                           (SELECT GROUP_CONCAT(p.slug, ',') FROM website_pages p
                              WHERE p.body_md LIKE '%' || a.file_name || '%'),
                           ''
-                        ) AS pages_csv
+                        ) AS pages_csv,
+                        COALESCE(
+                          (SELECT GROUP_CONCAT(s.sku, ',') FROM shop_products s
+                             WHERE s.image_asset = a.file_name),
+                          ''
+                        ) AS products_csv
                  FROM website_assets a
                  ORDER BY a.file_name",
             )
@@ -166,6 +172,7 @@ impl LicenseDb {
                     r.get::<_, i64>(1)?,
                     r.get::<_, i64>(2)?,
                     r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
                 ))
             })
             .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
@@ -223,6 +230,11 @@ impl LicenseDb {
                 params![brace_old, brace_new, paren_old, paren_new, old_name],
             )
             .map_err(|e| LicenseError::Other(format!("DB rewrite body_md: {}", e)))?;
+        tx.execute(
+            "UPDATE shop_products SET image_asset = ?1 WHERE image_asset = ?2",
+            params![new_name, old_name],
+        )
+        .map_err(|e| LicenseError::Other(format!("DB rewrite product image: {}", e)))?;
         tx.commit()
             .map_err(|e| LicenseError::Other(format!("DB tx commit: {}", e)))?;
         Ok((true, n_pages))

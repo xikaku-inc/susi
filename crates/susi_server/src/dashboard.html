@@ -1473,6 +1473,34 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
         </table>
     </div>
 
+    <div style="margin-top:40px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
+        <h2 style="font-size:16px;font-weight:600;">Website — Assets</h2>
+        <div style="display:flex;gap:8px;">
+            <button class="secondary" onclick="loadWebsiteAssets()">Refresh</button>
+            <button onclick="document.getElementById('websiteAssetFile').click()">+ Upload Asset</button>
+            <input type="file" id="websiteAssetFile" style="display:none;" onchange="uploadWebsiteAssetFromPage(this.files[0]);this.value='';">
+        </div>
+    </div>
+    <p style="margin-top:0;margin-bottom:16px;font-size:12px;color:var(--text2);">
+        Images and files served at <code>/api/v1/website/assets/{name}</code>. Referenced from page markdown and as shop product images.
+    </p>
+    <div class="card" style="padding:0;">
+        <table style="width:100%;" id="websiteAssetsTable">
+            <thead>
+                <tr>
+                    <th style="width:56px;">Preview</th>
+                    <th>File name</th>
+                    <th style="width:100px;">Size</th>
+                    <th>Used by</th>
+                    <th style="width:120px;"></th>
+                </tr>
+            </thead>
+            <tbody id="websiteAssetsBody">
+                <tr><td colspan="5" class="empty-state"><p>Loading...</p></td></tr>
+            </tbody>
+        </table>
+    </div>
+
     <div style="margin-top:40px;margin-bottom:14px;">
         <h2 style="font-size:16px;font-weight:600;margin:0 0 14px;">Site Settings</h2>
         <div class="card settings-card">
@@ -1581,8 +1609,16 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                 <div><label>Currency</label><input type="text" id="productCurrency" value="usd" maxlength="3"></div>
             </div>
             <div class="form-row">
-                <label>Image asset (website asset filename)</label>
-                <input type="text" id="productImage" placeholder="sensor.png — upload via Website assets first">
+                <label>Image</label>
+                <div style="display:flex;gap:10px;align-items:center;">
+                    <img id="productImagePreview" alt="" style="width:48px;height:48px;object-fit:cover;border-radius:6px;border:1px solid var(--border);display:none;flex-shrink:0;">
+                    <select id="productImage" style="flex:1;min-width:0;" onchange="updateProductImagePreview()">
+                        <option value="">— No image —</option>
+                    </select>
+                    <button type="button" class="small secondary" onclick="document.getElementById('productImageFile').click()">Upload…</button>
+                    <input type="file" id="productImageFile" accept="image/*" style="display:none;" onchange="uploadProductImage(this.files[0]);this.value='';">
+                </div>
+                <p style="font-size:11px;color:var(--text2);margin:4px 0 0;">Pick a website asset or upload a new image. Manage all assets under Admin &rsaquo; Website.</p>
             </div>
             <div class="form-row" style="display:grid;grid-template-columns:1fr 120px 100px;gap:12px;">
                 <div><label>Tax code</label><input type="text" id="productTaxCode" value="txcd_99999999"></div>
@@ -2816,6 +2852,7 @@ function enterDashboard() {
         loadProducts();
         loadShop();
         loadWebsitePages();
+        loadWebsiteAssets();
         loadSiteSettings();
         loadAssignableUsers();
     } else {
@@ -5869,7 +5906,7 @@ function showProductModal(sku) {
         document.getElementById('productDesc').value = p.description_md || '';
         document.getElementById('productPrice').value = p.price_cents;
         document.getElementById('productCurrency').value = p.currency;
-        document.getElementById('productImage').value = p.image_asset || '';
+        populateProductImageOptions(p.image_asset || '');
         document.getElementById('productTaxCode').value = p.tax_code;
         document.getElementById('productOrd').value = p.ord;
         document.getElementById('productActive').checked = p.active;
@@ -5880,7 +5917,7 @@ function showProductModal(sku) {
         document.getElementById('productDesc').value = '';
         document.getElementById('productPrice').value = 0;
         document.getElementById('productCurrency').value = 'usd';
-        document.getElementById('productImage').value = '';
+        populateProductImageOptions('');
         document.getElementById('productTaxCode').value = 'txcd_99999999';
         document.getElementById('productOrd').value = 0;
         document.getElementById('productActive').checked = true;
@@ -6542,6 +6579,170 @@ async function deleteWebsitePage(slug) {
     } catch (e) {
         alert(e.message || 'Failed to delete');
     }
+}
+
+// ----- Website assets -----
+
+let websiteAssets = [];
+
+function assetUrl(name) { return API + '/website/assets/' + encodeURIComponent(name); }
+function isImageAsset(name) { return /\.(png|jpe?g|gif|svg|webp)$/i.test(name); }
+
+function fmtAssetSize(bytes) {
+    if (bytes >= 1048576) return (bytes / 1048576).toFixed(1) + ' MB';
+    if (bytes >= 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return bytes + ' B';
+}
+
+async function loadWebsiteAssets() {
+    if (userRole !== 'admin') return;
+    const tbody = document.getElementById('websiteAssetsBody');
+    try {
+        const resp = await fetch(API + '/website/admin/assets', { headers: authHeaders() });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        websiteAssets = (await resp.json()).assets || [];
+        renderWebsiteAssetsTable();
+    } catch (e) {
+        tbody.innerHTML = '<tr><td colspan="5" class="empty-state"><p>Failed to load: ' + escHtml(e.message) + '</p></td></tr>';
+    }
+}
+
+function renderWebsiteAssetsTable() {
+    const tbody = document.getElementById('websiteAssetsBody');
+    if (!websiteAssets.length) {
+        tbody.innerHTML = '<tr><td colspan="5" class="empty-state"><p>No assets yet — upload one here or from the page editor.</p></td></tr>';
+        return;
+    }
+    tbody.innerHTML = websiteAssets.map((a, i) => {
+        const preview = isImageAsset(a.name)
+            ? '<img src="' + assetUrl(a.name) + '" loading="lazy" style="width:40px;height:40px;object-fit:cover;border-radius:4px;">'
+            : '<span style="color:var(--text2);font-size:11px;">file</span>';
+        const usedBy = (a.pages || []).map(s =>
+                '<a href="/site/' + encodeURIComponent(s) + '" target="_blank" rel="noopener"><code>' + escHtml(s) + '</code></a>')
+            .concat((a.products || []).map(s => '<code>' + escHtml(s) + '</code> (shop)'));
+        const menuId = 'website-asset-menu-' + i;
+        return '<tr>'
+            + '<td>' + preview + '</td>'
+            + '<td><code>' + escHtml(a.name) + '</code></td>'
+            + '<td>' + fmtAssetSize(a.size) + '</td>'
+            + '<td style="font-size:12px;">' + (usedBy.length ? usedBy.join(', ') : '<span style="color:var(--text2);">unused</span>') + '</td>'
+            + '<td style="text-align:right;">'
+            +   '<span class="dropdown" onclick="event.stopPropagation();">'
+            +     '<button class="small secondary" onclick="toggleDropdown(event,\'' + menuId + '\')">Actions &#9662;</button>'
+            +     '<div id="' + menuId + '" class="dropdown-menu" style="display:none;">'
+            +       '<a href="' + assetUrl(a.name) + '" target="_blank" rel="noopener">Open ↗</a>'
+            +       '<button onclick="copyAssetUrl(\'' + escHtml(a.name) + '\')">Copy URL</button>'
+            +       '<button onclick="renameWebsiteAsset(\'' + escHtml(a.name) + '\')">Rename…</button>'
+            +       '<div class="divider"></div>'
+            +       '<button class="danger" onclick="deleteWebsiteAsset(\'' + escHtml(a.name) + '\')">Delete</button>'
+            +     '</div>'
+            +   '</span>'
+            + '</td>'
+            + '</tr>';
+    }).join('');
+}
+
+// Shared upload: sanitizes the name, warns before overwriting an existing
+// asset. Returns {name, size, url} or null when the user cancelled.
+async function uploadWebsiteAsset(file) {
+    if (!file) return null;
+    const name = (file.name || 'file').replace(/[^A-Za-z0-9._-]/g, '_');
+    if (websiteAssets.some(a => a.name === name)
+        && !confirm('Asset "' + name + '" already exists. Overwrite it?')) return null;
+    const fd = new FormData();
+    fd.append('file', file, name);
+    const resp = await fetch(API + '/website/assets', {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + authToken },
+        body: fd,
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status));
+    return data;
+}
+
+async function uploadWebsiteAssetFromPage(file) {
+    try {
+        const data = await uploadWebsiteAsset(file);
+        if (!data) return;
+        toast('Uploaded ' + data.name, 'success');
+        await loadWebsiteAssets();
+    } catch (e) { toast('Upload failed: ' + e.message, 'error'); }
+}
+
+function copyAssetUrl(name) {
+    navigator.clipboard.writeText(location.origin + assetUrl(name)).then(
+        () => toast('URL copied', 'success'),
+        () => toast('Copy failed', 'error'));
+}
+
+async function renameWebsiteAsset(name) {
+    const newName = (prompt('Rename asset "' + name + '" to:', name) || '').trim();
+    if (!newName || newName === name) return;
+    try {
+        const resp = await fetch(API + '/website/assets/' + encodeURIComponent(name) + '/rename', {
+            method: 'POST',
+            headers: authHeaders(),
+            body: JSON.stringify({ new_name: newName }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) { toast('Rename failed: ' + (data.error || resp.status), 'error'); return; }
+        toast('Renamed' + (data.pages_updated ? ' — ' + data.pages_updated + ' page(s) updated' : ''), 'success');
+        await loadWebsiteAssets();
+        await loadShopProducts();
+    } catch (e) { toast('Rename failed: ' + e.message, 'error'); }
+}
+
+async function deleteWebsiteAsset(name) {
+    const a = websiteAssets.find(x => x.name === name);
+    const used = a ? (a.pages || []).length + (a.products || []).length : 0;
+    let msg = 'Delete asset "' + name + '"?';
+    if (used) msg += '\nIt is referenced by ' + used + ' page(s)/product(s) — those will show a broken image.';
+    msg += '\nThis cannot be undone.';
+    if (!confirm(msg)) return;
+    try {
+        const resp = await fetch(API + '/website/assets/' + encodeURIComponent(name), {
+            method: 'DELETE', headers: authHeaders(),
+        });
+        if (!resp.ok) { const d = await resp.json().catch(() => ({})); toast('Error: ' + (d.error || resp.status), 'error'); return; }
+        toast('Asset deleted', 'success');
+        await loadWebsiteAssets();
+    } catch (e) { toast('Failed: ' + e.message, 'error'); }
+}
+
+// ----- Product image picker (uses website assets) -----
+
+function populateProductImageOptions(selected) {
+    const sel = document.getElementById('productImage');
+    const names = websiteAssets.map(a => a.name).filter(isImageAsset);
+    if (selected && !names.includes(selected)) names.unshift(selected);
+    sel.innerHTML = '<option value="">— No image —</option>' + names.map(n =>
+        '<option value="' + escHtml(n) + '"' + (n === selected ? ' selected' : '') + '>' + escHtml(n) + '</option>').join('');
+    updateProductImagePreview();
+}
+
+function updateProductImagePreview() {
+    const name = document.getElementById('productImage').value;
+    const img = document.getElementById('productImagePreview');
+    if (name) {
+        img.src = assetUrl(name);
+        img.style.display = '';
+    } else {
+        img.style.display = 'none';
+        img.removeAttribute('src');
+    }
+}
+
+async function uploadProductImage(file) {
+    const errEl = document.getElementById('productError');
+    errEl.style.display = 'none';
+    try {
+        const data = await uploadWebsiteAsset(file);
+        if (!data) return;
+        toast('Uploaded ' + data.name, 'success');
+        await loadWebsiteAssets();
+        populateProductImageOptions(data.name);
+    } catch (e) { errEl.textContent = 'Upload failed: ' + e.message; errEl.style.display = ''; }
 }
 </script>
 </body>
