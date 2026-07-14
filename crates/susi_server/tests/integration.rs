@@ -2823,3 +2823,106 @@ fn test_workspace_member_doc_authoring() {
         .expect("member write global page");
     assert_eq!(resp.status().as_u16(), 403, "member cannot write global docs");
 }
+
+/// Hiding a website page removes it from every public surface (page list,
+/// direct fetch, sitemap, llms.txt) while keeping it visible to admins so it
+/// can be edited and shown again — without deleting any content.
+#[test]
+fn test_website_page_hide_show() {
+    let server = TestServer::start();
+    let token = server.admin_token();
+    let http = server.http();
+
+    for (slug, title) in [("home", "Home"), ("secret", "Secret")] {
+        let resp = http
+            .put(format!("{}/website/pages/{}", server.api_url, slug))
+            .bearer_auth(&token)
+            .json(&json!({ "title": title, "body_md": format!("# {}", title) }))
+            .send()
+            .expect("create page");
+        assert_eq!(resp.status().as_u16(), 200, "create {}: {}", slug, resp.text().unwrap_or_default());
+    }
+
+    let public_slugs = |body: &Value| -> Vec<String> {
+        body["pages"].as_array().unwrap().iter()
+            .map(|p| p["slug"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    // Both pages are publicly listed and default to hidden=false.
+    let body = http.get(format!("{}/website/pages", server.api_url))
+        .send().expect("list").json::<Value>().unwrap();
+    assert_eq!(public_slugs(&body), vec!["home", "secret"]);
+    assert!(body["pages"].as_array().unwrap().iter().all(|p| p["hidden"] == json!(false)));
+
+    // Hide "secret".
+    let resp = http
+        .post(format!("{}/website/pages/secret/visibility", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "hidden": true }))
+        .send()
+        .expect("hide page");
+    assert_eq!(resp.status().as_u16(), 200, "hide: {}", resp.text().unwrap_or_default());
+
+    // Anonymous: gone from the list, direct fetch 404s, absent from
+    // sitemap.xml and llms.txt.
+    let body = http.get(format!("{}/website/pages", server.api_url))
+        .send().expect("list").json::<Value>().unwrap();
+    assert_eq!(public_slugs(&body), vec!["home"]);
+    let resp = http.get(format!("{}/website/pages/secret", server.api_url))
+        .send().expect("get hidden page");
+    assert_eq!(resp.status().as_u16(), 404, "hidden page must 404 for anonymous");
+    let sitemap = http.get(format!("{}/sitemap.xml", server.url))
+        .send().expect("sitemap").text().unwrap();
+    assert!(!sitemap.contains("/secret"), "sitemap must omit hidden page: {}", sitemap);
+    let llms = http.get(format!("{}/llms.txt", server.url))
+        .send().expect("llms").text().unwrap();
+    assert!(!llms.contains("Secret"), "llms.txt must omit hidden page: {}", llms);
+    let ssr = http.get(format!("{}/site/secret", server.url))
+        .send().expect("ssr hidden").text().unwrap();
+    assert!(!ssr.contains("Secret"), "SSR must not leak hidden page content");
+
+    // Admin: still listed (flagged hidden) and fetchable for editing.
+    let body = http.get(format!("{}/website/pages", server.api_url))
+        .bearer_auth(&token)
+        .send().expect("admin list").json::<Value>().unwrap();
+    assert_eq!(public_slugs(&body), vec!["home", "secret"]);
+    let secret = body["pages"].as_array().unwrap().iter()
+        .find(|p| p["slug"] == "secret").unwrap();
+    assert_eq!(secret["hidden"], json!(true));
+    let body = http.get(format!("{}/website/pages/secret", server.api_url))
+        .bearer_auth(&token)
+        .send().expect("admin get").json::<Value>().unwrap();
+    assert_eq!(body["body_md"].as_str().unwrap(), "# Secret");
+    assert_eq!(body["hidden"], json!(true));
+
+    // Editing while hidden must not flip the page back to visible.
+    let resp = http
+        .put(format!("{}/website/pages/secret", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "title": "Secret", "body_md": "# Secret v2" }))
+        .send()
+        .expect("edit hidden page");
+    assert_eq!(resp.status().as_u16(), 200);
+    let resp = http.get(format!("{}/website/pages/secret", server.api_url))
+        .send().expect("get after edit");
+    assert_eq!(resp.status().as_u16(), 404, "editing must not unhide the page");
+
+    // Show it again — public access is restored.
+    let resp = http
+        .post(format!("{}/website/pages/secret/visibility", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "hidden": false }))
+        .send()
+        .expect("show page");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = http.get(format!("{}/website/pages/secret", server.api_url))
+        .send().expect("get shown page").json::<Value>().unwrap();
+    assert_eq!(body["body_md"].as_str().unwrap(), "# Secret v2");
+    assert_eq!(body["hidden"], json!(false));
+
+    // The SSR cache entry from the hidden render must have been busted.
+    let ssr = http.get(format!("{}/site/secret", server.url))
+        .send().expect("ssr shown").text().unwrap();
+    assert!(ssr.contains("Secret v2"), "SSR must serve the page again after showing");
+}

@@ -981,7 +981,10 @@ async function loadIndex() {
 
 async function loadPage(slug) {
     currentSlug = slug;
-    const resp = await fetch(API + '/website/pages/' + encodeURIComponent(slug));
+    // Send the token when present: hidden pages 404 for anonymous visitors
+    // but stay reachable for admins so they can be previewed and edited.
+    const opts = authToken() ? { headers: { 'Authorization': 'Bearer ' + authToken() } } : {};
+    const resp = await fetch(API + '/website/pages/' + encodeURIComponent(slug), opts);
     if (!resp.ok) {
         currentPage = null;
         renderEmptyState('Page "' + slug + '" not found.');
@@ -1100,7 +1103,13 @@ function renderPage() {
     const meta = currentPage.updated_at
         ? '<div class="meta">Updated ' + escHtml(formatDate(currentPage.updated_at)) + '</div>'
         : '';
-    let html = meta + renderMarkdown(currentPage.body_md || '');
+    // Only admins ever receive hidden pages, so this notice is admin-only.
+    const hiddenNotice = currentPage.hidden
+        ? '<div style="display:inline-block;margin-bottom:14px;padding:4px 12px;border-radius:999px;'
+          + 'background:rgba(251,191,36,0.15);color:#b45309;font-size:12px;font-weight:600;">'
+          + 'Hidden — this page is not visible to the public</div>'
+        : '';
+    let html = hiddenNotice + meta + renderMarkdown(currentPage.body_md || '');
     const { html: withIds, headings } = injectHeadingIds(html);
     c.innerHTML = withIds;
     renderToc(headings);

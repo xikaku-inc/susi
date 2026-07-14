@@ -59,15 +59,40 @@ fn safe_slug(slug: &str) -> Result<&str, (StatusCode, Json<ErrorResponse>)> {
 // Public read endpoints
 // ---------------------------------------------------------------------------
 
+/// Row shape returned by `list_website_pages`:
+/// (slug, title, parent_slug, ord, updated_at, meta_description, hidden).
+type PageRow = (String, String, Option<String>, i64, String, String, bool);
+
+/// Drop hidden pages — applied before any public-facing use of the page list
+/// (nav, SSR head, sitemap, llms.txt).
+fn visible_pages(mut pages: Vec<PageRow>) -> Vec<PageRow> {
+    pages.retain(|p| !p.6);
+    pages
+}
+
+/// True when the request carries a valid full-admin principal. The public
+/// read endpoints use this to include hidden pages for the dashboard/editor.
+fn is_admin_request(headers: &HeaderMap, state: &AppState) -> bool {
+    validate_principal(headers, state)
+        .ok()
+        .map(|p| require_admin_full(state, &p).is_ok())
+        .unwrap_or(false)
+}
+
 pub async fn handle_list_pages(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let is_admin = is_admin_request(&headers, &state);
     let db = state.db.lock();
-    let pages = db.list_website_pages().map_err(db_err)?;
+    let mut pages = db.list_website_pages().map_err(db_err)?;
+    if !is_admin {
+        pages = visible_pages(pages);
+    }
     let assets = db.list_website_assets().map_err(db_err)?;
     let pages_json: Vec<_> = pages
         .into_iter()
-        .map(|(slug, title, parent_slug, ord, updated_at, meta_description)| {
+        .map(|(slug, title, parent_slug, ord, updated_at, meta_description, hidden)| {
             json!({
                 "slug": slug,
                 "title": title,
@@ -75,6 +100,7 @@ pub async fn handle_list_pages(
                 "ord": ord,
                 "updated_at": updated_at,
                 "meta_description": meta_description,
+                "hidden": hidden,
             })
         })
         .collect();
@@ -90,15 +116,20 @@ pub async fn handle_list_pages(
 
 pub async fn handle_get_page(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(slug): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     safe_slug(&slug)?;
+    let is_admin = is_admin_request(&headers, &state);
     let db = state.db.lock();
     let page = db
         .get_website_page(&slug)
         .map_err(db_err)?
         .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Page not found"))?;
-    let (title, body_md, parent_slug, ord, updated_at, meta_description) = page;
+    let (title, body_md, parent_slug, ord, updated_at, meta_description, hidden) = page;
+    if hidden && !is_admin {
+        return Err(error_response(StatusCode::NOT_FOUND, "Page not found"));
+    }
     Ok(Json(json!({
         "slug": slug,
         "title": title,
@@ -107,6 +138,7 @@ pub async fn handle_get_page(
         "ord": ord,
         "updated_at": updated_at,
         "meta_description": meta_description,
+        "hidden": hidden,
     })))
 }
 
@@ -169,7 +201,7 @@ pub async fn handle_upsert_page(
             Some(&principal.username),
         )
         .map_err(db_err)?;
-        let pages = db.list_website_pages().unwrap_or_default();
+        let pages = visible_pages(db.list_website_pages().unwrap_or_default());
         let is_home = first_default_slug(&pages) == Some(slug.as_str());
         (id, is_home)
     };
@@ -245,14 +277,14 @@ pub async fn handle_restore_page_revision(
     let existing_meta = db
         .get_website_page(&slug)
         .map_err(db_err)?
-        .map(|(_t, _b, _p, _o, _u, m)| m)
+        .map(|(_t, _b, _p, _o, _u, m, _h)| m)
         .unwrap_or_default();
     let new_id = db.upsert_website_page(
         &slug, &title, &body_md, parent_slug.as_deref(), ord,
         &existing_meta,
         Some(&principal.username),
     ).map_err(db_err)?;
-    let pages = db.list_website_pages().unwrap_or_default();
+    let pages = visible_pages(db.list_website_pages().unwrap_or_default());
     let is_home = first_default_slug(&pages) == Some(slug.as_str());
     drop(db);
     invalidate_page_cache();
@@ -394,6 +426,33 @@ pub async fn handle_rename_page(
             }
         }
     }
+}
+
+#[derive(Deserialize)]
+pub struct SetPageHiddenRequest {
+    pub hidden: bool,
+}
+
+pub async fn handle_set_page_hidden(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+    Json(req): Json<SetPageHiddenRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    require_admin_full(&state, &principal)?;
+    safe_slug(&slug)?;
+
+    let updated = {
+        let db = state.db.lock();
+        db.set_website_page_hidden(&slug, req.hidden).map_err(db_err)?
+    };
+    if !updated {
+        return Err(error_response(StatusCode::NOT_FOUND, "Page not found"));
+    }
+    invalidate_page_cache();
+    ping_indexnow(&state, vec![canonical_page_url(&slug, false)]);
+    Ok(Json(json!({ "slug": slug, "hidden": req.hidden })))
 }
 
 pub async fn handle_delete_page(
@@ -883,21 +942,20 @@ fn render_body_html(body_md: &str) -> String {
         .to_string()
 }
 
-fn first_default_slug(pages: &[(String, String, Option<String>, i64, String, String)]) -> Option<&str> {
-    let mut top: Vec<&(String, String, Option<String>, i64, String, String)> =
-        pages.iter().filter(|p| p.2.is_none()).collect();
+fn first_default_slug(pages: &[PageRow]) -> Option<&str> {
+    let mut top: Vec<&PageRow> = pages.iter().filter(|p| p.2.is_none()).collect();
     top.sort_by(|a, b| a.3.cmp(&b.3).then_with(|| a.1.cmp(&b.1)));
     top.first().map(|p| p.0.as_str()).or_else(|| pages.first().map(|p| p.0.as_str()))
 }
 
 fn build_breadcrumbs(
-    pages: &[(String, String, Option<String>, i64, String, String)],
+    pages: &[PageRow],
     slug: &str,
     home_slug: Option<&str>,
 ) -> String {
-    let by_slug: std::collections::HashMap<&str, &(String, String, Option<String>, i64, String, String)> =
+    let by_slug: std::collections::HashMap<&str, &PageRow> =
         pages.iter().map(|p| (p.0.as_str(), p)).collect();
-    let mut chain: Vec<&(String, String, Option<String>, i64, String, String)> = Vec::new();
+    let mut chain: Vec<&PageRow> = Vec::new();
     let mut cur = by_slug.get(slug).copied();
     while let Some(p) = cur {
         chain.push(p);
@@ -945,7 +1003,7 @@ fn render_seo_head(
     description: &str,
     updated_at: &str,
     og_image_override: Option<&str>,
-    pages: &[(String, String, Option<String>, i64, String, String)],
+    pages: &[PageRow],
     products: &[(String, String, String, i64, String, Option<String>, String, bool, i64, String)],
 ) -> String {
     let home_slug = first_default_slug(pages);
@@ -1112,7 +1170,7 @@ fn render_website(
     let (pages, products) = {
         let db = state.db.lock();
         (
-            db.list_website_pages().unwrap_or_default(),
+            visible_pages(db.list_website_pages().unwrap_or_default()),
             db.list_products(true).unwrap_or_default(),
         )
     };
@@ -1128,7 +1186,9 @@ fn render_website(
                 let db = state.db.lock();
                 db.get_website_page(s).unwrap_or(None)
             };
-            if let Some((t, body, _p, _o, upd, meta)) = row {
+            // A hidden page renders like an unknown slug: bare shell, no SEO
+            // head, no body — the SPA shows "Page not found" to visitors.
+            if let Some((t, body, _p, _o, upd, meta, false)) = row {
                 let desc = if !meta.trim().is_empty() {
                     meta
                 } else {
@@ -1245,13 +1305,13 @@ pub async fn handle_sitemap_xml(
 ) -> impl IntoResponse {
     let pages = {
         let db = state.db.lock();
-        db.list_website_pages().unwrap_or_default()
+        visible_pages(db.list_website_pages().unwrap_or_default())
     };
     let home_slug = first_default_slug(&pages).map(|s| s.to_string());
     let mut xml = String::from(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n",
     );
-    for (slug, _title, _parent, _ord, updated_at, _meta) in &pages {
+    for (slug, _title, _parent, _ord, updated_at, _meta, _hidden) in &pages {
         let is_home = home_slug.as_deref() == Some(slug.as_str());
         xml.push_str("  <url>\n");
         xml.push_str(&format!(
@@ -1277,7 +1337,7 @@ pub async fn handle_llms_txt(
 ) -> impl IntoResponse {
     let pages = {
         let db = state.db.lock();
-        db.list_website_pages().unwrap_or_default()
+        visible_pages(db.list_website_pages().unwrap_or_default())
     };
     let home_slug = first_default_slug(&pages).map(|s| s.to_string());
 
@@ -1292,7 +1352,7 @@ pub async fn handle_llms_txt(
     ));
 
     body.push_str("## Pages\n");
-    for (slug, title, parent, _ord, _upd, meta) in &pages {
+    for (slug, title, parent, _ord, _upd, meta, _hidden) in &pages {
         let desc_source = if !meta.trim().is_empty() {
             meta.clone()
         } else {
@@ -1300,7 +1360,7 @@ pub async fn handle_llms_txt(
                 let db = state.db.lock();
                 db.get_website_page(slug).unwrap_or(None)
             };
-            row.map(|(_t, body, _p, _o, _u, _m)| derive_description(&body))
+            row.map(|(_t, body, _p, _o, _u, _m, _h)| derive_description(&body))
                 .unwrap_or_default()
         };
         let indent = if parent.is_some() { "  " } else { "" };

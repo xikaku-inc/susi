@@ -476,7 +476,8 @@ impl LicenseDb {
                 parent_slug TEXT,
                 ord INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL,
-                meta_description TEXT NOT NULL DEFAULT ''
+                meta_description TEXT NOT NULL DEFAULT '',
+                hidden INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS idx_website_pages_parent ON website_pages(parent_slug);
 
@@ -722,6 +723,11 @@ impl LicenseDb {
         // SEO: per-page meta description override (empty = auto-derive from body_md)
         let _ = self.conn.execute_batch(
             "ALTER TABLE website_pages ADD COLUMN meta_description TEXT NOT NULL DEFAULT '';",
+        );
+
+        // Hide pages from the public site (nav, SSR, sitemap) without deleting
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE website_pages ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0;",
         );
 
         // Session-revocation counter: every issued JWT embeds the value at
@@ -3178,5 +3184,35 @@ mod tests {
             .query_row("SELECT image_asset FROM shop_products WHERE sku = 'lpms-b2'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(img.as_deref(), Some("imu.png"));
+    }
+
+    #[test]
+    fn test_website_page_hidden_flag() {
+        let mut db = test_db();
+        db.upsert_website_page("about", "About", "# About", None, 0, "", None)
+            .unwrap();
+
+        // New pages default to visible.
+        let pages = db.list_website_pages().unwrap();
+        assert_eq!(pages.len(), 1);
+        assert!(!pages[0].6, "new page must not be hidden");
+        assert!(!db.get_website_page("about").unwrap().unwrap().6);
+
+        // Hide, verify, and check that editing the page keeps it hidden.
+        assert!(db.set_website_page_hidden("about", true).unwrap());
+        assert!(db.get_website_page("about").unwrap().unwrap().6);
+        db.upsert_website_page("about", "About v2", "# About v2", None, 0, "", None)
+            .unwrap();
+        assert!(
+            db.get_website_page("about").unwrap().unwrap().6,
+            "editing a page must not reset the hidden flag"
+        );
+
+        // Show again.
+        assert!(db.set_website_page_hidden("about", false).unwrap());
+        assert!(!db.get_website_page("about").unwrap().unwrap().6);
+
+        // Unknown slug reports not-found.
+        assert!(!db.set_website_page_hidden("nope", true).unwrap());
     }
 }

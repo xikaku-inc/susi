@@ -2965,6 +2965,10 @@ async fn main() -> Result<()> {
             post(website::handle_rename_page),
         )
         .route(
+            "/api/v1/website/pages/{slug}/visibility",
+            post(website::handle_set_page_hidden),
+        )
+        .route(
             "/api/v1/website/assets/{file}",
             axum::routing::delete(website::handle_delete_asset),
         )

@@ -242,10 +242,10 @@ impl LicenseDb {
 
     pub fn list_website_pages(
         &self,
-    ) -> Result<Vec<(String, String, Option<String>, i64, String, String)>, LicenseError> {
+    ) -> Result<Vec<(String, String, Option<String>, i64, String, String, bool)>, LicenseError> {
         let mut stmt = self.conn
             .prepare(
-                "SELECT slug, title, parent_slug, ord, updated_at, meta_description FROM website_pages
+                "SELECT slug, title, parent_slug, ord, updated_at, meta_description, hidden FROM website_pages
                  ORDER BY parent_slug NULLS FIRST, ord, title",
             )
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
@@ -258,6 +258,7 @@ impl LicenseDb {
                     r.get::<_, i64>(3)?,
                     r.get::<_, String>(4)?,
                     r.get::<_, String>(5)?,
+                    r.get::<_, i64>(6)? != 0,
                 ))
             })
             .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
@@ -269,9 +270,9 @@ impl LicenseDb {
     pub fn get_website_page(
         &self,
         slug: &str,
-    ) -> Result<Option<(String, String, Option<String>, i64, String, String)>, LicenseError> {
+    ) -> Result<Option<(String, String, Option<String>, i64, String, String, bool)>, LicenseError> {
         match self.conn.query_row(
-            "SELECT title, body_md, parent_slug, ord, updated_at, meta_description FROM website_pages
+            "SELECT title, body_md, parent_slug, ord, updated_at, meta_description, hidden FROM website_pages
              WHERE slug = ?1",
             params![slug],
             |r| {
@@ -282,6 +283,7 @@ impl LicenseDb {
                     r.get::<_, i64>(3)?,
                     r.get::<_, String>(4)?,
                     r.get::<_, String>(5)?,
+                    r.get::<_, i64>(6)? != 0,
                 ))
             },
         ) {
@@ -289,6 +291,18 @@ impl LicenseDb {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(LicenseError::Other(format!("DB query: {}", e))),
         }
+    }
+
+    /// Set the hidden flag on a page. Returns false if the slug doesn't exist.
+    pub fn set_website_page_hidden(&self, slug: &str, hidden: bool) -> Result<bool, LicenseError> {
+        let n = self
+            .conn
+            .execute(
+                "UPDATE website_pages SET hidden = ?1 WHERE slug = ?2",
+                params![hidden as i64, slug],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB set hidden: {}", e)))?;
+        Ok(n > 0)
     }
 
     pub fn delete_website_page(&self, slug: &str) -> Result<bool, LicenseError> {

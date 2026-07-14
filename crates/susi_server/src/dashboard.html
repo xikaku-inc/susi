@@ -6477,24 +6477,52 @@ function renderWebsitePagesTable() {
             ? '<code>' + escHtml(p.parent_slug) + '</code>'
             : '<span style="color:var(--text2);">—</span>';
         const menuId = 'website-page-menu-' + p.slug.replace(/[^a-zA-Z0-9_-]/g, '_');
+        const slugArg = JSON.stringify(p.slug).replace(/"/g, '&quot;');
+        const hiddenBadge = p.hidden
+            ? ' <span class="badge" style="background:var(--bg3);color:var(--text2);">hidden</span>'
+            : '';
+        // Dim the content cells individually — opacity on the <tr> would
+        // create a stacking context that traps the fixed-position dropdown
+        // menu below the following rows.
+        const dim = p.hidden ? ' style="opacity:0.6;"' : '';
         return '<tr>'
-            + '<td><code>' + escHtml(p.slug) + '</code></td>'
-            + '<td>' + escHtml(p.title) + '</td>'
-            + '<td>' + parent + '</td>'
-            + '<td>' + p.ord + '</td>'
-            + '<td style="color:var(--text2);font-size:12px;">' + escHtml(p.updated_at || '') + '</td>'
+            + '<td' + dim + '><code>' + escHtml(p.slug) + '</code></td>'
+            + '<td' + dim + '>' + escHtml(p.title) + hiddenBadge + '</td>'
+            + '<td' + dim + '>' + parent + '</td>'
+            + '<td' + dim + '>' + p.ord + '</td>'
+            + '<td style="color:var(--text2);font-size:12px;' + (p.hidden ? 'opacity:0.6;' : '') + '">' + escHtml(p.updated_at || '') + '</td>'
             + '<td>'
             +   '<span class="dropdown" onclick="event.stopPropagation();">'
             +     '<button class="small secondary" onclick="toggleDropdown(event,\'' + menuId + '\')">Actions &#9662;</button>'
             +     '<div id="' + menuId + '" class="dropdown-menu" style="display:none;">'
             +       '<a href="' + escHtml(editUrl) + '" target="_blank" rel="noopener">Open editor ↗</a>'
+            +       '<button onclick="toggleWebsitePageHidden(' + slugArg + ', ' + (p.hidden ? 'false' : 'true') + ')">' + (p.hidden ? 'Show on site' : 'Hide from site') + '</button>'
             +       '<div class="divider"></div>'
-            +       '<button class="danger" onclick="deleteWebsitePage(' + JSON.stringify(p.slug) + ')">Delete</button>'
+            +       '<button class="danger" onclick="deleteWebsitePage(' + slugArg + ')">Delete</button>'
             +     '</div>'
             +   '</span>'
             + '</td>'
             + '</tr>';
     }).join('');
+}
+
+async function toggleWebsitePageHidden(slug, hidden) {
+    try {
+        const resp = await fetch(API + '/website/pages/' + encodeURIComponent(slug) + '/visibility', {
+            method: 'POST',
+            headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+            body: JSON.stringify({ hidden }),
+        });
+        if (!resp.ok) {
+            const data = await resp.json().catch(() => ({}));
+            alert(data.error || ('HTTP ' + resp.status));
+            return;
+        }
+        await loadWebsitePages();
+        toast(hidden ? 'Page hidden from public site' : 'Page visible on public site', 'success');
+    } catch (e) {
+        alert(e.message || 'Failed to update visibility');
+    }
 }
 
 function showWebsitePageModal() {
