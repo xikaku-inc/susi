@@ -1604,6 +1604,7 @@ function navigateTo(slug) {
         history.replaceState({}, '', target);
     }
     route();
+    window.scrollTo(0, 0);
 }
 
 async function route() {
@@ -1659,6 +1660,7 @@ document.addEventListener('click', (e) => {
             history.pushState({}, '', href);
         }
         route();
+        window.scrollTo(0, 0);
         return;
     }
     // Legacy /site/{slug} form (susi.lp-research.com or old links on xikaku).
