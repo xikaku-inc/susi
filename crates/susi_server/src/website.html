@@ -1208,6 +1208,7 @@ function renderToc(headings) {
             const id = a.getAttribute('data-toc-id');
             const el = document.getElementById(id);
             if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            history.replaceState({}, '', location.pathname + location.search + '#' + encodeURIComponent(id));
         });
     });
 
@@ -1591,8 +1592,21 @@ function slugFromLocation() {
         const m = path.match(/^\/([^\/\?#]+)$/);
         if (m && !RESERVED_TOP_PATHS.has(m[1])) return decodeURIComponent(m[1]);
     }
-    const hash = location.hash.replace(/^#\/?/, '');
-    return decodeURIComponent(hash.split('/').filter(Boolean)[0] || '');
+    // Only the legacy #/foo form routes to a page; a plain #foo is an
+    // in-page anchor (see anchorFromLocation).
+    const legacyHash = location.hash.match(/^#\/(.+)/);
+    if (legacyHash) return decodeURIComponent(legacyHash[1].split('/').filter(Boolean)[0] || '');
+    return '';
+}
+
+function anchorFromLocation() {
+    if (!location.hash || location.hash.startsWith('#/')) return '';
+    return decodeURIComponent(location.hash.slice(1));
+}
+
+function scrollToAnchor(id) {
+    const el = document.getElementById(id);
+    if (el) el.scrollIntoView({ block: 'start' });
 }
 
 function navigateTo(slug) {
@@ -1621,9 +1635,11 @@ async function route() {
     }
 
     const slug = slugFromLocation();
+    const anchor = anchorFromLocation();
     // Upgrade legacy hash URLs (#/foo) to the canonical path form. Crawlers
     // don't follow fragments but users still get a clean URL in the address bar.
-    if (location.hash) {
+    // Plain #foo hashes are in-page anchors and stay in the URL.
+    if (location.hash && !anchor) {
         const clean = slug ? pageHref(slug) : siteRootHref();
         history.replaceState({}, '', clean + location.search);
     }
@@ -1635,13 +1651,19 @@ async function route() {
         // Default: first top-level page by ord
         const sorted = [...pages].sort((a, b) => a.ord - b.ord || a.title.localeCompare(b.title));
         const first = sorted.find(p => !p.parent_slug) || sorted[0];
-        history.replaceState({}, '', pageHref(first.slug));
+        history.replaceState({}, '', pageHref(first.slug) + (anchor ? '#' + encodeURIComponent(anchor) : ''));
         await loadPage(first.slug);
     }
+    if (anchor) scrollToAnchor(anchor);
 }
 
 window.addEventListener('popstate', route);
-window.addEventListener('hashchange', route);
+window.addEventListener('hashchange', () => {
+    // Same-page anchor jump: just scroll, don't re-render.
+    const anchor = anchorFromLocation();
+    if (anchor && slugFromLocation() === currentSlug) { scrollToAnchor(anchor); return; }
+    route();
+});
 
 // Intercept intra-site link clicks for SPA navigation.
 // Lets Ctrl/Cmd/middle-click still open in a new tab (server renders them fine).
