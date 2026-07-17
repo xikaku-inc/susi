@@ -1953,6 +1953,13 @@ async function route() {
     }
 }
 
+// Land at the top when a page link is clicked. Back/forward keep the
+// browser's own scroll handling; TOC anchors (#id, no slash) are unaffected.
+document.addEventListener('click', (e) => {
+    if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+    const a = e.target.closest && e.target.closest('a[href^="#/"]');
+    if (a) window.scrollTo(0, 0);
+});
 window.addEventListener('hashchange', route);
 route();
 </script>
