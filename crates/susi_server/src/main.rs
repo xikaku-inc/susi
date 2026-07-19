@@ -2121,6 +2121,8 @@ struct ProductRequest {
     description: String,
     #[serde(default)]
     ord: i64,
+    #[serde(default)]
+    download_public: bool,
 }
 
 
@@ -2131,6 +2133,8 @@ struct UpdateProductRequest {
     description: String,
     #[serde(default)]
     ord: i64,
+    #[serde(default)]
+    download_public: bool,
 }
 
 
@@ -2160,18 +2164,28 @@ fn authorize_release_download(
     product: &str,
     tag: &str,
 ) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
-    let license_product = validate_license_key(state, headers).ok();
-    let principal_opt = validate_principal(headers, state).ok();
-    if license_product.is_none() && principal_opt.is_none() {
-        return Err(error_response(StatusCode::UNAUTHORIZED, "Authentication required"));
-    }
-
     let scoped_ws = {
         let db = state.db.lock();
         db.get_release_workspace_id(product, tag)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
             .flatten()
     };
+
+    // A publicly-downloadable product exposes its *global* releases with no
+    // auth - the free FusionHub installer linked from xikaku.com. Workspace-
+    // scoped releases stay gated by membership below.
+    if scoped_ws.is_none()
+        && state.db.lock().get_product_download_public(product).unwrap_or(false)
+    {
+        return Ok("public".into());
+    }
+
+    let license_product = validate_license_key(state, headers).ok();
+    let principal_opt = validate_principal(headers, state).ok();
+    if license_product.is_none() && principal_opt.is_none() {
+        return Err(error_response(StatusCode::UNAUTHORIZED, "Authentication required"));
+    }
+
     if let Some(ws_id) = scoped_ws {
         let principal = principal_opt.as_ref()
             .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Workspace membership required"))?;
@@ -2853,6 +2867,10 @@ async fn main() -> Result<()> {
         .route("/api/v1/updates/releases", get(releases::handle_get_releases))
         .route("/api/v1/updates/download/{tag}/{asset}", get(releases::handle_download_asset))
         .route("/api/v1/updates/download-ticket", post(releases::handle_mint_download_ticket))
+        // Public "latest installer" redirect for publicly-downloadable products,
+        // e.g. /download/fusionhub/windows -> newest matching asset. Lets the
+        // marketing site link a stable URL that never needs editing per release.
+        .route("/download/{product}/{platform}", get(releases::handle_public_latest_download))
         // Releases — admin endpoints (JWT protected)
         .route("/api/v1/releases", get(releases::handle_list_releases_admin))
         .merge(

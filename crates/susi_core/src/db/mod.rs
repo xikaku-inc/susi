@@ -862,6 +862,23 @@ impl LicenseDb {
             );
         }
 
+        // Public-download flag: a product's *global* releases can be fetched
+        // with no license or login (the free FusionHub installer linked from
+        // xikaku.com so sensor users replacing LpmsControl can grab it). The
+        // one-time enable of the default product runs only when the column is
+        // first added, so an admin later toggling it off in the Products page
+        // is not clobbered on the next restart.
+        if self
+            .conn
+            .execute_batch("ALTER TABLE products ADD COLUMN download_public INTEGER NOT NULL DEFAULT 0;")
+            .is_ok()
+        {
+            let _ = self.conn.execute(
+                "UPDATE products SET download_public = 1 WHERE slug = ?1",
+                params![DEFAULT_PRODUCT],
+            );
+        }
+
         // >> Add new migrations as own execute_batch statements here <<
         Ok(())
     }

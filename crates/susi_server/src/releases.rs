@@ -12,8 +12,8 @@ pub(crate) async fn handle_list_products(
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
     let products: Vec<_> = rows
         .into_iter()
-        .map(|(slug, name, description, ord)| {
-            serde_json::json!({ "slug": slug, "name": name, "description": description, "ord": ord })
+        .map(|(slug, name, description, ord, download_public)| {
+            serde_json::json!({ "slug": slug, "name": name, "description": description, "ord": ord, "download_public": download_public })
         })
         .collect();
     Ok(Json(serde_json::json!({ "products": products })))
@@ -39,7 +39,7 @@ pub(crate) async fn handle_create_product(
     {
         return Err(error_response(StatusCode::CONFLICT, "Product already exists"));
     }
-    db.upsert_release_product(slug, req.name.trim(), req.description.trim(), req.ord)
+    db.upsert_release_product(slug, req.name.trim(), req.description.trim(), req.ord, req.download_public)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
     Ok(Json(serde_json::json!({ "status": "OK", "slug": slug })))
 }
@@ -61,7 +61,7 @@ pub(crate) async fn handle_update_product(
     {
         return Err(error_response(StatusCode::NOT_FOUND, "Product not found"));
     }
-    db.upsert_release_product(&product, req.name.trim(), req.description.trim(), req.ord)
+    db.upsert_release_product(&product, req.name.trim(), req.description.trim(), req.ord, req.download_public)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
     Ok(Json(serde_json::json!({ "status": "OK", "slug": product })))
 }
@@ -103,11 +103,14 @@ pub(crate) async fn handle_get_releases(
     headers: HeaderMap,
     Query(pq): Query<ProductQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    // Accept either license key or bearer token
-    if validate_license_key(&state, &headers).is_err() {
+    let product = pq.slug();
+    // A publicly-downloadable product lists its global releases anonymously so
+    // the marketing site can render download buttons. Otherwise accept either a
+    // license key or a bearer token.
+    let is_public = { state.db.lock().get_product_download_public(product).unwrap_or(false) };
+    if !is_public && validate_license_key(&state, &headers).is_err() {
         validate_principal(&headers, &state)?;
     }
-    let product = pq.slug();
 
     let (rows, mut assets_by_id) = {
         let db = state.db.lock();
@@ -213,6 +216,83 @@ pub(crate) async fn handle_download_asset(
     let stream = tokio_util::io::ReaderStream::new(file);
     let body = axum::body::Body::from_stream(stream);
     Ok((resp_headers, body))
+}
+
+/// Percent-encode a path/query segment, keeping only RFC 3986 unreserved
+/// characters. Release tags and asset names are validated to be traversal-safe
+/// but may still hold characters that need escaping in a redirect Location.
+fn pct_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => out.push(b as char),
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
+}
+
+/// Public "latest installer" redirect for a publicly-downloadable product:
+/// `GET /download/{product}/{platform}` 302s to the newest release's asset for
+/// that platform. Prefers a stable release, falling back to the newest
+/// prerelease when no stable one ships that platform yet. Lets xikaku.com link
+/// a stable URL (e.g. /download/fusionhub/macos) that never needs editing when
+/// a new version is cut.
+pub(crate) async fn handle_public_latest_download(
+    State(state): State<Arc<AppState>>,
+    Path((product, platform)): Path<(String, String)>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    docs::safe_product(&product)?;
+    let exts: &[&str] = match platform.to_ascii_lowercase().as_str() {
+        "windows" | "win" => &[".msi", ".exe"],
+        "macos" | "mac" | "osx" | "darwin" => &[".dmg", ".pkg"],
+        "linux" => &[".appimage", ".deb", ".rpm"],
+        _ => return Err(error_response(StatusCode::BAD_REQUEST, "Unknown platform")),
+    };
+
+    let (tag, asset) = {
+        let db = state.db.lock();
+        if !db.get_product_download_public(&product).unwrap_or(false) {
+            return Err(error_response(StatusCode::NOT_FOUND, "Not found"));
+        }
+        // list_releases is ordered newest-first (id DESC). Keep global releases
+        // for this product; walk newest-first and take the first stable match,
+        // remembering the first prerelease match as a fallback.
+        let rows = db.list_releases().unwrap_or_default();
+        let ids: Vec<i64> = rows
+            .iter()
+            .filter(|r| r.6.is_none() && r.7 == product)
+            .map(|r| r.0)
+            .collect();
+        let assets_by_id = db.get_assets_for_releases(&ids).unwrap_or_default();
+        let mut fallback: Option<(String, String)> = None;
+        let mut chosen: Option<(String, String)> = None;
+        for r in rows.iter().filter(|r| r.6.is_none() && r.7 == product) {
+            let Some(assets) = assets_by_id.get(&r.0) else { continue };
+            let Some((name, _)) = assets.iter().find(|(n, _)| {
+                let lower = n.to_ascii_lowercase();
+                exts.iter().any(|e| lower.ends_with(e))
+            }) else { continue };
+            if !r.4 {
+                chosen = Some((r.1.clone(), name.clone()));
+                break;
+            }
+            if fallback.is_none() {
+                fallback = Some((r.1.clone(), name.clone()));
+            }
+        }
+        chosen.or(fallback).ok_or_else(|| {
+            error_response(StatusCode::NOT_FOUND, "No download available for this platform")
+        })?
+    };
+
+    let url = format!(
+        "/api/v1/updates/download/{}/{}?product={}",
+        pct_encode(&tag),
+        pct_encode(&asset),
+        pct_encode(&product),
+    );
+    Ok(axum::response::Redirect::to(&url))
 }
 
 /// List releases — admin view (JWT)

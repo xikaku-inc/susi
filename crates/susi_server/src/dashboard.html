@@ -965,7 +965,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
             <h2 style="font-size:16px;font-weight:600;">Products</h2>
         </div>
         <div class="card" style="margin-bottom:20px;">
-            <div style="padding:16px;display:grid;grid-template-columns:150px 1fr 1.8fr 90px 180px;gap:12px;align-items:end;">
+            <div style="padding:16px;display:grid;grid-template-columns:150px 1fr 1.4fr 70px 80px 150px;gap:12px;align-items:end;">
                 <div>
                     <label style="display:block;font-size:12px;color:var(--text2);margin-bottom:4px;">Slug</label>
                     <input type="text" id="newProductSlug" placeholder="lpvr" autocomplete="off" style="width:100%;">
@@ -981,6 +981,10 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                 <div>
                     <label style="display:block;font-size:12px;color:var(--text2);margin-bottom:4px;">Order</label>
                     <input type="number" id="newProductOrd" value="0" style="width:100%;">
+                </div>
+                <div>
+                    <label style="display:block;font-size:12px;color:var(--text2);margin-bottom:4px;" title="Allow downloading this product's global releases without a license or login">Public DL</label>
+                    <input type="checkbox" id="newProductPublic" style="width:auto;height:18px;">
                 </div>
                 <button onclick="createProduct()">Add Product</button>
             </div>
@@ -4691,10 +4695,10 @@ function renderProducts() {
         container.innerHTML = '<span style="color:var(--text2);">No products yet</span>';
         return;
     }
-    const GRID = 'display:grid;grid-template-columns:150px 1fr 1.8fr 90px 180px;gap:12px;align-items:center;';
+    const GRID = 'display:grid;grid-template-columns:150px 1fr 1.4fr 70px 80px 150px;gap:12px;align-items:center;';
     const header =
         '<div style="' + GRID + 'padding:0 0 8px;border-bottom:1px solid var(--border);font-size:12px;font-weight:600;color:var(--text2);">' +
-        '<div>Slug</div><div>Name</div><div>Description</div><div>Order</div><div></div></div>';
+        '<div>Slug</div><div>Name</div><div>Description</div><div>Order</div><div>Public DL</div><div></div></div>';
     const rows = products.map(p => {
         const isDefault = p.slug === DEFAULT_PRODUCT;
         const menuId = 'product-menu-' + p.slug.replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -4715,6 +4719,7 @@ function renderProducts() {
             '<input type="text" id="prod-name-' + esc(p.slug) + '" value="' + esc(p.name) + '">' +
             '<input type="text" id="prod-desc-' + esc(p.slug) + '" value="' + esc(p.description || '') + '">' +
             '<input type="number" id="prod-ord-' + esc(p.slug) + '" value="' + esc(p.ord || 0) + '">' +
+            '<input type="checkbox" id="prod-public-' + esc(p.slug) + '"' + (p.download_public ? ' checked' : '') + ' style="width:auto;height:18px;justify-self:center;" title="Downloadable without a license or login">' +
             menu +
         '</div>';
     }).join('');
@@ -4726,12 +4731,13 @@ async function createProduct() {
     const name = document.getElementById('newProductName').value.trim();
     const description = document.getElementById('newProductDesc').value.trim();
     const ord = parseInt(document.getElementById('newProductOrd').value, 10) || 0;
+    const download_public = document.getElementById('newProductPublic').checked;
     if (!slug || !name) { toast('Slug and name are required', 'error'); return; }
     try {
         const resp = await fetch(API + '/products', {
             method: 'POST',
             headers: authHeaders(),
-            body: JSON.stringify({ slug, name, description, ord }),
+            body: JSON.stringify({ slug, name, description, ord, download_public }),
         });
         if (!resp.ok) {
             const data = await resp.json().catch(() => ({}));
@@ -4743,6 +4749,7 @@ async function createProduct() {
         document.getElementById('newProductName').value = '';
         document.getElementById('newProductDesc').value = '';
         document.getElementById('newProductOrd').value = '0';
+        document.getElementById('newProductPublic').checked = false;
         await loadProducts();
     } catch (e) {
         toast('Failed: ' + e.message, 'error');
@@ -4753,12 +4760,13 @@ async function saveProduct(slug) {
     const name = document.getElementById('prod-name-' + slug).value.trim();
     const description = document.getElementById('prod-desc-' + slug).value.trim();
     const ord = parseInt(document.getElementById('prod-ord-' + slug).value, 10) || 0;
+    const download_public = document.getElementById('prod-public-' + slug).checked;
     if (!name) { toast('Name is required', 'error'); return; }
     try {
         const resp = await fetch(API + '/products/' + encodeURIComponent(slug), {
             method: 'PUT',
             headers: authHeaders(),
-            body: JSON.stringify({ name, description, ord }),
+            body: JSON.stringify({ name, description, ord, download_public }),
         });
         if (!resp.ok) {
             const data = await resp.json().catch(() => ({}));

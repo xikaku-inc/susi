@@ -1392,6 +1392,141 @@ fn test_release_download_product_entitlement() {
     assert_eq!(mint(None, Some(&admin), Some("otherprod")), 200);
 }
 
+/// A publicly-downloadable product (FusionHub by default) serves its global
+/// release binaries with no license or login: anonymous listing, anonymous
+/// asset download, and the stable /download/{product}/{platform} redirect all
+/// work. Non-public products stay gated, and toggling the flag off re-gates
+/// the product.
+#[test]
+fn test_public_product_download() {
+    let server = TestServer::start();
+    let admin = server.admin_token();
+    let client = server.http();
+
+    // Upload a stable global FusionHub release with a Windows + macOS asset.
+    // Build the multipart body by hand to avoid pulling reqwest's `multipart`
+    // feature (and its extra deps) into the test build.
+    let msi = b"MSI-INSTALLER-BYTES".to_vec();
+    let dmg = b"DMG-INSTALLER-BYTES".to_vec();
+    let boundary = "susiTESTboundary9d8f";
+    let mut mp: Vec<u8> = Vec::new();
+    for (name, value) in [("tag", "v1.0"), ("name", "FusionHub 1.0"), ("prerelease", "false")] {
+        mp.extend_from_slice(
+            format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n").as_bytes(),
+        );
+    }
+    for (fname, data) in [("fusionhub-1.0-x86_64.msi", &msi), ("fusionhub-1.0-macos-arm64.dmg", &dmg)] {
+        mp.extend_from_slice(
+            format!("--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{fname}\"\r\nContent-Type: application/octet-stream\r\n\r\n").as_bytes(),
+        );
+        mp.extend_from_slice(data);
+        mp.extend_from_slice(b"\r\n");
+    }
+    mp.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    let resp = client
+        .post(format!("{}/releases", server.api_url))
+        .bearer_auth(&admin)
+        .header("content-type", format!("multipart/form-data; boundary={boundary}"))
+        .body(mp)
+        .send()
+        .expect("upload release");
+    assert!(resp.status().is_success(), "upload failed: {}", resp.text().unwrap_or_default());
+
+    // Anonymous listing works for the public product.
+    let listed = client
+        .get(format!("{}/updates/releases?product=fusionhub", server.api_url))
+        .send()
+        .expect("list releases");
+    assert_eq!(listed.status().as_u16(), 200);
+    let body = listed.json::<Value>().expect("json");
+    let rels = body["releases"].as_array().expect("releases array");
+    assert_eq!(rels.len(), 1);
+    assert_eq!(rels[0]["assets"].as_array().expect("assets").len(), 2);
+
+    // Anonymous asset download returns the exact bytes.
+    let dl = client
+        .get(format!("{}/updates/download/v1.0/fusionhub-1.0-x86_64.msi?product=fusionhub", server.api_url))
+        .send()
+        .expect("download msi");
+    assert_eq!(dl.status().as_u16(), 200);
+    assert_eq!(dl.bytes().expect("bytes").as_ref(), msi.as_slice());
+
+    // The stable platform redirects resolve to the right asset.
+    let no_redirect = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("client");
+    for (platform, needle) in [
+        ("windows", "fusionhub-1.0-x86_64.msi"),
+        ("macos", "fusionhub-1.0-macos-arm64.dmg"),
+    ] {
+        let resp = no_redirect
+            .get(format!("{}/download/fusionhub/{}", server.url, platform))
+            .send()
+            .expect("redirect");
+        assert_eq!(resp.status().as_u16(), 302, "platform {}", platform);
+        let loc = resp
+            .headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        assert!(loc.contains(needle), "platform {} -> {}", platform, loc);
+    }
+
+    // Unknown platform is a 400.
+    let bad = no_redirect
+        .get(format!("{}/download/fusionhub/atari", server.url))
+        .send()
+        .expect("bad platform");
+    assert_eq!(bad.status().as_u16(), 400);
+
+    // A non-public product stays gated: anonymous download authorization fails.
+    client
+        .post(format!("{}/products", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({"slug": "gated", "name": "Gated Product"}))
+        .send()
+        .expect("create product")
+        .error_for_status()
+        .expect("create product ok");
+    let mint = client
+        .post(format!("{}/updates/download-ticket", server.api_url))
+        .json(&json!({"tag": "v1.0", "asset": "x.zip", "product": "gated"}))
+        .send()
+        .expect("mint");
+    assert_eq!(mint.status().as_u16(), 401);
+    // And its convenience redirect 404s rather than exposing anything.
+    let gated_redirect = no_redirect
+        .get(format!("{}/download/gated/windows", server.url))
+        .send()
+        .expect("gated redirect");
+    assert_eq!(gated_redirect.status().as_u16(), 404);
+
+    // Toggling the flag off re-gates FusionHub; toggling on restores access.
+    let set_public = |public: bool| {
+        client
+            .put(format!("{}/products/fusionhub", server.api_url))
+            .bearer_auth(&admin)
+            .json(&json!({"name": "FusionHub", "download_public": public}))
+            .send()
+            .expect("toggle")
+            .error_for_status()
+            .expect("toggle ok");
+    };
+    set_public(false);
+    let gated = client
+        .get(format!("{}/updates/download/v1.0/fusionhub-1.0-x86_64.msi?product=fusionhub", server.api_url))
+        .send()
+        .expect("gated download");
+    assert_eq!(gated.status().as_u16(), 401);
+    set_public(true);
+    let regained = client
+        .get(format!("{}/updates/download/v1.0/fusionhub-1.0-x86_64.msi?product=fusionhub", server.api_url))
+        .send()
+        .expect("regained download");
+    assert_eq!(regained.status().as_u16(), 200);
+}
+
 /// Every response carries the output security headers set by the global
 /// layer - HTML shells and JSON API alike.
 #[test]
