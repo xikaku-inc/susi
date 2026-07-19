@@ -1339,6 +1339,17 @@ fn test_release_download_product_entitlement() {
         req.send().expect("mint ticket").status().as_u16()
     };
 
+    // The default product ships download_public=1 (public FusionHub
+    // installers); switch it off so this test exercises the entitlement gate.
+    client
+        .put(format!("{}/products/fusionhub", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({"name": "FusionHub", "download_public": false}))
+        .send()
+        .expect("gate default product")
+        .error_for_status()
+        .expect("gate default product ok");
+
     client
         .post(format!("{}/products", server.api_url))
         .bearer_auth(&admin)
