@@ -79,7 +79,11 @@ body {
     padding: 0 20px;
     position: sticky;
     top: 0;
-    z-index: 10;
+    /* Above the mobile sidebar drawer (150) and its overlay (140) so the
+       header dropdowns (kebab, More) paint over them; below the image
+       lightbox (200). The sticky header is a stacking context, so its
+       children can never exceed this value. */
+    z-index: 160;
 }
 .header h1 {
     font-size: 16px;
@@ -91,6 +95,7 @@ body {
 .header-left .brand {
     color: inherit; text-decoration: none;
     font-size: 15px; font-weight: 600;
+    white-space: nowrap;
 }
 .top-nav { display: flex; gap: 4px; align-items: center; }
 .top-nav a {
@@ -101,12 +106,70 @@ body {
     font-size: 13px;
     font-weight: 500;
     border: 1px solid transparent;
+    white-space: nowrap;
 }
 .top-nav a:hover { background: var(--bg3); color: var(--text1); }
 .top-nav a.active {
     color: var(--accent);
     background: rgba(106,169,255,0.10);
 }
+.nav-group { position: relative; display: inline-block; }
+.nav-group > button {
+    background: none;
+    border: 1px solid transparent;
+    color: var(--text2);
+    padding: 6px 12px;
+    border-radius: var(--radius);
+    font-size: 13px;
+    font-weight: 500;
+    font-family: inherit;
+    cursor: pointer;
+    white-space: nowrap;
+}
+.nav-group > button:hover { background: var(--bg3); color: var(--text1); }
+.nav-group-menu {
+    display: none;
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.25);
+    min-width: 160px;
+    padding: 4px 0;
+    z-index: 500;
+}
+.nav-group-menu.open { display: block; }
+.nav-group-menu a {
+    display: block;
+    padding: 8px 14px;
+    color: var(--text1);
+    text-decoration: none;
+    font-size: 13px;
+}
+.nav-group-menu a:hover { background: var(--bg3); }
+.nav-group-menu a.active { color: var(--accent); }
+.nav-group-menu .menu-divider { height: 1px; background: var(--border); margin: 4px 0; }
+/* Mobile-only header kebab menu; the edit/login controls are DOM-moved into
+   it (and the pickers into the sidebar drawer) below 720px. */
+.docs-more { position: relative; display: none; }
+.docs-more-menu { left: auto; right: 0; }
+.docs-more-menu .btn {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: none;
+    border: none;
+    border-radius: 0;
+    padding: 8px 14px;
+    min-height: 0;
+}
+.docs-more-menu .btn:hover { background: var(--bg3); }
+/* Site nav + picker slots inside the mobile sidebar drawer - hidden on
+   desktop where the top nav and header controls are visible. */
+.site-nav-mobile { display: none; }
+.drawer-pickers { display: none; }
 .header-right { display: flex; gap: 10px; align-items: center; }
 .release-picker {
     background: var(--bg);
@@ -116,7 +179,10 @@ body {
     border-radius: var(--radius);
     font-size: 13px;
     font-family: "SF Mono", "Consolas", monospace;
-    min-width: 130px;
+    /* Shrinkable: the pickers absorb width pressure before anything else
+       in the header has to give. */
+    min-width: 60px;
+    max-width: 200px;
 }
 .release-picker:focus { outline: 1px solid var(--accent); }
 .btn {
@@ -129,6 +195,7 @@ body {
     cursor: pointer;
     font-family: inherit;
     min-height: 32px;
+    white-space: nowrap;
 }
 .btn:hover { background: var(--bg3); }
 .nav-toggle {
@@ -530,6 +597,12 @@ body {
     :root { --sidebar-width: 220px; }
     .content { padding: 28px 28px; }
 }
+@media (max-width: 1150px) {
+    /* Mid widths: the edit/login buttons collapse into the header kebab and
+       the workspace banner goes; pickers shrink but stay in the header. */
+    #wsBanner { display: none !important; }
+    .docs-more { display: inline-block; }
+}
 @media (max-width: 720px) {
     .layout,
     .layout.no-toc { grid-template-columns: 1fr; }
@@ -556,9 +629,66 @@ body {
     .header-left { gap: 8px; }
     .header-left .brand { font-size: 14px; }
     .top-nav { display: none; }
+    .site-nav-mobile {
+        display: block;
+        padding: 4px 8px 8px;
+        border-bottom: 1px solid var(--border);
+    }
+    .site-nav-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        width: 100%;
+        background: none;
+        border: none;
+        color: var(--text1);
+        font-family: inherit;
+        font-size: 14px;
+        font-weight: 600;
+        padding: 10px 14px;
+        border-radius: var(--radius);
+        cursor: pointer;
+    }
+    .site-nav-head:hover { background: var(--bg3); }
+    .site-nav-head .chev { color: var(--text2); transition: transform 0.15s ease; }
+    .site-nav-mobile.open .site-nav-head .chev { transform: rotate(90deg); }
+    #siteNavLinks { display: none; }
+    .site-nav-mobile.open #siteNavLinks { display: block; }
+    .site-nav-mobile a {
+        display: block;
+        padding: 10px 14px;
+        border-left: none;
+        border-radius: var(--radius);
+        font-size: 14px;
+    }
+    .site-nav-mobile .site-nav-label {
+        padding: 12px 14px 4px;
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        color: var(--text2);
+    }
+    .drawer-pickers {
+        display: block;
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--border);
+    }
+    .drawer-pickers .drawer-ws-name {
+        font-size: 12px;
+        color: var(--text2);
+        padding: 0 2px 6px;
+    }
+    .drawer-pickers select {
+        display: block;
+        width: 100%;
+        max-width: none;
+        margin: 6px 0;
+    }
     .header-right { gap: 4px; }
     .header-right .btn, .release-picker { padding: 8px 10px; font-size: 13px; min-height: 36px; min-width: 0; }
     .release-picker { min-width: 100px; max-width: 130px; }
+    .docs-more-menu .btn { min-height: 40px; }
 }
 </style>
 </head>
@@ -584,6 +714,10 @@ body {
         <button id="editBtn" class="btn" onclick="enterEditMode()" style="display:none;">Edit</button>
         <button id="newPageBtn" class="btn" onclick="newPage()" style="display:none;">+ Page</button>
         <button id="btnTheme" class="btn" onclick="cycleTheme()" title="Toggle theme">🌓</button>
+        <span class="docs-more">
+            <button class="btn" onclick="toggleDocsMore(event)" aria-label="More actions">&#8943;</button>
+            <div id="docsMoreMenu" class="nav-group-menu docs-more-menu"></div>
+        </span>
         <button id="navLoginBtn" class="btn" onclick="location.href='/'" style="display:none;">Login</button>
         <button id="navLogoutBtn" class="btn" onclick="logoutFromDocs()" style="display:none;">Logout</button>
     </div>
@@ -591,7 +725,14 @@ body {
 
 <div class="layout no-toc" id="layout">
     <aside class="sidebar" id="sidebar">
-        <div class="empty">Loading...</div>
+        <div id="siteNavMobile" class="site-nav-mobile">
+            <button class="site-nav-head" onclick="toggleSiteNav()">Susi Server <span class="chev">&#9656;</span></button>
+            <div id="siteNavLinks"></div>
+        </div>
+        <div id="drawerPickers" class="drawer-pickers">
+            <div id="drawerWsName" class="drawer-ws-name" style="display:none;"></div>
+        </div>
+        <div id="sidebarTree"><div class="empty">Loading...</div></div>
     </aside>
     <main class="content" id="content">
         <div class="empty-state">Loading documentation…</div>
@@ -700,12 +841,25 @@ function syncProductInUrl() {
     history.replaceState(null, '', url.toString());
 }
 
-// Admin detection. We confirm against the server in renderTopNav() and update
-// `isAdminUser` so edit/new-page buttons only show for actual admins; a JWT
-// alone (e.g. a workspace member's session) is not enough.
+// Edit-permission detection. Site admins can edit any docs; in workspace mode
+// a workspace member can too (`isWorkspaceEditor` flips once the workspace
+// fetch below succeeds, which the backend only allows for members/admins).
+// Both are confirmed against the server; a JWT alone is not enough.
 function authToken() { return localStorage.getItem('auth_token') || ''; }
 let isAdminUser = false;
-function isPotentialAdmin() { return isAdminUser; }
+let isWorkspaceEditor = false;
+function canEditDocs() { return isAdminUser || isWorkspaceEditor; }
+function refreshEditButtons() {
+    const editBtn = document.getElementById('editBtn');
+    const newBtn = document.getElementById('newPageBtn');
+    if (editBtn && currentPage) editBtn.style.display = canEditDocs() ? '' : 'none';
+    if (newBtn) newBtn.style.display = (canEditDocs() && currentTag) ? '' : 'none';
+    // "+ Version" lets an admin start a fresh version for the current product.
+    // Hidden in workspace mode (releases there are created from the Workspaces
+    // page and are workspace-scoped).
+    const verBtn = document.getElementById('newVersionBtn');
+    if (verBtn) verBtn.style.display = (isAdminUser && !currentWorkspaceId) ? '' : 'none';
+}
 
 // Build fetch options that automatically include Authorization when we have a
 // token. Workspace doc reads require auth on the backend, so we send it for
@@ -736,31 +890,128 @@ async function renderTopNav() {
     isAdminUser = isAdmin;
     // The buttons may have already been laid out by route() before the role
     // check resolved. Re-apply visibility now that we know the answer.
-    const editBtn = document.getElementById('editBtn');
-    const newBtn = document.getElementById('newPageBtn');
-    if (editBtn && currentPage) editBtn.style.display = isAdmin ? '' : 'none';
-    if (newBtn) newBtn.style.display = isAdmin ? '' : 'none';
-    // "+ Version" lets an admin start a fresh version for the current product.
-    // Hidden in workspace mode (releases there are created from the Workspaces
-    // page and are workspace-scoped).
-    const verBtn = document.getElementById('newVersionBtn');
-    if (verBtn) verBtn.style.display = (isAdmin && !currentWorkspaceId) ? '' : 'none';
+    refreshEditButtons();
+    // Keep in sync with renderNav() in dashboard.html. group:'admin' items
+    // collapse into the Admin dropdown on desktop and an Admin section in
+    // the mobile sidebar drawer.
     const items = [
         { label: 'Documentation', href: '/docs', active: true,           show: true },
         { label: 'My Licenses',   href: '/#/mylicenses', active: false,  show: !!authToken() && !isAdmin },
         { label: 'Workspaces',    href: '/#/workspaces', active: false,  show: !!authToken() },
         { label: 'Releases',      href: '/#/releases',   active: false,  show: !!authToken() },
-        { label: 'Products',      href: '/#/products',   active: false,  show: !!authToken() && isAdmin },
         { label: 'Licenses',      href: '/#/licenses',   active: false,  show: !!authToken() && isAdmin },
-        { label: 'Website',       href: '/#/website',    active: false,  show: !!authToken() && isAdmin },
-        { label: 'Shop',          href: '/#/shop',       active: false,  show: !!authToken() && isAdmin },
+        { label: 'Users',         href: '/#/users',      active: false,  show: !!authToken() && isAdmin },
+        { label: 'Products',      href: '/#/products',   active: false,  show: !!authToken() && isAdmin, group: 'admin' },
+        { label: 'Website',       href: '/#/website',    active: false,  show: !!authToken() && isAdmin, group: 'admin' },
+        { label: 'Shop',          href: '/#/shop',       active: false,  show: !!authToken() && isAdmin, group: 'admin' },
+        { label: 'Audit',         href: '/#/audit',      active: false,  show: !!authToken() && isAdmin, group: 'admin' },
+        { label: 'Backups',       href: '/#/backups',    active: false,  show: !!authToken() && isAdmin, group: 'admin' },
     ];
-    nav.innerHTML = items.filter(i => i.show).map(i =>
-        '<a href="' + i.href + '"' + (i.active ? ' class="active"' : '') + '>' + i.label + '</a>'
-    ).join('');
+    const visible = items.filter(i => i.show);
+    docNavFlat = visible.filter(i => !i.group);
+    docNavAdmin = visible.filter(i => i.group === 'admin');
+    layoutDocsNav();
+    // Mobile: the same links live in the collapsed "Susi Server" accordion
+    // at the top of the sidebar drawer.
+    const siteNav = document.getElementById('siteNavLinks');
+    if (siteNav) {
+        siteNav.innerHTML = docNavFlat.map(docNavPlain).join('') +
+            (docNavAdmin.length ? '<div class="site-nav-label">Admin</div>' + docNavAdmin.map(docNavPlain).join('') : '');
+    }
     document.getElementById('navLoginBtn').style.display = authToken() ? 'none' : '';
     document.getElementById('navLogoutBtn').style.display = authToken() ? '' : 'none';
 }
+
+// Priority+ top nav (keep in sync with layoutTopNav() in dashboard.html):
+// flat items that don't fit the header width collapse into the trailing
+// dropdown, labelled "Admin" while it only holds the admin group and "More"
+// once flat items overflow into it.
+let docNavFlat = [], docNavAdmin = [];
+const docNavLink = i => '<a href="' + i.href + '"' + (i.active ? ' class="active"' : '') + '>' + i.label + '</a>';
+const docNavPlain = i => '<a href="' + i.href + '">' + i.label + '</a>';
+
+function renderDocsNavHtml(n) {
+    const shown = docNavFlat.slice(0, n);
+    const overflow = docNavFlat.slice(n);
+    let html = shown.map(docNavLink).join('');
+    if (overflow.length || docNavAdmin.length) {
+        const label = overflow.length ? 'More' : 'Admin';
+        const divider = (overflow.length && docNavAdmin.length) ? '<div class="menu-divider"></div>' : '';
+        html += '<span class="nav-group">' +
+            '<button type="button" onclick="toggleNavGroup(event)">' + label + ' &#9662;</button>' +
+            '<div id="navAdminMenu" class="nav-group-menu">' +
+            overflow.map(docNavLink).join('') + divider + docNavAdmin.map(docNavPlain).join('') + '</div></span>';
+    }
+    document.getElementById('topNav').innerHTML = html;
+}
+
+function layoutDocsNav() {
+    const header = document.querySelector('.header');
+    if (!header || !document.getElementById('topNav')) return;
+    for (let n = docNavFlat.length; n >= 0; n--) {
+        renderDocsNavHtml(n);
+        if (header.scrollWidth <= header.clientWidth) break;
+    }
+}
+
+let docNavResizeTimer;
+window.addEventListener('resize', () => {
+    clearTimeout(docNavResizeTimer);
+    docNavResizeTimer = setTimeout(layoutDocsNav, 120);
+});
+
+function toggleNavGroup(event) {
+    event.stopPropagation();
+    const m = document.getElementById('navAdminMenu');
+    if (m) m.classList.toggle('open');
+}
+
+function toggleDocsMore(event) {
+    event.stopPropagation();
+    document.getElementById('docsMoreMenu').classList.toggle('open');
+}
+
+function toggleSiteNav() {
+    document.getElementById('siteNavMobile').classList.toggle('open');
+}
+
+document.addEventListener('click', () => {
+    ['navAdminMenu', 'docsMoreMenu'].forEach(id => {
+        const m = document.getElementById(id);
+        if (m) m.classList.remove('open');
+    });
+});
+
+// Responsive header control relocation. Below 1150px the edit/login buttons
+// move into the header kebab menu; below 720px the pickers additionally move
+// into the sidebar drawer. Elements are DOM-moved (not duplicated) so all
+// existing visibility logic keeps working on them.
+const docsMobileMq = window.matchMedia('(max-width: 720px)');
+const docsMidMq = window.matchMedia('(max-width: 1150px)');
+function relocateHeaderControls() {
+    const headerRight = document.querySelector('.header-right');
+    const theme = document.getElementById('btnTheme');
+    const pickers = ['productPicker', 'releasePicker'].map(id => document.getElementById(id));
+    const actions = ['newVersionBtn', 'editBtn', 'newPageBtn', 'navLoginBtn', 'navLogoutBtn']
+        .map(id => document.getElementById(id));
+    if (docsMobileMq.matches) {
+        const pickerSlot = document.getElementById('drawerPickers');
+        pickers.forEach(el => pickerSlot.appendChild(el));
+    } else {
+        pickers.forEach(el => headerRight.insertBefore(el, theme));
+    }
+    if (docsMidMq.matches) {
+        const menu = document.getElementById('docsMoreMenu');
+        actions.forEach(el => menu.appendChild(el));
+    } else {
+        actions.slice(0, 3).forEach(el => headerRight.insertBefore(el, theme));
+        actions.slice(3).forEach(el => headerRight.appendChild(el));
+    }
+    layoutDocsNav();
+}
+relocateHeaderControls();
+docsMobileMq.addEventListener('change', relocateHeaderControls);
+docsMidMq.addEventListener('change', relocateHeaderControls);
 
 function logoutFromDocs() {
     localStorage.removeItem('auth_token');
@@ -783,6 +1034,13 @@ if (currentWorkspaceId) {
                 const el = document.getElementById('wsBanner');
                 document.getElementById('wsBannerName').textContent = currentWorkspaceName;
                 el.style.display = '';
+                const dn = document.getElementById('drawerWsName');
+                dn.textContent = 'Workspace: ' + currentWorkspaceName;
+                dn.style.display = '';
+                // The workspace endpoint only answers for members and site
+                // admins, so a 200 here means this user may author docs.
+                isWorkspaceEditor = true;
+                refreshEditButtons();
             }
         } catch (e) {}
     })();
@@ -1051,11 +1309,13 @@ async function loadReleases() {
         ? API + '/workspaces/' + encodeURIComponent(currentWorkspaceId) + '/docs/releases'
         : API + '/products/' + encodeURIComponent(currentProduct) + '/docs/releases';
     const resp = await fetch(url, { headers: docHeaders() });
+    // null = fetch denied/failed (error state already rendered), so route()
+    // won't overwrite it with the "no releases yet" hint.
     if (!resp.ok) {
         renderEmptyState(currentWorkspaceId
             ? 'Could not load workspace documentation. Are you signed in as a workspace member?'
             : 'Could not load documentation index.');
-        return false;
+        return null;
     }
     const data = await resp.json();
     releases = data.releases || [];
@@ -1101,7 +1361,7 @@ async function loadPage(slug) {
 // ---------------------------------------------------------------------------
 
 function renderSidebar() {
-    const sb = document.getElementById('sidebar');
+    const sb = document.getElementById('sidebarTree');
     if (pages.length === 0) {
         sb.innerHTML = '<div class="empty">No pages yet.</div>';
         return;
@@ -1162,14 +1422,17 @@ function renderPage() {
         if (layout) layout.classList.add('no-toc');
         return;
     }
-    document.getElementById('editBtn').style.display = isPotentialAdmin() ? '' : 'none';
-    document.getElementById('newPageBtn').style.display = isPotentialAdmin() ? '' : 'none';
+    document.getElementById('editBtn').style.display = canEditDocs() ? '' : 'none';
+    document.getElementById('newPageBtn').style.display = canEditDocs() ? '' : 'none';
     if (editMode) {
         if (layout) layout.classList.add('no-toc');
         renderEditor();
         return;
     }
-    const meta = '<div class="meta">Release <code>' + escHtml(currentTag) + '</code> · '
+    // Workspace docs are often standalone collections (handbooks, guides)
+    // where a "Release <tag>" prefix would be confusing noise.
+    const meta = '<div class="meta">'
+        + (currentWorkspaceId ? '' : 'Release <code>' + escHtml(currentTag) + '</code> · ')
         + 'Updated ' + escHtml(formatDate(currentPage.updated_at)) + '</div>';
     let html = meta + renderMarkdown(currentPage.body_md || '');
     const { html: withIds, headings } = injectHeadingIds(html);
@@ -1411,7 +1674,7 @@ function easymdePreviewRender(plainText) {
 /// EasyMDE-compatible image uploader.
 /// Signature: (file, onSuccess(url), onError(msg))
 async function easymdeImageUpload(file, onSuccess, onError) {
-    if (!isPotentialAdmin()) { onError('Login required'); return; }
+    if (!canEditDocs()) { onError('Login required'); return; }
     if (!currentTag) { onError('No release selected'); return; }
     const name = generateAssetName(file);
     try {
@@ -1472,7 +1735,7 @@ function formatDate(s) {
 
 function enterEditMode() {
     if (!currentPage) return;
-    if (!isPotentialAdmin()) { toast('Login required', 'error'); return; }
+    if (!canEditDocs()) { toast('Login required', 'error'); return; }
     editMode = true;
     renderPage();
 }
@@ -1581,7 +1844,7 @@ async function deletePage() {
 }
 
 async function newPage() {
-    if (!isPotentialAdmin()) { toast('Login required', 'error'); return; }
+    if (!canEditDocs()) { toast('Login required', 'error'); return; }
     const slug = prompt('New page slug (lowercase, no spaces):');
     if (!slug) return;
     const cleanSlug = slug.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '-');
@@ -1613,7 +1876,7 @@ async function newPage() {
 // created on the backend when the first page is saved (ensure_release_with_seed),
 // so here we just point the editor at the new tag with an empty sidebar.
 async function newVersion() {
-    if (!isPotentialAdmin()) { toast('Login required', 'error'); return; }
+    if (!canEditDocs()) { toast('Login required', 'error'); return; }
     const tag = prompt('New version tag (e.g. v1.0):');
     if (!tag) return;
     const cleanTag = tag.trim();
@@ -1658,9 +1921,11 @@ async function route() {
             renderSidebar();
             document.getElementById('editBtn').style.display = 'none';
             document.getElementById('newPageBtn').style.display = 'none';
-            renderEmptyState(currentWorkspaceId
-                ? 'No documentation releases in this workspace yet. Create one from the Workspaces page.'
-                : 'No documentation has been published yet.');
+            if (ok !== null) {
+                renderEmptyState(currentWorkspaceId
+                    ? 'No documentation releases in this workspace yet. Create one from the Workspaces page.'
+                    : 'No documentation has been published yet.');
+            }
             return;
         }
     }
@@ -1673,7 +1938,7 @@ async function route() {
         // so they can create the first page. Otherwise newly-created workspace
         // releases would have no entry point.
         document.getElementById('content').innerHTML = '<div class="empty-state"><h2>No pages in this release</h2><p style="color:var(--text2);margin-top:8px;">Click <strong>+ Page</strong> to create the first one.</p></div>';
-        document.getElementById('newPageBtn').style.display = isPotentialAdmin() ? '' : 'none';
+        document.getElementById('newPageBtn').style.display = canEditDocs() ? '' : 'none';
         document.getElementById('editBtn').style.display = 'none';
         return;
     }

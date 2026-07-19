@@ -263,8 +263,6 @@ mod macos {
     struct __CFURL(u8);
     type CFURLRef = *const __CFURL;
 
-    type CFURLPathStyle = i64;
-
     // Additional types for certificate extraction
     #[repr(C)]
     struct __CFDictionary(u8);

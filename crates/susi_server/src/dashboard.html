@@ -70,7 +70,8 @@ a:hover { color: var(--accent-hover); }
     justify-content: space-between;
 }
 .header h1 { font-size: 18px; font-weight: 600; }
-.header .status { font-size: 13px; color: var(--text2); }
+.header .status { font-size: 13px; color: var(--text2); white-space: nowrap; }
+#currentUser { white-space: nowrap; }
 .header .status.ok { color: var(--green); }
 .header .status.err { color: var(--red); }
 
@@ -289,43 +290,15 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
     flex-shrink: 0;
 }
 
-.advanced-options {
-    margin-bottom: 12px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    overflow: hidden;
-}
-.advanced-options summary {
-    padding: 8px 12px;
-    cursor: pointer;
+.advanced-options { margin-top: 16px; margin-bottom: 12px; }
+.advanced-options .advanced-title {
     font-size: 12px;
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text2);
-    user-select: none;
-    list-style: none;
+    margin-bottom: 8px;
 }
-.advanced-options summary::-webkit-details-marker { display: none; }
-.advanced-options summary::before { content: '▶ '; font-size: 10px; }
-.advanced-options[open] summary::before { content: '▼ '; }
-.advanced-options .advanced-body {
-    padding: 8px 12px 12px;
-    border-top: 1px solid var(--border);
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 12px;
-}
-.advanced-options .adv-field label {
-    display: block;
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--text2);
-    margin-bottom: 4px;
-}
-.advanced-options .adv-field input { width: 100%; }
 
 .toast {
     position: fixed;
@@ -338,8 +311,8 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
     animation: slideIn 0.2s ease-out;
     max-width: 400px;
 }
-.toast.success { background: rgba(74, 222, 128, 0.15); border: 1px solid var(--green); color: var(--green); }
-.toast.error { background: rgba(248, 113, 113, 0.15); border: 1px solid var(--red); color: var(--red); }
+.toast.success { background: linear-gradient(rgba(74, 222, 128, 0.15), rgba(74, 222, 128, 0.15)) var(--bg2); border: 1px solid var(--green); color: var(--green); }
+.toast.error { background: linear-gradient(rgba(248, 113, 113, 0.15), rgba(248, 113, 113, 0.15)) var(--bg2); border: 1px solid var(--red); color: var(--red); }
 @keyframes slideIn { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
 
 .empty-state {
@@ -383,11 +356,6 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
     padding-bottom: 4px;
     border-bottom: 1px solid var(--border);
 }
-.detail-advanced summary { cursor: pointer; user-select: none; list-style: none; }
-.detail-advanced summary::-webkit-details-marker { display: none; }
-.detail-advanced summary::after { content: ' ▶'; font-size: 9px; }
-.detail-advanced[open] summary::after { content: ' ▼'; }
-
 /* Tabs styled like the top-nav menu items: pill hover with rounded corners,
    accent-tinted active state. No underline. */
 .ws-tabs {
@@ -616,6 +584,7 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
 .header-left .brand {
     color: inherit; text-decoration: none;
     font-size: 15px; font-weight: 600;
+    white-space: nowrap;
 }
 .top-nav { display: flex; gap: 4px; align-items: center; }
 .top-nav a {
@@ -626,15 +595,156 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
     font-size: 13px;
     font-weight: 500;
     border: 1px solid transparent;
+    white-space: nowrap;
 }
 .top-nav a:hover { background: var(--bg2); color: var(--text1); }
 .top-nav a.active {
     color: var(--accent);
     background: rgba(106,169,255,0.10);
 }
+.top-nav .nav-group > button {
+    background: none;
+    min-width: 0;
+    min-height: 0;
+    padding: 6px 12px;
+    border-radius: var(--radius);
+    color: var(--text2);
+    font-size: 13px;
+    font-weight: 500;
+    border: 1px solid transparent;
+    white-space: nowrap;
+}
+.top-nav .nav-group > button:hover { background: var(--bg2); color: var(--text1); }
+.top-nav .nav-group > button.active {
+    color: var(--accent);
+    background: rgba(106,169,255,0.10);
+}
+
+/* Mobile hamburger + slide-in nav drawer. Hidden on desktop; the 768px
+   breakpoint swaps the flat .top-nav for these. */
+.nav-toggle {
+    display: none;
+    background: none;
+    border: none;
+    color: var(--text1);
+    padding: 6px;
+    min-width: 0;
+    min-height: 0;
+    align-items: center;
+    justify-content: center;
+}
+.nav-toggle svg { width: 22px; height: 22px; stroke: currentColor; }
+.nav-toggle:hover { background: var(--bg3); }
+.nav-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.45);
+    z-index: 400;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease;
+}
+.nav-backdrop.visible { opacity: 1; pointer-events: auto; }
+.nav-drawer {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: 280px;
+    max-width: 85vw;
+    background: var(--bg2);
+    border-right: 1px solid var(--border);
+    z-index: 410;
+    transform: translateX(-100%);
+    transition: transform 0.2s ease;
+    padding: 12px;
+    overflow-y: auto;
+}
+.nav-drawer.open { transform: translateX(0); }
+.nav-drawer .drawer-brand {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 4px 14px 12px;
+    font-size: 15px;
+    font-weight: 600;
+}
+.nav-drawer .drawer-brand button {
+    background: none;
+    border: none;
+    color: var(--text2);
+    font-size: 20px;
+    min-width: 0;
+    min-height: 0;
+    padding: 0 4px;
+}
+.nav-drawer a,
+.nav-drawer .drawer-actions button {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 11px 14px;
+    border-radius: var(--radius);
+    color: var(--text1);
+    text-decoration: none;
+    font-size: 14px;
+    background: none;
+    border: none;
+    min-width: 0;
+    min-height: 0;
+}
+.nav-drawer a:hover,
+.nav-drawer .drawer-actions button:hover { background: var(--bg3); }
+.nav-drawer a.active { color: var(--accent); background: rgba(106,169,255,0.10); }
+.nav-drawer .drawer-section {
+    padding: 14px 14px 4px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text2);
+}
+.nav-drawer .drawer-divider { height: 1px; background: var(--border); margin: 10px 0; }
+.nav-drawer .drawer-actions button.danger { color: var(--red); }
 
 .dash-page { display: none; }
 .dash-page.active { display: block; }
+
+/* Symbol-only buttons (back arrows etc.): exempt from the project-wide
+   button min-width - a lone glyph shouldn't stretch to pill width. */
+button.icon-btn {
+    min-width: 0;
+    width: auto;
+    padding: 4px 12px;
+}
+
+/* Shared "peek" expansion anatomy - inset panel + label/value grid used by
+   every expandable list row (users, releases) so quick details look
+   identical across pages. */
+.peek-body {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 10px 14px;
+    margin-top: 8px;
+}
+.peek-grid {
+    display: flex;
+    gap: 28px;
+    flex-wrap: wrap;
+    padding: 2px 6px;
+    font-size: 13px;
+}
+.peek-grid .label {
+    display: block;
+    font-size: 11px;
+    color: var(--text2);
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    margin-bottom: 3px;
+}
+a.feature-tag { text-decoration: none; cursor: pointer; }
+a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
 
 @media (max-width: 768px) {
     .container { padding: 12px; }
@@ -645,6 +755,9 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
     .header-left { gap: 8px; flex-wrap: wrap; }
     .header-left .brand { font-size: 14px; }
     .top-nav { display: none; }
+    .nav-toggle { display: inline-flex; }
+    /* Account actions live in the drawer on mobile. */
+    #headerActions { display: none !important; }
     .header-actions { gap: 6px; flex-wrap: wrap; }
     .header-actions button { min-width: 0 !important; padding: 8px 10px; min-height: 36px; }
     button { min-width: 0; padding: 10px 14px; min-height: 40px; }
@@ -665,6 +778,13 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
 
 <div class="header">
     <div class="header-left">
+        <button class="nav-toggle" onclick="openNavDrawer()" aria-label="Open menu">
+            <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="3" y1="6" x2="21" y2="6"></line>
+                <line x1="3" y1="12" x2="21" y2="12"></line>
+                <line x1="3" y1="18" x2="21" y2="18"></line>
+            </svg>
+        </button>
         <a href="/" class="brand">Susi Server</a>
         <nav class="top-nav" id="topNav"></nav>
     </div>
@@ -675,8 +795,8 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
         <span class="dropdown" id="headerActions" style="display:none;">
             <button class="small secondary" onclick="toggleDropdown(event,'headerActionsMenu')">Actions &#9662;</button>
             <div id="headerActionsMenu" class="dropdown-menu" style="display:none;">
-                <button id="btnUsers" onclick="showUsersModal()" style="display:none;">Users</button>
                 <button id="btn2FA" onclick="show2FAModal()" style="display:none;">2FA</button>
+                <button id="btnSessions" onclick="showSessionsModal()" style="display:none;">Sessions</button>
                 <button id="btnApiTokens" onclick="showApiTokensModal()" style="display:none;">API Tokens</button>
                 <div class="divider"></div>
                 <button class="danger" id="btnLogout" onclick="logout()">Logout</button>
@@ -686,6 +806,20 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
     </div>
 </div>
 
+<!-- Mobile nav drawer (opened by the header hamburger) -->
+<div id="navBackdrop" class="nav-backdrop" onclick="closeNavDrawer()"></div>
+<nav id="navDrawer" class="nav-drawer">
+    <div class="drawer-brand">Susi Server <button onclick="closeNavDrawer()" aria-label="Close menu">&times;</button></div>
+    <div id="navDrawerLinks"></div>
+    <div id="navDrawerAccount" class="drawer-actions" style="display:none;">
+        <div class="drawer-divider"></div>
+        <button onclick="show2FAModal()">2FA</button>
+        <button onclick="showSessionsModal()">Sessions</button>
+        <button onclick="showApiTokensModal()">API Tokens</button>
+        <button class="danger" onclick="logout()">Logout</button>
+    </div>
+</nav>
+
 <div class="container">
 
 <!-- Anonymous landing route — login overlay is auto-shown by route(). -->
@@ -693,19 +827,24 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
 
 <!-- Workspaces page -->
 <div id="page-workspaces" class="dash-page">
-    <div style="margin-top:32px;margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;">
-        <h2 style="font-size:16px;font-weight:600;">Workspaces</h2>
+    <div id="workspaceListSection">
+    <h2 style="font-size:16px;font-weight:600;margin-top:32px;margin-bottom:16px;">Workspaces</h2>
+    <div class="toolbar">
+        <input type="text" id="wsSearch" placeholder="Search workspaces..." oninput="renderWorkspaces()">
+        <div class="spacer"></div>
         <button id="btnCreateWorkspace" onclick="showCreateWorkspaceModal()">+ New Workspace</button>
     </div>
     <div id="workspacesContainer" style="margin-bottom:20px;"></div>
+    </div><!-- /workspaceListSection -->
 
-    <!-- Workspace detail panel -->
+    <!-- Workspace detail panel (routed: #/workspaces/{id}/{tab} replaces the list view) -->
     <div id="wsDetailPanel" class="detail-panel card">
         <div class="detail-header">
-            <h3 id="wsDetailTitle">Workspace</h3>
-            <div>
-                <button class="small secondary" onclick="closeWsDetail()">&times; Close</button>
+            <div style="display:flex;align-items:center;gap:10px;min-width:0;">
+                <button class="small secondary icon-btn" onclick="closeWsDetail()" title="Back to all workspaces">&larr;</button>
+                <h3 id="wsDetailTitle">Workspace</h3>
             </div>
+            <div></div>
         </div>
         <div class="detail-body">
             <div class="detail-grid">
@@ -721,29 +860,33 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
                     <div class="field-label">Created By</div>
                     <div class="field-value" id="wsDetailCreatedBy"></div>
                 </div>
-                <div class="detail-field">
-                    <div class="field-label">Your Role</div>
-                    <div class="field-value" id="wsDetailRole"></div>
-                </div>
             </div>
 
             <div class="ws-tabs" role="tablist">
-                <button class="ws-tab active" data-ws-tab="releases" onclick="setWsTab('releases')">Releases</button>
-                <button class="ws-tab" data-ws-tab="configs" onclick="setWsTab('configs')">Configs</button>
-                <button class="ws-tab" data-ws-tab="recordings" onclick="setWsTab('recordings')">Recordings</button>
-                <button class="ws-tab" data-ws-tab="instances" onclick="setWsTab('instances')">Instances</button>
-                <button class="ws-tab" data-ws-tab="members" onclick="setWsTab('members')">Members</button>
-                <button class="ws-tab" data-ws-tab="settings" data-ws-admin-only onclick="setWsTab('settings')">Settings</button>
+                <button class="ws-tab active" data-ws-tab="releases" onclick="wsNavTab('releases')">Releases</button>
+                <button class="ws-tab" data-ws-tab="docs" onclick="wsNavTab('docs')">Docs</button>
+                <button class="ws-tab" data-ws-tab="configs" onclick="wsNavTab('configs')">Configs</button>
+                <button class="ws-tab" data-ws-tab="recordings" onclick="wsNavTab('recordings')">Recordings</button>
+                <button class="ws-tab" data-ws-tab="members" onclick="wsNavTab('members')">Members</button>
+                <button class="ws-tab" data-ws-tab="settings" data-ws-admin-only onclick="wsNavTab('settings')">Settings</button>
             </div>
 
             <div class="ws-tab-panel active" data-ws-panel="releases">
                 <div class="detail-section-title" style="display:flex;align-items:center;justify-content:space-between;">
                     <span>Releases</span>
                     <span style="display:flex;gap:6px;">
-                        <button id="wsCreateDocReleaseBtn" class="small" style="display:none;" onclick="createWsDocRelease()">Add release</button>
+                        <button id="wsUploadSoftwareBtn" class="small" style="display:none;" onclick="showUploadReleaseModal(selectedWsId)">Upload software</button>
                     </span>
                 </div>
                 <div id="wsDetailReleases" class="machines-list"></div>
+            </div>
+
+            <div class="ws-tab-panel" data-ws-panel="docs">
+                <div class="detail-section-title" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Documentation</span>
+                    <button class="small" onclick="createWsDocCollection()">New documentation</button>
+                </div>
+                <div id="wsDetailDocs" class="machines-list"></div>
             </div>
 
             <div class="ws-tab-panel" data-ws-panel="configs">
@@ -759,24 +902,11 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
                 <div id="wsDetailRecordings" class="machines-list"></div>
             </div>
 
-            <div class="ws-tab-panel" data-ws-panel="instances">
-                <div class="detail-section-title" style="display:flex;align-items:center;justify-content:space-between;">
-                    <span>Connected Instances</span>
-                    <button class="small" onclick="loadWsInstances(selectedWsId)">Refresh</button>
-                </div>
-                <div id="wsDetailInstances" class="machines-list"></div>
-            </div>
-
             <div class="ws-tab-panel" data-ws-panel="members">
                 <div class="detail-section-title">Members</div>
                 <div id="wsDetailMembers" class="machines-list"></div>
                 <div id="wsAddMemberRow" style="display:flex;gap:8px;margin-top:8px;">
                     <select id="wsNewMember" style="flex:1;"><option value="">Select user...</option></select>
-                    <select id="wsNewMemberRole" style="width:100px;">
-                        <option value="viewer">Viewer</option>
-                        <option value="editor">Editor</option>
-                        <option value="owner">Owner</option>
-                    </select>
                     <button class="small" onclick="addWsMember()">Add</button>
                 </div>
             </div>
@@ -816,8 +946,10 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
 <!-- Releases page -->
 <div id="page-releases" class="dash-page">
     <div id="adminReleasesSection" style="margin-top:32px;">
-        <div style="margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;">
-            <h2 style="font-size:16px;font-weight:600;">Software Releases</h2>
+        <h2 style="font-size:16px;font-weight:600;margin-bottom:16px;">Software Releases</h2>
+        <div class="toolbar">
+            <input type="text" id="releaseSearch" placeholder="Search releases..." oninput="renderReleases()">
+            <div class="spacer"></div>
             <button id="btnUploadRelease" onclick="showUploadReleaseModal()">+ Upload Release</button>
         </div>
         <div class="card" id="releasesCard">
@@ -833,7 +965,7 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
             <h2 style="font-size:16px;font-weight:600;">Products</h2>
         </div>
         <div class="card" style="margin-bottom:20px;">
-            <div style="padding:16px;display:grid;grid-template-columns:150px 1fr 1.8fr 90px 180px;gap:12px;align-items:end;">
+            <div style="padding:16px;display:grid;grid-template-columns:150px 1fr 1.4fr 70px 80px 150px;gap:12px;align-items:end;">
                 <div>
                     <label style="display:block;font-size:12px;color:var(--text2);margin-bottom:4px;">Slug</label>
                     <input type="text" id="newProductSlug" placeholder="lpvr" autocomplete="off" style="width:100%;">
@@ -850,6 +982,10 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
                     <label style="display:block;font-size:12px;color:var(--text2);margin-bottom:4px;">Order</label>
                     <input type="number" id="newProductOrd" value="0" style="width:100%;">
                 </div>
+                <div>
+                    <label style="display:block;font-size:12px;color:var(--text2);margin-bottom:4px;" title="Allow downloading this product's global releases without a license or login">Public DL</label>
+                    <input type="checkbox" id="newProductPublic" style="width:auto;height:18px;">
+                </div>
                 <button onclick="createProduct()">Add Product</button>
             </div>
         </div>
@@ -862,25 +998,48 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
 <!-- Licenses page -->
 <div id="page-licenses" class="dash-page">
     <div id="adminLicenseTableSection">
+    <div id="licenseListSection">
     <h2 style="font-size:16px;font-weight:600;margin-top:32px;margin-bottom:16px;">Licenses</h2>
 
     <div id="adminLicenseToolbar" class="toolbar">
         <input type="text" id="searchInput" placeholder="Search licenses...">
         <div class="spacer"></div>
-        <button class="secondary" onclick="loadLicenses()">Refresh</button>
         <button onclick="showCreateModal()">+ New License</button>
     </div>
 
-    <!-- Detail panel -->
+    <!-- License table -->
+    <div class="card">
+        <table>
+            <thead>
+                <tr>
+                    <th>Key</th>
+                    <th>Customer</th>
+                    <th>Product</th>
+                    <th>Status</th>
+                    <th>Expires</th>
+                    <th>Machines</th>
+                    <th>Features</th>
+                </tr>
+            </thead>
+            <tbody id="licenseTableBody">
+                <tr><td colspan="7" class="empty-state"><p>Loading...</p></td></tr>
+            </tbody>
+        </table>
+    </div>
+    </div><!-- /licenseListSection -->
+
+    <!-- Detail panel (routed: #/licenses/{key} replaces the list view) -->
     <div id="detailPanel" class="detail-panel card">
         <div class="detail-header">
-            <h3 id="detailTitle">License Details</h3>
+            <div style="display:flex;align-items:center;gap:10px;min-width:0;">
+                <button class="small secondary icon-btn" onclick="closeDetail()" title="Back to all licenses">&larr;</button>
+                <h3 id="detailTitle">License Details</h3>
+            </div>
             <div>
                 <button class="small secondary" id="btnEdit" onclick="startEditLicense()">Edit</button>
                 <button class="small secondary" onclick="exportLicense()">Export</button>
                 <button class="small danger" id="btnRevoke" onclick="revokeLicense()">Revoke</button>
                 <button class="small danger" id="btnDelete" onclick="deleteLicense()">Delete</button>
-                <button class="small secondary" onclick="closeDetail()">&times; Close</button>
             </div>
         </div>
         <!-- View mode -->
@@ -928,9 +1087,8 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
                     </div>
                 </div>
             </div>
-            <details class="detail-advanced">
-                <summary class="detail-section-title">Advanced Options</summary>
-                <div class="detail-grid" style="margin-top:8px;">
+            <div class="detail-section-title">Advanced Options</div>
+            <div class="detail-grid">
                     <div class="detail-field">
                         <div class="field-label">Lease Duration (hours)</div>
                         <div class="field-value" id="detailLeaseDuration"></div>
@@ -943,8 +1101,7 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
                         <div class="field-label">Requires Signed Binary</div>
                         <div class="field-value" id="detailRequireSignedBinary"></div>
                     </div>
-                </div>
-            </details>
+            </div>
             <div class="detail-section-title">Activated Machines</div>
             <div id="detailMachines" class="machines-list"></div>
         </div>
@@ -983,26 +1140,6 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
                 <button onclick="saveEditLicense()">Save Changes</button>
             </div>
         </div>
-    </div>
-
-    <!-- License table -->
-    <div class="card">
-        <table>
-            <thead>
-                <tr>
-                    <th>Key</th>
-                    <th>Customer</th>
-                    <th>Product</th>
-                    <th>Status</th>
-                    <th>Expires</th>
-                    <th>Machines</th>
-                    <th>Features</th>
-                </tr>
-            </thead>
-            <tbody id="licenseTableBody">
-                <tr><td colspan="7" class="empty-state"><p>Loading...</p></td></tr>
-            </tbody>
-        </table>
     </div>
     </div>
 </div><!-- /page-licenses -->
@@ -1127,6 +1264,192 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
     </div>
 </div><!-- /page-shop -->
 
+<!-- Audit log (admin) -->
+<div id="page-audit" class="dash-page">
+    <div style="margin-top:32px;margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
+        <h2 style="font-size:16px;font-weight:600;">Audit Log</h2>
+        <button class="secondary" onclick="loadAudit()">Refresh</button>
+    </div>
+    <div class="card" style="padding:0;">
+        <table style="width:100%;" id="auditTable">
+            <thead>
+                <tr>
+                    <th style="width:170px;">Time</th>
+                    <th style="width:140px;">Actor</th>
+                    <th style="width:200px;">Action</th>
+                    <th>Target</th>
+                    <th>Details</th>
+                </tr>
+            </thead>
+            <tbody id="auditBody">
+                <tr><td colspan="5" class="empty-state"><p>Loading...</p></td></tr>
+            </tbody>
+        </table>
+    </div>
+    <div style="margin-top:12px;">
+        <button class="secondary" id="auditLoadMore" onclick="loadAudit(true)" style="display:none;">Load more</button>
+    </div>
+</div><!-- /page-audit -->
+
+<!-- Backups (Dropbox) -->
+<div id="page-backups" class="dash-page">
+    <div style="margin-top:32px;margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
+        <h2 style="font-size:16px;font-weight:600;">Backups — Dropbox</h2>
+        <div style="display:flex;gap:8px;">
+            <button class="secondary" onclick="loadBackupPage()">Refresh</button>
+            <button id="backupRunBtn" onclick="runBackupNow()">Back up now</button>
+        </div>
+    </div>
+
+    <div id="backupNotConfigured" class="card" style="display:none;margin-bottom:20px;">
+        <p style="font-size:13px;margin:0;">
+            Backups are not configured on this server. Set <code>SUSI_DROPBOX_APP_KEY</code>,
+            <code>SUSI_DROPBOX_APP_SECRET</code> and <code>SUSI_BACKUP_KEY</code> in the host
+            environment (<code>/opt/susi/.env</code>) and restart the container.
+        </p>
+    </div>
+
+    <div id="backupMain" style="display:none;">
+        <div class="card settings-card" style="margin-bottom:20px;">
+            <div class="detail-header">
+                <h3>Dropbox connection</h3>
+                <span id="backupConnBadge" class="badge revoked">not connected</span>
+            </div>
+            <div class="detail-body">
+                <div id="backupConnInfo" style="font-size:13px;margin-bottom:10px;"></div>
+                <div id="backupConnectFlow" style="display:none;">
+                    <p style="font-size:12px;color:var(--text2);margin:0 0 10px;">
+                        1. Open the Dropbox authorization page and approve access.
+                        2. Dropbox shows a one-time code — paste it below and connect.
+                        Backups only ever see the app's own folder (Apps/&lt;app name&gt;).
+                    </p>
+                    <button class="secondary" onclick="openBackupAuthorize()">Open Dropbox authorization</button>
+                    <div class="form-row" style="margin-top:12px;">
+                        <label for="backupAuthCode">Authorization code</label>
+                        <input type="text" id="backupAuthCode" placeholder="Paste the code shown by Dropbox">
+                    </div>
+                    <button onclick="submitBackupCode()">Connect Dropbox</button>
+                </div>
+                <div id="backupDisconnectRow" style="display:none;">
+                    <button class="secondary" onclick="disconnectBackup()">Disconnect</button>
+                </div>
+                <div id="backupConnError" class="form-error" style="display:none;margin-top:10px;"></div>
+            </div>
+        </div>
+
+        <div class="card settings-card" style="margin-bottom:20px;">
+            <div class="detail-header">
+                <h3>Schedule &amp; retention</h3>
+            </div>
+            <div class="detail-body">
+                <div class="form-row">
+                    <label style="display:flex;align-items:center;gap:8px;">
+                        <input type="checkbox" id="backupEnabled" style="width:auto;"> Nightly backup enabled
+                    </label>
+                </div>
+                <div class="form-row">
+                    <label for="backupHour">Backup hour (UTC)</label>
+                    <input type="number" id="backupHour" min="0" max="23" style="width:100px;">
+                    <div class="field-help">One backup per day at this hour. Failed runs are retried hourly.</div>
+                </div>
+                <div class="form-row">
+                    <label style="display:flex;align-items:center;gap:8px;">
+                        <input type="checkbox" id="backupIncludeReleases" style="width:auto;"> Include release binaries
+                    </label>
+                    <div class="field-help">Off by default: release installers are large, rebuildable artifacts. The database, signing key, secrets and docs are always included.</div>
+                </div>
+                <div style="display:flex;gap:16px;flex-wrap:wrap;">
+                    <div class="form-row">
+                        <label for="backupKeepDaily">Keep daily</label>
+                        <input type="number" id="backupKeepDaily" min="1" max="60" style="width:100px;">
+                    </div>
+                    <div class="form-row">
+                        <label for="backupKeepWeekly">Keep weekly</label>
+                        <input type="number" id="backupKeepWeekly" min="0" max="52" style="width:100px;">
+                    </div>
+                    <div class="form-row">
+                        <label for="backupKeepMonthly">Keep monthly</label>
+                        <input type="number" id="backupKeepMonthly" min="0" max="120" style="width:100px;">
+                    </div>
+                </div>
+                <div class="field-help">Rotation keeps the newest archive per day/week/month up to these counts and deletes the rest. Anything younger than 48 h is never deleted.</div>
+                <div id="backupSetError" class="form-error" style="display:none;"></div>
+            </div>
+            <div class="form-footer">
+                <button class="primary" onclick="saveBackupSettings()">Save settings</button>
+            </div>
+        </div>
+
+        <div class="card" style="padding:0;">
+            <table style="width:100%;">
+                <thead>
+                    <tr>
+                        <th style="width:170px;">Started</th>
+                        <th style="width:90px;">Status</th>
+                        <th style="width:100px;">Trigger</th>
+                        <th>Archive</th>
+                        <th style="width:100px;">Size</th>
+                        <th>Error</th>
+                    </tr>
+                </thead>
+                <tbody id="backupHistoryBody">
+                    <tr><td colspan="6" class="empty-state"><p>Loading...</p></td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div><!-- /page-backups -->
+
+<!-- Users page -->
+<div id="page-users" class="dash-page">
+    <style>
+        /* Scoped overrides - the global button/badge min-width:180px from the
+           status-pill design elsewhere is wrong for inline row actions here. */
+        #page-users .role-pill { min-width: 0; padding: 2px 10px; }
+        #page-users th { white-space: nowrap; }
+        #page-users td.col-actions { text-align: right; white-space: nowrap; }
+        #page-users button.small { min-width: 0; margin-left: 4px; }
+        #page-users tr.user-row { cursor: pointer; }
+        #page-users td.col-chev { width: 24px; color: var(--text2); font-size: 11px; }
+        #page-users .user-name { font-weight: 500; }
+        #page-users .user-email {
+            font-size: 12px;
+            color: var(--text2);
+            max-width: 340px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        #page-users tr.user-detail td {
+            font-size: 13px;
+            padding-top: 0;
+        }
+        #page-users tr.user-detail .peek-body { margin-top: 0; }
+        /* Match the releases accordion: no hover highlight, and no divider
+           between an expanded row and its peek panel. */
+        #page-users tr:hover td { background: none; }
+        #page-users tr.user-row.expanded td { border-bottom: none; }
+    </style>
+    <h2 style="font-size:16px;font-weight:600;margin-top:32px;margin-bottom:16px;">User Management</h2>
+    <div class="toolbar">
+        <input type="text" id="userSearch" placeholder="Search users (name, email, role, license)..." oninput="onUserSearch()">
+        <span id="userCount" style="font-size:12px;color:var(--text2);white-space:nowrap;"></span>
+        <div class="spacer"></div>
+        <button onclick="showAddUserModal()">+ Add User</button>
+    </div>
+    <div class="card" style="padding:0;margin-bottom:12px;">
+        <div id="usersTableContainer" style="overflow:auto;">
+            <table style="width:100%;">
+                <thead><tr><th></th><th>User</th><th>Role</th><th>Status</th><th></th></tr></thead>
+                <tbody id="usersTableBody"><tr><td colspan="5">Loading...</td></tr></tbody>
+            </table>
+        </div>
+    </div>
+    <div style="margin-bottom:20px;">
+        <button class="secondary" id="usersShowMore" style="display:none;" onclick="showMoreUsers()">Show more</button>
+    </div>
+</div><!-- /page-users -->
+
 <!-- Website Pages -->
 <div id="page-website" class="dash-page">
     <div style="margin-top:8px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
@@ -1150,6 +1473,34 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
             </thead>
             <tbody id="websitePagesBody">
                 <tr><td colspan="6" class="empty-state"><p>Loading...</p></td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <div style="margin-top:40px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
+        <h2 style="font-size:16px;font-weight:600;">Website — Assets</h2>
+        <div style="display:flex;gap:8px;">
+            <button class="secondary" onclick="loadWebsiteAssets()">Refresh</button>
+            <button onclick="document.getElementById('websiteAssetFile').click()">+ Upload Asset</button>
+            <input type="file" id="websiteAssetFile" style="display:none;" onchange="uploadWebsiteAssetFromPage(this.files[0]);this.value='';">
+        </div>
+    </div>
+    <p style="margin-top:0;margin-bottom:16px;font-size:12px;color:var(--text2);">
+        Images and files served at <code>/api/v1/website/assets/{name}</code>. Referenced from page markdown and as shop product images.
+    </p>
+    <div class="card" style="padding:0;">
+        <table style="width:100%;" id="websiteAssetsTable">
+            <thead>
+                <tr>
+                    <th style="width:56px;">Preview</th>
+                    <th>File name</th>
+                    <th style="width:100px;">Size</th>
+                    <th>Used by</th>
+                    <th style="width:120px;"></th>
+                </tr>
+            </thead>
+            <tbody id="websiteAssetsBody">
+                <tr><td colspan="5" class="empty-state"><p>Loading...</p></td></tr>
             </tbody>
         </table>
     </div>
@@ -1262,8 +1613,16 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
                 <div><label>Currency</label><input type="text" id="productCurrency" value="usd" maxlength="3"></div>
             </div>
             <div class="form-row">
-                <label>Image asset (website asset filename)</label>
-                <input type="text" id="productImage" placeholder="sensor.png — upload via Website assets first">
+                <label>Image</label>
+                <div style="display:flex;gap:10px;align-items:center;">
+                    <img id="productImagePreview" alt="" style="width:48px;height:48px;object-fit:cover;border-radius:6px;border:1px solid var(--border);display:none;flex-shrink:0;">
+                    <select id="productImage" style="flex:1;min-width:0;" onchange="updateProductImagePreview()">
+                        <option value="">— No image —</option>
+                    </select>
+                    <button type="button" class="small secondary" onclick="document.getElementById('productImageFile').click()">Upload…</button>
+                    <input type="file" id="productImageFile" accept="image/*" style="display:none;" onchange="uploadProductImage(this.files[0]);this.value='';">
+                </div>
+                <p style="font-size:11px;color:var(--text2);margin:4px 0 0;">Pick a website asset or upload a new image. Manage all assets under Admin &rsaquo; Website.</p>
             </div>
             <div class="form-row" style="display:grid;grid-template-columns:1fr 120px 100px;gap:12px;">
                 <div><label>Tax code</label><input type="text" id="productTaxCode" value="txcd_99999999"></div>
@@ -1354,22 +1713,20 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
                 <label>Max Machines (0 = unlimited)</label>
                 <input type="number" id="createMaxMachines" placeholder="1" min="0">
             </div>
-            <details class="advanced-options">
-                <summary>Advanced Options</summary>
-                <div class="advanced-body">
-                    <div class="adv-field">
-                        <label>Lease Duration<br>(hours, 0 = disable lease)</label>
-                        <input type="number" id="createLeaseDuration" placeholder="168" min="0">
-                    </div>
-                    <div class="adv-field">
-                        <label>Grace Period<br>(hours)</label>
-                        <input type="number" id="createLeaseGrace" placeholder="24" min="0">
-                    </div>
-                    <div class="adv-field" style="grid-column:1/-1;">
-                        <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;font-weight:400;text-transform:none;letter-spacing:0;color:var(--text);margin:0;"><input type="checkbox" id="createRequireSignedBinary" style="width:auto;margin:0;"> Require signed binary</label>
-                    </div>
+            <div class="advanced-options">
+                <div class="advanced-title">Advanced Options</div>
+                <div class="form-row">
+                    <label>Lease Duration (hours, 0 = disable lease)</label>
+                    <input type="number" id="createLeaseDuration" placeholder="72" min="0">
                 </div>
-            </details>
+                <div class="form-row">
+                    <label>Grace Period (hours)</label>
+                    <input type="number" id="createLeaseGrace" placeholder="24" min="0">
+                </div>
+                <div class="form-row">
+                    <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;"><input type="checkbox" id="createRequireSignedBinary" style="width:auto;margin:0;"> Require signed binary</label>
+                </div>
+            </div>
         </div>
         <div class="form-actions">
             <button class="secondary" onclick="closeCreateModal()">Cancel</button>
@@ -1574,6 +1931,42 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
     </div>
 </div>
 
+<!-- Add User Modal -->
+<div id="addUserModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeAddUserModal()">
+    <div class="modal">
+        <h2>Add User</h2>
+        <div class="modal-body">
+            <div class="form-row">
+                <label>Username</label>
+                <input type="text" id="newUsername" placeholder="e.g. AliceDemoCorp">
+            </div>
+            <div class="form-row">
+                <label>Email</label>
+                <input type="email" id="newUserEmail" placeholder="user@company.com">
+            </div>
+            <div class="form-row">
+                <label>Role</label>
+                <select id="newUserRole">
+                    <option value="user">User</option>
+                    <option value="admin">Admin</option>
+                </select>
+            </div>
+            <details style="margin-top:10px;">
+                <summary style="font-size:12px;color:var(--text2);cursor:pointer;">Advanced: set a password manually (no email sent)</summary>
+                <div class="form-row" style="margin-top:10px;">
+                    <label>Password (min 8)</label>
+                    <input type="password" id="newPassword">
+                </div>
+                <p style="font-size:11px;color:var(--text2);margin:6px 0 0;">Use only if SMTP isn't configured. Plaintext must be couriered to the user.</p>
+            </details>
+        </div>
+        <div class="form-actions">
+            <button class="secondary" onclick="closeAddUserModal()">Cancel</button>
+            <button onclick="createUser()">Send invitation</button>
+        </div>
+    </div>
+</div>
+
 <!-- Login overlay -->
 <div id="loginOverlay" class="auth-overlay">
     <div class="auth-card">
@@ -1732,58 +2125,19 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
     </div>
 </div>
 
-<!-- Users Management Modal -->
-<div id="usersModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeUsersModal()">
-    <div class="modal" style="max-width:min(1200px,95vw);width:min(1200px,95vw);">
-        <style>
-            /* Scoped overrides — the global button/badge has a min-width:180px
-               from the status-pill design elsewhere that's wrong for inline
-               row actions here. */
-            #usersModal .role-pill { min-width: 0; padding: 2px 10px; }
-            #usersModal td, #usersModal th { white-space: nowrap; }
-            #usersModal td.col-actions { text-align: right; }
-            #usersModal button.small { min-width: 0; margin-left: 4px; }
-            /* Keep the Set/Edit button pinned to the right edge of the email
-               column so the buttons line up across rows regardless of the
-               address length. */
-            #usersModal .email-cell {
-                display: flex;
-                align-items: center;
-                gap: 8px;
-                min-width: 260px;
-            }
-            #usersModal .email-cell > .email-value { flex: 1 1 auto; }
-        </style>
-        <h2>User Management</h2>
+<!-- Active Sessions Modal -->
+<div id="sessionsModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeSessionsModal()">
+    <div class="modal" style="max-width:min(640px,95vw);width:min(640px,95vw);">
+        <h2>Active Sessions</h2>
         <div class="modal-body">
-            <div id="usersTableContainer" style="margin-bottom:16px;max-height:50vh;overflow:auto;">
-                <table>
-                    <thead><tr><th>Username</th><th>Role</th><th>Email</th><th>Licenses</th><th>2FA</th><th>Status</th><th></th></tr></thead>
-                    <tbody id="usersTableBody"><tr><td colspan="7">Loading...</td></tr></tbody>
-                </table>
-            </div>
-            <div style="border-top:1px solid var(--border);padding-top:16px;">
-                <h3 style="font-size:14px;margin-bottom:12px;">Add User</h3>
-                <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
-                    <input type="text" id="newUsername" placeholder="Username" style="flex:1;min-width:120px;">
-                    <input type="email" id="newUserEmail" placeholder="Email" style="flex:1;min-width:160px;" required>
-                    <select id="newUserRole" style="width:90px;">
-                        <option value="user">User</option>
-                        <option value="admin">Admin</option>
-                    </select>
-                    <button onclick="createUser()" style="width:auto;">Send invitation</button>
-                </div>
-                <details style="margin-top:10px;">
-                    <summary style="font-size:12px;color:var(--text2);cursor:pointer;">Advanced: set a password manually (no email sent)</summary>
-                    <div style="display:flex;gap:8px;align-items:center;margin-top:10px;">
-                        <input type="password" id="newPassword" placeholder="Password (min 8)" style="flex:1;min-width:160px;">
-                        <span style="font-size:11px;color:var(--text2);">Use only if SMTP isn't configured. Plaintext must be couriered to the user.</span>
-                    </div>
-                </details>
-            </div>
+            <p style="font-size:12px;color:var(--text2);margin-bottom:12px;">
+                Every signed-in browser session for your account. Revoking a session signs that browser out immediately.
+            </p>
+            <div id="sessionsList"><p class="empty-state">Loading...</p></div>
         </div>
         <div class="form-actions">
-            <button class="secondary" onclick="closeUsersModal()">Close</button>
+            <button class="danger" onclick="revokeOtherSessions()">Sign out everywhere else</button>
+            <button class="secondary" onclick="closeSessionsModal()">Close</button>
         </div>
     </div>
 </div>
@@ -1848,7 +2202,7 @@ document.addEventListener('mousedown', e => {
 });
 
 const API = '/api/v1';
-const LICENSE_DEFAULTS = { days: 365, maxMachines: 1, leaseDurationHours: 168, leaseGraceHours: 24 };
+const LICENSE_DEFAULTS = { days: 365, maxMachines: 1, leaseDurationHours: 72, leaseGraceHours: 24 };
 let authToken = '';
 let currentUsername = '';
 
@@ -1972,6 +2326,49 @@ async function handleWelcomeLink() {
     }
 }
 
+// Priority+ top nav: flat items that don't fit the header width collapse
+// into the trailing dropdown, labelled "Admin" while it only holds the admin
+// group and "More" once flat items overflow into it. Declared before init()
+// because renderNav() runs synchronously during startup.
+let navFlatItems = [], navAdminItems = [], activeNavPage = '';
+const navLink = i => '<a href="' + i.href + '" data-page="' + i.page + '">' + i.label + '</a>';
+
+function renderTopNavHtml(n) {
+    const shown = navFlatItems.slice(0, n);
+    const overflow = navFlatItems.slice(n);
+    let html = shown.map(navLink).join('');
+    if (overflow.length || navAdminItems.length) {
+        const label = overflow.length ? 'More' : 'Admin';
+        const divider = (overflow.length && navAdminItems.length) ? '<div class="divider"></div>' : '';
+        html += '<span class="dropdown nav-group">' +
+            '<button id="navAdminBtn" onclick="toggleDropdown(event,\'navAdminMenu\')">' + label + ' &#9662;</button>' +
+            '<div id="navAdminMenu" class="dropdown-menu" style="display:none;">' +
+            overflow.map(navLink).join('') + divider + navAdminItems.map(navLink).join('') + '</div></span>';
+    }
+    document.getElementById('topNav').innerHTML = html;
+}
+
+function layoutTopNav() {
+    const nav = document.getElementById('topNav');
+    const header = document.querySelector('.header');
+    if (!nav || !header) return;
+    for (let n = navFlatItems.length; n >= 0; n--) {
+        renderTopNavHtml(n);
+        if (header.scrollWidth <= header.clientWidth) break;
+    }
+    nav.querySelectorAll('a').forEach(a => {
+        a.classList.toggle('active', a.dataset.page === activeNavPage);
+    });
+    const adminBtn = document.getElementById('navAdminBtn');
+    if (adminBtn) adminBtn.classList.toggle('active', !!document.querySelector('#navAdminMenu a.active'));
+}
+
+let navResizeTimer;
+window.addEventListener('resize', () => {
+    clearTimeout(navResizeTimer);
+    navResizeTimer = setTimeout(layoutTopNav, 120);
+});
+
 (function init() {
     authToken = localStorage.getItem('auth_token') || '';
 
@@ -1994,9 +2391,13 @@ async function handleWelcomeLink() {
 })();
 
 /// Decide which dash-page to show based on the hash route + auth state.
+/// Entity sub-routes: #/licenses/{key}, #/workspaces/{id}[/{tab}] open the
+/// routed detail view in place of the list; #/users/{query} prefills search.
 function route() {
-    const hash = location.hash.replace(/^#\/?/, '').split('/')[0] || '';
-    let target = hash;
+    const segs = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean).map(s => {
+        try { return decodeURIComponent(s); } catch (_) { return s; }
+    });
+    let target = segs[0] || '';
     const allowedAnon = new Set(['', 'home']);
     if (!authToken && !allowedAnon.has(target)) {
         // Protected page requested by anonymous user — show login.
@@ -2012,7 +2413,14 @@ function route() {
         target = (userRole === 'admin') ? 'releases' : 'mylicenses';
         if (location.hash !== '#/' + target) location.hash = '#/' + target;
     }
+    if (authToken && target === 'users' && segs[1]) {
+        document.getElementById('userSearch').value = segs[1];
+    }
     showPage(target);
+    if (authToken) {
+        if (target === 'licenses') setLicenseRoute(segs[1] || null);
+        if (target === 'workspaces') setWorkspaceRoute(segs[1] || null, segs[2] || null);
+    }
 }
 
 function showPage(name) {
@@ -2020,35 +2428,66 @@ function showPage(name) {
     const page = document.getElementById('page-' + name);
     if (page) page.classList.add('active');
     if (name === 'mylicenses' && authToken) loadMyLicenses();
+    if (name === 'audit' && authToken) loadAudit();
+    if (name === 'backups' && authToken) loadBackupPage();
+    if (name === 'users' && authToken) loadUsers();
+    activeNavPage = name;
     renderNav();
-    document.querySelectorAll('#topNav a').forEach(a => {
+    document.querySelectorAll('#navDrawerLinks a').forEach(a => {
         a.classList.toggle('active', a.dataset.page === name);
     });
 }
+
+// Mobile nav drawer
+function openNavDrawer() {
+    document.getElementById('navDrawer').classList.add('open');
+    document.getElementById('navBackdrop').classList.add('visible');
+}
+
+function closeNavDrawer() {
+    document.getElementById('navDrawer').classList.remove('open');
+    document.getElementById('navBackdrop').classList.remove('visible');
+}
+
+// Any tap on a drawer link or button navigates / opens a modal - close the drawer.
+document.getElementById('navDrawer').addEventListener('click', e => {
+    if (e.target.closest('a,button')) closeNavDrawer();
+});
 
 function renderNav() {
     const nav = document.getElementById('topNav');
     if (!nav) return;
     const isAdmin = userRole === 'admin';
+    // Keep in sync with renderTopNav() in docs.html. group:'admin' items
+    // collapse into the Admin dropdown on desktop and an Admin section in
+    // the mobile drawer.
     const items = [
         { page: 'docs', label: 'Documentation', href: '/docs', show: true },
         { page: 'mylicenses', label: 'My Licenses', href: '#/mylicenses', show: !!authToken && !isAdmin },
         { page: 'workspaces', label: 'Workspaces', href: '#/workspaces', show: !!authToken },
         { page: 'releases', label: 'Releases', href: '#/releases', show: !!authToken },
-        { page: 'products', label: 'Products', href: '#/products', show: !!authToken && isAdmin },
         { page: 'licenses', label: 'Licenses', href: '#/licenses', show: !!authToken && isAdmin },
-        { page: 'website', label: 'Website', href: '#/website', show: !!authToken && isAdmin },
-        { page: 'shop', label: 'Shop', href: '#/shop', show: !!authToken && isAdmin },
+        { page: 'users', label: 'Users', href: '#/users', show: !!authToken && isAdmin },
+        { page: 'products', label: 'Products', href: '#/products', show: !!authToken && isAdmin, group: 'admin' },
+        { page: 'website', label: 'Website', href: '#/website', show: !!authToken && isAdmin, group: 'admin' },
+        { page: 'shop', label: 'Shop', href: '#/shop', show: !!authToken && isAdmin, group: 'admin' },
+        { page: 'audit', label: 'Audit', href: '#/audit', show: !!authToken && isAdmin, group: 'admin' },
+        { page: 'backups', label: 'Backups', href: '#/backups', show: !!authToken && isAdmin, group: 'admin' },
     ];
-    nav.innerHTML = items.filter(i => i.show).map(i =>
-        '<a href="' + i.href + '" data-page="' + i.page + '">' + i.label + '</a>'
-    ).join('');
+    const visible = items.filter(i => i.show);
+    navFlatItems = visible.filter(i => !i.group);
+    navAdminItems = visible.filter(i => i.group === 'admin');
+    layoutTopNav();
+    // The mobile drawer mirrors the same items as a flat list.
+    document.getElementById('navDrawerLinks').innerHTML = navFlatItems.map(navLink).join('') +
+        (navAdminItems.length ? '<div class="drawer-section">Admin</div>' + navAdminItems.map(navLink).join('') : '');
+    document.getElementById('navDrawerAccount').style.display = authToken ? '' : 'none';
     // Login/logout button visibility
     document.getElementById('btnLogin').style.display = authToken ? 'none' : '';
     document.getElementById('headerActions').style.display = authToken ? '' : 'none';
     document.getElementById('currentUser').style.display = authToken ? '' : 'none';
     document.getElementById('btn2FA').style.display = authToken ? 'block' : 'none';
-    document.getElementById('btnUsers').style.display = (authToken && isAdmin) ? 'block' : 'none';
+    document.getElementById('btnSessions').style.display = authToken ? 'block' : 'none';
     document.getElementById('btnApiTokens').style.display = authToken ? 'block' : 'none';
 }
 
@@ -2242,6 +2681,13 @@ async function submitChangePassword() {
             errEl.classList.add('visible');
             return;
         }
+        // Changing the password revokes all outstanding sessions; adopt the
+        // fresh token from the response so this one stays signed in.
+        const data = await resp.json();
+        if (data.token) {
+            authToken = data.token;
+            localStorage.setItem('auth_token', authToken);
+        }
         document.getElementById('changePasswordOverlay').classList.remove('visible');
         toast('Password changed successfully', 'success');
         // Re-sync auth state from the server. enterDashboard() alone leaves
@@ -2410,6 +2856,7 @@ function enterDashboard() {
         loadProducts();
         loadShop();
         loadWebsitePages();
+        loadWebsiteAssets();
         loadSiteSettings();
         loadAssignableUsers();
     } else {
@@ -2466,6 +2913,23 @@ function getStatus(lic) {
     if (lic.revoked) return 'revoked';
     if (lic.expires !== 'perpetual' && new Date(lic.expires) < new Date()) return 'expired';
     return 'active';
+}
+
+// "(N seen)" suffix when machines activated in the past no longer hold a live
+// lease. Distinguishes "never activated" from "activated but quiet lately".
+function machinesSeenNote(lic) {
+    const total = lic.total_machine_count || 0;
+    if (total <= lic.active_machine_count) return '';
+    return ' <span style="color:var(--text2);font-size:11px;white-space:nowrap;">(' + total + ' seen)</span>';
+}
+
+function machineStatusBadge(m) {
+    return m.lease_active ? '' : ' <span class="badge expired">stale</span>';
+}
+
+function machineSeenLine(m) {
+    return '<br><span style="color:var(--text2);font-size:11px;">Last seen ' + formatDateTime(m.last_seen_at) +
+        ' · activated ' + formatDate(m.activated_at) + '</span>';
 }
 
 async function loadLicenses() {
@@ -2525,13 +2989,13 @@ function renderTable() {
     tbody.innerHTML = filtered.map(l => {
         const status = getStatus(l);
         const features = l.features.map(f => '<span class="feature-tag">' + esc(f) + '</span>').join(' ');
-        return '<tr style="cursor:pointer" onclick="selectLicense(\'' + esc(l.license_key) + '\')">' +
+        return '<tr style="cursor:pointer" onclick="location.hash=\'#/licenses/' + encodeURIComponent(l.license_key) + '\'">' +
             '<td><span class="key-display">' + esc(l.license_key) + '</span></td>' +
             '<td>' + esc(l.customer) + '</td>' +
             '<td>' + esc(l.product) + '</td>' +
             '<td><span class="badge ' + status + '">' + status + '</span></td>' +
             '<td>' + formatDate(l.expires) + '</td>' +
-            '<td>' + l.active_machine_count + '/' + (l.max_machines === 0 ? '\u221e' : l.max_machines) + '</td>' +
+            '<td>' + l.active_machine_count + '/' + (l.max_machines === 0 ? '\u221e' : l.max_machines) + machinesSeenNote(l) + '</td>' +
             '<td>' + (features || '<span style="color:var(--text2)">none</span>') + '</td>' +
             '</tr>';
     }).join('');
@@ -2545,11 +3009,34 @@ function esc(s) {
     return d.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
+// Routed license detail: #/licenses/{key} replaces the list view.
+function setLicenseRoute(key) {
+    if (key) {
+        selectedKey = key;
+        document.getElementById('licenseListSection').style.display = 'none';
+        // With data present select immediately; otherwise loadLicenses()
+        // re-selects via its selectedKey tail once the list arrives.
+        if (licenses.length) selectLicense(key);
+    } else {
+        hideLicenseDetail();
+    }
+}
+
+function hideLicenseDetail() {
+    selectedKey = null;
+    document.getElementById('detailPanel').classList.remove('visible');
+    document.getElementById('licenseListSection').style.display = '';
+}
+
 // Detail panel
 function selectLicense(key) {
     selectedKey = key;
     const lic = licenses.find(l => l.license_key === key);
-    if (!lic) return;
+    if (!lic) {
+        // Deep link to a key that doesn't exist (or was deleted).
+        if (licenses.length) { toast('License not found', 'error'); closeDetail(); }
+        return;
+    }
 
     const status = getStatus(lic);
     document.getElementById('detailTitle').textContent = 'License: ' + lic.customer;
@@ -2560,7 +3047,7 @@ function selectLicense(key) {
     document.getElementById('detailCreated').textContent = formatDate(lic.created);
     document.getElementById('detailExpires').textContent = formatDate(lic.expires);
     document.getElementById('detailFeatures').innerHTML = lic.features.map(f => '<span class="feature-tag">' + esc(f) + '</span>').join(' ') || 'none';
-    document.getElementById('detailMachineCount').textContent = lic.active_machine_count + ' / ' + (lic.max_machines === 0 ? '\u221e' : lic.max_machines);
+    document.getElementById('detailMachineCount').innerHTML = lic.active_machine_count + ' / ' + (lic.max_machines === 0 ? '\u221e' : lic.max_machines) + machinesSeenNote(lic);
     document.getElementById('detailLeaseDuration').textContent = lic.lease_duration_hours === 0 ? 'Disabled' : lic.lease_duration_hours + ' h';
     document.getElementById('detailLeaseGrace').textContent = lic.lease_grace_hours + ' h';
     document.getElementById('detailRequireSignedBinary').textContent = lic.require_signed_binary ? 'Yes' : 'No';
@@ -2573,7 +3060,9 @@ function selectLicense(key) {
                 ? '<span class="machine-code" style="margin-left:12px;">' + esc(account.email) + '</span>'
                 : '';
             return '<div class="machine-item">' +
-                '<div style="display:flex;align-items:baseline;"><strong>' + esc(u) + '</strong>' + email + '</div>' +
+                '<div style="display:flex;align-items:baseline;">' +
+                    '<a href="#/users/' + encodeURIComponent(u) + '" style="font-weight:600;color:var(--accent);text-decoration:none;" title="Open in user management">' + esc(u) + '</a>' + email +
+                '</div>' +
                 '<button class="small danger" onclick="unassignLicenseUser(\'' + esc(lic.license_key) + '\',\'' + esc(u) + '\')">Remove</button>' +
                 '</div>';
         }).join('');
@@ -2589,7 +3078,9 @@ function selectLicense(key) {
     if (lic.machines && lic.machines.length > 0) {
         machinesEl.innerHTML = lic.machines.map(m =>
             '<div class="machine-item">' +
-            '<div><strong>' + esc(m.friendly_name || 'Unknown') + '</strong><br><span class="machine-code">' + esc(m.machine_code) + '</span></div>' +
+            '<div><strong>' + esc(m.friendly_name || 'Unknown') + '</strong>' + machineStatusBadge(m) +
+            '<br><span class="machine-code">' + esc(m.machine_code) + '</span>' +
+            machineSeenLine(m) + '</div>' +
             '<button class="small danger" onclick="deactivateMachine(\'' + esc(lic.license_key) + '\', \'' + esc(m.machine_code) + '\')">Remove</button>' +
             '</div>'
         ).join('');
@@ -2600,14 +3091,13 @@ function selectLicense(key) {
     document.getElementById('detailView').style.display = '';
     document.getElementById('detailEdit').style.display = 'none';
     document.getElementById('btnEdit').style.display = '';
-    const panel = document.getElementById('detailPanel');
-    panel.classList.add('visible');
-    panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    document.getElementById('licenseListSection').style.display = 'none';
+    document.getElementById('detailPanel').classList.add('visible');
 }
 
 function closeDetail() {
-    selectedKey = null;
-    document.getElementById('detailPanel').classList.remove('visible');
+    hideLicenseDetail();
+    if (location.hash.startsWith('#/licenses/')) location.hash = '#/licenses';
 }
 
 function startEditLicense() {
@@ -2705,7 +3195,6 @@ function showCreateModal() {
     document.getElementById('createLeaseDuration').value = '';
     document.getElementById('createLeaseGrace').value = '';
     document.getElementById('createRequireSignedBinary').checked = false;
-    document.querySelector('#createModal .advanced-options').open = false;
     document.getElementById('createModal').classList.add('visible');
     document.getElementById('createCustomer').focus();
 }
@@ -2772,7 +3261,7 @@ async function createLicense() {
     const assignEmail = document.getElementById('createAssignEmail').value.trim();
     let assignTo = [];
     if (assignEmail) {
-        const username = await ensurePortalUser(assignEmail);
+        const username = await ensurePortalUser(assignEmail, customer);
         if (!username) return;
         assignTo = [username];
     }
@@ -2812,7 +3301,7 @@ async function createLicense() {
         toast('License created: ' + lic.license_key, 'success');
         closeCreateModal();
         await loadLicenses();
-        selectLicense(lic.license_key);
+        location.hash = '#/licenses/' + encodeURIComponent(lic.license_key);
     } catch (e) {
         toast('Failed: ' + e.message, 'error');
     }
@@ -2877,9 +3366,21 @@ async function loadAssignableUsers() {
 
 // Resolve a username-or-email to an existing account; create + invite a new
 // portal user when given an unknown email. Returns the username or null.
-async function ensurePortalUser(identifier) {
+// Suggest a portal username in the manual convention (FirstLastCompany),
+// derived from the email local part plus the license customer.
+function suggestUsername(email, customer) {
+    const name = email.split('@')[0].split(/[._-]+/).filter(Boolean)
+        .map(p => p.charAt(0).toUpperCase() + p.slice(1)).join('');
+    const company = (customer || '').replace(/[^a-zA-Z0-9]+/g, '');
+    return (name + company) || email;
+}
+
+async function ensurePortalUser(identifier, customer) {
     const id = identifier.trim();
     if (!id) return null;
+    // Refresh before matching: a user created moments ago (e.g. via the Users
+    // page) must be found here, not shadowed by a stale login-time snapshot.
+    await loadAssignableUsers();
     const user = assignableUsers.find(u => u.username === id) ||
                  assignableUsers.find(u => (u.email || '').toLowerCase() === id.toLowerCase());
     if (user) return user.username;
@@ -2887,11 +3388,17 @@ async function ensurePortalUser(identifier) {
         toast('No user "' + id + '" - enter an email address to create one', 'error');
         return null;
     }
+    // New account: confirm the username instead of silently using the email,
+    // so shortcut-created accounts follow the same naming convention as
+    // manually created ones.
+    const proposed = prompt('New portal account for ' + id + '\nUsername:', suggestUsername(id, customer));
+    if (proposed === null) return null;
+    const username = proposed.trim() || id;
     try {
         const resp = await fetch(API + '/auth/users', {
             method: 'POST',
             headers: authHeaders(),
-            body: JSON.stringify({ username: id, email: id, role: 'user' }),
+            body: JSON.stringify({ username, email: id, role: 'user' }),
         });
         const data = await resp.json().catch(() => ({}));
         if (!resp.ok) {
@@ -2900,7 +3407,7 @@ async function ensurePortalUser(identifier) {
         }
         toast('Invitation sent to ' + id, 'success');
         await loadAssignableUsers();
-        return id;
+        return username;
     } catch (e) {
         toast('Failed: ' + e.message, 'error');
         return null;
@@ -2909,7 +3416,8 @@ async function ensurePortalUser(identifier) {
 
 async function assignLicenseUser() {
     if (!selectedKey) return;
-    const username = await ensurePortalUser(document.getElementById('assignUserInput').value);
+    const lic = licenses.find(l => l.license_key === selectedKey);
+    const username = await ensurePortalUser(document.getElementById('assignUserInput').value, lic ? lic.customer : '');
     if (!username) return;
     try {
         const resp = await fetch(API + '/licenses/' + encodeURIComponent(selectedKey) + '/users', {
@@ -3053,8 +3561,9 @@ function renderMyLicenses() {
         const machines = (lic.machines && lic.machines.length)
             ? lic.machines.map(m =>
                 '<div class="machine-item">' +
-                '<div><strong>' + esc(m.friendly_name || 'Unknown') + '</strong>' +
-                '<br><span class="machine-code">' + esc(m.machine_code) + '</span></div>' +
+                '<div><strong>' + esc(m.friendly_name || 'Unknown') + '</strong>' + machineStatusBadge(m) +
+                '<br><span class="machine-code">' + esc(m.machine_code) + '</span>' +
+                machineSeenLine(m) + '</div>' +
                 '<button class="small danger" onclick="myDeactivateMachine(\'' + esc(lic.license_key) + '\',\'' + esc(m.machine_code) + '\')">Remove</button>' +
                 '</div>').join('')
             : '<div style="color:var(--text2);font-size:13px;padding:8px 0;">No machines activated</div>';
@@ -3069,7 +3578,7 @@ function renderMyLicenses() {
             '<button class="small secondary" onclick="copyMyKey(\'' + esc(lic.license_key) + '\')">Copy</button>' +
             '</div></div>' +
             '<div class="detail-field"><div class="field-label">Expires</div><div class="field-value">' + formatDate(lic.expires) + '</div></div>' +
-            '<div class="detail-field"><div class="field-label">Machines</div><div class="field-value">' + lic.active_machine_count + ' / ' + (lic.max_machines === 0 ? '∞' : lic.max_machines) + '</div></div>' +
+            '<div class="detail-field"><div class="field-label">Machines</div><div class="field-value">' + lic.active_machine_count + ' / ' + (lic.max_machines === 0 ? '∞' : lic.max_machines) + machinesSeenNote(lic) + '</div></div>' +
             '<div class="detail-field" style="grid-column:1/-1;"><div class="field-label">Features</div><div class="field-value">' + features + '</div></div>' +
             '</div>' +
             '<div class="detail-section-title">Activated Machines</div>' +
@@ -3140,6 +3649,60 @@ async function doMyExport() {
     } catch (e) {
         toast('Failed: ' + e.message, 'error');
     }
+}
+
+// ---- Active sessions ----
+function showSessionsModal() {
+    document.getElementById('sessionsModal').classList.add('visible');
+    loadSessions();
+}
+
+function closeSessionsModal() {
+    document.getElementById('sessionsModal').classList.remove('visible');
+}
+
+async function loadSessions() {
+    const box = document.getElementById('sessionsList');
+    try {
+        const resp = await fetch(API + '/auth/me/sessions', { headers: authHeaders() });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const sessions = (await resp.json()).sessions || [];
+        if (!sessions.length) { box.innerHTML = '<p class="empty-state">No active sessions.</p>'; return; }
+        box.innerHTML = sessions.map(s =>
+            '<div style="display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--border);">'
+            + '<div style="flex:1;min-width:0;">'
+            + '<div style="font-size:13px;">' + esc(s.device_label || 'Unknown device')
+            + (s.current ? ' <span style="color:var(--green);font-size:11px;font-weight:600;">(this session)</span>' : '') + '</div>'
+            + '<div style="font-size:11px;color:var(--text2);">' + esc(s.ip)
+            + ' · signed in ' + esc(new Date(s.created_at).toLocaleString())
+            + ' · last seen ' + esc(new Date(s.last_seen).toLocaleString()) + '</div>'
+            + '</div>'
+            + (s.current ? '' : '<button class="small danger" onclick="revokeSession(' + s.id + ')">Revoke</button>')
+            + '</div>'
+        ).join('');
+    } catch (e) {
+        box.innerHTML = '<p class="empty-state">Failed to load: ' + esc(e.message) + '</p>';
+    }
+}
+
+async function revokeSession(id) {
+    try {
+        const resp = await fetch(API + '/auth/me/sessions/' + id, { method: 'DELETE', headers: authHeaders() });
+        if (!resp.ok) { const d = await resp.json(); toast('Error: ' + (d.error || resp.status), 'error'); return; }
+        toast('Session revoked', 'success');
+        loadSessions();
+    } catch (e) { toast('Failed: ' + e.message, 'error'); }
+}
+
+async function revokeOtherSessions() {
+    if (!confirm('Sign out every other session for your account?')) return;
+    try {
+        const resp = await fetch(API + '/auth/me/sessions/revoke-others', { method: 'POST', headers: authHeaders() });
+        if (!resp.ok) { const d = await resp.json(); toast('Error: ' + (d.error || resp.status), 'error'); return; }
+        const n = (await resp.json()).revoked || 0;
+        toast('Revoked ' + n + ' session' + (n === 1 ? '' : 's'), 'success');
+        loadSessions();
+    } catch (e) { toast('Failed: ' + e.message, 'error'); }
 }
 
 // 2FA settings
@@ -3329,85 +3892,157 @@ async function disable2FA() {
 }
 
 // User management
-async function showUsersModal() {
-    document.getElementById('usersModal').classList.add('visible');
-    await loadUsers();
-}
-
-function closeUsersModal() {
-    document.getElementById('usersModal').classList.remove('visible');
-}
+let allUsers = [];
+const usersExpanded = new Set();
+const USERS_PAGE_SIZE = 100;
+let usersShownCount = USERS_PAGE_SIZE;
 
 async function loadUsers() {
     try {
         const resp = await fetch(API + '/auth/users', { headers: authHeaders() });
         if (!resp.ok) return;
-        const users = await resp.json();
-        const tbody = document.getElementById('usersTableBody');
-        tbody.innerHTML = users.map(u => {
-            const isSelf = u.username === currentUsername;
-            let status;
-            if (u.pending_invitation) {
-                status = '<span style="color:var(--accent);">Invited (pending)</span>';
-            } else if (u.must_change_password) {
-                status = '<span style="color:var(--yellow);">Must change password</span>';
-            } else {
-                status = '<span style="color:var(--green);">Active</span>';
-            }
-            const tfa = u.totp_enabled ? '<span style="color:var(--green);">Enabled</span>' : '<span style="color:var(--text2);">Off</span>';
-            const roleBadge = u.role === 'admin'
-                ? '<span class="badge role-pill" style="background:rgba(108,140,255,0.15);color:var(--accent);">admin</span>'
-                : '<span class="badge role-pill" style="background:var(--bg3);color:var(--text2);">user</span>';
-            // esc(JSON.stringify(x)) is HTML-safe for both the " and ' in the
-            // inline onclick attribute. A bare JSON.stringify would break the
-            // attribute quoting, which silently stopped the Edit action from
-            // firing when dispatched from the dropdown.
-            const emailArg = u.email ? esc(JSON.stringify(u.email)) : "''";
-            const emailCell = u.email
-                ? '<span class="email-value">' + esc(u.email) + '</span>'
-                : '<span class="email-value" style="color:var(--text2);font-size:11px;">(none)</span>';
-            // Resend appears for any user still on must_change_password=1 and
-            // with an email on file — covers both pending and expired-invite cases.
-            const canResend = !isSelf && u.must_change_password && u.email;
-            const uname = esc(u.username);
-            const menuId = 'user-menu-' + u.username.replace(/[^a-zA-Z0-9_-]/g, '_');
-            const resendItem = canResend
-                ? '<button onclick="resendInvitation(\'' + uname + '\')">' +
-                  (u.pending_invitation ? 'Resend invite' : 'Send invite') + '</button>'
-                : '';
-            const emailItem = '<button onclick="setUserEmail(\'' + uname + '\',' + emailArg + ')">' +
-                              (u.email ? 'Edit email' : 'Set email') + '</button>';
-            // Self row keeps a reduced Actions menu (rename + email) so admins
-            // can manage their own account without exposing the destructive
-            // items that would lock them out. Self-rename forces a re-login
-            // (the session token is bound to the old name).
-            const actions = isSelf
-                ? '<span class="dropdown" onclick="event.stopPropagation();">' +
-                    '<button class="small secondary" onclick="toggleDropdown(event,\'' + menuId + '\')">Actions &#9662;</button>' +
-                    '<div id="' + menuId + '" class="dropdown-menu" style="display:none;">' +
-                      '<button onclick="renameUser(\'' + uname + '\')">Rename</button>' +
-                      emailItem +
-                    '</div>' +
-                  '</span>'
-                : '<span class="dropdown" onclick="event.stopPropagation();">' +
-                    '<button class="small secondary" onclick="toggleDropdown(event,\'' + menuId + '\')">Actions &#9662;</button>' +
-                    '<div id="' + menuId + '" class="dropdown-menu" style="display:none;">' +
-                      '<button onclick="renameUser(\'' + uname + '\')">Rename</button>' +
-                      emailItem +
-                      resendItem +
-                      '<button onclick="resetUserPassword(\'' + uname + '\')">Reset password</button>' +
-                      '<div class="divider"></div>' +
-                      '<button class="danger" onclick="deleteUser(\'' + uname + '\')">Delete</button>' +
-                    '</div>' +
-                  '</span>';
-            const licCell = (u.licenses && u.licenses.length)
-                ? u.licenses.map(l => '<span class="feature-tag" title="' + esc(l.license_key) + '">' + esc(l.product) + '</span>').join(' ')
-                : '<span style="color:var(--text2);font-size:11px;">(none)</span>';
-            return '<tr><td>' + esc(u.username) + '</td><td>' + roleBadge + '</td><td class="col-email">' + emailCell + '</td><td>' + licCell + '</td><td>' + tfa + '</td><td>' + status + '</td><td class="col-actions">' + actions + '</td></tr>';
-        }).join('');
+        allUsers = await resp.json();
+        renderUsers();
     } catch (e) {
         toast('Failed to load users: ' + e.message, 'error');
     }
+}
+
+function showAddUserModal() {
+    document.getElementById('newUsername').value = '';
+    document.getElementById('newUserEmail').value = '';
+    document.getElementById('newPassword').value = '';
+    document.getElementById('newUserRole').value = 'user';
+    document.getElementById('addUserModal').classList.add('visible');
+    setTimeout(() => document.getElementById('newUsername').focus(), 50);
+}
+
+function closeAddUserModal() {
+    document.getElementById('addUserModal').classList.remove('visible');
+}
+
+function onUserSearch() {
+    usersShownCount = USERS_PAGE_SIZE;
+    renderUsers();
+}
+
+function showMoreUsers() {
+    usersShownCount += 2 * USERS_PAGE_SIZE;
+    renderUsers();
+}
+
+function toggleUserRow(username) {
+    if (usersExpanded.has(username)) usersExpanded.delete(username);
+    else usersExpanded.add(username);
+    renderUsers();
+}
+
+function filteredUsers() {
+    const q = (document.getElementById('userSearch').value || '').trim().toLowerCase();
+    if (!q) return allUsers;
+    return allUsers.filter(u => {
+        const hay = u.username + ' ' + (u.email || '') + ' ' + u.role + ' ' +
+            (u.licenses || []).map(l => l.product + ' ' + l.license_key).join(' ');
+        return hay.toLowerCase().includes(q);
+    });
+}
+
+function renderUsers() {
+    const tbody = document.getElementById('usersTableBody');
+    const filtered = filteredUsers();
+    const shown = filtered.slice(0, usersShownCount);
+    const countEl = document.getElementById('userCount');
+    countEl.textContent = shown.length < filtered.length
+        ? shown.length + ' of ' + filtered.length + ' users'
+        : filtered.length + ' user' + (filtered.length === 1 ? '' : 's');
+    document.getElementById('usersShowMore').style.display =
+        shown.length < filtered.length ? '' : 'none';
+    if (!shown.length) {
+        tbody.innerHTML = '<tr><td colspan="5" style="color:var(--text2);">No matching users.</td></tr>';
+        return;
+    }
+    tbody.innerHTML = shown.map(u => {
+        const isSelf = u.username === currentUsername;
+        let status;
+        if (u.pending_invitation) {
+            status = '<span style="color:var(--accent);">Invited (pending)</span>';
+        } else if (u.must_change_password) {
+            status = '<span style="color:var(--yellow);">Must change password</span>';
+        } else {
+            status = '<span style="color:var(--green);">Active</span>';
+        }
+        const tfa = u.totp_enabled ? '<span style="color:var(--green);">Enabled</span>' : '<span style="color:var(--text2);">Off</span>';
+        const roleBadge = u.role === 'admin'
+            ? '<span class="badge role-pill" style="background:rgba(108,140,255,0.15);color:var(--accent);">admin</span>'
+            : '<span class="badge role-pill" style="background:var(--bg3);color:var(--text2);">user</span>';
+        // esc(JSON.stringify(x)) is HTML-safe for both the " and ' in the
+        // inline onclick attribute. A bare JSON.stringify would break the
+        // attribute quoting, which silently stopped the Edit action from
+        // firing when dispatched from the dropdown.
+        const emailArg = u.email ? esc(JSON.stringify(u.email)) : "''";
+        // Resend appears for any user still on must_change_password=1 and
+        // with an email on file — covers both pending and expired-invite cases.
+        const canResend = !isSelf && u.must_change_password && u.email;
+        const uname = esc(u.username);
+        const menuId = 'user-menu-' + u.username.replace(/[^a-zA-Z0-9_-]/g, '_');
+        const resendItem = canResend
+            ? '<button onclick="resendInvitation(\'' + uname + '\')">' +
+              (u.pending_invitation ? 'Resend invite' : 'Send invite') + '</button>'
+            : '';
+        const roleItem = u.role === 'admin'
+            ? '<button onclick="setUserRole(\'' + uname + '\',\'user\')">Revoke admin</button>'
+            : '<button onclick="setUserRole(\'' + uname + '\',\'admin\')">Make admin</button>';
+        const emailItem = '<button onclick="setUserEmail(\'' + uname + '\',' + emailArg + ')">' +
+                          (u.email ? 'Edit email' : 'Set email') + '</button>';
+        // Self row keeps a reduced Actions menu (rename + email) so admins
+        // can manage their own account without exposing the destructive
+        // items that would lock them out. Self-rename forces a re-login
+        // (the session token is bound to the old name).
+        const actions = isSelf
+            ? '<span class="dropdown" onclick="event.stopPropagation();">' +
+                '<button class="small secondary" onclick="toggleDropdown(event,\'' + menuId + '\')">Actions &#9662;</button>' +
+                '<div id="' + menuId + '" class="dropdown-menu" style="display:none;">' +
+                  '<button onclick="renameUser(\'' + uname + '\')">Rename</button>' +
+                  emailItem +
+                '</div>' +
+              '</span>'
+            : '<span class="dropdown" onclick="event.stopPropagation();">' +
+                '<button class="small secondary" onclick="toggleDropdown(event,\'' + menuId + '\')">Actions &#9662;</button>' +
+                '<div id="' + menuId + '" class="dropdown-menu" style="display:none;">' +
+                  '<button onclick="renameUser(\'' + uname + '\')">Rename</button>' +
+                  emailItem +
+                  resendItem +
+                  '<button onclick="resetUserPassword(\'' + uname + '\')">Reset password</button>' +
+                  roleItem +
+                  '<div class="divider"></div>' +
+                  '<button class="danger" onclick="deleteUser(\'' + uname + '\')">Delete</button>' +
+                '</div>' +
+              '</span>';
+        const expanded = usersExpanded.has(u.username);
+        const chev = expanded ? '&#9662;' : '&#9656;';
+        const emailLine = u.email
+            ? '<div class="user-email">' + esc(u.email) + '</div>'
+            : '<div class="user-email">(no email)</div>';
+        let rows = '<tr class="user-row' + (expanded ? ' expanded' : '') + '" onclick="toggleUserRow(\'' + uname + '\')">' +
+            '<td class="col-chev">' + chev + '</td>' +
+            '<td><span class="user-name">' + esc(u.username) + '</span>' + emailLine + '</td>' +
+            '<td>' + roleBadge + '</td>' +
+            '<td>' + status + '</td>' +
+            '<td class="col-actions">' + actions + '</td></tr>';
+        if (expanded) {
+            const licDetail = (u.licenses && u.licenses.length)
+                ? u.licenses.map(l => '<a class="feature-tag" href="#/licenses/' + encodeURIComponent(l.license_key) + '" title="' + esc(l.license_key) + '">' + esc(l.product) + '</a>').join(' ')
+                : '<span style="color:var(--text2);">(none)</span>';
+            rows += '<tr class="user-detail"><td></td><td colspan="4">' +
+                '<div class="peek-body"><div class="peek-grid">' +
+                    '<div><span class="label">Email</span>' + (u.email ? esc(u.email) : '<span style="color:var(--text2);">(none)</span>') + '</div>' +
+                    '<div><span class="label">Licenses</span>' + licDetail + '</div>' +
+                    '<div><span class="label">2FA</span>' + tfa + '</div>' +
+                '</div></div>' +
+            '</td></tr>';
+        }
+        return rows;
+    }).join('');
 }
 
 async function createUser() {
@@ -3441,6 +4076,7 @@ async function createUser() {
         document.getElementById('newUserEmail').value = '';
         document.getElementById('newPassword').value = '';
         document.getElementById('newUserRole').value = 'user';
+        closeAddUserModal();
         const msg = data.invitation_sent
             ? 'Invitation sent to ' + email
             : 'User "' + username + '" created';
@@ -3487,7 +4123,6 @@ async function renameUser(username) {
         if (data.self_renamed) {
             // The session token is bound to the old username - start over.
             toast('Username changed to "' + newName.trim() + '" - sign in again', 'success');
-            closeUsersModal();
             logout();
             return;
         }
@@ -3534,6 +4169,27 @@ async function resetUserPassword(username) {
             return;
         }
         toast('Password reset for "' + username + '"', 'success');
+        await loadUsers();
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function setUserRole(username, role) {
+    const verb = role === 'admin' ? 'Grant admin rights to' : 'Revoke admin rights from';
+    if (!confirm(verb + ' ' + username + '?')) return;
+    try {
+        const resp = await fetch(API + '/auth/users/' + encodeURIComponent(username) + '/role', {
+            method: 'PUT',
+            headers: authHeaders(),
+            body: JSON.stringify({ role }),
+        });
+        if (!resp.ok) {
+            const data = await resp.json();
+            toast('Error: ' + data.error, 'error');
+            return;
+        }
+        toast(role === 'admin' ? username + ' is now an admin' : username + ' is now a user', 'success');
         await loadUsers();
     } catch (e) {
         toast('Failed: ' + e.message, 'error');
@@ -3770,7 +4426,9 @@ async function downloadAsset(event, product, tag, assetName) {
 function formatSize(bytes) {
     if (bytes < 1024) return bytes + ' B';
     if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    if (bytes < 1024 * 1024 * 1024 * 1024) return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
+    return (bytes / (1024 * 1024 * 1024 * 1024)).toFixed(2) + ' TB';
 }
 
 let expandedRelease = null;
@@ -3802,8 +4460,15 @@ function renderReleases() {
         container.innerHTML = '<span style="color:var(--text2);">No releases uploaded yet</span>';
         return;
     }
+    const q = (document.getElementById('releaseSearch').value || '').trim().toLowerCase();
+    const shown = q ? releases.filter(r =>
+        (r.tag + ' ' + (r.name || '') + ' ' + (r.product || '')).toLowerCase().includes(q)) : releases;
+    if (shown.length === 0) {
+        container.innerHTML = '<span style="color:var(--text2);">No matching releases.</span>';
+        return;
+    }
     const isAdmin = userRole === 'admin';
-    container.innerHTML = releases.map(r => {
+    container.innerHTML = shown.map(r => {
         const expanded = expandedRelease === r.tag;
         const prodSlug = r.product || DEFAULT_PRODUCT;
         const assets = (r.assets || []).map(a =>
@@ -3822,17 +4487,18 @@ function renderReleases() {
             const label = ws ? ws.name : r.workspace_id;
             scope = ' <span style="background:rgba(96,165,250,0.15);color:var(--accent);font-size:11px;font-weight:600;padding:2px 8px;border-radius:4px;" title="Workspace-scoped release">' + esc(label) + '</span>';
         }
-        const dlBtns = (r.assets || []).filter(a => /\.(msi|zip)$/i.test(a.name)).map(a =>
-            '<button class="small" onclick="event.stopPropagation();downloadAsset(event,\'' + esc(prodSlug) + '\',\'' + esc(r.tag) + '\',\'' + esc(a.name) + '\')" title="' + esc(a.name) + ' (' + formatSize(a.size) + ')">' +
-            a.name.match(/\.(msi|zip)$/i)[1].toUpperCase() + '</button>'
-        ).join('');
-        const deleteBtn = isAdmin ? '<button class="small danger" onclick="event.stopPropagation();deleteRelease(\'' + esc(prodSlug) + '\',\'' + esc(r.tag) + '\')">Delete</button>' : '';
-        const arrow = '<span style="color:var(--text2);font-size:10px;margin-right:4px;display:inline-block;transition:transform 0.15s;transform:rotate(' + (expanded ? '90' : '0') + 'deg);">&#9654;</span>';
+        const arrow = '<span style="color:var(--text2);font-size:11px;margin-right:6px;">' + (expanded ? '&#9662;' : '&#9656;') + '</span>';
+        const deleteRow = isAdmin
+            ? '<div style="display:flex;justify-content:flex-end;margin-top:10px;padding-top:8px;border-top:1px solid var(--border);">' +
+                '<button class="small danger" onclick="deleteRelease(\'' + esc(prodSlug) + '\',\'' + esc(r.tag) + '\')">Delete release</button>' +
+              '</div>'
+            : '';
         const body = expanded ? (
-            '<div style="padding:8px 0 4px 18px;border-top:1px solid var(--border);margin-top:8px;">' +
+            '<div class="peek-body">' +
                 (r.body ? '<div style="color:var(--text1);font-size:13px;line-height:1.5;">' + renderMarkdown(r.body) + '</div>'
                         : '<div style="color:var(--text2);font-size:13px;font-style:italic;">No release notes.</div>') +
-                (assets ? '<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--border);"><div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:4px;">Assets</div>' + assets + '</div>' : '') +
+                (assets ? '<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--border);"><div class="peek-grid" style="padding:0;"><div><span class="label">Assets</span>' + assets + '</div></div></div>' : '') +
+                deleteRow +
             '</div>'
         ) : '';
         return '<div style="padding:10px 0;border-bottom:1px solid var(--border);" class="release-item">' +
@@ -3842,7 +4508,6 @@ function renderReleases() {
                     (r.name && r.name !== r.tag ? '<div style="font-size:13px;color:var(--text2);margin-left:18px;">' + esc(r.name) + '</div>' : '') +
                     '<div style="font-size:12px;color:var(--text2);margin-top:4px;margin-left:18px;">' + formatDateTime(r.published_at) + '</div>' +
                 '</div>' +
-                '<div style="display:flex;gap:6px;align-items:center;flex-shrink:0;">' + dlBtns + deleteBtn + '</div>' +
             '</div>' +
             body +
         '</div>';
@@ -4030,10 +4695,10 @@ function renderProducts() {
         container.innerHTML = '<span style="color:var(--text2);">No products yet</span>';
         return;
     }
-    const GRID = 'display:grid;grid-template-columns:150px 1fr 1.8fr 90px 180px;gap:12px;align-items:center;';
+    const GRID = 'display:grid;grid-template-columns:150px 1fr 1.4fr 70px 80px 150px;gap:12px;align-items:center;';
     const header =
         '<div style="' + GRID + 'padding:0 0 8px;border-bottom:1px solid var(--border);font-size:12px;font-weight:600;color:var(--text2);">' +
-        '<div>Slug</div><div>Name</div><div>Description</div><div>Order</div><div></div></div>';
+        '<div>Slug</div><div>Name</div><div>Description</div><div>Order</div><div>Public DL</div><div></div></div>';
     const rows = products.map(p => {
         const isDefault = p.slug === DEFAULT_PRODUCT;
         const menuId = 'product-menu-' + p.slug.replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -4054,6 +4719,7 @@ function renderProducts() {
             '<input type="text" id="prod-name-' + esc(p.slug) + '" value="' + esc(p.name) + '">' +
             '<input type="text" id="prod-desc-' + esc(p.slug) + '" value="' + esc(p.description || '') + '">' +
             '<input type="number" id="prod-ord-' + esc(p.slug) + '" value="' + esc(p.ord || 0) + '">' +
+            '<input type="checkbox" id="prod-public-' + esc(p.slug) + '"' + (p.download_public ? ' checked' : '') + ' style="width:auto;height:18px;justify-self:center;" title="Downloadable without a license or login">' +
             menu +
         '</div>';
     }).join('');
@@ -4065,12 +4731,13 @@ async function createProduct() {
     const name = document.getElementById('newProductName').value.trim();
     const description = document.getElementById('newProductDesc').value.trim();
     const ord = parseInt(document.getElementById('newProductOrd').value, 10) || 0;
+    const download_public = document.getElementById('newProductPublic').checked;
     if (!slug || !name) { toast('Slug and name are required', 'error'); return; }
     try {
         const resp = await fetch(API + '/products', {
             method: 'POST',
             headers: authHeaders(),
-            body: JSON.stringify({ slug, name, description, ord }),
+            body: JSON.stringify({ slug, name, description, ord, download_public }),
         });
         if (!resp.ok) {
             const data = await resp.json().catch(() => ({}));
@@ -4082,6 +4749,7 @@ async function createProduct() {
         document.getElementById('newProductName').value = '';
         document.getElementById('newProductDesc').value = '';
         document.getElementById('newProductOrd').value = '0';
+        document.getElementById('newProductPublic').checked = false;
         await loadProducts();
     } catch (e) {
         toast('Failed: ' + e.message, 'error');
@@ -4092,12 +4760,13 @@ async function saveProduct(slug) {
     const name = document.getElementById('prod-name-' + slug).value.trim();
     const description = document.getElementById('prod-desc-' + slug).value.trim();
     const ord = parseInt(document.getElementById('prod-ord-' + slug).value, 10) || 0;
+    const download_public = document.getElementById('prod-public-' + slug).checked;
     if (!name) { toast('Name is required', 'error'); return; }
     try {
         const resp = await fetch(API + '/products/' + encodeURIComponent(slug), {
             method: 'PUT',
             headers: authHeaders(),
-            body: JSON.stringify({ name, description, ord }),
+            body: JSON.stringify({ name, description, ord, download_public }),
         });
         if (!resp.ok) {
             const data = await resp.json().catch(() => ({}));
@@ -4161,6 +4830,13 @@ function renderWorkspaces() {
         container.innerHTML = '<div class="empty-state" style="width:100%;padding:24px;"><p>No workspaces yet.</p></div>';
         return;
     }
+    const q = (document.getElementById('wsSearch').value || '').trim().toLowerCase();
+    const shown = q ? workspaces.filter(ws =>
+        (ws.name + ' ' + (ws.product || '') + ' ' + (ws.description || '') + ' ' + (ws.created_by || '')).toLowerCase().includes(q)) : workspaces;
+    if (shown.length === 0) {
+        container.innerHTML = '<div class="empty-state" style="width:100%;padding:24px;"><p>No matching workspaces.</p></div>';
+        return;
+    }
     container.innerHTML = `
         <div class="card">
             <table>
@@ -4169,17 +4845,15 @@ function renderWorkspaces() {
                         <th>Name</th>
                         <th>Product</th>
                         <th>Description</th>
-                        <th>Role</th>
                         <th>Created by</th>
                     </tr>
                 </thead>
                 <tbody>
-                    ${workspaces.map(ws => `
-                        <tr class="ws-row${ws.id === selectedWsId ? ' selected' : ''}" onclick="showWsDetail('${ws.id}')">
+                    ${shown.map(ws => `
+                        <tr class="ws-row${ws.id === selectedWsId ? ' selected' : ''}" onclick="location.hash='#/workspaces/${encodeURIComponent(ws.id)}'">
                             <td style="font-weight:600;">${esc(ws.name)}</td>
                             <td>${ws.product ? `<span class="badge active">${esc(ws.product)}</span>` : ''}</td>
                             <td style="color:var(--text2);">${ws.description ? esc(ws.description) : ''}</td>
-                            <td style="color:var(--text2);">${esc(ws.role ? ws.role.charAt(0).toUpperCase() + ws.role.slice(1) : 'Not a member')}</td>
                             <td style="color:var(--text2);">${esc(ws.created_by)}</td>
                         </tr>
                     `).join('')}
@@ -4190,12 +4864,48 @@ function renderWorkspaces() {
 }
 
 
-async function showWsDetail(id) {
-    selectedWsId = id;
+// Routed workspace detail: #/workspaces/{id}[/{tab}] replaces the list view.
+// Tab switches re-route with the same id, which must NOT refetch everything -
+// wsDetailLoadedId tracks which workspace the panel currently holds.
+let wsDetailLoadedId = null;
+
+function setWorkspaceRoute(id, tab) {
+    if (!id) {
+        hideWsDetail();
+        return;
+    }
+    document.getElementById('workspaceListSection').style.display = 'none';
+    if (wsDetailLoadedId === id) {
+        document.getElementById('wsDetailPanel').classList.add('visible');
+        setWsTab(tab || 'releases');
+    } else {
+        showWsDetail(id, tab);
+    }
+}
+
+function hideWsDetail() {
+    selectedWsId = null;
+    wsDetailLoadedId = null;
+    document.getElementById('wsDetailPanel').classList.remove('visible');
+    document.getElementById('workspaceListSection').style.display = '';
     renderWorkspaces();
+}
+
+function wsNavTab(name) {
+    if (!selectedWsId) return;
+    location.hash = '#/workspaces/' + encodeURIComponent(selectedWsId) + '/' + name;
+}
+
+async function showWsDetail(id, tab) {
+    selectedWsId = id;
+    wsDetailLoadedId = id;
+    renderWorkspaces();
+    document.getElementById('workspaceListSection').style.display = 'none';
     const panel = document.getElementById('wsDetailPanel');
     panel.classList.add('visible');
-    setWsTab('releases');
+    // Default to Releases when opening the panel fresh; callers that refresh
+    // after an in-tab action (e.g. add/remove member) pass the tab to keep.
+    setWsTab(tab || 'releases');
 
     try {
         const resp = await fetch(API + '/workspaces/' + id, { headers: authHeaders() });
@@ -4206,7 +4916,6 @@ async function showWsDetail(id) {
         document.getElementById('wsDetailProduct').textContent = ws.product || '-';
         document.getElementById('wsDetailDesc').textContent = ws.description || '-';
         document.getElementById('wsDetailCreatedBy').textContent = ws.created_by;
-        document.getElementById('wsDetailRole').textContent = ws.role ? ws.role.charAt(0).toUpperCase() + ws.role.slice(1) : '';
 
         // Members
         const members = ws.members || [];
@@ -4214,7 +4923,7 @@ async function showWsDetail(id) {
             ? '<div style="color:var(--text2);font-size:13px;">No members</div>'
             : members.map(m => `
                 <div class="machine-item">
-                    <span style="display:flex;align-items:center;gap:8px;"><strong style="min-width:200px;">${esc(m.username)}</strong> <span class="badge active" style="font-size:10px;">${esc(m.role.toUpperCase())}</span></span>
+                    <span style="display:flex;align-items:center;gap:8px;"><strong style="min-width:200px;">${esc(m.username)}</strong></span>
                     ${userRole === 'admin' ? `<button class="small danger" onclick="removeWsMember('${id}','${esc(m.username)}')">Remove</button>` : ''}
                 </div>
             `).join('');
@@ -4267,15 +4976,13 @@ async function showWsDetail(id) {
             }
         }
 
-        // Only site admins create doc releases or upload software, even into
-        // a workspace they're a member of. Workspace members can read.
-        const canEdit = userRole === 'admin';
-        document.getElementById('wsCreateDocReleaseBtn').style.display = canEdit ? '' : 'none';
+        // Only site admins upload software, even into a workspace they're a
+        // member of. Documentation (Docs tab) is member-writable.
+        document.getElementById('wsUploadSoftwareBtn').style.display = userRole === 'admin' ? '' : 'none';
 
         // Load configs and the unified releases list.
         loadWsConfigs(id);
         loadWsReleases(id);
-        loadWsInstances(id);
         loadWsRecordings(id);
     } catch (e) {
         toast('Error: ' + e.message, 'error');
@@ -4572,26 +5279,30 @@ async function saveWsProperties() {
     }
 }
 
-async function createWsDocRelease() {
+// Create a member-only documentation collection (a doc-only release row under
+// the hood; the tag is derived from the name) and jump straight into the
+// editor so the first page can be written immediately.
+async function createWsDocCollection() {
     if (!selectedWsId) return;
-    const tag = prompt('Release tag (e.g. v1.0):');
-    if (!tag) return;
-    const trimmed = tag.trim();
-    if (!trimmed) return;
-    const name = prompt('Release name (optional):', trimmed) || '';
+    const name = prompt('Documentation name (e.g. "Sales Handbook"):');
+    if (!name || !name.trim()) return;
+    const trimmedName = name.trim();
+    let tag = trimmedName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+    if (!tag) tag = 'doc-' + Date.now().toString(36);
     try {
         const resp = await fetch(API + '/workspaces/' + selectedWsId + '/docs/releases', {
             method: 'POST',
             headers: authHeaders(),
-            body: JSON.stringify({ tag: trimmed, name }),
+            body: JSON.stringify({ tag, name: trimmedName }),
         });
         if (!resp.ok) {
             const data = await resp.json().catch(() => ({}));
-            toast('Error: ' + (data.error || 'Could not create release'), 'error');
+            toast('Error: ' + (data.error || 'Could not create documentation'), 'error');
             return;
         }
-        toast('Release ' + trimmed + ' created', 'success');
+        toast('Documentation "' + trimmedName + '" created', 'success');
         loadWsReleases(selectedWsId);
+        window.open('/docs?workspace=' + encodeURIComponent(selectedWsId) + '&tag=' + encodeURIComponent(tag), '_blank');
     } catch (e) {
         toast('Failed: ' + e.message, 'error');
     }
@@ -4643,16 +5354,25 @@ async function loadWsReleases(wsId) {
     }
 }
 
+// Rows with software files render in the Releases tab; rows without any are
+// documentation collections and render in the Docs tab instead.
 function renderWsReleases() {
-    const container = document.getElementById('wsDetailReleases');
     const { wsId, allRels, docPageCounts } = wsReleasesData;
     if (!wsId) return;
-    if (allRels.length === 0) {
-        container.innerHTML = '<div style="color:var(--text2);font-size:13px;">No releases yet. Upload software or create an empty release to start adding documentation.</div>';
+    const software = allRels.filter(r => (r.assets || []).length > 0);
+    const docs = allRels.filter(r => (r.assets || []).length === 0);
+    renderWsSoftwareReleases(software, docPageCounts);
+    renderWsDocCollections(docs, docPageCounts);
+}
+
+function renderWsSoftwareReleases(rels, docPageCounts) {
+    const container = document.getElementById('wsDetailReleases');
+    if (rels.length === 0) {
+        container.innerHTML = '<div style="color:var(--text2);font-size:13px;">No software releases yet.</div>';
         return;
     }
     const isAdmin = userRole === 'admin';
-    container.innerHTML = allRels.map(r => {
+    container.innerHTML = rels.map(r => {
         const pre = r.prerelease ? ' <span style="background:rgba(251,191,36,0.15);color:var(--yellow);font-size:10px;font-weight:600;padding:1px 6px;border-radius:4px;">Pre</span>' : '';
         const menuId = 'rel-menu-' + r.tag.replace(/[^a-zA-Z0-9_-]/g, '_');
         const adminBtns = isAdmin
@@ -4671,7 +5391,7 @@ function renderWsReleases() {
             : '';
         const expanded = wsExpandedTags.has(r.tag);
         const chev = expanded ? '&#9662;' : '&#9656;';
-        const expandedBlock = expanded ? renderWsReleaseExpansion(r, docPageCounts.has(r.tag)) : '';
+        const expandedBlock = expanded ? renderWsReleaseExpansion(r, docPageCounts.has(r.tag), false) : '';
         return '<div class="ws-release-row' + (expanded ? ' open' : '') + '">' +
             '<div class="machine-item ws-release-head" style="flex-wrap:wrap;gap:8px;cursor:pointer;" onclick="toggleWsRelease(\'' + esc(r.tag) + '\')">' +
                 '<span style="flex:1;min-width:200px;display:flex;align-items:center;gap:6px;">' +
@@ -4689,7 +5409,51 @@ function renderWsReleases() {
     }).join('');
 }
 
-function renderWsReleaseExpansion(r, hasDocReleaseRow) {
+function renderWsDocCollections(rels, docPageCounts) {
+    const container = document.getElementById('wsDetailDocs');
+    if (rels.length === 0) {
+        container.innerHTML = '<div style="color:var(--text2);font-size:13px;">No documentation yet. Create member-only pages - handbooks, guides, internal notes - with "New documentation".</div>';
+        return;
+    }
+    const isAdmin = userRole === 'admin';
+    const wsId = wsReleasesData.wsId;
+    container.innerHTML = rels.map(r => {
+        const menuId = 'doc-menu-' + r.tag.replace(/[^a-zA-Z0-9_-]/g, '_');
+        const pageCount = docPageCounts.get(r.tag) || 0;
+        const adminBtns = isAdmin
+            ? ' <span class="dropdown" onclick="event.stopPropagation();">' +
+                '<button class="small secondary" onclick="toggleDropdown(event,\'' + menuId + '\')">Actions &#9662;</button>' +
+                '<div id="' + menuId + '" class="dropdown-menu" style="display:none;">' +
+                    '<button onclick="editWsRelease(\'' + esc(r.tag) + '\')">Rename</button>' +
+                    '<button onclick="moveWsRelease(\'' + esc(r.tag) + '\')">Move to workspace…</button>' +
+                    '<div class="divider"></div>' +
+                    '<button class="danger" onclick="deleteWsRelease(\'' + esc(r.tag) + '\')">Delete</button>' +
+                '</div>' +
+              '</span>'
+            : '';
+        const openUrl = '/docs?workspace=' + encodeURIComponent(wsId) + '&tag=' + encodeURIComponent(r.tag);
+        const expanded = wsExpandedTags.has(r.tag);
+        const chev = expanded ? '&#9662;' : '&#9656;';
+        const expandedBlock = expanded ? renderWsReleaseExpansion(r, docPageCounts.has(r.tag), true) : '';
+        return '<div class="ws-release-row' + (expanded ? ' open' : '') + '">' +
+            '<div class="machine-item ws-release-head" style="flex-wrap:wrap;gap:8px;cursor:pointer;" onclick="toggleWsRelease(\'' + esc(r.tag) + '\')">' +
+                '<span style="flex:1;min-width:200px;display:flex;align-items:center;gap:6px;">' +
+                    '<span class="ws-release-chev" style="color:var(--text2);width:12px;display:inline-block;">' + chev + '</span>' +
+                    '<strong>' + esc(r.name || r.tag) + '</strong>' +
+                    ' <span style="color:var(--text2);margin-left:6px;font-size:11px;">' + pageCount + (pageCount === 1 ? ' page' : ' pages') + ' · ' + formatDate(r.published_at) + '</span>' +
+                '</span>' +
+                '<span style="display:flex;gap:4px;flex-wrap:wrap;align-items:center;justify-content:flex-end;" onclick="event.stopPropagation();">' +
+                    '<button class="small secondary" onclick="window.open(\'' + openUrl + '\',\'_blank\')">Open</button>' +
+                    '<button class="small" onclick="editWsReleaseDocs(\'' + esc(r.tag) + '\')">Edit pages</button>' +
+                    adminBtns +
+                '</span>' +
+            '</div>' +
+            expandedBlock +
+        '</div>';
+    }).join('');
+}
+
+function renderWsReleaseExpansion(r, hasDocReleaseRow, docOnly) {
     const wsId = wsReleasesData.wsId;
     const tag = r.tag;
     const pages = wsReleasePages.get(tag);
@@ -4710,6 +5474,12 @@ function renderWsReleaseExpansion(r, hasDocReleaseRow) {
                 return '<li style="padding-left:' + indent + ';"><a href="' + pageUrl + '" style="color:var(--accent);text-decoration:none;font-size:13px;">' + esc(p.title) + '</a></li>';
             }).join('') +
         '</ul>';
+    }
+
+    if (docOnly) {
+        return '<div class="ws-release-expand" style="padding:8px 12px 12px 30px;background:var(--bg);border-radius:0 0 var(--radius) var(--radius);">' +
+            '<div><div class="field-label">Pages</div>' + pagesHtml + '</div>' +
+        '</div>';
     }
 
     let filesHtml;
@@ -4764,9 +5534,8 @@ async function toggleWsRelease(tag) {
 }
 
 function closeWsDetail() {
-    selectedWsId = null;
-    document.getElementById('wsDetailPanel').classList.remove('visible');
-    renderWorkspaces();
+    hideWsDetail();
+    if (location.hash.startsWith('#/workspaces/')) location.hash = '#/workspaces';
 }
 
 async function loadWsConfigs(wsId) {
@@ -4883,58 +5652,16 @@ async function deleteWsRecording(id) {
     }
 }
 
-// Render registered FusionHub peers for the workspace. Peers re-register every
-// 30s, so anything seen within 90s (3 ticks) is treated as currently online.
-async function loadWsInstances(wsId) {
-    if (!wsId) return;
-    const container = document.getElementById('wsDetailInstances');
-    try {
-        const resp = await fetch(API + '/workspaces/' + wsId + '/federation', { headers: authHeaders() });
-        if (!resp.ok) { container.innerHTML = '<div style="color:var(--text2);font-size:13px;">Failed to load</div>'; return; }
-        const data = await resp.json();
-        const peers = data.peers || [];
-        if (peers.length === 0) {
-            container.innerHTML = '<div style="color:var(--text2);font-size:13px;">No FusionHub instances have registered with this workspace.</div>';
-            return;
-        }
-        const now = Date.now();
-        container.innerHTML = peers.map(p => {
-            const seenMs = p.last_seen ? new Date(p.last_seen).getTime() : 0;
-            const ageS = seenMs ? Math.max(0, Math.floor((now - seenMs) / 1000)) : null;
-            const online = ageS !== null && ageS <= 90;
-            const dotColor = online ? '#3fb950' : 'var(--text2)';
-            const ageLabel = ageS === null ? 'never'
-                : ageS < 60 ? ageS + 's ago'
-                : ageS < 3600 ? Math.floor(ageS / 60) + 'm ago'
-                : ageS < 86400 ? Math.floor(ageS / 3600) + 'h ago'
-                : Math.floor(ageS / 86400) + 'd ago';
-            const label = p.label && p.label.trim() ? p.label : '(unnamed)';
-            const hostShort = (p.host_id || '').slice(0, 12);
-            return '<div class="machine-item">' +
-                '<span style="display:flex;align-items:center;gap:10px;min-width:0;">' +
-                    '<span title="' + (online ? 'Online' : 'Last seen ' + ageLabel) + '" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + dotColor + ';flex-shrink:0;"></span>' +
-                    '<strong style="min-width:160px;">' + esc(label) + '</strong>' +
-                    '<span class="machine-code" title="' + esc(p.host_id) + '">' + esc(hostShort) + '</span>' +
-                    '<span class="machine-code" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(p.url) + '</span>' +
-                '</span>' +
-                '<span class="machine-code">' + esc(p.registered_by) + ' &middot; ' + ageLabel + '</span>' +
-            '</div>';
-        }).join('');
-    } catch (e) {
-        container.innerHTML = '<div style="color:var(--text2);font-size:13px;">Failed to load instances</div>';
-    }
-}
 
 async function addWsMember() {
     const username = document.getElementById('wsNewMember').value;
-    const role = document.getElementById('wsNewMemberRole').value;
     if (!username) { toast('Select a user first', 'error'); return; }
     if (!selectedWsId) return;
     try {
         const resp = await fetch(API + '/workspaces/' + selectedWsId + '/members', {
             method: 'POST',
             headers: authHeaders(),
-            body: JSON.stringify({ username, role }),
+            body: JSON.stringify({ username }),
         });
         if (!resp.ok) {
             const data = await resp.json();
@@ -4943,7 +5670,7 @@ async function addWsMember() {
         }
         document.getElementById('wsNewMember').value = '';
         toast('Member added', 'success');
-        showWsDetail(selectedWsId);
+        showWsDetail(selectedWsId, 'members');
     } catch (e) {
         toast('Failed: ' + e.message, 'error');
     }
@@ -4962,7 +5689,7 @@ async function removeWsMember(wsId, username) {
             return;
         }
         toast('Member removed', 'success');
-        showWsDetail(wsId);
+        showWsDetail(wsId, 'members');
     } catch (e) {
         toast('Failed: ' + e.message, 'error');
     }
@@ -5028,10 +5755,11 @@ async function createWorkspace() {
 // Keyboard shortcuts
 document.addEventListener('keydown', e => {
     if (e.key === 'Escape') {
+        closeNavDrawer();
         closeCreateModal();
         closeExportModal();
         closeTFAModal();
-        closeUsersModal();
+        closeAddUserModal();
         closeUploadReleaseModal();
         closeCreateWorkspaceModal();
         closeProductModal();
@@ -5186,7 +5914,7 @@ function showProductModal(sku) {
         document.getElementById('productDesc').value = p.description_md || '';
         document.getElementById('productPrice').value = p.price_cents;
         document.getElementById('productCurrency').value = p.currency;
-        document.getElementById('productImage').value = p.image_asset || '';
+        populateProductImageOptions(p.image_asset || '');
         document.getElementById('productTaxCode').value = p.tax_code;
         document.getElementById('productOrd').value = p.ord;
         document.getElementById('productActive').checked = p.active;
@@ -5197,7 +5925,7 @@ function showProductModal(sku) {
         document.getElementById('productDesc').value = '';
         document.getElementById('productPrice').value = 0;
         document.getElementById('productCurrency').value = 'usd';
-        document.getElementById('productImage').value = '';
+        populateProductImageOptions('');
         document.getElementById('productTaxCode').value = 'txcd_99999999';
         document.getElementById('productOrd').value = 0;
         document.getElementById('productActive').checked = true;
@@ -5375,6 +6103,207 @@ const escHtml = esc;
 // ---------------------------------------------------------------------------
 let shopOrders = [];
 let viewingOrderId = null;
+
+// ---- Audit log (admin) ----
+let auditCursor = null;   // smallest id seen; keyset cursor for "Load more"
+
+async function loadAudit(more) {
+    const tbody = document.getElementById('auditBody');
+    if (!tbody) return;
+    if (!more) { auditCursor = null; tbody.innerHTML = '<tr><td colspan="5" class="empty-state"><p>Loading...</p></td></tr>'; }
+    const url = API + '/audit?limit=100' + (more && auditCursor ? '&before=' + auditCursor : '');
+    try {
+        const resp = await fetch(url, { headers: authHeaders() });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const entries = (await resp.json()).entries || [];
+        const rows = entries.map(e =>
+            '<tr>'
+            + '<td style="white-space:nowrap;color:var(--text2);">' + escHtml(e.at ? new Date(e.at).toLocaleString() : '') + '</td>'
+            + '<td>' + escHtml(e.actor) + '</td>'
+            + '<td><code>' + escHtml(e.action) + '</code></td>'
+            + '<td>' + escHtml(e.target) + '</td>'
+            + '<td style="color:var(--text2);">' + escHtml(e.details) + '</td>'
+            + '</tr>'
+        ).join('');
+        if (!more) {
+            tbody.innerHTML = rows || '<tr><td colspan="5" class="empty-state"><p>No audit entries yet.</p></td></tr>';
+        } else if (rows) {
+            tbody.insertAdjacentHTML('beforeend', rows);
+        }
+        if (entries.length) auditCursor = entries[entries.length - 1].id;
+        document.getElementById('auditLoadMore').style.display = entries.length === 100 ? '' : 'none';
+    } catch (e) {
+        tbody.innerHTML = '<tr><td colspan="5" class="empty-state"><p>Failed to load: ' + escHtml(e.message) + '</p></td></tr>';
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Backups (Dropbox)
+// ---------------------------------------------------------------------------
+
+let backupPollTimer = null;
+let backupWasRunning = false;
+
+async function loadBackupPage() {
+    if (backupPollTimer) { clearTimeout(backupPollTimer); backupPollTimer = null; }
+    const errEl = document.getElementById('backupConnError');
+    errEl.style.display = 'none';
+    try {
+        const resp = await fetch(API + '/admin/backup/status', { headers: authHeaders() });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        renderBackupPage(await resp.json());
+    } catch (e) {
+        errEl.textContent = 'Failed to load backup status: ' + e.message;
+        errEl.style.display = '';
+        document.getElementById('backupMain').style.display = '';
+    }
+}
+
+function renderBackupPage(st) {
+    document.getElementById('backupNotConfigured').style.display = st.configured ? 'none' : '';
+    document.getElementById('backupMain').style.display = st.configured ? '' : 'none';
+    document.getElementById('backupRunBtn').style.display = (st.configured && st.connected) ? '' : 'none';
+    if (!st.configured) return;
+
+    const badge = document.getElementById('backupConnBadge');
+    const info = document.getElementById('backupConnInfo');
+    if (st.running) {
+        badge.className = 'badge expired';
+        badge.textContent = 'backup running…';
+    } else {
+        badge.className = st.connected ? 'badge active' : 'badge revoked';
+        badge.textContent = st.connected ? 'connected' : 'not connected';
+    }
+    if (st.connected) {
+        let space = '';
+        if (st.space_used != null && st.space_allocated) {
+            space = ' — ' + formatSize(st.space_used) + ' of ' + formatSize(st.space_allocated) + ' used';
+        }
+        info.innerHTML = 'Account: <strong>' + escHtml(st.account || '(unknown)') + '</strong>'
+            + escHtml(space)
+            + '<br><span style="color:var(--text2);font-size:12px;">Archives are named '
+            + escHtml(st.prefix) + '-backup-&lt;timestamp&gt;.tar.gz.enc in the app folder.</span>';
+    } else {
+        info.textContent = '';
+    }
+    document.getElementById('backupConnectFlow').style.display = st.connected ? 'none' : '';
+    document.getElementById('backupDisconnectRow').style.display = st.connected ? '' : 'none';
+
+    const s = st.settings || {};
+    document.getElementById('backupEnabled').checked = !!s.enabled;
+    document.getElementById('backupHour').value = s.hour_utc ?? 3;
+    document.getElementById('backupIncludeReleases').checked = !!s.include_releases;
+    document.getElementById('backupKeepDaily').value = s.keep_daily ?? 7;
+    document.getElementById('backupKeepWeekly').value = s.keep_weekly ?? 4;
+    document.getElementById('backupKeepMonthly').value = s.keep_monthly ?? 12;
+
+    const tbody = document.getElementById('backupHistoryBody');
+    const rows = (st.history || []).map(r => {
+        const cls = r.status === 'ok' ? 'active' : (r.status === 'running' ? 'expired' : 'revoked');
+        return '<tr>'
+            + '<td style="white-space:nowrap;color:var(--text2);">' + escHtml(r.started_at ? new Date(r.started_at).toLocaleString() : '') + '</td>'
+            + '<td><span class="badge ' + cls + '">' + escHtml(r.status) + '</span></td>'
+            + '<td>' + escHtml(r.source) + '</td>'
+            + '<td><code style="font-size:11px;">' + escHtml(r.archive_name || '') + '</code></td>'
+            + '<td>' + (r.size_bytes ? formatSize(r.size_bytes) : '') + '</td>'
+            + '<td style="color:var(--red);font-size:12px;">' + escHtml(r.error || '') + '</td>'
+            + '</tr>';
+    }).join('');
+    tbody.innerHTML = rows || '<tr><td colspan="6" class="empty-state"><p>No backups yet.</p></td></tr>';
+
+    if (st.running) {
+        backupWasRunning = true;
+        backupPollTimer = setTimeout(loadBackupPage, 3000);
+    } else if (backupWasRunning) {
+        backupWasRunning = false;
+    }
+}
+
+async function openBackupAuthorize() {
+    const errEl = document.getElementById('backupConnError');
+    errEl.style.display = 'none';
+    try {
+        const resp = await fetch(API + '/admin/backup/connect-url', { headers: authHeaders() });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status));
+        window.open(data.url, '_blank', 'noopener');
+    } catch (e) {
+        errEl.textContent = e.message;
+        errEl.style.display = '';
+    }
+}
+
+async function submitBackupCode() {
+    const errEl = document.getElementById('backupConnError');
+    errEl.style.display = 'none';
+    const code = document.getElementById('backupAuthCode').value.trim();
+    if (!code) { errEl.textContent = 'Paste the authorization code first.'; errEl.style.display = ''; return; }
+    try {
+        const resp = await fetch(API + '/admin/backup/connect', {
+            method: 'POST', headers: authHeaders(), body: JSON.stringify({ code })
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status));
+        document.getElementById('backupAuthCode').value = '';
+        loadBackupPage();
+    } catch (e) {
+        errEl.textContent = e.message;
+        errEl.style.display = '';
+    }
+}
+
+async function disconnectBackup() {
+    if (!confirm('Disconnect Dropbox? Scheduled backups will stop until reconnected. Existing archives stay in Dropbox.')) return;
+    const errEl = document.getElementById('backupConnError');
+    errEl.style.display = 'none';
+    try {
+        const resp = await fetch(API + '/admin/backup/disconnect', { method: 'POST', headers: authHeaders() });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status));
+        loadBackupPage();
+    } catch (e) {
+        errEl.textContent = e.message;
+        errEl.style.display = '';
+    }
+}
+
+async function saveBackupSettings() {
+    const errEl = document.getElementById('backupSetError');
+    errEl.style.display = 'none';
+    const body = {
+        enabled: document.getElementById('backupEnabled').checked,
+        hour_utc: parseInt(document.getElementById('backupHour').value, 10) || 0,
+        include_releases: document.getElementById('backupIncludeReleases').checked,
+        keep_daily: parseInt(document.getElementById('backupKeepDaily').value, 10) || 7,
+        keep_weekly: parseInt(document.getElementById('backupKeepWeekly').value, 10) || 0,
+        keep_monthly: parseInt(document.getElementById('backupKeepMonthly').value, 10) || 0,
+    };
+    try {
+        const resp = await fetch(API + '/admin/backup/settings', {
+            method: 'PUT', headers: authHeaders(), body: JSON.stringify(body)
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status));
+        loadBackupPage();
+    } catch (e) {
+        errEl.textContent = e.message;
+        errEl.style.display = '';
+    }
+}
+
+async function runBackupNow() {
+    const errEl = document.getElementById('backupConnError');
+    errEl.style.display = 'none';
+    try {
+        const resp = await fetch(API + '/admin/backup/run', { method: 'POST', headers: authHeaders() });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status));
+        setTimeout(loadBackupPage, 500);
+    } catch (e) {
+        errEl.textContent = e.message;
+        errEl.style.display = '';
+    }
+}
 
 async function loadShopOrders() {
     const tbody = document.getElementById('shopOrdersBody');
@@ -5556,24 +6485,52 @@ function renderWebsitePagesTable() {
             ? '<code>' + escHtml(p.parent_slug) + '</code>'
             : '<span style="color:var(--text2);">—</span>';
         const menuId = 'website-page-menu-' + p.slug.replace(/[^a-zA-Z0-9_-]/g, '_');
+        const slugArg = JSON.stringify(p.slug).replace(/"/g, '&quot;');
+        const hiddenBadge = p.hidden
+            ? ' <span class="badge" style="background:var(--bg3);color:var(--text2);">hidden</span>'
+            : '';
+        // Dim the content cells individually — opacity on the <tr> would
+        // create a stacking context that traps the fixed-position dropdown
+        // menu below the following rows.
+        const dim = p.hidden ? ' style="opacity:0.6;"' : '';
         return '<tr>'
-            + '<td><code>' + escHtml(p.slug) + '</code></td>'
-            + '<td>' + escHtml(p.title) + '</td>'
-            + '<td>' + parent + '</td>'
-            + '<td>' + p.ord + '</td>'
-            + '<td style="color:var(--text2);font-size:12px;">' + escHtml(p.updated_at || '') + '</td>'
+            + '<td' + dim + '><code>' + escHtml(p.slug) + '</code></td>'
+            + '<td' + dim + '>' + escHtml(p.title) + hiddenBadge + '</td>'
+            + '<td' + dim + '>' + parent + '</td>'
+            + '<td' + dim + '>' + p.ord + '</td>'
+            + '<td style="color:var(--text2);font-size:12px;' + (p.hidden ? 'opacity:0.6;' : '') + '">' + escHtml(p.updated_at || '') + '</td>'
             + '<td>'
             +   '<span class="dropdown" onclick="event.stopPropagation();">'
             +     '<button class="small secondary" onclick="toggleDropdown(event,\'' + menuId + '\')">Actions &#9662;</button>'
             +     '<div id="' + menuId + '" class="dropdown-menu" style="display:none;">'
             +       '<a href="' + escHtml(editUrl) + '" target="_blank" rel="noopener">Open editor ↗</a>'
+            +       '<button onclick="toggleWebsitePageHidden(' + slugArg + ', ' + (p.hidden ? 'false' : 'true') + ')">' + (p.hidden ? 'Show on site' : 'Hide from site') + '</button>'
             +       '<div class="divider"></div>'
-            +       '<button class="danger" onclick="deleteWebsitePage(' + JSON.stringify(p.slug) + ')">Delete</button>'
+            +       '<button class="danger" onclick="deleteWebsitePage(' + slugArg + ')">Delete</button>'
             +     '</div>'
             +   '</span>'
             + '</td>'
             + '</tr>';
     }).join('');
+}
+
+async function toggleWebsitePageHidden(slug, hidden) {
+    try {
+        const resp = await fetch(API + '/website/pages/' + encodeURIComponent(slug) + '/visibility', {
+            method: 'POST',
+            headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+            body: JSON.stringify({ hidden }),
+        });
+        if (!resp.ok) {
+            const data = await resp.json().catch(() => ({}));
+            alert(data.error || ('HTTP ' + resp.status));
+            return;
+        }
+        await loadWebsitePages();
+        toast(hidden ? 'Page hidden from public site' : 'Page visible on public site', 'success');
+    } catch (e) {
+        alert(e.message || 'Failed to update visibility');
+    }
 }
 
 function showWebsitePageModal() {
@@ -5658,6 +6615,170 @@ async function deleteWebsitePage(slug) {
     } catch (e) {
         alert(e.message || 'Failed to delete');
     }
+}
+
+// ----- Website assets -----
+
+let websiteAssets = [];
+
+function assetUrl(name) { return API + '/website/assets/' + encodeURIComponent(name); }
+function isImageAsset(name) { return /\.(png|jpe?g|gif|svg|webp)$/i.test(name); }
+
+function fmtAssetSize(bytes) {
+    if (bytes >= 1048576) return (bytes / 1048576).toFixed(1) + ' MB';
+    if (bytes >= 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return bytes + ' B';
+}
+
+async function loadWebsiteAssets() {
+    if (userRole !== 'admin') return;
+    const tbody = document.getElementById('websiteAssetsBody');
+    try {
+        const resp = await fetch(API + '/website/admin/assets', { headers: authHeaders() });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        websiteAssets = (await resp.json()).assets || [];
+        renderWebsiteAssetsTable();
+    } catch (e) {
+        tbody.innerHTML = '<tr><td colspan="5" class="empty-state"><p>Failed to load: ' + escHtml(e.message) + '</p></td></tr>';
+    }
+}
+
+function renderWebsiteAssetsTable() {
+    const tbody = document.getElementById('websiteAssetsBody');
+    if (!websiteAssets.length) {
+        tbody.innerHTML = '<tr><td colspan="5" class="empty-state"><p>No assets yet — upload one here or from the page editor.</p></td></tr>';
+        return;
+    }
+    tbody.innerHTML = websiteAssets.map((a, i) => {
+        const preview = isImageAsset(a.name)
+            ? '<img src="' + assetUrl(a.name) + '" loading="lazy" style="width:40px;height:40px;object-fit:cover;border-radius:4px;">'
+            : '<span style="color:var(--text2);font-size:11px;">file</span>';
+        const usedBy = (a.pages || []).map(s =>
+                '<a href="/site/' + encodeURIComponent(s) + '" target="_blank" rel="noopener"><code>' + escHtml(s) + '</code></a>')
+            .concat((a.products || []).map(s => '<code>' + escHtml(s) + '</code> (shop)'));
+        const menuId = 'website-asset-menu-' + i;
+        return '<tr>'
+            + '<td>' + preview + '</td>'
+            + '<td><code>' + escHtml(a.name) + '</code></td>'
+            + '<td>' + fmtAssetSize(a.size) + '</td>'
+            + '<td style="font-size:12px;">' + (usedBy.length ? usedBy.join(', ') : '<span style="color:var(--text2);">unused</span>') + '</td>'
+            + '<td style="text-align:right;">'
+            +   '<span class="dropdown" onclick="event.stopPropagation();">'
+            +     '<button class="small secondary" onclick="toggleDropdown(event,\'' + menuId + '\')">Actions &#9662;</button>'
+            +     '<div id="' + menuId + '" class="dropdown-menu" style="display:none;">'
+            +       '<a href="' + assetUrl(a.name) + '" target="_blank" rel="noopener">Open ↗</a>'
+            +       '<button onclick="copyAssetUrl(\'' + escHtml(a.name) + '\')">Copy URL</button>'
+            +       '<button onclick="renameWebsiteAsset(\'' + escHtml(a.name) + '\')">Rename…</button>'
+            +       '<div class="divider"></div>'
+            +       '<button class="danger" onclick="deleteWebsiteAsset(\'' + escHtml(a.name) + '\')">Delete</button>'
+            +     '</div>'
+            +   '</span>'
+            + '</td>'
+            + '</tr>';
+    }).join('');
+}
+
+// Shared upload: sanitizes the name, warns before overwriting an existing
+// asset. Returns {name, size, url} or null when the user cancelled.
+async function uploadWebsiteAsset(file) {
+    if (!file) return null;
+    const name = (file.name || 'file').replace(/[^A-Za-z0-9._-]/g, '_');
+    if (websiteAssets.some(a => a.name === name)
+        && !confirm('Asset "' + name + '" already exists. Overwrite it?')) return null;
+    const fd = new FormData();
+    fd.append('file', file, name);
+    const resp = await fetch(API + '/website/assets', {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + authToken },
+        body: fd,
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status));
+    return data;
+}
+
+async function uploadWebsiteAssetFromPage(file) {
+    try {
+        const data = await uploadWebsiteAsset(file);
+        if (!data) return;
+        toast('Uploaded ' + data.name, 'success');
+        await loadWebsiteAssets();
+    } catch (e) { toast('Upload failed: ' + e.message, 'error'); }
+}
+
+function copyAssetUrl(name) {
+    navigator.clipboard.writeText(location.origin + assetUrl(name)).then(
+        () => toast('URL copied', 'success'),
+        () => toast('Copy failed', 'error'));
+}
+
+async function renameWebsiteAsset(name) {
+    const newName = (prompt('Rename asset "' + name + '" to:', name) || '').trim();
+    if (!newName || newName === name) return;
+    try {
+        const resp = await fetch(API + '/website/assets/' + encodeURIComponent(name) + '/rename', {
+            method: 'POST',
+            headers: authHeaders(),
+            body: JSON.stringify({ new_name: newName }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) { toast('Rename failed: ' + (data.error || resp.status), 'error'); return; }
+        toast('Renamed' + (data.pages_updated ? ' — ' + data.pages_updated + ' page(s) updated' : ''), 'success');
+        await loadWebsiteAssets();
+        await loadShopProducts();
+    } catch (e) { toast('Rename failed: ' + e.message, 'error'); }
+}
+
+async function deleteWebsiteAsset(name) {
+    const a = websiteAssets.find(x => x.name === name);
+    const used = a ? (a.pages || []).length + (a.products || []).length : 0;
+    let msg = 'Delete asset "' + name + '"?';
+    if (used) msg += '\nIt is referenced by ' + used + ' page(s)/product(s) — those will show a broken image.';
+    msg += '\nThis cannot be undone.';
+    if (!confirm(msg)) return;
+    try {
+        const resp = await fetch(API + '/website/assets/' + encodeURIComponent(name), {
+            method: 'DELETE', headers: authHeaders(),
+        });
+        if (!resp.ok) { const d = await resp.json().catch(() => ({})); toast('Error: ' + (d.error || resp.status), 'error'); return; }
+        toast('Asset deleted', 'success');
+        await loadWebsiteAssets();
+    } catch (e) { toast('Failed: ' + e.message, 'error'); }
+}
+
+// ----- Product image picker (uses website assets) -----
+
+function populateProductImageOptions(selected) {
+    const sel = document.getElementById('productImage');
+    const names = websiteAssets.map(a => a.name).filter(isImageAsset);
+    if (selected && !names.includes(selected)) names.unshift(selected);
+    sel.innerHTML = '<option value="">— No image —</option>' + names.map(n =>
+        '<option value="' + escHtml(n) + '"' + (n === selected ? ' selected' : '') + '>' + escHtml(n) + '</option>').join('');
+    updateProductImagePreview();
+}
+
+function updateProductImagePreview() {
+    const name = document.getElementById('productImage').value;
+    const img = document.getElementById('productImagePreview');
+    if (name) {
+        img.src = assetUrl(name);
+        img.style.display = '';
+    } else {
+        img.style.display = 'none';
+        img.removeAttribute('src');
+    }
+}
+
+async function uploadProductImage(file) {
+    const errEl = document.getElementById('productError');
+    errEl.style.display = 'none';
+    try {
+        const data = await uploadWebsiteAsset(file);
+        if (!data) return;
+        toast('Uploaded ' + data.name, 'success');
+        await loadWebsiteAssets();
+        populateProductImageOptions(data.name);
+    } catch (e) { errEl.textContent = 'Upload failed: ' + e.message; errEl.style.display = ''; }
 }
 </script>
 </body>

@@ -14,7 +14,6 @@ services:
     ports:
       - "127.0.0.1:3100:3100"
     environment:
-      - SUSI_ADMIN_KEY=${SUSI_ADMIN_KEY:?Set SUSI_ADMIN_KEY in .env}
       - RUST_LOG=info
       # Magic-link login (leave SUSI_SMTP_HOST empty to disable)
       - SUSI_SMTP_HOST=${SUSI_SMTP_HOST:-}
@@ -44,6 +43,13 @@ services:
       - SUSI_S3_REGION=${SUSI_S3_REGION:-}
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      # Dropbox backups (keys live in /opt/susi/.env). SUSI_BACKUP_KEY is the
+      # archive encryption key - keep a copy off-server or backups are
+      # unreadable. All three empty = feature disabled.
+      - SUSI_DROPBOX_APP_KEY=${SUSI_DROPBOX_APP_KEY:-}
+      - SUSI_DROPBOX_APP_SECRET=${SUSI_DROPBOX_APP_SECRET:-}
+      - SUSI_BACKUP_KEY=${SUSI_BACKUP_KEY:-}
+      - SUSI_BACKUP_PREFIX=${SUSI_BACKUP_PREFIX:-prod}
     volumes:
       - susi-data:/data
     healthcheck:

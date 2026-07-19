@@ -1,4 +1,4 @@
-//! Shop endpoints — Stripe-backed checkout for physical goods.
+//! Shop endpoints - Stripe-backed checkout for physical goods.
 //!
 //! - Public: list products, get product, create checkout session, webhook.
 //! - Admin (JWT): CRUD for products + shipping rates.
@@ -115,7 +115,7 @@ pub async fn handle_list_products(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
     let rows = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.list_products(true).map_err(db_err)?
     };
     let products: Vec<Value> = rows.into_iter().map(product_to_json).collect();
@@ -127,7 +127,7 @@ pub async fn handle_get_product(
     Path(sku): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
     let row = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.get_product(&sku).map_err(db_err)?
     }
     .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Product not found"))?;
@@ -154,7 +154,7 @@ pub struct CheckoutRequest {
     pub destination_country: String,
 }
 
-/// Region match — `*` is a wildcard for "any country".
+/// Region match - `*` is a wildcard for "any country".
 fn rate_applies(regions: &[String], country: &str) -> bool {
     regions.iter().any(|r| r == "*" || r.eq_ignore_ascii_case(country))
 }
@@ -218,7 +218,7 @@ pub async fn handle_create_checkout_session(
     }
     // ISO-3166-1 alpha-2 country codes are 2 letters; allow empty (initial
     // page load before the country selector is rendered). Shop only serves
-    // the US and Canada — reject all other destinations.
+    // the US and Canada - reject all other destinations.
     if !req.destination_country.is_empty() {
         if req.destination_country.len() != 2
             || !req.destination_country.chars().all(|c| c.is_ascii_alphabetic())
@@ -237,7 +237,7 @@ pub async fn handle_create_checkout_session(
         if item.qty <= 0 || item.qty > 1000 {
             return Err(error_response(StatusCode::BAD_REQUEST, "Invalid quantity"));
         }
-        // Mirror admin validate_sku — bound length and character set so a
+        // Mirror admin validate_sku - bound length and character set so a
         // pathological client can't waste a DB lookup with megabyte SKUs.
         if item.sku.is_empty()
             || item.sku.len() > 64
@@ -248,11 +248,11 @@ pub async fn handle_create_checkout_session(
     }
 
     // Single batch lookup instead of one round-trip per cart line. Releases
-    // the DB lock before the Stripe HTTP call below — that call is 100–500 ms
+    // the DB lock before the Stripe HTTP call below - that call is 100-500 ms
     // and previously held every other handler off the connection.
     let skus: Vec<String> = req.items.iter().map(|i| i.sku.clone()).collect();
     let products = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.get_products_by_skus(&skus).map_err(db_err)?
     };
 
@@ -283,7 +283,7 @@ pub async fn handle_create_checkout_session(
     // load), pass all active rates and let Stripe's address step handle it;
     // the currency must still match.
     let active_rates = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.list_shipping_rates(true).map_err(db_err)?
     };
     let applicable: Vec<_> = active_rates
@@ -309,7 +309,7 @@ pub async fn handle_create_checkout_session(
     // Always collect a billing address so receipts / invoices have one,
     // and so we can show it separately from the shipping address.
     form.push(("billing_address_collection".into(), "required".into()));
-    // Require phone number — needed by carriers for shipping.
+    // Require phone number - needed by carriers for shipping.
     form.push(("phone_number_collection[enabled]".into(), "true".into()));
     // Tell Stripe to generate a hosted invoice + PDF for every paid session.
     // The webhook event then references the invoice id, which we fetch and
@@ -382,7 +382,7 @@ pub async fn handle_create_checkout_session(
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        log::error!("Stripe checkout.sessions create failed: {} — {}", status, body);
+        log::error!("Stripe checkout.sessions create failed: {} - {}", status, body);
         let short = if body.len() > 400 { &body[..400] } else { &body };
         return Err(error_response(
             StatusCode::BAD_GATEWAY,
@@ -405,7 +405,7 @@ pub async fn handle_create_checkout_session(
 // Stripe signs each webhook with an HMAC-SHA256 over `{timestamp}.{raw_body}`.
 // We verify using the whsec_… secret + constant-time tag compare, then act on
 // `checkout.session.completed` by emailing a short order summary to the shop
-// owner. No DB writes — Stripe is the source of truth for orders.
+// owner. No DB writes - Stripe is the source of truth for orders.
 // ---------------------------------------------------------------------------
 
 fn parse_stripe_signature_header(h: &str) -> (Option<i64>, Vec<String>) {
@@ -487,21 +487,91 @@ pub async fn handle_stripe_webhook(
     let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
     log::info!("Stripe webhook received: {}", event_type);
 
-    if event_type == "checkout.session.completed" {
-        // Persist a shadow-row in shop_orders so we can drive fulfillment
-        // from the admin UI without a round-trip to Stripe for every list.
-        // `inserted == false` means a previous delivery already created the
-        // order — Stripe is retrying. Skip emails so the customer doesn't
-        // get a duplicate confirmation.
-        let persisted = persist_order_from_event(&state, &event).await;
-        let order_id = persisted.map(|(id, _)| id);
-        let is_new_order = persisted.map(|(_, ins)| ins).unwrap_or(false);
-        if !is_new_order {
-            log::info!("Stripe webhook retry for already-recorded session — skipping emails");
-            return Ok(Json(json!({ "received": true, "duplicate": true })));
+    match event_type {
+        "checkout.session.completed" => {
+            // Persist a shadow-row in shop_orders so we can drive fulfillment
+            // from the admin UI without a round-trip to Stripe for every list.
+            // Only sessions whose payment actually settled are recorded as
+            // 'paid': delayed methods (ACH/SEPA/BNPL) complete the session
+            // with payment_status='unpaid' and settle later via
+            // checkout.session.async_payment_succeeded.
+            let payment_status = event
+                .pointer("/data/object/payment_status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let settled = matches!(payment_status, "paid" | "no_payment_required");
+            let status = if settled { "paid" } else { "pending_payment" };
+            let persisted = persist_order_from_event(&state, &event, status).await;
+            if !settled {
+                log::info!(
+                    "Checkout session completed with payment_status={} - order recorded as pending_payment, awaiting settlement",
+                    payment_status
+                );
+                return Ok(Json(json!({ "received": true, "pending": true })));
+            }
+            // `inserted == false` means a previous delivery already created
+            // the order - Stripe is retrying. Skip emails so the customer
+            // doesn't get a duplicate confirmation.
+            let order_id = persisted.map(|(id, _)| id);
+            let is_new_order = persisted.map(|(_, ins)| ins).unwrap_or(false);
+            if !is_new_order {
+                log::info!("Stripe webhook retry for already-recorded session - skipping emails");
+                return Ok(Json(json!({ "received": true, "duplicate": true })));
+            }
+            send_order_notifications(&state, &event, order_id).await;
         }
+        "checkout.session.async_payment_succeeded" => {
+            // A delayed payment settled. The conditional pending->paid
+            // transition makes the email side effects run exactly once across
+            // retries; insert-if-absent first covers a session whose
+            // completed event was never delivered.
+            let persisted = persist_order_from_event(&state, &event, "paid").await;
+            let order_id = persisted.map(|(id, _)| id);
+            let inserted = persisted.map(|(_, ins)| ins).unwrap_or(false);
+            let session_id = event
+                .pointer("/data/object/id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let flipped = {
+                let db = state.db.lock();
+                db.transition_order_status_by_session(session_id, "pending_payment", "paid")
+                    .unwrap_or(false)
+            };
+            if inserted || flipped {
+                send_order_notifications(&state, &event, order_id).await;
+            } else {
+                log::info!("async_payment_succeeded retry for already-paid session - skipping emails");
+            }
+        }
+        "checkout.session.async_payment_failed" => {
+            let session_id = event
+                .pointer("/data/object/id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let failed = {
+                let db = state.db.lock();
+                db.transition_order_status_by_session(session_id, "pending_payment", "payment_failed")
+                    .unwrap_or(false)
+            };
+            if failed {
+                log::warn!(
+                    "Delayed payment failed for session {} - order marked payment_failed",
+                    session_id
+                );
+            }
+        }
+        _ => {}
+    }
 
-        // Fetch line items + invoice PDF in parallel — both via Stripe API,
+    Ok(Json(json!({ "received": true })))
+}
+
+/// Fetch line items + invoice and send the admin notification and customer
+/// confirmation for a settled order. Callers must guarantee at-most-once
+/// delivery (fresh insert or a conditional status transition).
+async fn send_order_notifications(state: &Arc<AppState>, event: &Value, order_id: Option<i64>) {
+    {
+        // Fetch line items + invoice PDF in parallel - both via Stripe API,
         // both best-effort (we still send emails even if one is unavailable).
         let session_id = event
             .pointer("/data/object/id")
@@ -523,7 +593,7 @@ pub async fn handle_stripe_webhook(
                     (Value::Null, String::new())
                 } else {
                     // We need the Stripe invoice for its number + creation
-                    // timestamp, but we render the PDF ourselves below — see
+                    // timestamp, but we render the PDF ourselves below - see
                     // invoice_pdf::generate for why.
                     let inv = fetch_invoice(&state, &invoice_id).await;
                     let number = inv.get("number").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -536,7 +606,7 @@ pub async fn handle_stripe_webhook(
 
         // Render our own paid-invoice PDF. Stripe's PDF for Checkout-paid
         // invoices is rendered once at finalization (status=open) and never
-        // refreshed, so it always carries a "Pay online" CTA — useless for
+        // refreshed, so it always carries a "Pay online" CTA - useless for
         // a post-payment receipt.
         let pdf_bytes = match invoice_pdf::generate(&event, &line_items, &invoice_obj, order_id) {
             Ok(b) => b,
@@ -570,7 +640,7 @@ pub async fn handle_stripe_webhook(
                     let to = to.clone();
                     let subject = subject.clone();
                     let body = body.clone();
-                    // Refcount-bump clone — `bytes: Arc<[u8]>`, no PDF copy.
+                    // Refcount-bump clone - `bytes: Arc<[u8]>`, no PDF copy.
                     let attach = pdf_attachment.as_ref().map(|a| EmailAttachment {
                         file_name: a.file_name.clone(),
                         mime_type: a.mime_type.clone(),
@@ -616,12 +686,10 @@ pub async fn handle_stripe_webhook(
             }
         }
     }
-
-    Ok(Json(json!({ "received": true })))
 }
 
 // ---------------------------------------------------------------------------
-// Settings — well-known keys and lookup helpers
+// Settings - well-known keys and lookup helpers
 // ---------------------------------------------------------------------------
 
 const SETTING_NOTIFY_EMAILS: &str = "notification_emails";
@@ -648,7 +716,7 @@ fn split_recipients(s: &str) -> Vec<String> {
 /// install that hasn't visited the Settings tab yet).
 fn effective_admin_recipients(state: &AppState) -> Vec<String> {
     let from_db = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.get_shop_setting(SETTING_NOTIFY_EMAILS).ok().flatten().unwrap_or_default()
     };
     let mut list = split_recipients(&from_db);
@@ -660,10 +728,10 @@ fn effective_admin_recipients(state: &AppState) -> Vec<String> {
 
 fn customer_email_enabled(state: &AppState) -> bool {
     let v = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.get_shop_setting(SETTING_CUSTOMER_EMAIL_ENABLED).ok().flatten()
     };
-    // Default ON when unset — most shops want customer confirmations.
+    // Default ON when unset - most shops want customer confirmations.
     match v.as_deref() {
         Some("0") | Some("false") | Some("off") => false,
         _ => true,
@@ -671,7 +739,7 @@ fn customer_email_enabled(state: &AppState) -> bool {
 }
 
 fn get_setting_str(state: &AppState, key: &str) -> String {
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     db.get_shop_setting(key).ok().flatten().unwrap_or_default()
 }
 
@@ -720,7 +788,7 @@ fn build_customer_confirmation(
     text.push_str(&format!("Tax:       {}\n", fmt_money(amount_tax, currency)));
     text.push_str(&format!("Total:     {}\n\n", fmt_money(amount_total, currency)));
 
-    // Ship-to confirmation in the customer email — reassures them the address
+    // Ship-to confirmation in the customer email - reassures them the address
     // we'll ship to is what they entered. Always show ship-to and bill-to as
     // separate blocks (even when they match) so the customer can see both.
     let ship_text = address_block_text(obj.get("shipping_details"), name);
@@ -761,7 +829,7 @@ fn build_customer_confirmation(
     }
 
     // Always render ship-to and bill-to as separate blocks, even when they
-    // match — keeps the email layout consistent and lets the customer verify
+    // match - keeps the email layout consistent and lets the customer verify
     // both addresses at a glance.
     let ship_html = address_block_html(obj.get("shipping_details"), name);
     let bill_html = address_block_html(obj.get("customer_details"), name);
@@ -785,7 +853,7 @@ fn build_customer_confirmation(
         )
     };
 
-    // Address sections — always two columns when both are present so the
+    // Address sections - always two columns when both are present so the
     // customer sees ship-to and bill-to side by side, even when identical.
     let address_section = if ship_html.is_empty() && bill_html.is_empty() {
         String::new()
@@ -945,7 +1013,7 @@ async fn fetch_invoice(state: &AppState, invoice_id: &str) -> Value {
 }
 
 /// Pull line items from the Stripe API (the webhook payload doesn't include
-/// them — Stripe explicitly omits expandable fields on webhook events).
+/// them - Stripe explicitly omits expandable fields on webhook events).
 async fn fetch_line_items(state: &AppState, session_id: &str) -> Vec<Value> {
     if state.stripe_secret_key.is_empty() { return Vec::new(); }
     let url = format!("{}/checkout/sessions/{}/line_items?limit=100", STRIPE_API_BASE, session_id);
@@ -964,12 +1032,16 @@ async fn fetch_line_items(state: &AppState, session_id: &str) -> Vec<Value> {
     }
 }
 
-/// Persist a Stripe Checkout Session as a shop_orders row. Returns
-/// `(local_order_id, inserted)` on success — `inserted == false` means the
-/// row already existed (Stripe retry) and side effects (emails) should be
-/// skipped. Returns `None` on any error (still ack 200 so Stripe stops
-/// retrying after the first DB success).
-async fn persist_order_from_event(state: &AppState, event: &Value) -> Option<(i64, bool)> {
+/// Persist a Stripe Checkout Session as a shop_orders row with the given
+/// status ('paid' or 'pending_payment'). Returns `(local_order_id, inserted)`
+/// on success - `inserted == false` means the row already existed (Stripe
+/// retry) and side effects (emails) should be skipped. Returns `None` on any
+/// error (still ack 200 so Stripe stops retrying after the first DB success).
+async fn persist_order_from_event(
+    state: &AppState,
+    event: &Value,
+    status: &str,
+) -> Option<(i64, bool)> {
     let obj = event.pointer("/data/object")?;
     let session_id = obj.get("id")?.as_str()?;
 
@@ -991,8 +1063,8 @@ async fn persist_order_from_event(state: &AppState, event: &Value) -> Option<(i6
 
     let now = chrono::Utc::now().to_rfc3339();
     let res = {
-        let db = state.db.lock().unwrap();
-        db.insert_order_if_absent(session_id, &now, email, name, amount, currency, &ship_to_json, &line_items_json)
+        let db = state.db.lock();
+        db.insert_order_if_absent(session_id, &now, email, name, amount, currency, status, &ship_to_json, &line_items_json)
     };
     match res {
         Ok((id, inserted)) => Some((id, inserted)),
@@ -1032,7 +1104,7 @@ fn format_order_summary(event: &Value, line_items: &[Value], order_id: Option<i6
     }
 
     // Always render ship-to and bill-to as separate sections so the operator
-    // sees both — even when they match — and can spot a mismatch instantly.
+    // sees both - even when they match - and can spot a mismatch instantly.
     let ship_text = address_block_text(obj.get("shipping_details"), name);
     let bill_text = address_block_text(obj.get("customer_details"), name);
     if ship_text.is_empty() && bill_text.is_empty() {
@@ -1108,7 +1180,7 @@ pub async fn handle_admin_list_products(
     let p = validate_principal(&headers, &state)?;
     require_admin_full(&state, &p)?;
     let rows = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.list_products(false).map_err(db_err)?
     };
     let products: Vec<Value> = rows.into_iter().map(product_to_json).collect();
@@ -1163,7 +1235,7 @@ pub async fn handle_upsert_product(
         return Err(error_response(StatusCode::BAD_REQUEST, "Price cannot be negative"));
     }
     {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         if let Some(asset) = req.image_asset.as_deref() {
             if !asset.is_empty() && !db.website_asset_exists(asset).map_err(db_err)? {
                 return Err(error_response(
@@ -1186,6 +1258,7 @@ pub async fn handle_upsert_product(
         .map_err(db_err)?;
     }
     crate::website::invalidate_page_cache();
+    crate::audit(&state, &p.username, "shop.product_upsert", &sku, "");
     Ok(Json(json!({ "sku": sku })))
 }
 
@@ -1198,13 +1271,14 @@ pub async fn handle_delete_product(
     require_admin_full(&state, &p)?;
     validate_sku(&sku)?;
     let removed = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.delete_product(&sku).map_err(db_err)?
     };
     if !removed {
         return Err(error_response(StatusCode::NOT_FOUND, "Product not found"));
     }
     crate::website::invalidate_page_cache();
+    crate::audit(&state, &p.username, "shop.product_delete", &sku, "");
     Ok(Json(json!({ "status": "OK" })))
 }
 
@@ -1215,7 +1289,7 @@ pub async fn handle_list_shipping_rates_admin(
     let p = validate_principal(&headers, &state)?;
     require_admin_full(&state, &p)?;
     let rows = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.list_shipping_rates(false).map_err(db_err)?
     };
     let rates: Vec<Value> = rows.into_iter().map(rate_to_json).collect();
@@ -1275,7 +1349,7 @@ pub async fn handle_create_shipping_rate(
     require_admin_full(&state, &p)?;
     let regions_json = validate_rate_body(&req)?;
     let id = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.insert_shipping_rate(
             &req.label,
             req.amount_cents,
@@ -1300,7 +1374,7 @@ pub async fn handle_update_shipping_rate(
     require_admin_full(&state, &p)?;
     let regions_json = validate_rate_body(&req)?;
     let ok = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.update_shipping_rate(
             id,
             &req.label,
@@ -1327,7 +1401,7 @@ pub async fn handle_delete_shipping_rate(
     let p = validate_principal(&headers, &state)?;
     require_admin_full(&state, &p)?;
     let removed = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.delete_shipping_rate(id).map_err(db_err)?
     };
     if !removed {
@@ -1368,7 +1442,7 @@ fn order_to_json(
 }
 
 /// Build a customer-facing tracking URL from carrier name + tracking number.
-/// Returns None for unknown carriers — the email then shows just the number.
+/// Returns None for unknown carriers - the email then shows just the number.
 fn tracking_url(carrier: &str, tracking: &str) -> Option<String> {
     if tracking.is_empty() { return None; }
     let n = urlencoding_encode(tracking);
@@ -1385,7 +1459,7 @@ fn tracking_url(carrier: &str, tracking: &str) -> Option<String> {
     Some(url)
 }
 
-/// Lightweight URL encoder — only escapes the ASCII chars that need escaping
+/// Lightweight URL encoder - only escapes the ASCII chars that need escaping
 /// in a query value. Avoids pulling in a separate dep just for this one use.
 fn urlencoding_encode(s: &str) -> String {
     const HEX: &[u8] = b"0123456789ABCDEF";
@@ -1412,7 +1486,7 @@ pub async fn handle_admin_list_orders(
     require_admin_full(&state, &p)?;
     let status = q.get("status").map(|s| s.as_str());
     let rows = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.list_orders(status).map_err(db_err)?
     };
     let orders: Vec<Value> = rows.into_iter().map(order_to_json).collect();
@@ -1427,7 +1501,7 @@ pub async fn handle_admin_get_order(
     let p = validate_principal(&headers, &state)?;
     require_admin_full(&state, &p)?;
     let row = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.get_order(id).map_err(db_err)?
     }.ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Order not found"))?;
     Ok(Json(order_to_json(row)))
@@ -1457,7 +1531,7 @@ pub async fn handle_admin_mark_shipped(
     }
     let now = chrono::Utc::now().to_rfc3339();
     let order = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         let ok = db.mark_order_shipped(id, carrier, tracking, &now).map_err(db_err)?;
         if !ok { return Err(error_response(StatusCode::NOT_FOUND, "Order not found")); }
         db.get_order(id).map_err(db_err)?
@@ -1479,6 +1553,13 @@ pub async fn handle_admin_mark_shipped(
         }
     }
 
+    crate::audit(
+        &state,
+        &p.username,
+        "order.ship",
+        &id.to_string(),
+        &format!("carrier={} tracking={}", carrier, tracking),
+    );
     Ok(Json(order_to_json(order)))
 }
 
@@ -1496,10 +1577,11 @@ pub async fn handle_admin_update_order_notes(
     let p = validate_principal(&headers, &state)?;
     require_admin_full(&state, &p)?;
     let ok = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.update_order_notes(id, &req.notes).map_err(db_err)?
     };
     if !ok { return Err(error_response(StatusCode::NOT_FOUND, "Order not found")); }
+    crate::audit(&state, &p.username, "order.notes", &id.to_string(), "");
     Ok(Json(json!({ "id": id })))
 }
 
@@ -1612,7 +1694,7 @@ pub async fn handle_admin_get_settings(
     let p = validate_principal(&headers, &state)?;
     require_admin_full(&state, &p)?;
     let pairs = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.list_shop_settings().map_err(db_err)?
     };
     let mut out = serde_json::Map::new();
@@ -1669,9 +1751,10 @@ pub async fn handle_admin_put_settings(
             SETTING_SUPPORT_CONTACT => v.trim().to_string(),
             _ => v.clone(),
         };
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.set_shop_setting(k, &normalized).map_err(db_err)?;
     }
+    crate::audit(&state, &p.username, "shop.settings_update", "", "");
     Ok(Json(json!({ "status": "OK" })))
 }
 
@@ -1684,9 +1767,9 @@ pub async fn handle_admin_put_settings(
 // ---------------------------------------------------------------------------
 
 pub async fn handle_shop_page(State(state): State<Arc<AppState>>) -> axum::response::Html<String> {
-    let head = "<title>Shop — Xikaku</title>\n\
+    let head = "<title>Shop - Xikaku</title>\n\
                 <meta name=\"description\" content=\"Order Xikaku IMU and inertial sensors directly. Shipped from our Los Angeles office.\">\n\
-                <meta property=\"og:title\" content=\"Shop — Xikaku\">\n\
+                <meta property=\"og:title\" content=\"Shop - Xikaku\">\n\
                 <meta property=\"og:type\" content=\"website\">\n";
     let analytics = crate::website::analytics_head(&state);
     let html = crate::website::WEBSITE_HTML
@@ -1746,7 +1829,7 @@ mod tests {
         mac.update(payload);
         let sig = hex::encode(mac.finalize().into_bytes());
         let header = format!("t={},v1={}", ts, sig);
-        // 10 min later — outside 5 min tolerance.
+        // 10 min later - outside 5 min tolerance.
         assert!(verify_stripe_signature(secret, &header, payload, ts + 600).is_err());
     }
 

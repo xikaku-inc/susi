@@ -2,7 +2,7 @@
 //!
 //! Simple single-site page store at `/api/v1/website/...`. Public reads for
 //! viewing pages + assets; admin writes (JWT/API-token) for editing. Unlike
-//! `docs`, there's no release concept and no pipeline/user origin split —
+//! `docs`, there's no release concept and no pipeline/user origin split -
 //! all content is hand-authored via the in-browser editor.
 
 use std::collections::HashMap;
@@ -20,7 +20,7 @@ use serde::Deserialize;
 use serde_json::json;
 use susi_core::error::LicenseError;
 
-use crate::docs::{safe_filename};
+use crate::docs::{harden_svg_response, safe_filename};
 use crate::{error_response, require_admin_full, validate_principal, AppState, ErrorResponse};
 
 fn assets_dir(state: &AppState) -> std::path::PathBuf {
@@ -59,15 +59,40 @@ fn safe_slug(slug: &str) -> Result<&str, (StatusCode, Json<ErrorResponse>)> {
 // Public read endpoints
 // ---------------------------------------------------------------------------
 
+/// Row shape returned by `list_website_pages`:
+/// (slug, title, parent_slug, ord, updated_at, meta_description, hidden).
+type PageRow = (String, String, Option<String>, i64, String, String, bool);
+
+/// Drop hidden pages - applied before any public-facing use of the page list
+/// (nav, SSR head, sitemap, llms.txt).
+fn visible_pages(mut pages: Vec<PageRow>) -> Vec<PageRow> {
+    pages.retain(|p| !p.6);
+    pages
+}
+
+/// True when the request carries a valid full-admin principal. The public
+/// read endpoints use this to include hidden pages for the dashboard/editor.
+fn is_admin_request(headers: &HeaderMap, state: &AppState) -> bool {
+    validate_principal(headers, state)
+        .ok()
+        .map(|p| require_admin_full(state, &p).is_ok())
+        .unwrap_or(false)
+}
+
 pub async fn handle_list_pages(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    let db = state.db.lock().unwrap();
-    let pages = db.list_website_pages().map_err(db_err)?;
+    let is_admin = is_admin_request(&headers, &state);
+    let db = state.db.lock();
+    let mut pages = db.list_website_pages().map_err(db_err)?;
+    if !is_admin {
+        pages = visible_pages(pages);
+    }
     let assets = db.list_website_assets().map_err(db_err)?;
     let pages_json: Vec<_> = pages
         .into_iter()
-        .map(|(slug, title, parent_slug, ord, updated_at, meta_description)| {
+        .map(|(slug, title, parent_slug, ord, updated_at, meta_description, hidden)| {
             json!({
                 "slug": slug,
                 "title": title,
@@ -75,6 +100,7 @@ pub async fn handle_list_pages(
                 "ord": ord,
                 "updated_at": updated_at,
                 "meta_description": meta_description,
+                "hidden": hidden,
             })
         })
         .collect();
@@ -90,15 +116,20 @@ pub async fn handle_list_pages(
 
 pub async fn handle_get_page(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(slug): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     safe_slug(&slug)?;
-    let db = state.db.lock().unwrap();
+    let is_admin = is_admin_request(&headers, &state);
+    let db = state.db.lock();
     let page = db
         .get_website_page(&slug)
         .map_err(db_err)?
         .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Page not found"))?;
-    let (title, body_md, parent_slug, ord, updated_at, meta_description) = page;
+    let (title, body_md, parent_slug, ord, updated_at, meta_description, hidden) = page;
+    if hidden && !is_admin {
+        return Err(error_response(StatusCode::NOT_FOUND, "Page not found"));
+    }
     Ok(Json(json!({
         "slug": slug,
         "title": title,
@@ -107,6 +138,7 @@ pub async fn handle_get_page(
         "ord": ord,
         "updated_at": updated_at,
         "meta_description": meta_description,
+        "hidden": hidden,
     })))
 }
 
@@ -127,6 +159,7 @@ pub async fn handle_get_asset(
     resp.insert(header::CONTENT_TYPE, content_type_for(&file_name).parse().unwrap());
     resp.insert(header::CONTENT_LENGTH, bytes.len().into());
     resp.insert(header::CACHE_CONTROL, "public, max-age=300".parse().unwrap());
+    harden_svg_response(&file_name, &mut resp);
     Ok((resp, bytes))
 }
 
@@ -157,7 +190,7 @@ pub async fn handle_upsert_page(
     safe_slug(&slug)?;
 
     let (id, is_home) = {
-        let mut db = state.db.lock().unwrap();
+        let mut db = state.db.lock();
         let id = db.upsert_website_page(
             &slug,
             &req.title,
@@ -168,7 +201,7 @@ pub async fn handle_upsert_page(
             Some(&principal.username),
         )
         .map_err(db_err)?;
-        let pages = db.list_website_pages().unwrap_or_default();
+        let pages = visible_pages(db.list_website_pages().unwrap_or_default());
         let is_home = first_default_slug(&pages) == Some(slug.as_str());
         (id, is_home)
     };
@@ -189,7 +222,7 @@ pub async fn handle_list_page_revisions(
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
     safe_slug(&slug)?;
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let rows = db.list_page_revisions(&slug).map_err(db_err)?;
     let revisions: Vec<_> = rows
         .into_iter()
@@ -212,7 +245,7 @@ pub async fn handle_get_page_revision(
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
     safe_slug(&slug)?;
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let row = db
         .get_page_revision(&slug, id)
         .map_err(db_err)?
@@ -234,7 +267,7 @@ pub async fn handle_restore_page_revision(
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
     safe_slug(&slug)?;
-    let mut db = state.db.lock().unwrap();
+    let mut db = state.db.lock();
     let rev = db
         .get_page_revision(&slug, id)
         .map_err(db_err)?
@@ -244,14 +277,14 @@ pub async fn handle_restore_page_revision(
     let existing_meta = db
         .get_website_page(&slug)
         .map_err(db_err)?
-        .map(|(_t, _b, _p, _o, _u, m)| m)
+        .map(|(_t, _b, _p, _o, _u, m, _h)| m)
         .unwrap_or_default();
     let new_id = db.upsert_website_page(
         &slug, &title, &body_md, parent_slug.as_deref(), ord,
         &existing_meta,
         Some(&principal.username),
     ).map_err(db_err)?;
-    let pages = db.list_website_pages().unwrap_or_default();
+    let pages = visible_pages(db.list_website_pages().unwrap_or_default());
     let is_home = first_default_slug(&pages) == Some(slug.as_str());
     drop(db);
     invalidate_page_cache();
@@ -269,20 +302,26 @@ pub async fn handle_list_assets_with_usage(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let rows = db.list_website_assets_with_usage().map_err(db_err)?;
     let assets: Vec<_> = rows
         .into_iter()
-        .map(|(name, size, usage_count, pages_csv)| {
+        .map(|(name, size, usage_count, pages_csv, products_csv)| {
             let pages: Vec<&str> = if pages_csv.is_empty() {
                 Vec::new()
             } else {
                 pages_csv.split(',').collect()
             };
+            let products: Vec<&str> = if products_csv.is_empty() {
+                Vec::new()
+            } else {
+                products_csv.split(',').collect()
+            };
             json!({
                 "name": name, "size": size,
                 "usage_count": usage_count,
                 "pages": pages,
+                "products": products,
             })
         })
         .collect();
@@ -307,7 +346,7 @@ pub async fn handle_rename_asset(
     safe_filename(new_name)?;
 
     let (ok, n_pages) = {
-        let mut db = state.db.lock().unwrap();
+        let mut db = state.db.lock();
         db.rename_website_asset(&file_name, new_name).map_err(|e| {
             let msg = e.to_string();
             if msg.contains("already exists") {
@@ -362,7 +401,7 @@ pub async fn handle_rename_page(
     }
 
     let result = {
-        let mut db = state.db.lock().unwrap();
+        let mut db = state.db.lock();
         db.rename_website_page(&slug, new_slug)
     };
     match result {
@@ -389,6 +428,33 @@ pub async fn handle_rename_page(
     }
 }
 
+#[derive(Deserialize)]
+pub struct SetPageHiddenRequest {
+    pub hidden: bool,
+}
+
+pub async fn handle_set_page_hidden(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+    Json(req): Json<SetPageHiddenRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    require_admin_full(&state, &principal)?;
+    safe_slug(&slug)?;
+
+    let updated = {
+        let db = state.db.lock();
+        db.set_website_page_hidden(&slug, req.hidden).map_err(db_err)?
+    };
+    if !updated {
+        return Err(error_response(StatusCode::NOT_FOUND, "Page not found"));
+    }
+    invalidate_page_cache();
+    ping_indexnow(&state, vec![canonical_page_url(&slug, false)]);
+    Ok(Json(json!({ "slug": slug, "hidden": req.hidden })))
+}
+
 pub async fn handle_delete_page(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -399,7 +465,7 @@ pub async fn handle_delete_page(
     safe_slug(&slug)?;
 
     let removed = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.delete_website_page(&slug).map_err(db_err)?
     };
     if !removed {
@@ -450,7 +516,7 @@ pub async fn handle_upload_asset(
     })?;
 
     {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.upsert_website_asset(&file_name, bytes.len() as u64)
             .map_err(db_err)?;
     }
@@ -470,7 +536,7 @@ pub async fn handle_delete_asset(
     safe_filename(&file_name)?;
 
     let removed = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.delete_website_asset(&file_name).map_err(db_err)?
     };
     let _ = std::fs::remove_file(assets_dir(&state).join(&file_name));
@@ -590,7 +656,7 @@ pub fn invalidate_page_cache() {
     }
 }
 
-// Returns the static byte slice unchanged — axum's IntoResponse for
+// Returns the static byte slice unchanged - axum's IntoResponse for
 // `&'static [u8]` wraps it via `Body::from_static`, so no per-request copy.
 fn cached_image(content_type: &'static str, bytes: &'static [u8]) -> (HeaderMap, &'static [u8]) {
     let mut h = HeaderMap::new();
@@ -743,7 +809,7 @@ fn first_image_url(body_md: &str) -> Option<String> {
 /// pulldown-cmark doesn't understand pandoc syntax; without this the `{...}`
 /// either rendered as literal text or (when only stripped) dropped classes
 /// like `.logo-light`/`.logo-dark` that the page CSS uses to pick the right
-/// asset for the active theme — causing both logos to flash on load.
+/// asset for the active theme - causing both logos to flash on load.
 fn rewrite_pandoc_image_attrs(body_md: &str) -> String {
     let bytes = body_md.as_bytes();
     let mut out = String::with_capacity(body_md.len());
@@ -847,10 +913,17 @@ fn try_rewrite_image_at(s: &str) -> Option<(usize, String)> {
     Some((consumed, html))
 }
 
-/// Render markdown body into HTML for SSR injection. Pages are admin-edited
-/// so we don't sanitize — we just render with tables, footnotes, strikethrough,
-/// and task lists enabled. Relative image src/href stay relative; the existing
-/// page CSS handles image sizing.
+/// Render markdown body into HTML for SSR injection, with tables, footnotes,
+/// strikethrough, and task lists enabled. Relative image src/href stay
+/// relative; the existing page CSS handles image sizing.
+///
+/// The output is sanitized: pages are admin-edited, but a leaked admin
+/// credential (API tokens skip the TOTP gate) must not become persistent XSS
+/// on the public site. Ammonia strips script/style/event handlers and
+/// javascript: URLs while keeping document structure; `class`/`id` are
+/// allowed so the image attributes emitted above survive. The client-side
+/// renderer escapes raw HTML entirely, so nothing user-visible relies on
+/// markup this strips.
 fn render_body_html(body_md: &str) -> String {
     use pulldown_cmark::{html, Options, Parser};
     let cleaned = rewrite_pandoc_image_attrs(body_md);
@@ -863,24 +936,26 @@ fn render_body_html(body_md: &str) -> String {
     let parser = Parser::new_ext(&cleaned, opts);
     let mut out = String::with_capacity(cleaned.len() * 2);
     html::push_html(&mut out, parser);
-    out
+    ammonia::Builder::default()
+        .add_generic_attributes(&["class", "id"])
+        .clean(&out)
+        .to_string()
 }
 
-fn first_default_slug(pages: &[(String, String, Option<String>, i64, String, String)]) -> Option<&str> {
-    let mut top: Vec<&(String, String, Option<String>, i64, String, String)> =
-        pages.iter().filter(|p| p.2.is_none()).collect();
+fn first_default_slug(pages: &[PageRow]) -> Option<&str> {
+    let mut top: Vec<&PageRow> = pages.iter().filter(|p| p.2.is_none()).collect();
     top.sort_by(|a, b| a.3.cmp(&b.3).then_with(|| a.1.cmp(&b.1)));
     top.first().map(|p| p.0.as_str()).or_else(|| pages.first().map(|p| p.0.as_str()))
 }
 
 fn build_breadcrumbs(
-    pages: &[(String, String, Option<String>, i64, String, String)],
+    pages: &[PageRow],
     slug: &str,
     home_slug: Option<&str>,
 ) -> String {
-    let by_slug: std::collections::HashMap<&str, &(String, String, Option<String>, i64, String, String)> =
+    let by_slug: std::collections::HashMap<&str, &PageRow> =
         pages.iter().map(|p| (p.0.as_str(), p)).collect();
-    let mut chain: Vec<&(String, String, Option<String>, i64, String, String)> = Vec::new();
+    let mut chain: Vec<&PageRow> = Vec::new();
     let mut cur = by_slug.get(slug).copied();
     while let Some(p) = cur {
         chain.push(p);
@@ -928,19 +1003,19 @@ fn render_seo_head(
     description: &str,
     updated_at: &str,
     og_image_override: Option<&str>,
-    pages: &[(String, String, Option<String>, i64, String, String)],
+    pages: &[PageRow],
     products: &[(String, String, String, i64, String, Option<String>, String, bool, i64, String)],
 ) -> String {
     let home_slug = first_default_slug(pages);
     let is_home = home_slug == Some(slug);
     let canonical = canonical_page_url(slug, is_home);
     let full_title = if is_home {
-        format!("{} — {}", SITE_NAME, SITE_TAGLINE)
+        format!("{} - {}", SITE_NAME, SITE_TAGLINE)
     } else {
-        format!("{} — {}", page_title, SITE_NAME)
+        format!("{} - {}", page_title, SITE_NAME)
     };
 
-    // Organization JSON-LD is identical across every page — built once at
+    // Organization JSON-LD is identical across every page - built once at
     // module init by `ORG_JSONLD: LazyLock<String>`.
     let org_jsonld: &str = &ORG_JSONLD;
 
@@ -1093,9 +1168,9 @@ fn render_website(
     }
 
     let (pages, products) = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         (
-            db.list_website_pages().unwrap_or_default(),
+            visible_pages(db.list_website_pages().unwrap_or_default()),
             db.list_products(true).unwrap_or_default(),
         )
     };
@@ -1103,15 +1178,17 @@ fn render_website(
         first_default_slug(&pages).map(|s| s.to_string())
     });
     // If the requested slug is unknown, render the shell anyway (SPA shows "Page not found")
-    // but omit the SEO head — better than 500'ing.
+    // but omit the SEO head - better than 500'ing.
     let (title, description, updated_at, valid_slug, body_md):
         (String, String, String, Option<String>, String) =
         if let Some(s) = slug_owned.as_deref() {
             let row = {
-                let db = state.db.lock().unwrap();
+                let db = state.db.lock();
                 db.get_website_page(s).unwrap_or(None)
             };
-            if let Some((t, body, _p, _o, upd, meta)) = row {
+            // A hidden page renders like an unknown slug: bare shell, no SEO
+            // head, no body - the SPA shows "Page not found" to visitors.
+            if let Some((t, body, _p, _o, upd, meta, false)) = row {
                 let desc = if !meta.trim().is_empty() {
                     meta
                 } else {
@@ -1171,10 +1248,10 @@ fn is_valid_analytics_id(s: &str) -> bool {
 }
 
 /// Render the analytics `<script>` block from the configured Measurement ID,
-/// or empty string when unset. Called per-request — DB lookup is cheap.
+/// or empty string when unset. Called per-request - DB lookup is cheap.
 pub fn analytics_head(state: &Arc<AppState>) -> String {
     let id = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.get_site_setting(SETTING_GOOGLE_ANALYTICS_ID).ok().flatten()
     };
     let Some(id) = id else { return String::new() };
@@ -1227,14 +1304,14 @@ pub async fn handle_sitemap_xml(
     _headers: HeaderMap,
 ) -> impl IntoResponse {
     let pages = {
-        let db = state.db.lock().unwrap();
-        db.list_website_pages().unwrap_or_default()
+        let db = state.db.lock();
+        visible_pages(db.list_website_pages().unwrap_or_default())
     };
     let home_slug = first_default_slug(&pages).map(|s| s.to_string());
     let mut xml = String::from(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n",
     );
-    for (slug, _title, _parent, _ord, updated_at, _meta) in &pages {
+    for (slug, _title, _parent, _ord, updated_at, _meta, _hidden) in &pages {
         let is_home = home_slug.as_deref() == Some(slug.as_str());
         xml.push_str("  <url>\n");
         xml.push_str(&format!(
@@ -1259,8 +1336,8 @@ pub async fn handle_llms_txt(
     _headers: HeaderMap,
 ) -> impl IntoResponse {
     let pages = {
-        let db = state.db.lock().unwrap();
-        db.list_website_pages().unwrap_or_default()
+        let db = state.db.lock();
+        visible_pages(db.list_website_pages().unwrap_or_default())
     };
     let home_slug = first_default_slug(&pages).map(|s| s.to_string());
 
@@ -1275,15 +1352,15 @@ pub async fn handle_llms_txt(
     ));
 
     body.push_str("## Pages\n");
-    for (slug, title, parent, _ord, _upd, meta) in &pages {
+    for (slug, title, parent, _ord, _upd, meta, _hidden) in &pages {
         let desc_source = if !meta.trim().is_empty() {
             meta.clone()
         } else {
             let row = {
-                let db = state.db.lock().unwrap();
+                let db = state.db.lock();
                 db.get_website_page(slug).unwrap_or(None)
             };
-            row.map(|(_t, body, _p, _o, _u, _m)| derive_description(&body))
+            row.map(|(_t, body, _p, _o, _u, _m, _h)| derive_description(&body))
                 .unwrap_or_default()
         };
         let indent = if parent.is_some() { "  " } else { "" };
@@ -1315,7 +1392,7 @@ pub async fn handle_admin_get_site_settings(
     let p = validate_principal(&headers, &state)?;
     require_admin_full(&state, &p)?;
     let pairs = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.list_site_settings().map_err(db_err)?
     };
     let mut out = serde_json::Map::new();
@@ -1352,7 +1429,7 @@ pub async fn handle_admin_put_site_settings(
                 "google_analytics_id must contain only letters, digits, '-' or '_' (max 64 chars)",
             ));
         }
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.set_site_setting(k, trimmed).map_err(db_err)?;
     }
     invalidate_page_cache();
@@ -1360,7 +1437,7 @@ pub async fn handle_admin_put_site_settings(
 }
 
 // ---------------------------------------------------------------------------
-// IndexNow — push page changes to Bing/Yandex/Naver/Seznam (Google opts out).
+// IndexNow - push page changes to Bing/Yandex/Naver/Seznam (Google opts out).
 //
 // Spec: https://www.indexnow.org/documentation
 // We generate a 32-hex-char key on first use, persist it in site_settings,
@@ -1382,14 +1459,14 @@ fn generate_indexnow_key() -> String {
 /// Fetch the configured IndexNow key, lazily creating one the first time.
 fn get_or_create_indexnow_key(state: &Arc<AppState>) -> Option<String> {
     let existing = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.get_site_setting(SETTING_INDEXNOW_KEY).ok().flatten()
     };
     if let Some(k) = existing.filter(|k| !k.is_empty()) {
         return Some(k);
     }
     let key = generate_indexnow_key();
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     db.set_site_setting(SETTING_INDEXNOW_KEY, &key).ok()?;
     Some(key)
 }
@@ -1464,7 +1541,7 @@ mod tests {
     #[test]
     fn derive_description_cuts_on_sentence_boundary() {
         let md = "The Xikaku LPMS series delivers 9-axis and 6-axis inertial measurement \
-            across a wide range of applications — from wearables to autonomous vehicles \
+            across a wide range of applications - from wearables to autonomous vehicles \
             to structural monitoring. All models expose raw data, Euler angles, and \
             quaternions, and are configurable through LPMS-Control software. \
             Pick a sensor to see specs, datasheets, and application notes.";
@@ -1516,6 +1593,31 @@ mod tests {
         assert!(h.contains("Title"));
         assert!(h.contains("<p>"));
         assert!(h.contains("A paragraph"));
+    }
+
+    #[test]
+    fn render_body_html_strips_xss_vectors() {
+        let md = "<script>alert(1)</script>\n\n\
+                  <img src=\"/x.png\" onerror=\"alert(1)\">\n\n\
+                  [link](javascript:alert(1))\n\n\
+                  <iframe src=\"https://evil.example\"></iframe>";
+        let h = render_body_html(md);
+        assert!(!h.contains("<script"), "got: {}", h);
+        assert!(!h.contains("onerror"), "got: {}", h);
+        assert!(!h.to_lowercase().contains("javascript:"), "got: {}", h);
+        assert!(!h.contains("<iframe"), "got: {}", h);
+    }
+
+    #[test]
+    fn svg_assets_are_download_only() {
+        let mut h = HeaderMap::new();
+        harden_svg_response("diagram.SVG", &mut h);
+        assert_eq!(h.get(header::CONTENT_DISPOSITION).unwrap(), "attachment");
+        assert!(h.get(header::CONTENT_SECURITY_POLICY).is_some());
+
+        let mut h = HeaderMap::new();
+        harden_svg_response("photo.png", &mut h);
+        assert!(h.is_empty());
     }
 
     #[test]

@@ -18,7 +18,7 @@ set -euo pipefail
 #      pattern fusionhub already uses.
 #   2. Saves the image to a gzipped tarball and scps it to the server.
 #   3. rsyncs the deployment files (compose files) into /opt/susi.
-#   4. Generates .env (SUSI_ADMIN_KEY) + RSA keypair on first deploy.
+#   4. Creates an empty .env + RSA keypair on first deploy.
 #   5. `docker load` of the shipped image + `docker compose up -d` (no
 #      `--build` flag — uses the loaded image directly).
 #
@@ -107,13 +107,11 @@ fi
 echo "==> Setting up .env file"
 ssh_cmd "
     if [ ! -f $REMOTE_DIR/.env ]; then
-        ADMIN_KEY=\$(openssl rand -hex 32)
-        echo \"SUSI_ADMIN_KEY=\$ADMIN_KEY\" > $REMOTE_DIR/.env
+        touch $REMOTE_DIR/.env
         chmod 600 $REMOTE_DIR/.env
-        echo \"Generated new admin key: \$ADMIN_KEY\"
-        echo \"SAVE THIS KEY — you will need it for admin API access.\"
+        echo 'Created empty .env - add SMTP / Stripe / S3 settings as needed.'
     else
-        echo '.env already exists, keeping existing admin key.'
+        echo '.env already exists, keeping it.'
     fi
 "
 

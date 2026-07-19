@@ -87,7 +87,7 @@ This creates `private.pem` (keep secret) and `public.pem` (distribute with your 
 ### 2. Create a license
 
 ```bash
-# Time-limited license with lease enforcement (default: 7-day lease, 24h grace)
+# Time-limited license with lease enforcement (default: 3-day lease, 24h grace)
 susi-admin create \
   --customer "Acme Corp" \
   --product "MyApp" \
@@ -659,7 +659,7 @@ curl -X POST http://localhost:3100/api/v1/licenses \
     "days": 365,
     "features": ["pro"],
     "max_machines": 2,
-    "lease_duration_hours": 168,
+    "lease_duration_hours": 72,
     "lease_grace_hours": 24
   }'
 ```
@@ -718,14 +718,17 @@ Leases prevent customers from running more concurrent machines than they've paid
 
 ```
 Customer activates on Machine A:
-  → Server grants a 7-day lease
+  → Server grants a 3-day lease
   → Client stores the signed license (includes lease_expires timestamp)
   → Client calls /activate or /verify periodically to renew
 
 Customer wants to move to Machine B:
   → They stop running on Machine A
-  → After 7 days, Machine A's lease expires and is cleaned up
-  → Machine B can now activate (the seat is freed)
+  → After 3 days, Machine A's lease expires and the seat is freed
+  → Machine B can now activate
+  → Machine A's record is kept as history ("stale" in the dashboard,
+    with a last-seen timestamp) so activations stay visible even when
+    a customer goes offline after activating
 
 Customer tries to run on both:
   → Machine A has an active lease
@@ -737,7 +740,7 @@ Customer tries to run on both:
 
 | Parameter | Default | Description |
 |---|---|---|
-| `--lease-duration` | `168` (7 days) | Lease duration in hours. `0` disables lease enforcement. |
+| `--lease-duration` | `72` (3 days) | Lease duration in hours. `0` disables lease enforcement. |
 | `--lease-grace` | `24` (1 day) | Grace period in hours after lease expiry. The software continues working during the grace period but should attempt to renew urgently. |
 
 Lease parameters are set per-license at creation time, so different customers can have different lease windows.
@@ -753,6 +756,10 @@ Lease parameters are set per-license at creation time, so different customers ca
 ### Disabling Leases
 
 Set `--lease-duration 0` when creating a license to disable lease enforcement entirely. Machine activations become permanent (the original behavior), suitable for trusted customers or air-gapped environments.
+
+### Offline Exports Carry No Lease
+
+Exported license files (dashboard export, self-serve "Activate offline machine", `susi-admin export`) and USB tokens never contain a lease, regardless of the license's lease settings - an offline machine cannot phone home to renew, so a leased file would stop validating after lease + grace. The license expiry date still applies. The exported machine holds its seat until it is removed manually in the dashboard.
 
 ## Managing Licenses
 
@@ -894,6 +901,50 @@ Served at the `/site` chrome and disabled (503) unless `SUSI_CONTACT_TO_ADDR` an
 | `GET` | `/api/v1/contact/config` | None | Returns whether the form is enabled and the public Turnstile site key |
 | `POST` | `/api/v1/contact` | None | Submit a contact-form message |
 
+## Dropbox Backups
+
+Rotating, encrypted offsite backups of the whole `/data` volume (SQLite DB via
+`VACUUM INTO`, `private.pem`, `db_secret.bin`, `jwt_secret.bin`, `docs/`,
+optionally `releases/`) to a Dropbox App Folder. Redundant to the primary AWS
+backups; managed from the dashboard's admin-only Backups page.
+
+Setup:
+
+1. Create a scoped Dropbox app (App folder access) with permissions
+   `files.content.write`, `files.content.read`, `files.metadata.read`.
+2. Set in the server environment (`/opt/susi/.env`):
+   - `SUSI_DROPBOX_APP_KEY` / `SUSI_DROPBOX_APP_SECRET`
+   - `SUSI_BACKUP_KEY` - 64 hex chars (`openssl rand -hex 32`). Archives are
+     encrypted with chunked AES-256-GCM under this key before upload. Keep a
+     copy off-server (password manager) - without it backups are unreadable.
+   - `SUSI_BACKUP_PREFIX` - archive name prefix (`prod` / `staging`); rotation
+     only ever touches archives with the instance's own prefix.
+3. On the dashboard Backups page: Connect Dropbox (opens the consent page,
+   paste the one-time code back), then enable the nightly backup.
+
+Scheduling: one backup per day at the configured UTC hour, retried hourly on
+failure. Rotation is grandfather-father-son - newest archive per day/week/month
+up to the configured counts (default 7/4/12), and nothing younger than 48 h is
+ever deleted. The OAuth refresh token is stored sealed with the DB at-rest key;
+access tokens are minted per run and never persisted.
+
+Restore:
+
+```bash
+# Download the archive from Dropbox (Apps/<app name>/), then:
+susi-server decrypt-backup prod-backup-20260706-030000.tar.gz.enc --key <SUSI_BACKUP_KEY>
+tar -xzf prod-backup-20260706-030000.tar.gz   # unpack into a fresh /data volume
+```
+
+| Method | Endpoint | Auth | Description |
+|---|---|---|---|
+| `GET` | `/api/v1/admin/backup/status` | Admin JWT | Settings, connection state, run history |
+| `PUT` | `/api/v1/admin/backup/settings` | Admin JWT | Schedule + retention |
+| `GET` | `/api/v1/admin/backup/connect-url` | Admin JWT | Dropbox consent URL |
+| `POST` | `/api/v1/admin/backup/connect` | Admin JWT | Exchange pasted code for a refresh token |
+| `POST` | `/api/v1/admin/backup/disconnect` | Admin JWT | Revoke + forget the connection |
+| `POST` | `/api/v1/admin/backup/run` | Admin JWT | Trigger a manual backup |
+
 ## Deploying to AWS Lightsail
 
 The project includes a Dockerfile, docker-compose.yml, and a deploy script for one-command deployment to an AWS Lightsail (or any EC2/VPS) instance.
@@ -948,11 +999,10 @@ On first run, the server creates an `admin` user with password `changeme`. Log i
 
 ### 3a. Configure environment variables
 
-The container reads optional integrations from `/opt/susi/.env`. The deploy script seeds it with `SUSI_ADMIN_KEY`; add the rest manually as needed:
+The container reads optional integrations from `/opt/susi/.env`. The deploy script creates an empty file on first deploy; add settings manually as needed:
 
 ```bash
 # /opt/susi/.env  (chmod 600)
-SUSI_ADMIN_KEY=<generated-by-deploy.sh>
 
 # Sign-in code / password-reset / outbound mail (Gmail SMTP relay shown)
 SUSI_SMTP_HOST=smtp.gmail.com
@@ -1019,7 +1069,7 @@ curl -X POST $SERVER/api/v1/licenses \
     "days": 365,
     "features": ["pro"],
     "max_machines": 2,
-    "lease_duration_hours": 168,
+    "lease_duration_hours": 72,
     "lease_grace_hours": 24
   }'
 

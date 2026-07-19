@@ -262,7 +262,7 @@ fn cmd_seed_e2e_workspace(
             username,
         )?;
     } else {
-        db.add_workspace_member(workspace_id, username, "owner")?;
+        db.add_workspace_member(workspace_id, username)?;
     }
 
     println!(
@@ -423,18 +423,15 @@ fn cmd_export(
         );
     }
 
-    // Add machine activation
+    // Add machine activation. Offline exports carry no lease - the machine
+    // cannot phone home to renew, so a leased file would stop validating
+    // after lease + grace. The license expiry date still applies.
     let name = if friendly_name.is_empty() {
         "Unknown".to_string()
     } else {
         friendly_name.to_string()
     };
-    let lease_expires = if license.lease_duration_hours == 0 {
-        None
-    } else {
-        Some(Utc::now() + Duration::hours(license.lease_duration_hours as i64))
-    };
-    db.add_machine_activation(&license.id, &machine_code, &name, lease_expires)?;
+    db.add_machine_activation(&license.id, &machine_code, &name, None)?;
 
     // Re-fetch license with the new activation
     let license = db.get_license_by_key(key)?.unwrap();

@@ -3,6 +3,7 @@ target/
 *.pem
 keys/
 license.json
+.env
 .git/
 .github/
 cpp/

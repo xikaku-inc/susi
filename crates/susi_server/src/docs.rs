@@ -19,7 +19,7 @@ use susi_core::error::LicenseError;
 
 use crate::{
     error_response, release_reader_check, release_writer_check, validate_principal, AppState,
-    ErrorResponse, Principal,
+    ErrorResponse,
 };
 
 // ---------------------------------------------------------------------------
@@ -96,6 +96,22 @@ fn content_type_for(name: &str) -> &'static str {
     else { "application/octet-stream" }
 }
 
+/// Uploaded SVG can carry <script>; navigating to the asset URL would run it
+/// in the site's origin. Browsers ignore Content-Disposition on subresource
+/// loads, so <img> embedding keeps rendering - only direct navigation turns
+/// from "execute" into "download". The sandbox CSP (which overrides the
+/// site-wide header) additionally neuters scripts in any context that still
+/// renders the document.
+pub(crate) fn harden_svg_response(file_name: &str, resp: &mut HeaderMap) {
+    if file_name.to_ascii_lowercase().ends_with(".svg") {
+        resp.insert(header::CONTENT_DISPOSITION, HeaderValue::from_static("attachment"));
+        resp.insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static("default-src 'none'; sandbox"),
+        );
+    }
+}
+
 fn db_err(e: LicenseError) -> (StatusCode, Json<ErrorResponse>) {
     error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string())
 }
@@ -115,7 +131,7 @@ pub(crate) fn seed_user_docs_into_release(
     workspace_id: Option<&str>,
 ) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
     let (src_tag, asset_names) = {
-        let mut db = state.db.lock().unwrap();
+        let mut db = state.db.lock();
         let prior = db
             .latest_prior_release_with_user_docs(dst_id, product, workspace_id)
             .map_err(db_err)?;
@@ -152,25 +168,6 @@ pub(crate) fn seed_user_docs_into_release(
     Ok(())
 }
 
-/// Permission gate for doc write endpoints that may auto-create a release.
-/// Admin-only. Returns the existing release's workspace id (if any) so seeding
-/// stays scope-correct; returns `None` if the release does not yet exist (the
-/// caller will create it as a global release).
-fn release_writer_check_or_admin_create(
-    state: &AppState,
-    principal: &Principal,
-    product: &str,
-    tag: &str,
-) -> Result<Option<String>, (StatusCode, Json<ErrorResponse>)> {
-    crate::require_admin_full(state, principal)?;
-    let db = state.db.lock().unwrap();
-    let scoped_ws = db
-        .get_release_workspace_id(product, tag)
-        .map_err(db_err)?
-        .flatten();
-    Ok(scoped_ws)
-}
-
 /// Ensure the release row for `(product, tag)` exists and, if it was just
 /// created, seed it with hand-authored content from the most recent prior
 /// release in the same scope. Returns the release id.
@@ -182,7 +179,7 @@ fn ensure_release_with_seed(
     workspace_id: Option<&str>,
 ) -> Result<i64, (StatusCode, Json<ErrorResponse>)> {
     let (dst_id, newly_created) = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.ensure_release_created_scoped(product, tag, name, workspace_id)
             .map_err(db_err)?
     };
@@ -208,7 +205,7 @@ async fn list_doc_releases_impl(
     state: &Arc<AppState>,
     product: &str,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let rows = db.list_doc_releases(product).map_err(db_err)?;
     let releases: Vec<_> = rows
         .into_iter()
@@ -242,7 +239,7 @@ async fn latest_doc_release_impl(
     state: &Arc<AppState>,
     product: &str,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let mut rows = db.list_doc_releases(product).map_err(db_err)?;
     if rows.is_empty() {
         return Err(error_response(StatusCode::NOT_FOUND, "No documentation releases"));
@@ -279,7 +276,7 @@ async fn list_doc_pages_impl(
     safe_tag(tag)?;
     let principal_opt = validate_principal(headers, state).ok();
     release_reader_check(state, principal_opt.as_ref(), product, tag)?;
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let release_id = db
         .get_release_by_product_tag(product, tag)
         .map_err(db_err)?
@@ -336,7 +333,7 @@ async fn get_doc_page_impl(
     safe_tag(tag)?;
     let principal_opt = validate_principal(headers, state).ok();
     release_reader_check(state, principal_opt.as_ref(), product, tag)?;
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let release_id = db
         .get_release_by_product_tag(product, tag)
         .map_err(db_err)?
@@ -419,6 +416,7 @@ async fn get_doc_asset_impl(
     resp.insert(header::CONTENT_LENGTH, bytes.len().into());
     // Allow inline display; long max-age since assets are immutable per release
     resp.insert(header::CACHE_CONTROL, "public, max-age=86400".parse().unwrap());
+    harden_svg_response(file_name, &mut resp);
     Ok((resp, bytes))
 }
 
@@ -468,7 +466,7 @@ async fn upsert_doc_page_impl(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(headers, state)?;
     safe_tag(tag)?;
-    let workspace_id = release_writer_check_or_admin_create(state, &principal, product, tag)?;
+    let workspace_id = release_writer_check(state, &principal, product, tag)?;
 
     let release_id = ensure_release_with_seed(
         state,
@@ -478,7 +476,7 @@ async fn upsert_doc_page_impl(
         workspace_id.as_deref(),
     )?;
     let id = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.upsert_doc_page(
             release_id,
             slug,
@@ -532,7 +530,7 @@ async fn rename_doc_page_impl(
         return Err(error_response(StatusCode::BAD_REQUEST, "Invalid slug"));
     }
 
-    let mut db = state.db.lock().unwrap();
+    let mut db = state.db.lock();
     let release_id = db
         .get_release_by_product_tag(product, tag)
         .map_err(db_err)?
@@ -581,7 +579,7 @@ async fn delete_doc_page_impl(
     safe_tag(tag)?;
     release_writer_check(state, &principal, product, tag)?;
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock();
     let release_id = db
         .get_release_by_product_tag(product, tag)
         .map_err(db_err)?
@@ -633,7 +631,7 @@ async fn bulk_import_docs_impl(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
     safe_tag(&tag)?;
-    let workspace_id = release_writer_check_or_admin_create(&state, &principal, product, &tag)?;
+    let workspace_id = release_writer_check(&state, &principal, product, &tag)?;
 
     let mut release_name = String::new();
     let mut manifest: HashMap<String, PageManifestEntry> = HashMap::new();
@@ -711,7 +709,7 @@ async fn bulk_import_docs_impl(
 
     let release_id = ensure_release_with_seed(&state, product, &tag, &release_name, workspace_id.as_deref())?;
     let (written_pages, skipped_user_slugs) = {
-        let mut db = state.db.lock().unwrap();
+        let mut db = state.db.lock();
         db.upsert_doc_pages(release_id, &row_data).map_err(db_err)?
     };
 
@@ -727,7 +725,7 @@ async fn bulk_import_docs_impl(
                 &format!("Cannot create assets dir: {}", e),
             )
         })?;
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         for (name, bytes) in &assets {
             let wrote = db
                 .upsert_doc_asset_pipeline(release_id, name, bytes.len() as u64)
@@ -794,7 +792,7 @@ async fn upload_doc_asset_impl(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
     safe_tag(&tag)?;
-    let workspace_id = release_writer_check_or_admin_create(&state, &principal, product, &tag)?;
+    let workspace_id = release_writer_check(&state, &principal, product, &tag)?;
 
     // Pull the first "file" field from the multipart body.
     let mut file_name = String::new();
@@ -832,7 +830,7 @@ async fn upload_doc_asset_impl(
     })?;
 
     {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.upsert_doc_asset(release_id, &file_name, bytes.len() as u64)
             .map_err(db_err)?;
     }
@@ -880,13 +878,13 @@ async fn delete_doc_asset_impl(
     release_writer_check(state, &principal, product, tag)?;
 
     let release_id = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.get_release_by_product_tag(product, tag)
             .map_err(db_err)?
             .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Release not found"))?
     };
     let removed = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock();
         db.delete_doc_asset(release_id, file_name).map_err(db_err)?
     };
     let _ = std::fs::remove_file(assets_dir(state, product, tag).join(file_name));

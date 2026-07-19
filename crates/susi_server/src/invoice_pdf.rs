@@ -212,7 +212,7 @@ pub fn generate(
 
 // Embed the Xikaku PNG with its top-right corner at (right_mm, top_mm).
 // We resize the source down to the on-page pixel count first, because
-// printpdf 0.7 stores images as raw uncompressed bytes — a 1200×402 RGBA
+// printpdf 0.7 stores images as raw uncompressed bytes - a 1200×402 RGBA
 // source balloons the PDF to ~1.9 MB, while a 400×134 resize keeps it
 // under 200 KB without visibly degrading the print at 28 mm wide.
 fn draw_logo(layer: &PdfLayerReference, right_mm: f32, top_mm: f32) -> Result<()> {
@@ -374,7 +374,7 @@ mod tests {
             }}
         });
         let line_items = vec![
-            json!({"quantity": 1, "description": "LPMS-NAV3-CAN — Industrial 6-Axis IMU (CAN)", "amount_total": 49900, "currency": "usd"}),
+            json!({"quantity": 1, "description": "LPMS-NAV3-CAN - Industrial 6-Axis IMU (CAN)", "amount_total": 49900, "currency": "usd"}),
         ];
         let invoice = json!({"number": "9VRGWXU6-0001", "created": 1745625600i64});
         let bytes = generate(&event, &line_items, &invoice, Some(7)).expect("generate");
