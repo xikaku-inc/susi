@@ -292,7 +292,10 @@ pub(crate) async fn handle_public_latest_download(
         pct_encode(&asset),
         pct_encode(&product),
     );
-    Ok(axum::response::Redirect::to(&url))
+    Ok((
+        StatusCode::FOUND,
+        [(axum::http::header::LOCATION, url)],
+    ))
 }
 
 /// List releases - admin view (JWT)
