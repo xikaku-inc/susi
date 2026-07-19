@@ -43,7 +43,7 @@ pub struct MachineActivation {
 }
 
 /// The payload that gets signed and shipped to the client.
-/// This is a subset of License — no server-internal fields.
+/// This is a subset of License - no server-internal fields.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LicensePayload {
     pub id: String,

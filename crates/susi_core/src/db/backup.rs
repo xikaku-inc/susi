@@ -2,7 +2,7 @@ use super::*;
 
 impl LicenseDb {
     // -----------------------------------------------------------------------
-    // Dropbox backup — config/state KV + run history
+    // Dropbox backup - config/state KV + run history
     // -----------------------------------------------------------------------
 
     pub fn get_backup_state(&self, key: &str) -> Result<Option<String>, LicenseError> {
@@ -78,7 +78,7 @@ impl LicenseDb {
         Ok(())
     }
 
-    /// Flip any `running` rows to `error` — called once at startup so a run
+    /// Flip any `running` rows to `error` - called once at startup so a run
     /// interrupted by a crash/redeploy doesn't show as running forever.
     pub fn mark_interrupted_backup_runs(&self) -> Result<usize, LicenseError> {
         let now = Utc::now().to_rfc3339();

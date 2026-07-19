@@ -39,8 +39,8 @@ if (-not $signtool) {
 Write-Host "signtool: $signtool"
 
 # ---- Sign ---------------------------------------------------------------
-# /fd SHA256  — use SHA-256 as the file digest algorithm
-# /n <name>   — pick the cert by subject name from the My store
+# /fd SHA256  - use SHA-256 as the file digest algorithm
+# /n <name>   - pick the cert by subject name from the My store
 # No timestamp server: this is a local test cert without network access required.
 & $signtool sign /fd SHA256 /n $CertName $BinaryPath
 if ($LASTEXITCODE -ne 0) {

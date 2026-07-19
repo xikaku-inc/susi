@@ -121,7 +121,7 @@ fn db_err(e: LicenseError) -> (StatusCode, Json<ErrorResponse>) {
 /// global). Physical asset files are copied on disk alongside the DB rows.
 /// Idempotent: `INSERT OR IGNORE` makes a second call a no-op. Call from any
 /// code path that creates a release row (binary-asset upload, docs editor,
-/// docs bulk import) so user docs always carry forward — but never across
+/// docs bulk import) so user docs always carry forward - but never across
 /// workspaces.
 pub(crate) fn seed_user_docs_into_release(
     state: &AppState,

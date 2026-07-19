@@ -425,7 +425,7 @@ impl WorkspaceClient {
     }
 
     // -----------------------------------------------------------------------
-    // HTTP helpers (async — sync paths go through `blocking_run`)
+    // HTTP helpers (async - sync paths go through `blocking_run`)
     // -----------------------------------------------------------------------
 
     async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, WorkspaceError> {

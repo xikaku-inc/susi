@@ -118,7 +118,7 @@ impl LicenseDb {
     }
 
     /// List releases that belong to a single workspace. Global releases are
-    /// excluded — those are reachable through the public/admin global release
+    /// excluded - those are reachable through the public/admin global release
     /// listing and don't belong on a workspace-specific surface.
     pub fn list_releases_for_workspace(
         &self,
@@ -224,7 +224,7 @@ impl LicenseDb {
     }
 
     /// Reassign a release to a different workspace (or to global with `None`).
-    /// Doesn't touch any other column — doc pages, assets, and software files
+    /// Doesn't touch any other column - doc pages, assets, and software files
     /// stay attached because they FK on release_id, not on workspace_id.
     pub fn set_release_workspace(
         &self,

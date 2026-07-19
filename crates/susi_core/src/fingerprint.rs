@@ -13,7 +13,7 @@ pub fn get_machine_code() -> Result<String, LicenseError> {
     machine_code_from_ids(&a, &b)
 }
 
-/// Pure core of [`get_machine_code`] — separated so it can be unit-tested
+/// Pure core of [`get_machine_code`] - separated so it can be unit-tested
 /// without access to the real hardware ID sources.
 pub(crate) fn machine_code_from_ids(a: &str, b: &str) -> Result<String, LicenseError> {
     let na = normalize(a);
@@ -328,7 +328,7 @@ mod tests {
     fn test_get_machine_code_is_stable() {
         // Some CI runners (e.g. GitHub ubuntu-latest) have an empty root-disk
         // serial, which get_machine_code intentionally refuses. Treat that as
-        // "test environment can't exercise this" rather than a real failure —
+        // "test environment can't exercise this" rather than a real failure -
         // the pure-hash invariants are already covered by the regression tests
         // against machine_code_from_ids.
         let code = match get_machine_code() {
@@ -367,7 +367,7 @@ mod tests {
 
     #[test]
     fn test_get_or_cache_rejects_corrupt_and_writes_fresh() {
-        // Requires a real hardware fingerprint as fallback — skip on CI
+        // Requires a real hardware fingerprint as fallback - skip on CI
         // runners that don't expose a root-disk serial. See comment on
         // test_get_machine_code_is_stable.
         if get_machine_code().is_err() {

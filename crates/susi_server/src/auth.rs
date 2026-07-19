@@ -16,7 +16,7 @@ pub(crate) async fn handle_login(
     // sign-in code email so all three show the same readable string.
     let device_label = summarize_user_agent(&req.device_label);
 
-    // Phase 1 — password check. Pull every DB row we need under one lock, drop
+    // Phase 1 - password check. Pull every DB row we need under one lock, drop
     // the lock, then run Argon2 verify off-thread so the ~50 ms CPU spend
     // doesn't serialise every other request behind us.
     let (username, hash, must_change, role, totp_enabled, user_email, device_known) = {
@@ -56,7 +56,7 @@ pub(crate) async fn handle_login(
         return Err(error_response(StatusCode::UNAUTHORIZED, "Invalid credentials"));
     }
 
-    // Phase 2 — decide what the new-device gate demands.
+    // Phase 2 - decide what the new-device gate demands.
     //
     //   known device                → password only, issue JWT
     //   new device + email + SMTP   → require sign-in code (and TOTP if enabled)
@@ -64,7 +64,7 @@ pub(crate) async fn handle_login(
     if !device_known {
         let code_disabled = signin_code_disabled(&state);
         if let (Some(email_addr), false) = (user_email.as_ref(), code_disabled) {
-            // Issue a 6-digit sign-in code. Do NOT issue JWT yet — the user
+            // Issue a 6-digit sign-in code. Do NOT issue JWT yet - the user
             // has to type the code back, which proves email control.
             let code = random_signin_code();
             let token_hash = hash_signin_code(&username, &code);
@@ -82,7 +82,7 @@ pub(crate) async fn handle_login(
             }
 
             // Fire off the email. We log but don't leak failures back to the
-            // caller — telling an unauthenticated client that an address is
+            // caller - telling an unauthenticated client that an address is
             // unreachable would be a small info leak.
             let email_service = state.email.clone().expect("checked above");
             let to = email_addr.clone();
@@ -110,7 +110,7 @@ pub(crate) async fn handle_login(
             })));
         }
 
-        // Bootstrap path — no email on file or SMTP disabled.
+        // Bootstrap path - no email on file or SMTP disabled.
         log::warn!(
             "New-device login for user '{}' accepted without email verification (email set: {}, smtp enabled: {})",
             username,
@@ -119,7 +119,7 @@ pub(crate) async fn handle_login(
         );
     }
 
-    // Phase 3 — TOTP. Only enforced on new devices when enabled.
+    // Phase 3 - TOTP. Only enforced on new devices when enabled.
     if totp_enabled && !device_known {
         match &req.totp_code {
             None => {
@@ -136,7 +136,7 @@ pub(crate) async fn handle_login(
         }
     }
 
-    // Phase 4 — register this device as trusted (if fp provided) and issue JWT.
+    // Phase 4 - register this device as trusted (if fp provided) and issue JWT.
     if !req.device_fp.is_empty() {
         let db = state.db.lock();
         if device_known {
@@ -223,7 +223,7 @@ pub(crate) async fn handle_signin_code_exchange(
         })?;
     }
 
-    // All gates passed — NOW consume the code (atomic flip; guards against
+    // All gates passed - NOW consume the code (atomic flip; guards against
     // a concurrent second submission). Anything below this point must
     // succeed, since after consumption a retry would fail.
     let consumed = {
@@ -453,7 +453,7 @@ pub(crate) async fn handle_forgot_password(
     let ip = client_ip(peer, &headers);
     check_login_rate_limit(&state, ip)?;
 
-    // Generic OK response — never leak whether identifier/email/SMTP are set up.
+    // Generic OK response - never leak whether identifier/email/SMTP are set up.
     let ok = || Json(serde_json::json!({ "status": "OK" }));
 
     let identifier = req.identifier.trim().to_string();
@@ -598,7 +598,7 @@ pub(crate) async fn handle_verify_2fa(
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
     drop(db);
 
-    // Generate fresh backup codes atomically with enable — the user should
+    // Generate fresh backup codes atomically with enable - the user should
     // see them once, right now, and have no chance of losing access later
     // because they never saved them.
     let raw_codes = generate_backup_codes(8);
@@ -648,7 +648,7 @@ pub(crate) async fn handle_disable_2fa(
 
     db.disable_user_totp(&principal.username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
-    // Wipe backup codes too — they were bound to the (now gone) 2FA factor.
+    // Wipe backup codes too - they were bound to the (now gone) 2FA factor.
     let _ = db.clear_backup_codes(&principal.username);
 
     audit_db(&db, &principal.username, "auth.2fa_disabled", &principal.username, "");

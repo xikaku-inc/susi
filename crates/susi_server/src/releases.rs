@@ -97,7 +97,7 @@ pub(crate) async fn handle_delete_product(
     Ok(Json(serde_json::json!({ "status": "OK" })))
 }
 
-/// List releases — available to licensed clients or authenticated users
+/// List releases - available to licensed clients or authenticated users
 pub(crate) async fn handle_get_releases(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -143,7 +143,7 @@ pub(crate) async fn handle_get_releases(
 }
 
 /// Mint a short-lived, single-asset ticket the browser can include as a query
-/// parameter on the download URL — needed because `<a href>` clicks can't
+/// parameter on the download URL - needed because `<a href>` clicks can't
 /// attach Authorization headers, but only `<a href>`-style navigation hands
 /// the response off to the browser's native download UI.
 pub(crate) async fn handle_mint_download_ticket(
@@ -295,7 +295,7 @@ pub(crate) async fn handle_public_latest_download(
     Ok(axum::response::Redirect::to(&url))
 }
 
-/// List releases — admin view (JWT)
+/// List releases - admin view (JWT)
 pub(crate) async fn handle_list_releases_admin(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -334,7 +334,7 @@ pub(crate) async fn handle_list_releases_admin(
     Ok(Json(serde_json::json!({ "releases": releases })))
 }
 
-/// Upload a new release — admin only (JWT)
+/// Upload a new release - admin only (JWT)
 pub(crate) async fn handle_upload_release(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -409,7 +409,7 @@ pub(crate) async fn handle_upload_release(
         docs::safe_filename(file_name)?;
     }
 
-    // Upsert release metadata — re-running a release (e.g. a CI retry) must
+    // Upsert release metadata - re-running a release (e.g. a CI retry) must
     // reuse the existing release_id so doc_pages and assets hanging off this
     // release survive. Previously the handler rejected existing tags with 409
     // and the caller was forced to DELETE first, which cascaded and wiped
@@ -506,7 +506,7 @@ pub(crate) async fn handle_update_release(
 }
 
 /// Move a release to a different workspace (or to global). Admin only.
-/// Files on disk stay put — releases are keyed by tag, not workspace.
+/// Files on disk stay put - releases are keyed by tag, not workspace.
 pub(crate) async fn handle_move_release(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -556,7 +556,7 @@ pub(crate) async fn handle_move_release(
     })))
 }
 
-/// Delete a release — admin only (JWT)
+/// Delete a release - admin only (JWT)
 pub(crate) async fn handle_delete_release(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -669,7 +669,7 @@ pub(crate) async fn handle_replace_release_asset(
         let db = state.db.lock();
         db.add_release_asset(release_id, &new_file_name, bytes.len() as u64)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
-        // Drop the old row only if the new file landed under a different name —
+        // Drop the old row only if the new file landed under a different name -
         // otherwise add_release_asset's upsert already updated the row in place.
         if new_file_name != old_file_name {
             db.delete_release_asset(release_id, &old_file_name)

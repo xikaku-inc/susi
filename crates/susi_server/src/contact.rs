@@ -45,7 +45,7 @@ pub struct ContactRequest {
     pub subject: String,
     #[serde(default)]
     pub message: String,
-    /// Honeypot — must be empty. Real browsers don't fill hidden inputs;
+    /// Honeypot - must be empty. Real browsers don't fill hidden inputs;
     /// dumb spambots happily fill anything that looks like a form field.
     #[serde(default)]
     pub website: String,
@@ -77,7 +77,7 @@ pub async fn handle_submit(
         ));
     }
 
-    // Honeypot — silently accept (don't reveal what triggered) but drop.
+    // Honeypot - silently accept (don't reveal what triggered) but drop.
     if !req.website.trim().is_empty() {
         log::info!("Contact form honeypot tripped");
         return Ok(Json(json!({ "status": "ok" })));
@@ -152,7 +152,7 @@ pub async fn handle_submit(
         message = message,
     );
 
-    // Send as plain text only — no HTML body from untrusted user input.
+    // Send as plain text only - no HTML body from untrusted user input.
     // Also set Reply-To indirectly by passing the visitor email in the body;
     // we keep the actual From as the configured server address so SPF/DKIM
     // are valid (visitor's domain wouldn't authorize us as a sender).
@@ -172,7 +172,7 @@ pub async fn handle_submit(
 }
 
 fn is_email_like(s: &str) -> bool {
-    // Intentionally minimal — full RFC 5322 is famously hopeless. We just
+    // Intentionally minimal - full RFC 5322 is famously hopeless. We just
     // require a single @ with non-empty parts and a dot in the domain.
     let mut parts = s.split('@');
     let local = parts.next().unwrap_or("");

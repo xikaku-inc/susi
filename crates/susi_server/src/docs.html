@@ -388,7 +388,7 @@ body {
 .editor:focus { outline: 1px solid var(--accent); }
 .editor.drop-target { outline: 2px dashed var(--accent); outline-offset: -4px; }
 
-/* EasyMDE theme overrides — match the surrounding dark UI. */
+/* EasyMDE theme overrides - match the surrounding dark UI. */
 .EasyMDEContainer { background: var(--bg); }
 .EasyMDEContainer .CodeMirror {
     background: var(--code-bg);
@@ -745,7 +745,7 @@ body {
 <div id="toast" class="toast"></div>
 
 <script>
-// Theme handling — shared key 'susi_theme' so dashboard + docs stay in sync per-origin.
+// Theme handling - shared key 'susi_theme' so dashboard + docs stay in sync per-origin.
 function applyTheme(t) {
     const root = document.documentElement;
     if (t === 'system') {
@@ -1063,7 +1063,7 @@ function escHtml(s) {
 }
 
 // ---------------------------------------------------------------------------
-// Markdown renderer — handles what generate_node_docs.py emits:
+// Markdown renderer - handles what generate_node_docs.py emits:
 // ATX headers, fenced code blocks, inline code, bold/italic, links, images,
 // blockquotes, unordered lists, GFM tables, horizontal rules, hard line breaks.
 // ---------------------------------------------------------------------------
@@ -1180,7 +1180,7 @@ function renderMarkdown(src) {
             continue;
         }
 
-        // GFM table — header row, alignment row, then body rows
+        // GFM table - header row, alignment row, then body rows
         if (line.includes('|') && i + 1 < lines.length && /^\s*\|?[\s:|-]+\|[\s:|-]+\|?\s*$/.test(lines[i+1])) {
             const headers = splitTableRow(line);
             i += 2;
@@ -1228,7 +1228,7 @@ function renderMarkdown(src) {
             continue;
         }
 
-        // Ordered list — preserve the first item's number as the list start
+        // Ordered list - preserve the first item's number as the list start
         const ol = line.match(/^(\d+)\.\s+(.*)$/);
         if (ol) {
             const start = ol[1];
@@ -1276,7 +1276,7 @@ function splitTableRow(line) {
 // Data fetch
 // ---------------------------------------------------------------------------
 
-// Load the product catalog and populate the picker. Global mode only —
+// Load the product catalog and populate the picker. Global mode only -
 // workspace docs are not product-scoped.
 async function loadProducts() {
     if (currentWorkspaceId) return;
@@ -1321,7 +1321,7 @@ async function loadReleases() {
     releases = data.releases || [];
     const picker = document.getElementById('releasePicker');
     picker.innerHTML = releases.map(r =>
-        '<option value="' + escHtml(r.tag) + '">' + escHtml(r.tag) + (r.name && r.name !== r.tag ? ' — ' + escHtml(r.name) : '') + '</option>'
+        '<option value="' + escHtml(r.tag) + '">' + escHtml(r.tag) + (r.name && r.name !== r.tag ? ' - ' + escHtml(r.name) : '') + '</option>'
     ).join('');
     return releases.length > 0;
 }
@@ -1601,7 +1601,7 @@ function renderEditor() {
 /// when it points at a page that doesn't (yet) exist, so we don't silently
 /// lose the value.
 function buildParentOptions(selected, excludeSlug) {
-    const opts = ['<option value="">(none — top level)</option>'];
+    const opts = ['<option value="">(none - top level)</option>'];
     const sorted = [...pages].sort((a, b) => a.title.localeCompare(b.title));
     const known = new Set();
     sorted.forEach(p => {
@@ -1620,7 +1620,7 @@ function buildParentOptions(selected, excludeSlug) {
 
 function initEasyMDE(initialBody) {
     if (typeof EasyMDE === 'undefined') {
-        toast('Editor failed to load — refresh the page', 'error');
+        toast('Editor failed to load - refresh the page', 'error');
         return;
     }
     if (easymde) { try { easymde.toTextArea(); } catch (e) {} easymde = null; }
@@ -1658,7 +1658,7 @@ function initEasyMDE(initialBody) {
             '|',
             { name: 'link', action: EasyMDE.drawLink, text: '🔗', title: 'Insert link' },
             { name: 'upload-image', action: '*image-upload*', text: '🖼', title: 'Upload image' },
-            { name: 'horizontal-rule', action: EasyMDE.drawHorizontalRule, text: '—', title: 'Horizontal rule' },
+            { name: 'horizontal-rule', action: EasyMDE.drawHorizontalRule, text: '-', title: 'Horizontal rule' },
             '|',
             { name: 'preview', action: EasyMDE.togglePreview, text: '👁', title: 'Toggle preview', noDisable: true },
         ],
@@ -1696,7 +1696,7 @@ async function easymdeImageUpload(file, onSuccess, onError) {
             return;
         }
         const data = await resp.json();
-        // EasyMDE inserts ![alt](onSuccess-arg) — we pass the bare filename so the
+        // EasyMDE inserts ![alt](onSuccess-arg) - we pass the bare filename so the
         // markdown stays portable; previewRender resolves it to the asset endpoint.
         onSuccess(data.name);
         toast('Uploaded ' + data.name, 'success');
@@ -1715,7 +1715,7 @@ function inferExtension(file) {
 function generateAssetName(file) {
     const orig = (file.name || '').replace(/[^A-Za-z0-9._-]/g, '_');
     // Browsers use a generic "image.png" filename for clipboard-pasted
-    // images, which collides across pastes — always timestamp those.
+    // images, which collides across pastes - always timestamp those.
     const isPasteDefault = /^image\.(png|jpe?g|gif|webp|svg)$/i.test(orig);
     if (orig && !isPasteDefault && /\.[A-Za-z0-9]+$/.test(orig)) return orig;
     const ts = new Date().toISOString().replace(/[:.]/g, '-').replace(/Z$/, '');
@@ -1806,7 +1806,7 @@ function handleSessionExpired(currentBody) {
             '<h2 style="margin:0 0 8px;font-size:16px;">Session expired</h2>' +
             '<p style="margin:0 0 14px;color:var(--text2);font-size:13px;">' +
                 'Your login token is no longer valid (this can happen after a server restart). ' +
-                'Your edits are still in this editor — copy them to the clipboard before logging in again so you don\'t lose them.' +
+                'Your edits are still in this editor - copy them to the clipboard before logging in again so you don\'t lose them.' +
             '</p>' +
             '<div style="display:flex;gap:8px;justify-content:flex-end;">' +
                 '<button class="btn" id="copyEdits">Copy edits to clipboard</button>' +
@@ -1819,7 +1819,7 @@ function handleSessionExpired(currentBody) {
             await navigator.clipboard.writeText(currentBody || '');
             toast('Copied to clipboard', 'success');
         } catch (e) {
-            toast('Copy failed — select-all and copy manually', 'error');
+            toast('Copy failed - select-all and copy manually', 'error');
         }
     };
     overlay.querySelector('#reloginBtn').onclick = () => {
@@ -1882,7 +1882,7 @@ async function newVersion() {
     const cleanTag = tag.trim();
     if (!cleanTag) { toast('Invalid version', 'error'); return; }
     if (releases.some(r => r.tag === cleanTag)) {
-        // Already exists — just switch to it.
+        // Already exists - just switch to it.
         location.hash = '#/' + cleanTag;
         return;
     }
@@ -1915,7 +1915,7 @@ async function route() {
     if (releases.length === 0) {
         const ok = await loadReleases();
         if (!ok) {
-            // No releases for this product/workspace — clear any pages left over
+            // No releases for this product/workspace - clear any pages left over
             // from a previously selected product so the sidebar doesn't lie.
             pages = []; assets = []; currentTag = null; currentSlug = null; currentPage = null;
             renderSidebar();

@@ -93,7 +93,7 @@ impl LicenseDb {
         Ok(())
     }
 
-    /// Count releases attached to a product — callers reject deletion of a
+    /// Count releases attached to a product - callers reject deletion of a
     /// product that still owns releases.
     pub fn count_releases_for_product(&self, slug: &str) -> Result<i64, LicenseError> {
         self.conn

@@ -23,7 +23,7 @@ alwaysApply: true
 - Create simple and concise commit messages. 
 - Important: Never add anything like "co-authored by Claude" to a commit message!
 - Important: Never add "Generated with Claude Code" or any Claude/AI attribution footer to PR bodies or commit messages.
-- Never use the long em dash (U+2014). Use a normal hyphen-minus (-) instead. Applies everywhere: code, comments, docs, commit messages, and especially anything user-facing such as email bodies, UI copy, and PDF invoices.
+- Only ever use the plain hyphen-minus (-) as a dash. Never use typographic dashes: no em dash (U+2014), no en dash (U+2013), no other Unicode dash variants - not even for ranges (write "100-500 ms"). Applies everywhere: code, comments, docs, commit messages, and especially anything user-facing such as email bodies, UI copy, and PDF invoices.
 
 # Additional behavioral guidelines
 ## 1. Think Before Coding

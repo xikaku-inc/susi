@@ -12,7 +12,7 @@ use susi_core::{
 
 /// Run an async future to completion on a fresh current-thread tokio runtime.
 /// Used by the blocking API wrappers. Must NOT be called from inside a tokio
-/// runtime — in that case, call the `_async` variant directly.
+/// runtime - in that case, call the `_async` variant directly.
 pub(crate) fn blocking_run<F: std::future::Future>(fut: F) -> F::Output {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -50,10 +50,10 @@ pub enum LicenseStatus {
     /// The license requires a signed binary but the running binary is unsigned or tampered.
     UnsignedBinary,
     /// Machine was removed by an administrator. Distinct from Revoked (which
-    /// kills the whole license) — only this machine slot is affected. Re-activation
+    /// kills the whole license) - only this machine slot is affected. Re-activation
     /// is blocked for the tombstone window.
     Deactivated,
-    /// No cached license on disk — the install has never been activated on
+    /// No cached license on disk - the install has never been activated on
     /// this machine, or was explicitly deactivated. User must click Activate.
     NotActivated,
     TokenNotFound,
@@ -267,7 +267,7 @@ impl LicenseClient {
     }
 
     /// Renew the lease for an already-activated machine via the server's
-    /// `/verify` endpoint. Does NOT add a machine back if it was removed —
+    /// `/verify` endpoint. Does NOT add a machine back if it was removed -
     /// that's the whole point of this method.
     ///
     /// Behavior:
@@ -343,7 +343,7 @@ impl LicenseClient {
         self.verify_file_async(path).await
     }
 
-    /// Explicit activation — user clicked the Activate button. Calls the
+    /// Explicit activation - user clicked the Activate button. Calls the
     /// server's `/activate` endpoint, claims a machine slot, and writes the
     /// signed license to `path`.
     pub fn activate(
@@ -624,7 +624,7 @@ mod tests {
     // ubuntu-latest where /sys/block/<disk>/serial is empty), which would
     // cause every verify_signed call to fall through to LicenseStatus::Error
     // regardless of actual signature validity. The tests do not care about
-    // machine-binding — inject a stable synthetic code via the cache.
+    // machine-binding - inject a stable synthetic code via the cache.
     const TEST_MACHINE_CODE: &str =
         "0000000000000000000000000000000000000000000000000000000000000000";
 
@@ -904,7 +904,7 @@ mod tests {
     }
 
     /// Serve a single canned HTTP response on a free port and return the base URL.
-    /// Minimal — just enough to exercise the /activate response parsing.
+    /// Minimal - just enough to exercise the /activate response parsing.
     async fn spawn_canned_http_response(status: u16, body: &'static str) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
@@ -992,12 +992,12 @@ mod tests {
 
     /// Regression: the defining invariant of the new design. If no cached
     /// license exists on disk, `verify_and_refresh_async` must return
-    /// `NotActivated` — it must NOT silently call /activate on every startup.
+    /// `NotActivated` - it must NOT silently call /activate on every startup.
     /// That auto-activation was the original ghost-slot bug.
     #[tokio::test]
     async fn regression_verify_and_refresh_no_cache_returns_not_activated() {
         let (_, pub_pem, _) = make_keypair_pems();
-        // Point at a URL that would noisily fail if it were ever called —
+        // Point at a URL that would noisily fail if it were ever called -
         // no cache file means the method must short-circuit before the server.
         let client = new_test_client_with_server(&pub_pem, "http://127.0.0.1:1".into());
 
@@ -1092,7 +1092,7 @@ mod tests {
     #[tokio::test]
     async fn test_sync_verify_file_from_async_context() {
         // The sync wrapper uses its own current-thread runtime inside block_on.
-        // Calling it from an async context via spawn_blocking must not panic —
+        // Calling it from an async context via spawn_blocking must not panic -
         // this is exactly the failure mode this refactor is meant to fix when
         // callers migrate to the _async variants, but existing sync callers
         // wrapped in spawn_blocking must still work.

@@ -4,7 +4,7 @@
 /// |----------|----------------------------------------------|
 /// | Windows  | `WinVerifyTrust` (Authenticode, SHA-256)     |
 /// | macOS    | `SecStaticCodeCheckValidity`                 |
-/// | Linux    | always `true` — no standard mechanism exists |
+/// | Linux    | always `true` - no standard mechanism exists |
 ///
 /// # Startup enforcement
 ///
@@ -31,7 +31,7 @@ pub fn is_binary_signed() -> bool {
 mod windows {
     use std::os::windows::ffi::OsStrExt;
 
-    // Raw FFI declarations for WinVerifyTrust — avoids windows-sys feature complexity.
+    // Raw FFI declarations for WinVerifyTrust - avoids windows-sys feature complexity.
     type HWND = *mut std::ffi::c_void;
     type HANDLE = *mut std::ffi::c_void;
     type LONG = i32;
@@ -92,7 +92,7 @@ mod windows {
     }
 
     // ---------------------------------------------------------------------------
-    // crypt32.dll FFI — certificate chain extraction from embedded Authenticode
+    // crypt32.dll FFI - certificate chain extraction from embedded Authenticode
     // ---------------------------------------------------------------------------
     type HCERTSTORE = *mut std::ffi::c_void;
     type HCRYPTMSG = *mut std::ffi::c_void;
@@ -187,7 +187,7 @@ mod windows {
                 let pb = (*p_ctx).pb_cert_encoded;
                 certs.push(std::slice::from_raw_parts(pb, cb).to_vec());
                 p_prev = p_ctx;
-                // CertEnumCertificatesInStore takes ownership of p_prev — do not
+                // CertEnumCertificatesInStore takes ownership of p_prev - do not
                 // call CertFreeCertificateContext on intermediate pointers.
             }
 
@@ -277,7 +277,7 @@ mod macos {
     struct OpaqueSecCertificate(u8);
     type SecCertificateRef = *const OpaqueSecCertificate;
 
-    // kSecCSSigningInformation = 0x00000002 — requests the certificate chain
+    // kSecCSSigningInformation = 0x00000002 - requests the certificate chain
     const K_SEC_CS_SIGNING_INFORMATION: u32 = 0x00000002;
 
     extern "C" {
@@ -300,7 +300,7 @@ mod macos {
         ) -> CFURLRef;
         // kSecCodeInfoCertificates is a CFStringRef exported by Security.framework.
         // CFDictionary uses pointer identity for CF string keys, so it must be
-        // the exact extern symbol — not a hardcoded string constant.
+        // the exact extern symbol - not a hardcoded string constant.
         static kSecCodeInfoCertificates: *const std::ffi::c_void;
         fn SecCodeCopySigningInformation(
             code: SecStaticCodeRef,
@@ -454,7 +454,7 @@ pub fn extract_signing_cert_chain() -> Vec<Vec<u8>> {
 #[ctor::ctor]
 fn enforce_signed_binary_at_startup() {
     if !is_binary_signed() {
-        // Write directly to stderr — log infrastructure is not yet initialised
+        // Write directly to stderr - log infrastructure is not yet initialised
         // at constructor time.
         eprintln!(
             "[susi] FATAL: Binary signature check failed at startup. \

@@ -1,37 +1,37 @@
 # susi
 
-*Susi* (Tagalog for "key") — a self-hosted backend platform written in Rust. It started as a software-licensing server and has grown to bundle everything a small product company needs around a downloadable application: signed licensing, release distribution, a documentation knowledge base, a public website, a Stripe-backed shop, and a contact form — all served from a single binary with a SQLite store.
+*Susi* (Tagalog for "key") - a self-hosted backend platform written in Rust. It started as a software-licensing server and has grown to bundle everything a small product company needs around a downloadable application: signed licensing, release distribution, a documentation knowledge base, a public website, a Stripe-backed shop, and a contact form - all served from a single binary with a SQLite store.
 
 ## Features
 
 ### Licensing
-- **RSA-SHA256 signed license files** — tamper-proof, offline-verifiable
-- **Node-locked licenses** — bind licenses to specific machines via hardware fingerprint
-- **Feature flags, expiry dates, machine limits** — fine-grained per-license policy
-- **Lease-based seat management** — time-limited activations that expire automatically, preventing unauthorized concurrent usage
-- **USB hardware tokens** — bind a license to a physical USB stick instead of a machine
-- **Binary signing enforcement** — optionally require the consuming binary to carry a valid code signature, making tampering detectable at license-verification time
-- **Cross-platform** — Linux and Windows support
-- **Rust + C++ client libraries** — drop-in verification for both ecosystems
+- **RSA-SHA256 signed license files** - tamper-proof, offline-verifiable
+- **Node-locked licenses** - bind licenses to specific machines via hardware fingerprint
+- **Feature flags, expiry dates, machine limits** - fine-grained per-license policy
+- **Lease-based seat management** - time-limited activations that expire automatically, preventing unauthorized concurrent usage
+- **USB hardware tokens** - bind a license to a physical USB stick instead of a machine
+- **Binary signing enforcement** - optionally require the consuming binary to carry a valid code signature, making tampering detectable at license-verification time
+- **Cross-platform** - Linux and Windows support
+- **Rust + C++ client libraries** - drop-in verification for both ecosystems
 
 ### Releases & workspaces
-- **Workspaces** — group licenses, releases, configs, and docs per product/team with member roles (`owner` / `editor` / `viewer`)
-- **Versioned config revisions** — push, fetch, and roll back JSON configs per workspace
-- **Binary release channel** — upload signed installers/binaries; clients fetch via license-key-protected `/api/v1/updates`
+- **Workspaces** - group licenses, releases, configs, and docs per product/team with member roles (`owner` / `editor` / `viewer`)
+- **Versioned config revisions** - push, fetch, and roll back JSON configs per workspace
+- **Binary release channel** - upload signed installers/binaries; clients fetch via license-key-protected `/api/v1/updates`
 
 ### Documentation & website
-- **Documentation knowledge base** — per-release doc sets at `/docs`, with Markdown editor, asset uploads, bulk import, and origin tagging (pipeline-generated vs. user-edited pages)
-- **Public marketing website** — `/site` with in-browser Markdown editor, asset library, page revision history, and per-page SEO (`robots.txt`, `sitemap.xml`, `llms.txt`)
+- **Documentation knowledge base** - per-release doc sets at `/docs`, with Markdown editor, asset uploads, bulk import, and origin tagging (pipeline-generated vs. user-edited pages)
+- **Public marketing website** - `/site` with in-browser Markdown editor, asset library, page revision history, and per-page SEO (`robots.txt`, `sitemap.xml`, `llms.txt`)
 
 ### Commerce
-- **Stripe-backed shop** — products, shipping rates, automatic-tax checkout, branded order confirmations with PDF invoices, and an admin fulfillment workflow
-- **Public contact form** — Cloudflare Turnstile + honeypot + per-IP rate limit, served at the `/site` chrome
+- **Stripe-backed shop** - products, shipping rates, automatic-tax checkout, branded order confirmations with PDF invoices, and an admin fulfillment workflow
+- **Public contact form** - Cloudflare Turnstile + honeypot + per-IP rate limit, served at the `/site` chrome
 
 ### Auth & ops
 - **Multi-user dashboard** with Argon2id passwords, **TOTP 2FA + backup codes**, **emailed sign-in code for new devices**, **trusted-device list**, **password reset via email**, and **API tokens** for headless clients
-- **Optional activation server** — HTTP server for online activation, lease renewal, and machine management
-- **One-command deploy** — Docker + Compose with separate production / staging environments
-- **Cross-platform clients** — Linux, Windows, macOS
+- **Optional activation server** - HTTP server for online activation, lease renewal, and machine management
+- **One-command deploy** - Docker + Compose with separate production / staging environments
+- **Cross-platform clients** - Linux, Windows, macOS
 
 ## Architecture
 
@@ -68,7 +68,7 @@
 | `susi_core` | Library | Shared types, RSA crypto, hardware fingerprinting, USB token encryption, SQLite storage |
 | `susi_client` | Library | Verification library + workspace/release/docs HTTP client (sync + async APIs) |
 | `susi_admin` | Binary | CLI tool for key generation, license creation, and management |
-| `susi_server` | Binary | HTTP server with SQLite backend — licensing, releases, docs, website, shop, contact |
+| `susi_server` | Binary | HTTP server with SQLite backend - licensing, releases, docs, website, shop, contact |
 | `susi_helper` | Binary | End-user utility for retrieving machine fingerprints and USB serial numbers |
 | `cpp/` | C++ Library | Standalone verification client for C++ applications |
 
@@ -160,7 +160,7 @@ match status {
         // trigger background renewal...
     }
     LicenseStatus::LeaseExpired { lease_expired_at } => {
-        eprintln!("Lease expired at {} — must renew to continue", lease_expired_at);
+        eprintln!("Lease expired at {} - must renew to continue", lease_expired_at);
     }
     LicenseStatus::Expired { expired_at } => {
         eprintln!("License expired on {}", expired_at.format("%Y-%m-%d"));
@@ -233,13 +233,13 @@ switch (status) {
         // License is valid
         break;
     case SusiClient::LicenseStatus::ValidGracePeriod:
-        // Lease expired but still in grace period — trigger renewal
+        // Lease expired but still in grace period - trigger renewal
         break;
     case SusiClient::LicenseStatus::Expired:
         // License has expired
         break;
     case SusiClient::LicenseStatus::LeaseExpired:
-        // Lease and grace period both expired — must renew
+        // Lease and grace period both expired - must renew
         break;
     case SusiClient::LicenseStatus::InvalidMachine:
         // License not valid for this machine
@@ -315,9 +315,9 @@ The `license_data` field is a JSON-serialized `LicensePayload`:
 }
 ```
 
-- `expires` — `null` for perpetual licenses
-- `lease_expires` — omitted when lease enforcement is disabled (`lease_duration = 0`). When present, the client must renew before this time or the license stops working (after the grace period).
-- `require_signed_binary` — omitted in old license files (defaults to `false`). When `true`, the client checks that the running binary carries a valid code signature before returning `Valid`.
+- `expires` - `null` for perpetual licenses
+- `lease_expires` - omitted when lease enforcement is disabled (`lease_duration = 0`). When present, the client must renew before this time or the license stops working (after the grace period).
+- `require_signed_binary` - omitted in old license files (defaults to `false`). When `true`, the client checks that the running binary carries a valid code signature before returning `Valid`.
 
 ## Hardware Fingerprinting
 
@@ -336,7 +336,7 @@ susi-helper fingerprint
 
 ## USB Hardware Tokens
 
-Instead of binding a license to a specific machine, you can bind it to a physical USB stick. The license file is stored on the USB drive, encrypted with a key derived from the device's hardware serial number. Plug the stick into any machine and the software is licensed — remove it and it's not. Copying the file to a different USB stick fails because the serial number won't match.
+Instead of binding a license to a specific machine, you can bind it to a physical USB stick. The license file is stored on the USB drive, encrypted with a key derived from the device's hardware serial number. Plug the stick into any machine and the software is licensed - remove it and it's not. Copying the file to a different USB stick fails because the serial number won't match.
 
 ### How it works
 
@@ -418,7 +418,7 @@ The check is performed by the client library at license-verification time using 
 |---|---|---|
 | Windows | `WinVerifyTrust` (Authenticode) | Binaries signed with a certificate trusted by the machine's certificate store |
 | macOS | `SecStaticCodeCheckValidity` | Binaries with any valid code signature (cryptographic integrity) |
-| Linux | — | Always passes (no standard mechanism) |
+| Linux | - | Always passes (no standard mechanism) |
 
 ### Per-license control
 
@@ -439,7 +439,7 @@ Old license files that pre-date this feature have no `require_signed_binary` fie
 
 Beyond checking at license-verification time, you can optionally abort the process at startup (before `main()`) if the binary is not signed.
 
-**Rust** — enable the `require-signed-binary` Cargo feature:
+**Rust** - enable the `require-signed-binary` Cargo feature:
 
 ```toml
 [dependencies]
@@ -448,7 +448,7 @@ susi_client = { path = "…", features = ["require-signed-binary"] }
 
 This installs a global constructor that calls `abort()` before `main()` if the binary signature check fails. No call-site code is needed.
 
-**C++** — set the `SUSI_REQUIRE_SIGNED_BINARY` build option:
+**C++** - set the `SUSI_REQUIRE_SIGNED_BINARY` build option:
 
 ```bash
 # Via Conan
@@ -517,7 +517,7 @@ The feature meaningfully raises the bar against casual binary patching but is no
 
 ## Susi Helper
 
-`susi-helper` is a small end-user utility that helps customers provide the information needed to activate a license. It requires no database or private key — it is safe to ship to end users alongside your product.
+`susi-helper` is a small end-user utility that helps customers provide the information needed to activate a license. It requires no database or private key - it is safe to ship to end users alongside your product.
 
 ```bash
 # Print the hardware fingerprint of the current machine
@@ -575,13 +575,13 @@ Admin endpoints require JWT authentication (see below).
 
 ### Web Dashboard
 
-The server includes a built-in web dashboard at the root URL (`http://localhost:3100/`). It provides a browser-based interface for managing licenses, viewing activations, and administering users — no API calls required.
+The server includes a built-in web dashboard at the root URL (`http://localhost:3100/`). It provides a browser-based interface for managing licenses, viewing activations, and administering users - no API calls required.
 
 ### Authentication & Multi-User Support
 
 The server uses JWT-based authentication with multi-user support. Each team member gets their own account with independent credentials and optional 2FA.
 
-**Default credentials** — on first run, the server seeds an `admin` user with password `changeme`. This must be changed on first login.
+**Default credentials** - on first run, the server seeds an `admin` user with password `changeme`. This must be changed on first login.
 
 #### Auth Endpoints
 
@@ -615,20 +615,20 @@ The server uses JWT-based authentication with multi-user support. Each team memb
 - Passwords are hashed with **Argon2id**
 - Sessions use **HS256 JWT tokens** with 24-hour expiry
 - 2FA uses **TOTP** with one-shot **backup codes**, plus **trusted-device fingerprints** so a known browser doesn't re-prompt every login
-- **Emailed sign-in code** is required the first time a user signs in from a new device — a 6-digit code is sent to the registered email (15-minute TTL); enabled when SMTP is configured
+- **Emailed sign-in code** is required the first time a user signs in from a new device - a 6-digit code is sent to the registered email (15-minute TTL); enabled when SMTP is configured
 - **Password reset** sends a time-limited token to the user's email
 - New users and password resets force a password change on next login
 - Login, shop checkout, Stripe webhook, and the contact form are each rate-limited per source IP (sliding window). When fronted by the on-host nginx proxy, `X-Forwarded-For` is honoured so the limiter sees the real client
 
 #### API tokens (`susi_pat_…`) and 2FA
 
-API tokens are long-lived bearers for headless clients (CI, scripts) and **bypass interactive 2FA**. The trade-off is deliberate: requiring a TOTP seed alongside an API token in CI raises attack surface without raising the bar — anyone with access to the bearer would also have access to the seed.
+API tokens are long-lived bearers for headless clients (CI, scripts) and **bypass interactive 2FA**. The trade-off is deliberate: requiring a TOTP seed alongside an API token in CI raises attack surface without raising the bar - anyone with access to the bearer would also have access to the seed.
 
 Operational consequences:
 
 - Treat each API token as equivalent to a password + 2FA. Store it in a secret manager, never check it into git.
 - Tokens are SHA-256-hashed at rest and revocable from the dashboard. Rotate them on any suspected compromise and on every team-member departure.
-- For day-to-day admin work in the browser, use a JWT login — TOTP is enforced on every admin write that uses a JWT principal.
+- For day-to-day admin work in the browser, use a JWT login - TOTP is enforced on every admin write that uses a JWT principal.
 - Limit API tokens to the smallest set of users that need them, and audit `/api/v1/auth/api-tokens/all` periodically (admin-only).
 
 ### Activate a license
@@ -639,7 +639,7 @@ curl -X POST http://localhost:3100/api/v1/activate \
   -d '{"license_key": "XXXXX-XXXXX-XXXXX-XXXXX", "machine_code": "a1b2c3...", "friendly_name": "Server-1"}'
 ```
 
-Returns a `SignedLicense` JSON that can be saved to disk for offline verification. The response includes a `lease_expires` timestamp — the client must call activate or verify again before this time to renew the lease.
+Returns a `SignedLicense` JSON that can be saved to disk for offline verification. The response includes a `lease_expires` timestamp - the client must call activate or verify again before this time to renew the lease.
 
 ### Create a license via API
 
@@ -682,7 +682,7 @@ let status = client.verify_and_refresh(
 );
 
 if status.needs_renewal() {
-    // Lease expired or in grace period — try again soon
+    // Lease expired or in grace period - try again soon
 }
 ```
 
@@ -704,7 +704,7 @@ if (susi.isValid()) {
 }
 
 if (susi.isInGracePeriod() || susi.isLeaseExpired()){
-  // Lease expired or in grace period — try again soon
+  // Lease expired or in grace period - try again soon
 }
 ```
 
@@ -733,7 +733,7 @@ Customer wants to move to Machine B:
 Customer tries to run on both:
   → Machine A has an active lease
   → Machine B tries to activate → "Machine limit reached"
-  → Enforced automatically — no trust required
+  → Enforced automatically - no trust required
 ```
 
 ### Configuration
@@ -838,11 +838,11 @@ Pages carry an **origin tag** of either `pipeline` (generated from a build pipel
 | `POST` | `/api/v1/docs/{tag}/import` | JWT | Bulk import a tarball of pages + assets |
 | `POST` / `DELETE` | `/api/v1/docs/{tag}/assets[/{file}]` | JWT | Upload / delete an asset |
 
-> **Editing rule:** never `PUT` a full page from outside the dashboard — fetch first, then send a targeted patch to `body_md`. Wholesale overwrites trash user edits.
+> **Editing rule:** never `PUT` a full page from outside the dashboard - fetch first, then send a targeted patch to `body_md`. Wholesale overwrites trash user edits.
 
 ## Public Website
 
-A small CMS that powers the marketing site at `/site`. Pages are Markdown, edited through the dashboard, and served with per-page SEO meta. There's no release concept here — all content is hand-authored.
+A small CMS that powers the marketing site at `/site`. Pages are Markdown, edited through the dashboard, and served with per-page SEO meta. There's no release concept here - all content is hand-authored.
 
 | Method | Endpoint | Auth | Description |
 |---|---|---|---|
@@ -953,7 +953,7 @@ The project includes a Dockerfile, docker-compose.yml, and a deploy script for o
 
 1. Go to [AWS Lightsail Console](https://lightsail.aws.amazon.com/)
 2. Create an instance: **Linux/Unix** → **OS Only** → **Ubuntu 22.04 LTS** (or 24.04)
-3. Choose a plan — **$5/mo (1 GB RAM, 1 vCPU)** is sufficient
+3. Choose a plan - **$5/mo (1 GB RAM, 1 vCPU)** is sufficient
 4. Under **Networking**, add a firewall rule: **Custom TCP, Port 3100**
 
 ### 2. Install Docker on the instance
@@ -1013,7 +1013,7 @@ SUSI_SMTP_FROM_NAME=Susi
 SUSI_SMTP_FROM_ADDR=noreply@example.com
 SUSI_MAGIC_LINK_BASE_URL=https://susi.example.com
 
-# Shop (leave empty to disable checkout — product pages still render)
+# Shop (leave empty to disable checkout - product pages still render)
 STRIPE_SECRET_KEY=sk_live_…
 STRIPE_WEBHOOK_SECRET=whsec_…
 SUSI_SHOP_BASE_URL=https://susi.example.com
@@ -1083,7 +1083,7 @@ curl -X POST $SERVER/api/v1/activate \
   }'
 ```
 
-Save the activation response as `license.json` — it contains the signed license with lease timestamp.
+Save the activation response as `license.json` - it contains the signed license with lease timestamp.
 
 ### 7. Maintenance
 
@@ -1103,7 +1103,7 @@ sudo cp $VOLUME_DIR/licenses.db ~/licenses-backup-$(date +%F).db
 
 ### 8. HTTPS reverse proxy (required for production)
 
-The containers bind to `127.0.0.1:3100` (prod) and `127.0.0.1:3101` (staging) —
+The containers bind to `127.0.0.1:3100` (prod) and `127.0.0.1:3101` (staging) -
 they are *not* reachable from the public internet. All external traffic must
 go through the on-host nginx reverse proxy over TLS. This protects credentials
 and JWTs that would otherwise cross the network in plaintext, and gives the
@@ -1156,7 +1156,7 @@ sudo certbot --nginx -d susi.lp-research.com -d staging.susi.lp-research.com
    were previously open. The docker-compose loopback binding already makes
    the ports unreachable externally, but the firewall is belt-and-braces.
 
-`X-Forwarded-For` is required — the Rust login rate-limiter reads it to
+`X-Forwarded-For` is required - the Rust login rate-limiter reads it to
 identify the real client when the TCP peer is loopback (nginx). Without it,
 every request looks like it's coming from `127.0.0.1` and the per-IP limit
 becomes a per-box limit.
@@ -1187,9 +1187,9 @@ cargo build --workspace --release
 ```
 
 Binaries are output to `target/release/`:
-- `susi-admin` — CLI management tool
-- `susi-server` — HTTP activation server
-- `susi-helper` — end-user utility for fingerprinting and USB serial lookup
+- `susi-admin` - CLI management tool
+- `susi-server` - HTTP activation server
+- `susi-helper` - end-user utility for fingerprinting and USB serial lookup
 
 ## Testing
 
@@ -1200,23 +1200,23 @@ cargo test --workspace
 ## Dependencies
 
 Key dependencies:
-- [`rsa`](https://crates.io/crates/rsa) — RSA key generation, signing, verification
-- [`sha2`](https://crates.io/crates/sha2) — SHA-256 hashing
-- [`aes-gcm`](https://crates.io/crates/aes-gcm) — AES-256-GCM encryption for USB tokens
-- [`hkdf`](https://crates.io/crates/hkdf) — HKDF-SHA256 key derivation for USB tokens
-- [`axum`](https://crates.io/crates/axum) — HTTP server with multipart support (susi_server only)
-- [`tower-http`](https://crates.io/crates/tower-http) — CORS middleware (susi_server only)
-- [`argon2`](https://crates.io/crates/argon2) — Argon2id password hashing (susi_server only)
-- [`jsonwebtoken`](https://crates.io/crates/jsonwebtoken) — JWT session tokens (susi_server only)
-- [`totp-rs`](https://crates.io/crates/totp-rs) — TOTP 2FA (susi_server only)
-- [`lettre`](https://crates.io/crates/lettre) — SMTP client for sign-in code / order / contact email (susi_server only)
-- [`hmac`](https://crates.io/crates/hmac) — Stripe webhook signature verification (susi_server only)
-- [`printpdf`](https://crates.io/crates/printpdf) — paid-invoice PDF generation (susi_server only)
-- [`ammonia`](https://crates.io/crates/ammonia) — HTML sanitizer for admin-authored content in customer email (susi_server only)
-- [`rusqlite`](https://crates.io/crates/rusqlite) — SQLite storage (server/admin only, bundled)
-- [`reqwest`](https://crates.io/crates/reqwest) — HTTP client for online refresh, Stripe API, Turnstile siteverify
+- [`rsa`](https://crates.io/crates/rsa) - RSA key generation, signing, verification
+- [`sha2`](https://crates.io/crates/sha2) - SHA-256 hashing
+- [`aes-gcm`](https://crates.io/crates/aes-gcm) - AES-256-GCM encryption for USB tokens
+- [`hkdf`](https://crates.io/crates/hkdf) - HKDF-SHA256 key derivation for USB tokens
+- [`axum`](https://crates.io/crates/axum) - HTTP server with multipart support (susi_server only)
+- [`tower-http`](https://crates.io/crates/tower-http) - CORS middleware (susi_server only)
+- [`argon2`](https://crates.io/crates/argon2) - Argon2id password hashing (susi_server only)
+- [`jsonwebtoken`](https://crates.io/crates/jsonwebtoken) - JWT session tokens (susi_server only)
+- [`totp-rs`](https://crates.io/crates/totp-rs) - TOTP 2FA (susi_server only)
+- [`lettre`](https://crates.io/crates/lettre) - SMTP client for sign-in code / order / contact email (susi_server only)
+- [`hmac`](https://crates.io/crates/hmac) - Stripe webhook signature verification (susi_server only)
+- [`printpdf`](https://crates.io/crates/printpdf) - paid-invoice PDF generation (susi_server only)
+- [`ammonia`](https://crates.io/crates/ammonia) - HTML sanitizer for admin-authored content in customer email (susi_server only)
+- [`rusqlite`](https://crates.io/crates/rusqlite) - SQLite storage (server/admin only, bundled)
+- [`reqwest`](https://crates.io/crates/reqwest) - HTTP client for online refresh, Stripe API, Turnstile siteverify
 
-The `susi_client` crate is intentionally lightweight — it only pulls in the crypto and HTTP dependencies needed for verification and the workspace/release/docs API client.
+The `susi_client` crate is intentionally lightweight - it only pulls in the crypto and HTTP dependencies needed for verification and the workspace/release/docs API client.
 
 ## License
 

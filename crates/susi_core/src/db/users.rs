@@ -182,7 +182,7 @@ impl LicenseDb {
     }
 
     /// Find a username by email (case-insensitive). Returns None if zero or
-    /// multiple matches — ambiguous addresses shouldn't grant a password reset.
+    /// multiple matches - ambiguous addresses shouldn't grant a password reset.
     pub fn find_unique_username_by_email(
         &self,
         email: &str,

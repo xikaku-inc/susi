@@ -6,7 +6,7 @@
 // variable SUSI_CPP_TEST_BIN, accessible in tests via env!().
 //
 // If conan is missing or the build fails the script prints a warning and
-// continues — the Rust test suite marks the C++ test as skipped rather than
+// continues - the Rust test suite marks the C++ test as skipped rather than
 // failed in that case.
 
 use std::path::{Path, PathBuf};
@@ -28,7 +28,7 @@ fn main() {
     println!("cargo:rerun-if-changed=../../cpp/test_package/conanfile_build.py");
 
     if !conan_available() {
-        println!("cargo:warning=conan not found — C++ integration test will be skipped");
+        println!("cargo:warning=conan not found - C++ integration test will be skipped");
         return;
     }
 
@@ -60,7 +60,7 @@ fn main() {
         .args(["create", ".", "--build=missing", "-s", "build_type=Debug", "--test-folder", ""])
         .current_dir(&cpp_dir))
     {
-        println!("cargo:warning=conan create failed — C++ integration test will fail");
+        println!("cargo:warning=conan create failed - C++ integration test will fail");
         println!("cargo:rustc-env=SUSI_CPP_BUILD_ERROR=conan create failed");
         return;
     }
@@ -78,7 +78,7 @@ fn main() {
         ])
         .current_dir(&build_dir))
     {
-        println!("cargo:warning=conan install failed — C++ integration test will fail");
+        println!("cargo:warning=conan install failed - C++ integration test will fail");
         println!("cargo:rustc-env=SUSI_CPP_BUILD_ERROR=conan install (test_package) failed");
         return;
     }
@@ -97,7 +97,7 @@ fn main() {
         ])
         .current_dir(&build_dir))
     {
-        println!("cargo:warning=cmake configure failed — C++ integration test will fail");
+        println!("cargo:warning=cmake configure failed - C++ integration test will fail");
         println!("cargo:rustc-env=SUSI_CPP_BUILD_ERROR=cmake configure failed");
         return;
     }
@@ -106,7 +106,7 @@ fn main() {
         .args(["--build", build_dir.to_str().unwrap(), "--config", "Debug"])
         .current_dir(&build_dir))
     {
-        println!("cargo:warning=cmake build failed — C++ integration test will fail");
+        println!("cargo:warning=cmake build failed - C++ integration test will fail");
         println!("cargo:rustc-env=SUSI_CPP_BUILD_ERROR=cmake build failed");
         return;
     }
@@ -122,7 +122,7 @@ fn main() {
             println!("cargo:warning=C++ test binary built: {}", p.display());
         }
         None => {
-            println!("cargo:warning=PackageTest binary not found after build — C++ test will fail");
+            println!("cargo:warning=PackageTest binary not found after build - C++ test will fail");
             println!("cargo:rustc-env=SUSI_CPP_BUILD_ERROR=PackageTest binary not found after cmake build");
         }
     }

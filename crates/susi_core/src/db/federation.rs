@@ -65,7 +65,7 @@ impl LicenseDb {
             )
             .map_err(|e| LicenseError::Other(format!("DB update federation: {}", e)))?;
         if updated == 0 {
-            // No row yet — treat rotate as create.
+            // No row yet - treat rotate as create.
             self.conn
                 .execute(
                     "INSERT INTO workspace_federation (workspace_id, channel_secret, created_at, rotated_at)
