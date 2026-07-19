@@ -125,6 +125,10 @@ pub struct LicenseClient {
     /// fingerprint has been computed successfully it is reused on subsequent
     /// runs even if the underlying hardware ID lookup later fails transiently.
     machine_code_cache: Option<PathBuf>,
+    /// Caller-resolved machine code that bypasses hardware/cache lookup
+    /// entirely. For hosts that own machine-code resolution (env overrides,
+    /// container-synthesised ids).
+    machine_code_override: Option<String>,
 }
 
 impl LicenseClient {
@@ -135,6 +139,7 @@ impl LicenseClient {
             public_key,
             server_url: None,
             machine_code_cache: None,
+            machine_code_override: None,
         })
     }
 
@@ -157,7 +162,17 @@ impl LicenseClient {
         self
     }
 
+    /// Pin the machine code to a caller-resolved value, skipping the
+    /// hardware/cache lookup in [`Self::current_machine_code`].
+    pub fn with_machine_code_override<S: Into<String>>(mut self, code: S) -> Self {
+        self.machine_code_override = Some(code.into());
+        self
+    }
+
     fn current_machine_code(&self) -> Result<String, LicenseError> {
+        if let Some(code) = &self.machine_code_override {
+            return Ok(code.clone());
+        }
         match &self.machine_code_cache {
             Some(p) => fingerprint::get_or_cache_machine_code(p),
             None => fingerprint::get_machine_code(),
@@ -624,26 +639,20 @@ mod tests {
     // ubuntu-latest where /sys/block/<disk>/serial is empty), which would
     // cause every verify_signed call to fall through to LicenseStatus::Error
     // regardless of actual signature validity. The tests do not care about
-    // machine-binding — inject a stable synthetic code via the cache.
+    // machine-binding — pin a stable synthetic code via the override.
     const TEST_MACHINE_CODE: &str =
         "0000000000000000000000000000000000000000000000000000000000000000";
-
-    fn test_machine_code_cache() -> PathBuf {
-        let path = std::env::temp_dir().join("susi_client_test_machine_code");
-        let _ = std::fs::write(&path, TEST_MACHINE_CODE);
-        path
-    }
 
     fn new_test_client(pub_pem: &str) -> LicenseClient {
         LicenseClient::new(pub_pem)
             .unwrap()
-            .with_machine_code_cache(test_machine_code_cache())
+            .with_machine_code_override(TEST_MACHINE_CODE)
     }
 
     fn new_test_client_with_server(pub_pem: &str, server_url: String) -> LicenseClient {
-        let mut client = LicenseClient::with_server(pub_pem, server_url).unwrap();
-        client.set_machine_code_cache(test_machine_code_cache());
-        client
+        LicenseClient::with_server(pub_pem, server_url)
+            .unwrap()
+            .with_machine_code_override(TEST_MACHINE_CODE)
     }
 
     #[test]

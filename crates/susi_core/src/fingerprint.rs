@@ -9,8 +9,17 @@ use crate::error::LicenseError;
 /// silently produce a *different* fingerprint from the normal one, which caused
 /// ghost machine slots to pile up on the license server.
 pub fn get_machine_code() -> Result<String, LicenseError> {
+    // Hardware identity cannot change mid-process; memoize the first
+    // successful read so periodic license checks don't re-query WMI/proc,
+    // and so a mid-run transient failure can't flip the code.
+    static HW: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    if let Some(code) = HW.get() {
+        return Ok(code.clone());
+    }
     let (a, b) = get_hardware_ids()?;
-    machine_code_from_ids(&a, &b)
+    let code = machine_code_from_ids(&a, &b)?;
+    let _ = HW.set(code.clone());
+    Ok(code)
 }
 
 /// Pure core of [`get_machine_code`] — separated so it can be unit-tested
@@ -30,27 +39,46 @@ pub(crate) fn machine_code_from_ids(a: &str, b: &str) -> Result<String, LicenseE
     Ok(hex::encode(hash))
 }
 
-/// Get the machine code, preferring a previously-cached value at `cache_path`.
+/// Get the machine code, treating the live hardware fingerprint as
+/// authoritative and `cache_path` only as a fallback for lookup failures
+/// (flaky WMI, temporary /proc reads, containers without hardware identity).
 ///
-/// Behavior:
-/// - If the cache file contains a valid 64-char lowercase hex code, return it.
-/// - Otherwise compute a fresh code via [`get_machine_code`]. On success, write
-///   it to the cache so later calls are immune to intermittent hardware ID
-///   lookup failures (flaky WMI, temporary /proc reads, etc).
+/// The cache is never trusted over a successful hardware read - a
+/// hand-edited cache file must not be able to spoof the machine code - and
+/// is rewritten whenever it disagrees with the hardware value.
 pub fn get_or_cache_machine_code(cache_path: &std::path::Path) -> Result<String, LicenseError> {
-    if let Ok(contents) = std::fs::read_to_string(cache_path) {
-        let code = contents.trim();
-        if is_valid_machine_code(code) {
-            return Ok(code.to_string());
+    resolve_machine_code(cache_path, get_machine_code)
+}
+
+/// Pure core of [`get_or_cache_machine_code`] with an injectable hardware
+/// lookup so the priority rules are unit-testable.
+fn resolve_machine_code(
+    cache_path: &std::path::Path,
+    fetch: impl FnOnce() -> Result<String, LicenseError>,
+) -> Result<String, LicenseError> {
+    match fetch() {
+        Ok(code) => {
+            let stale = std::fs::read_to_string(cache_path)
+                .map(|c| c.trim() != code)
+                .unwrap_or(true);
+            if stale {
+                if let Some(parent) = cache_path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = std::fs::write(cache_path, &code);
+            }
+            Ok(code)
+        }
+        Err(e) => {
+            if let Ok(contents) = std::fs::read_to_string(cache_path) {
+                let code = contents.trim();
+                if is_valid_machine_code(code) {
+                    return Ok(code.to_string());
+                }
+            }
+            Err(e)
         }
     }
-
-    let code = get_machine_code()?;
-    if let Some(parent) = cache_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let _ = std::fs::write(cache_path, &code);
-    Ok(code)
 }
 
 fn is_valid_machine_code(s: &str) -> bool {
@@ -354,14 +382,31 @@ mod tests {
     }
 
     #[test]
-    fn test_get_or_cache_reads_existing() {
+    fn test_resolve_falls_back_to_cache_when_hardware_fails() {
         let dir = std::env::temp_dir().join("susi_fp_test_read");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("mc");
         let good = "b".repeat(64);
         std::fs::write(&path, &good).unwrap();
-        let got = get_or_cache_machine_code(&path).unwrap();
+        let got =
+            resolve_machine_code(&path, || Err(LicenseError::Other("hw unavailable".into())))
+                .unwrap();
         assert_eq!(got, good);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_resolve_hardware_overrides_tampered_cache() {
+        // A hand-edited cache must not spoof the machine code: a successful
+        // hardware read wins and corrects the file (fusionhub #99).
+        let dir = std::env::temp_dir().join("susi_fp_test_tamper");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mc");
+        std::fs::write(&path, "a".repeat(64)).unwrap();
+        let hw = "c".repeat(64);
+        let got = resolve_machine_code(&path, || Ok(hw.clone())).unwrap();
+        assert_eq!(got, hw);
+        assert_eq!(std::fs::read_to_string(&path).unwrap().trim(), hw);
         let _ = std::fs::remove_file(&path);
     }
 
@@ -430,10 +475,7 @@ mod tests {
     #[test]
     fn regression_cache_shields_from_transient_failure() {
         // Once a good fingerprint has been computed and cached, a later call
-        // must reuse it even if the underlying hardware read would now fail.
-        // The cache file is the only input to `get_or_cache_machine_code` when
-        // a valid code is present, so this test is independent of the real
-        // `get_hardware_ids`.
+        // must reuse it even if the underlying hardware read now fails.
         let dir = std::env::temp_dir().join("susi_fp_test_transient");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("mc");
@@ -441,7 +483,9 @@ mod tests {
         std::fs::write(&path, &good).unwrap();
 
         for _ in 0..5 {
-            let got = get_or_cache_machine_code(&path).unwrap();
+            let got =
+                resolve_machine_code(&path, || Err(LicenseError::Other("hw flake".into())))
+                    .unwrap();
             assert_eq!(got, good, "cached code must be reused across calls");
         }
         let _ = std::fs::remove_file(&path);
