@@ -1442,6 +1442,30 @@ function renderPage() {
     renderToc(headings);
 }
 
+// Scroll a heading to the top of the view. Screenshots and other images load
+// without intrinsic dimensions, so a deep link's target drifts as images above
+// it finish loading - re-align once they settle.
+function scrollToAnchor(id) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.scrollIntoView({ block: 'start' });
+    const imgs = Array.from(document.querySelectorAll('.content img')).filter(im => !im.complete);
+    if (imgs.length) {
+        let pending = imgs.length;
+        const done = () => { if (--pending === 0) el.scrollIntoView({ block: 'start' }); };
+        imgs.forEach(im => {
+            im.addEventListener('load', done, { once: true });
+            im.addEventListener('error', done, { once: true });
+        });
+    }
+}
+
+// Shareable route for a section of the current page: "#/{tag}/{slug}/{id}".
+// Written with replaceState so it doesn't trigger the hash router.
+function markSection(id) {
+    history.replaceState({}, '', '#/' + currentTag + '/' + currentSlug + '/' + encodeURIComponent(id));
+}
+
 // In-content same-page anchor links ("#heading-id"): scroll instead of letting
 // the hash router misread the fragment as a release tag.
 function wireContentAnchors(container) {
@@ -1450,8 +1474,9 @@ function wireContentAnchors(container) {
         if (href.startsWith('#/')) return; // real route
         a.addEventListener('click', (e) => {
             e.preventDefault();
-            const el = document.getElementById(decodeURIComponent(href.slice(1)));
-            if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            const id = decodeURIComponent(href.slice(1));
+            const el = document.getElementById(id);
+            if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'start' }); markSection(id); }
         });
     });
 }
@@ -1472,8 +1497,9 @@ function populateInlineToc(container, headings) {
         host.querySelectorAll('a').forEach(a => {
             a.addEventListener('click', (e) => {
                 e.preventDefault();
-                const el = document.getElementById(a.getAttribute('data-toc-id'));
-                if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                const id = a.getAttribute('data-toc-id');
+                const el = document.getElementById(id);
+                if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'start' }); markSection(id); }
             });
         });
     });
@@ -1538,13 +1564,14 @@ function renderToc(headings) {
     }).join('');
     rail.innerHTML = '<div class="toc-title">On this page</div>' + links;
 
-    // Override default anchor behavior to scroll into view (the URL has hash routing).
+    // Override default anchor behavior to scroll into view (the URL has hash
+    // routing), and record the section in the URL so it can be shared.
     rail.querySelectorAll('a').forEach(a => {
         a.addEventListener('click', (e) => {
             e.preventDefault();
             const id = a.getAttribute('data-toc-id');
             const el = document.getElementById(id);
-            if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'start' }); markSection(id); }
         });
     });
 
@@ -1932,6 +1959,14 @@ async function route() {
     // Hash takes precedence; otherwise use ?tag= (one-shot, only on first load)
     // and fall back to the first release in the listing.
     const tag = parts[0] || (initialTagParam && releases.some(r => r.tag === initialTagParam) ? initialTagParam : releases[0].tag);
+    // Optional third segment: a section anchor within the page
+    // ("#/{tag}/{slug}/{heading-id}"). Same-page anchor navigation just
+    // scrolls - no refetch, no re-render.
+    const anchor = parts[2] || '';
+    if (anchor && tag === currentTag && parts[1] === currentSlug && currentPage && !editMode) {
+        scrollToAnchor(anchor);
+        return;
+    }
     if (tag !== currentTag) await loadRelease(tag);
     if (pages.length === 0) {
         // Empty release: still surface the "+ Page" button for logged-in users
@@ -1945,6 +1980,7 @@ async function route() {
     const slug = parts[1];
     if (slug) {
         await loadPage(slug);
+        if (anchor) scrollToAnchor(anchor);
     } else {
         // Default: first top-level page
         const sorted = [...pages].sort((a, b) => a.ord - b.ord || a.title.localeCompare(b.title));
