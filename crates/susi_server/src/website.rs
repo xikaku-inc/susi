@@ -1281,6 +1281,13 @@ fn is_marketing_host(headers: &HeaderMap) -> bool {
         .unwrap_or(false)
 }
 
+/// Google Search Console site-verification file for susi.lp-research.com.
+pub async fn handle_google_site_verification() -> impl IntoResponse {
+    let mut h = HeaderMap::new();
+    h.insert(header::CONTENT_TYPE, "text/html; charset=utf-8".parse().unwrap());
+    (h, "google-site-verification: googledb0d71a54eee8f70.html")
+}
+
 pub async fn handle_robots_txt(headers: HeaderMap) -> impl IntoResponse {
     let sitemap_base = if is_marketing_host(&headers) { PUBLIC_BASE } else { DOCS_PUBLIC_BASE };
     let body = format!(
