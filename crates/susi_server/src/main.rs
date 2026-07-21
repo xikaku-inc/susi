@@ -2510,9 +2510,6 @@ fn load_or_create_secret(data_dir: &str, file_name: &str, label: &str) -> Result
     Ok(secret)
 }
 
-async fn handle_docs_page() -> Html<&'static str> {
-    Html(include_str!("docs.html"))
-}
 
 
 async fn handle_easymde_js() -> impl IntoResponse {
@@ -2775,9 +2772,11 @@ async fn main() -> Result<()> {
         // Dashboard
         .route("/", get(handle_dashboard))
         // Public documentation viewer + vendored editor assets
-        .route("/docs", get(handle_docs_page))
+        .route("/docs", get(docs::handle_docs_shell))
         .route("/docs/easymde.js", get(handle_easymde_js))
         .route("/docs/easymde.css", get(handle_easymde_css))
+        .route("/docs/{slug}", get(docs::handle_docs_ssr_latest))
+        .route("/docs/{tag}/{slug}", get(docs::handle_docs_ssr_tagged))
         // Public Xikaku website (same EasyMDE assets reused from /docs).
         // Both `/site` and `/site/{slug}` render the same SPA shell with
         // per-page SEO head (title, description, OG, JSON-LD) injected.
@@ -2795,6 +2794,8 @@ async fn main() -> Result<()> {
         .route("/robots.txt", get(website::handle_robots_txt))
         .route("/sitemap.xml", get(website::handle_sitemap_xml))
         .route("/llms.txt", get(website::handle_llms_txt))
+        .route("/llms-full.txt", get(docs::handle_llms_full_txt))
+        .route("/googledb0d71a54eee8f70.html", get(website::handle_google_site_verification))
         // IndexNow key file - Bing/Yandex/etc. fetch this to verify ownership
         // before accepting our URL update notifications. Lives under /api/v1
         // so the standard nginx /api proxy reaches it without extra routing.

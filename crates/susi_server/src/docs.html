@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>FusionHub Documentation</title>
+<!--SEO_HEAD-->
 <script>
 // Apply theme before paint to avoid a flash of the wrong colour scheme.
 (function () {
@@ -734,7 +734,7 @@ body {
         </div>
         <div id="sidebarTree"><div class="empty">Loading...</div></div>
     </aside>
-    <main class="content" id="content">
+    <main class="content" id="content"><!--SSR_CONTENT-->
         <div class="empty-state">Loading documentation…</div>
     </main>
     <aside class="toc-rail" id="tocRail" aria-label="On this page"></aside>
@@ -1936,8 +1936,16 @@ function onReleaseChanged() {
 }
 
 async function route() {
+    // Server-rendered entry (/docs/{slug} or /docs/{tag}/{slug}): boot straight
+    // to that page while keeping the path URL. One-shot; in-app navigation
+    // continues via hash links.
+    const ssr = window.__SSR || null;
+    window.__SSR = null;
     const hash = location.hash.replace(/^#\/?/, '');
     const parts = hash.split('/').filter(Boolean).map(decodeURIComponent);
+    if (parts.length === 0 && ssr && ssr.tag && ssr.slug) {
+        parts.push(ssr.tag, ssr.slug);
+    }
     if (!currentWorkspaceId && products.length === 0) await loadProducts();
     if (releases.length === 0) {
         const ok = await loadReleases();

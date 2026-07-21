@@ -1112,6 +1112,87 @@ fn test_product_scoped_docs_flow() {
     assert_eq!(resp.status().as_u16(), 409, "product with releases must not delete");
 }
 
+/// SEO surface for docs: server-rendered pages at path URLs, the docs sitemap
+/// on the docs host, the llms.txt documentation section, and llms-full.txt.
+#[test]
+fn test_docs_seo_ssr_and_indexes() {
+    let server = TestServer::start();
+    let token = server.admin_token();
+    let http = server.http();
+
+    // Two releases: v1.0 (older) and v2.0 (latest). "guide" exists in both,
+    // "old-only" only in v1.0.
+    for (tag, slug, title, body) in [
+        ("v1.0", "guide", "Guide", "# Guide\n[TOC]\n\nOld body."),
+        ("v1.0", "old-only", "Old Only", "# Old Only\n\nGone in v2."),
+        ("v2.0", "guide", "Guide", "# Guide\n[TOC]\n\nNew body. ![](shot.png) See [other](other-page)."),
+    ] {
+        let resp = http
+            .put(format!("{}/docs/{}/pages/{}", server.api_url, tag, slug))
+            .bearer_auth(&token)
+            .json(&json!({ "title": title, "body_md": body }))
+            .send()
+            .expect("upsert page");
+        assert_eq!(resp.status().as_u16(), 200, "upsert: {}", resp.text().unwrap_or_default());
+    }
+
+    // Creating v2.0 seeded it with v1.0's user pages; drop the copied
+    // "old-only" so the latest release genuinely lacks it.
+    let resp = http
+        .delete(format!("{}/docs/v2.0/pages/old-only", server.api_url))
+        .bearer_auth(&token)
+        .send()
+        .expect("delete seeded page");
+    assert_eq!(resp.status().as_u16(), 200, "delete: {}", resp.text().unwrap_or_default());
+
+    // SSR at the latest-release URL: rendered content, canonical, SPA boot
+    // object; [TOC] stripped, relative targets rewritten.
+    let resp = http.get(format!("{}/docs/guide", server.url)).send().expect("ssr latest");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = resp.text().unwrap();
+    assert!(body.contains("New body."), "SSR must serve the latest release");
+    assert!(body.contains("<link rel=\"canonical\" href=\"https://susi.lp-research.com/docs/guide\">"));
+    assert!(body.contains("Guide - FusionHub Documentation</title>"));
+    assert!(body.contains("window.__SSR="));
+    assert!(!body.contains("<p>[TOC]</p>"), "[TOC] must be stripped from SSR content");
+    assert!(body.contains("/api/v1/docs/v2.0/assets/shot.png"));
+    assert!(body.contains("href=\"/docs/other-page\""));
+
+    // A pinned release canonicalizes to the latest form when the page exists
+    // there, and to itself when it does not.
+    let body = http.get(format!("{}/docs/v1.0/guide", server.url)).send().unwrap().text().unwrap();
+    assert!(body.contains("Old body."));
+    assert!(body.contains("canonical\" href=\"https://susi.lp-research.com/docs/guide\""));
+    let resp = http.get(format!("{}/docs/v1.0/old-only", server.url)).send().unwrap();
+    let status = resp.status().as_u16();
+    let body = resp.text().unwrap();
+    let head_snippet: String = body.chars().take(600).collect();
+    assert!(
+        body.contains("canonical\" href=\"https://susi.lp-research.com/docs/v1.0/old-only\""),
+        "status {} head: {}", status, head_snippet,
+    );
+
+    // Unknown slug is a 404 carrying the shell so the SPA still boots.
+    let resp = http.get(format!("{}/docs/nope", server.url)).send().unwrap();
+    assert_eq!(resp.status().as_u16(), 404);
+
+    // Non-marketing host serves the docs sitemap, latest release only.
+    let xml = http.get(format!("{}/sitemap.xml", server.url)).send().unwrap().text().unwrap();
+    assert!(xml.contains("<loc>https://susi.lp-research.com/docs/guide</loc>"));
+    assert!(!xml.contains("old-only"), "sitemap must only list the latest release");
+    let robots = http.get(format!("{}/robots.txt", server.url)).send().unwrap().text().unwrap();
+    assert!(robots.contains("Sitemap: https://susi.lp-research.com/sitemap.xml"));
+
+    // llms.txt gains the documentation section; llms-full.txt carries the
+    // full latest-release markdown.
+    let llms = http.get(format!("{}/llms.txt", server.url)).send().unwrap().text().unwrap();
+    assert!(llms.contains("## FusionHub Documentation"));
+    assert!(llms.contains("https://susi.lp-research.com/docs/guide"));
+    let full = http.get(format!("{}/llms-full.txt", server.url)).send().unwrap().text().unwrap();
+    assert!(full.contains("New body."));
+    assert!(!full.contains("Gone in v2."), "llms-full must only carry the latest release");
+}
+
 /// End-to-end self-serve licensing: admin assigns a license to a customer
 /// account, the customer sees it via /my/licenses, exports a license file for
 /// an offline machine, removes the machine again, and loses access once the

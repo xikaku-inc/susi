@@ -927,12 +927,331 @@ fn derive_title(slug: &str, body: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// SEO-facing SSR:
+//   GET /docs               -> viewer shell with default head
+//   GET /docs/{slug}        -> shell + rendered page (latest release), canonical
+//   GET /docs/{tag}/{slug}  -> shell + rendered page (pinned release),
+//                              canonical -> latest form when the slug exists there
+//   GET /llms-full.txt      -> full latest-release markdown for AI crawlers
+// Hash URLs (/docs#/{tag}/{slug}) stay the in-app navigation form; the path
+// URLs above are what crawlers index. Default product only.
+// ---------------------------------------------------------------------------
+
+use axum::body::Bytes;
+use std::sync::LazyLock;
+
+use crate::website::{derive_description, html_escape, iso8601_z, render_body_html};
+
+/// Canonical public base for documentation URLs (sitemap, canonical, llms).
+pub(crate) const DOCS_PUBLIC_BASE: &str = "https://susi.lp-research.com";
+
+const DOCS_HTML: &str = include_str!("docs.html");
+
+const DOCS_DEFAULT_DESCRIPTION: &str = "Official FusionHub documentation: setup guides, \
+headset use-cases, calibration tutorials and the full node reference for Xikaku's \
+real-time sensor-fusion engine.";
+
+static SHELL_DEFAULT: LazyLock<Bytes> = LazyLock::new(|| {
+    let head = format!(
+        "<title>FusionHub Documentation</title>\n<meta name=\"description\" content=\"{}\">\n",
+        html_escape(DOCS_DEFAULT_DESCRIPTION),
+    );
+    Bytes::from(render_docs_shell(&head, ""))
+});
+
+fn render_docs_shell(head: &str, content: &str) -> String {
+    DOCS_HTML
+        .replacen("<!--SEO_HEAD-->", head, 1)
+        .replacen("<!--SSR_CONTENT-->", content, 1)
+}
+
+fn docs_html_headers() -> HeaderMap {
+    let mut h = HeaderMap::new();
+    h.insert(header::CONTENT_TYPE, "text/html; charset=utf-8".parse().unwrap());
+    h.insert(header::CACHE_CONTROL, "public, max-age=300".parse().unwrap());
+    h
+}
+
+pub async fn handle_docs_shell() -> impl IntoResponse {
+    (docs_html_headers(), SHELL_DEFAULT.clone())
+}
+
+/// Rewrite relative markdown link targets so SSR output is crawlable: bare
+/// asset names -> the release asset endpoint, bare page slugs -> /docs/{slug}.
+/// Absolute, anchor and mailto targets pass through untouched.
+fn rewrite_doc_links(md: &str, tag: &str) -> String {
+    const ASSET_EXT: &[&str] = &[".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".pdf"];
+    let mut out = String::with_capacity(md.len() + 256);
+    let mut rest = md;
+    while let Some(p) = rest.find("](") {
+        let start = p + 2;
+        let Some(len) = rest[start..].find(')') else { break };
+        let target = rest[start..start + len].trim();
+        out.push_str(&rest[..start]);
+        let lower = target.to_ascii_lowercase();
+        if target.is_empty()
+            || lower.starts_with("http://")
+            || lower.starts_with("https://")
+            || lower.starts_with("mailto:")
+            || target.starts_with('/')
+            || target.starts_with('#')
+        {
+            out.push_str(target);
+        } else if ASSET_EXT.iter().any(|e| lower.ends_with(e)) {
+            out.push_str(&format!("/api/v1/docs/{}/assets/{}", tag, target));
+        } else {
+            out.push_str(&format!("/docs/{}", target));
+        }
+        rest = &rest[start + len..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Drop viewer-only `[TOC]` markers.
+fn strip_toc(body_md: &str) -> String {
+    body_md
+        .lines()
+        .filter(|l| l.trim() != "[TOC]")
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Markdown as fed to the SSR renderer: no `[TOC]`, absolute link targets.
+fn docs_md_for_ssr(body_md: &str, tag: &str) -> String {
+    rewrite_doc_links(&strip_toc(body_md), tag)
+}
+
+fn docs_seo_head(title: &str, description: &str, canonical: &str, updated_at: &str, tag: &str, slug: &str) -> String {
+    let full_title = format!("{} - FusionHub Documentation", title);
+    let mut head = format!(
+        concat!(
+            "<title>{title}</title>\n",
+            "<meta name=\"description\" content=\"{desc}\">\n",
+            "<link rel=\"canonical\" href=\"{canonical}\">\n",
+            "<meta property=\"og:type\" content=\"article\">\n",
+            "<meta property=\"og:site_name\" content=\"FusionHub Documentation\">\n",
+            "<meta property=\"og:title\" content=\"{title}\">\n",
+            "<meta property=\"og:description\" content=\"{desc}\">\n",
+            "<meta property=\"og:url\" content=\"{canonical}\">\n",
+            "<meta name=\"twitter:card\" content=\"summary\">\n",
+        ),
+        title = html_escape(&full_title),
+        desc = html_escape(description),
+        canonical = html_escape(canonical),
+    );
+    let date_mod = if updated_at.is_empty() {
+        String::new()
+    } else {
+        format!(",\"dateModified\":\"{}\"", html_escape(&iso8601_z(updated_at)))
+    };
+    head.push_str(&format!(
+        concat!(
+            r#"<script type="application/ld+json">{{"@context":"https://schema.org","#,
+            r#""@type":"TechArticle","headline":"{h}","description":"{d}","#,
+            r#""mainEntityOfPage":"{c}"{dm},"publisher":{{"@type":"Organization","#,
+            r#""name":"Xikaku","url":"https://xikaku.com"}}}}</script>"#,
+            "\n",
+        ),
+        h = html_escape(title),
+        d = html_escape(description),
+        c = html_escape(canonical),
+        dm = date_mod,
+    ));
+    // One-shot boot info so the viewer routes to this page without a hash.
+    // `<` is escaped so a pathological slug cannot close the script tag.
+    let boot = json!({ "tag": tag, "slug": slug }).to_string().replace('<', "\\u003c");
+    head.push_str(&format!("<script>window.__SSR={};</script>\n", boot));
+    head
+}
+
+fn docs_ssr_not_found() -> axum::response::Response {
+    (StatusCode::NOT_FOUND, docs_html_headers(), SHELL_DEFAULT.clone()).into_response()
+}
+
+fn latest_public_tag(state: &AppState) -> Option<String> {
+    let db = state.db.lock();
+    db.list_doc_releases(DEFAULT_PRODUCT)
+        .ok()?
+        .into_iter()
+        .next()
+        .map(|(_id, tag, ..)| tag)
+}
+
+fn docs_ssr_response(
+    state: &Arc<AppState>,
+    req_tag: Option<String>,
+    slug: String,
+) -> axum::response::Response {
+    let Some(latest) = latest_public_tag(state) else { return docs_ssr_not_found() };
+    let tag = req_tag.unwrap_or_else(|| latest.clone());
+    if safe_tag(&tag).is_err() {
+        return docs_ssr_not_found();
+    }
+    // Workspace-scoped releases require auth; they never get an SSR page.
+    if release_reader_check(state, None, DEFAULT_PRODUCT, &tag).is_err() {
+        return docs_ssr_not_found();
+    }
+    let (page, in_latest) = {
+        let db = state.db.lock();
+        let Ok(Some(release_id)) = db.get_release_by_product_tag(DEFAULT_PRODUCT, &tag) else {
+            return docs_ssr_not_found();
+        };
+        let Ok(Some(page)) = db.get_doc_page(release_id, &slug) else {
+            return docs_ssr_not_found();
+        };
+        let in_latest = if tag == latest {
+            true
+        } else {
+            db.get_release_by_product_tag(DEFAULT_PRODUCT, &latest)
+                .ok()
+                .flatten()
+                .and_then(|id| db.get_doc_page(id, &slug).ok().flatten())
+                .is_some()
+        };
+        (page, in_latest)
+    };
+    let (title, body_md, _parent, _ord, updated_at) = page;
+    // Older-release URLs canonicalize to the latest form so search engines
+    // index one URL per page.
+    let canonical = if in_latest {
+        format!("{}/docs/{}", DOCS_PUBLIC_BASE, slug)
+    } else {
+        format!("{}/docs/{}/{}", DOCS_PUBLIC_BASE, tag, slug)
+    };
+    let description = {
+        let d = derive_description(&strip_toc(&body_md));
+        if d.is_empty() { DOCS_DEFAULT_DESCRIPTION.to_string() } else { d }
+    };
+    let head = docs_seo_head(&title, &description, &canonical, &updated_at, &tag, &slug);
+    let content = render_body_html(&docs_md_for_ssr(&body_md, &tag));
+    let html = render_docs_shell(&head, &content);
+    (docs_html_headers(), Bytes::from(html)).into_response()
+}
+
+pub async fn handle_docs_ssr_latest(
+    State(state): State<Arc<AppState>>,
+    Path(slug): Path<String>,
+) -> axum::response::Response {
+    docs_ssr_response(&state, None, slug)
+}
+
+pub async fn handle_docs_ssr_tagged(
+    State(state): State<Arc<AppState>>,
+    Path((tag, slug)): Path<(String, String)>,
+) -> axum::response::Response {
+    docs_ssr_response(&state, Some(tag), slug)
+}
+
+/// (url, updated_at) for every page of the latest public release; consumed by
+/// the sitemap when it is served on the docs host.
+pub(crate) fn docs_sitemap_entries(state: &AppState) -> Vec<(String, String)> {
+    let Some(tag) = latest_public_tag(state) else { return Vec::new() };
+    let db = state.db.lock();
+    let Ok(Some(release_id)) = db.get_release_by_product_tag(DEFAULT_PRODUCT, &tag) else {
+        return Vec::new();
+    };
+    let Ok(pages) = db.list_doc_pages(release_id) else { return Vec::new() };
+    pages
+        .into_iter()
+        .map(|(slug, _t, _p, _o, upd)| (format!("{}/docs/{}", DOCS_PUBLIC_BASE, slug), upd))
+        .collect()
+}
+
+/// "## FusionHub Documentation" section appended to llms.txt on every host.
+pub(crate) fn docs_llms_section(state: &AppState) -> String {
+    let Some(tag) = latest_public_tag(state) else { return String::new() };
+    let db = state.db.lock();
+    let Ok(Some(release_id)) = db.get_release_by_product_tag(DEFAULT_PRODUCT, &tag) else {
+        return String::new();
+    };
+    let Ok(pages) = db.list_doc_pages(release_id) else { return String::new() };
+    let mut out = String::from("\n## FusionHub Documentation\n");
+    for (slug, title, _parent, _ord, _upd) in &pages {
+        let desc = db
+            .get_doc_page(release_id, slug)
+            .ok()
+            .flatten()
+            .map(|(_t, body, ..)| derive_description(&strip_toc(&body)))
+            .unwrap_or_default();
+        let url = format!("{}/docs/{}", DOCS_PUBLIC_BASE, slug);
+        if desc.is_empty() {
+            out.push_str(&format!("- [{}]({})\n", title, url));
+        } else {
+            out.push_str(&format!("- [{}]({}): {}\n", title, url, desc));
+        }
+    }
+    out.push_str(&format!(
+        "\nThe complete documentation as a single markdown file: {}/llms-full.txt\n",
+        DOCS_PUBLIC_BASE,
+    ));
+    out
+}
+
+/// Every page of the latest public release as one markdown document.
+pub async fn handle_llms_full_txt(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let mut h = HeaderMap::new();
+    h.insert(header::CONTENT_TYPE, "text/plain; charset=utf-8".parse().unwrap());
+    h.insert(header::CACHE_CONTROL, "public, max-age=600".parse().unwrap());
+    let mut body = String::new();
+    if let Some(tag) = latest_public_tag(&state) {
+        let db = state.db.lock();
+        if let Ok(Some(release_id)) = db.get_release_by_product_tag(DEFAULT_PRODUCT, &tag) {
+            body.push_str(&format!(
+                "# FusionHub Documentation ({})\n\nComplete documentation for FusionHub, \
+                 Xikaku's real-time sensor-fusion engine. Canonical page URLs follow the \
+                 pattern {}/docs/<slug>.\n",
+                tag, DOCS_PUBLIC_BASE,
+            ));
+            if let Ok(pages) = db.list_doc_pages(release_id) {
+                for (slug, title, _parent, _ord, _upd) in &pages {
+                    if let Ok(Some((_t, body_md, ..))) = db.get_doc_page(release_id, slug) {
+                        body.push_str(&format!(
+                            "\n---\n\n# {}\nURL: {}/docs/{}\n\n{}\n",
+                            title, DOCS_PUBLIC_BASE, slug, body_md,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    (h, body)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rewrite_doc_links_classifies_targets() {
+        let md = "![](shot.png) [other page](other-page) [ext](https://x.y/z) [anchor](#sec) [abs](/docs/foo)";
+        let out = rewrite_doc_links(md, "v1");
+        assert!(out.contains("](/api/v1/docs/v1/assets/shot.png)"));
+        assert!(out.contains("](/docs/other-page)"));
+        assert!(out.contains("](https://x.y/z)"));
+        assert!(out.contains("](#sec)"));
+        assert!(out.contains("](/docs/foo)"));
+    }
+
+    #[test]
+    fn docs_md_for_ssr_strips_toc() {
+        let out = docs_md_for_ssr("# T\n[TOC]\n\nBody.", "v1");
+        assert!(!out.contains("[TOC]"));
+        assert!(out.contains("Body."));
+    }
+
+    #[test]
+    fn docs_seo_head_has_canonical_and_boot() {
+        let h = docs_seo_head("Page", "Desc.", "https://susi.lp-research.com/docs/page", "2026-07-21 10:00:00", "v1", "page");
+        assert!(h.contains("<link rel=\"canonical\" href=\"https://susi.lp-research.com/docs/page\">"));
+        assert!(h.contains("Page - FusionHub Documentation</title>"));
+        assert!(h.contains("window.__SSR={\"slug\":\"page\",\"tag\":\"v1\"}"));
+        assert!(h.contains("\"dateModified\":\"2026-07-21T10:00:00Z\""));
+    }
 
     #[test]
     fn safe_filename_rejects_traversal() {
