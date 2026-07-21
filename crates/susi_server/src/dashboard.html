@@ -1517,6 +1517,11 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                     <input type="text" id="siteSetGaId" placeholder="G-XXXXXXXXXX">
                     <div class="field-help">Leave empty to disable. When set, the gtag.js snippet is injected on every public page.</div>
                 </div>
+                <div class="form-row">
+                    <label for="siteSetRedditPixelId">Reddit Pixel ID</label>
+                    <input type="text" id="siteSetRedditPixelId" placeholder="a2_xxxxxxxxxxxx">
+                    <div class="field-help">Leave empty to disable. When set, the Reddit Pixel snippet is injected on every public page.</div>
+                </div>
                 <div id="siteSetError" class="form-error" style="display:none;"></div>
             </div>
             <div class="form-footer">
@@ -5834,6 +5839,7 @@ async function loadSiteSettings() {
         if (!resp.ok) return;
         const s = await resp.json();
         document.getElementById('siteSetGaId').value = s.google_analytics_id || '';
+        document.getElementById('siteSetRedditPixelId').value = s.reddit_pixel_id || '';
     } catch (e) {
         // Non-fatal - settings just won't pre-fill.
     }
@@ -5844,6 +5850,7 @@ async function saveSiteSettings() {
     errEl.style.display = 'none';
     const body = {
         google_analytics_id: document.getElementById('siteSetGaId').value.trim(),
+        reddit_pixel_id: document.getElementById('siteSetRedditPixelId').value.trim(),
     };
     try {
         const resp = await fetch(API + '/site/admin/settings', {

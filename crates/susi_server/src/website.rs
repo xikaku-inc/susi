@@ -1237,37 +1237,55 @@ fn build_html_headers() -> HeaderMap {
 }
 
 pub const SETTING_GOOGLE_ANALYTICS_ID: &str = "google_analytics_id";
+pub const SETTING_REDDIT_PIXEL_ID: &str = "reddit_pixel_id";
 
-/// Validate a Google Analytics Measurement ID. Restrict to `[A-Za-z0-9_-]`
-/// so it can be safely interpolated into the gtag.js URL and `gtag('config', ...)`
-/// call without escaping. Length cap keeps stored values sane.
+/// Validate an analytics tag ID (GA Measurement ID, Reddit Pixel ID).
+/// Restrict to `[A-Za-z0-9_-]` so it can be safely interpolated into
+/// script URLs and inline JS without escaping. Length cap keeps stored
+/// values sane.
 fn is_valid_analytics_id(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 64
         && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-/// Render the analytics `<script>` block from the configured Measurement ID,
-/// or empty string when unset. Called per-request - DB lookup is cheap.
+/// Render the analytics `<script>` blocks from the configured tag IDs,
+/// or empty string when unset. Called per-request - DB lookups are cheap.
 pub fn analytics_head(state: &Arc<AppState>) -> String {
-    let id = {
+    let (ga_id, reddit_id) = {
         let db = state.db.lock();
-        db.get_site_setting(SETTING_GOOGLE_ANALYTICS_ID).ok().flatten()
+        (
+            db.get_site_setting(SETTING_GOOGLE_ANALYTICS_ID).ok().flatten(),
+            db.get_site_setting(SETTING_REDDIT_PIXEL_ID).ok().flatten(),
+        )
     };
-    let Some(id) = id else { return String::new() };
-    if !is_valid_analytics_id(&id) { return String::new() }
-    format!(
-        "<link rel=\"preconnect\" href=\"https://www.googletagmanager.com\" crossorigin>\n\
-         <!-- Google tag (gtag.js) -->\n\
-         <script async src=\"https://www.googletagmanager.com/gtag/js?id={id}\"></script>\n\
-         <script>\n\
-         window.dataLayer = window.dataLayer || [];\n\
-         function gtag(){{dataLayer.push(arguments);}}\n\
-         gtag('js', new Date());\n\
-         gtag('config', '{id}');\n\
-         </script>\n",
-        id = id,
-    )
+    let mut out = String::new();
+    if let Some(id) = ga_id.filter(|s| is_valid_analytics_id(s)) {
+        out.push_str(&format!(
+            "<link rel=\"preconnect\" href=\"https://www.googletagmanager.com\" crossorigin>\n\
+             <!-- Google tag (gtag.js) -->\n\
+             <script async src=\"https://www.googletagmanager.com/gtag/js?id={id}\"></script>\n\
+             <script>\n\
+             window.dataLayer = window.dataLayer || [];\n\
+             function gtag(){{dataLayer.push(arguments);}}\n\
+             gtag('js', new Date());\n\
+             gtag('config', '{id}');\n\
+             </script>\n",
+            id = id,
+        ));
+    }
+    if let Some(id) = reddit_id.filter(|s| is_valid_analytics_id(s)) {
+        out.push_str(&format!(
+            "<!-- Reddit Pixel -->\n\
+             <script>\n\
+             !function(w,d){{if(!w.rdt){{var p=w.rdt=function(){{p.sendEvent?p.sendEvent.apply(p,arguments):p.callQueue.push(arguments)}};p.callQueue=[];var t=d.createElement(\"script\");t.src=\"https://www.redditstatic.com/ads/pixel.js\",t.async=!0;var s=d.getElementsByTagName(\"script\")[0];s.parentNode.insertBefore(t,s)}}}}(window,document);\n\
+             rdt('init','{id}');\n\
+             rdt('track','PageVisit');\n\
+             </script>\n",
+            id = id,
+        ));
+    }
+    out
 }
 
 pub async fn handle_robots_txt(_headers: HeaderMap) -> impl IntoResponse {
@@ -1383,7 +1401,7 @@ pub async fn handle_llms_txt(
 // Site settings admin (JWT)
 // ---------------------------------------------------------------------------
 
-const KNOWN_SITE_SETTING_KEYS: &[&str] = &[SETTING_GOOGLE_ANALYTICS_ID];
+const KNOWN_SITE_SETTING_KEYS: &[&str] = &[SETTING_GOOGLE_ANALYTICS_ID, SETTING_REDDIT_PIXEL_ID];
 
 pub async fn handle_admin_get_site_settings(
     State(state): State<Arc<AppState>>,
@@ -1423,10 +1441,13 @@ pub async fn handle_admin_put_site_settings(
             return Err(error_response(StatusCode::BAD_REQUEST, &format!("Unknown setting: {}", k)));
         }
         let trimmed = v.trim();
-        if k == SETTING_GOOGLE_ANALYTICS_ID && !trimmed.is_empty() && !is_valid_analytics_id(trimmed) {
+        if (k == SETTING_GOOGLE_ANALYTICS_ID || k == SETTING_REDDIT_PIXEL_ID)
+            && !trimmed.is_empty()
+            && !is_valid_analytics_id(trimmed)
+        {
             return Err(error_response(
                 StatusCode::BAD_REQUEST,
-                "google_analytics_id must contain only letters, digits, '-' or '_' (max 64 chars)",
+                &format!("{} must contain only letters, digits, '-' or '_' (max 64 chars)", k),
             ));
         }
         let db = state.db.lock();
@@ -1667,6 +1688,7 @@ mod tests {
     fn analytics_id_validator() {
         assert!(is_valid_analytics_id("G-XSW6TEN1CZ"));
         assert!(is_valid_analytics_id("UA-12345-1"));
+        assert!(is_valid_analytics_id("a2_jdm5gdy9bfis"));
         assert!(!is_valid_analytics_id(""));
         assert!(!is_valid_analytics_id("evil';alert(1)"));
         assert!(!is_valid_analytics_id(&"x".repeat(65)));
