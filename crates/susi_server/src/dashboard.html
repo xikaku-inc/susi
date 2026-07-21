@@ -1686,11 +1686,15 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
         <div class="modal-body">
             <div class="form-row">
                 <label>Customer</label>
-                <input type="text" id="createCustomer" placeholder="Company name">
+                <input type="text" id="createCustomer" placeholder="Company name" oninput="updateSuggestedUsername()">
             </div>
             <div class="form-row">
-                <label>Customer contact email <span style="font-weight:400;color:var(--text2);font-size:11px;">(optional - creates portal account + assigns license)</span></label>
-                <input type="email" id="createAssignEmail" placeholder="contact@customer.com">
+                <label>Customer contact email <span style="font-weight:400;color:var(--text2);font-size:11px;">(optional - creates a new portal account + assigns license)</span></label>
+                <input type="email" id="createAssignEmail" placeholder="contact@customer.com" oninput="updateSuggestedUsername()">
+            </div>
+            <div class="form-row">
+                <label>Portal username <span style="font-weight:400;color:var(--text2);font-size:11px;">(for the new account - must not exist yet)</span></label>
+                <input type="text" id="createAssignUsername" placeholder="FirstLastCompany" oninput="createUsernameEdited=true">
             </div>
             <div class="form-row">
                 <label>Product</label>
@@ -3197,6 +3201,8 @@ async function deleteLicense() {
 function showCreateModal() {
     document.querySelectorAll('#createFeaturesContainer input[type=checkbox]').forEach(cb => cb.checked = false);
     document.getElementById('createAssignEmail').value = '';
+    document.getElementById('createAssignUsername').value = '';
+    createUsernameEdited = false;
     document.getElementById('createLeaseDuration').value = '';
     document.getElementById('createLeaseGrace').value = '';
     document.getElementById('createRequireSignedBinary').checked = false;
@@ -3261,12 +3267,14 @@ async function createLicense() {
     const customer = document.getElementById('createCustomer').value.trim();
     if (!customer) { toast('Customer name is required', 'error'); return; }
 
-    // One-dialog flow: a contact email finds-or-creates the portal account
-    // (sending the invitation) and assigns the new license to it.
+    // One-dialog flow: email + username create a NEW portal account (with
+    // invitation) and assign the license to it. Existing accounts are never
+    // matched silently here - assign those from the license detail page.
     const assignEmail = document.getElementById('createAssignEmail').value.trim();
+    const assignUsername = document.getElementById('createAssignUsername').value.trim();
     let assignTo = [];
-    if (assignEmail) {
-        const username = await ensurePortalUser(assignEmail, customer);
+    if (assignEmail || assignUsername) {
+        const username = await createPortalUser(assignUsername, assignEmail);
         if (!username) return;
         assignTo = [username];
     }
@@ -3378,6 +3386,54 @@ function suggestUsername(email, customer) {
         .map(p => p.charAt(0).toUpperCase() + p.slice(1)).join('');
     const company = (customer || '').replace(/[^a-zA-Z0-9]+/g, '');
     return (name + company) || email;
+}
+
+// Prefill the create-modal username from email + customer until the admin
+// edits the field manually; the final value is always visible before submit.
+let createUsernameEdited = false;
+function updateSuggestedUsername() {
+    if (createUsernameEdited) return;
+    const email = document.getElementById('createAssignEmail').value.trim();
+    document.getElementById('createAssignUsername').value = email.includes('@')
+        ? suggestUsername(email, document.getElementById('createCustomer').value.trim())
+        : '';
+}
+
+// Create a brand-new portal account for the create-license flow. Unlike
+// ensurePortalUser this never matches an existing account: a taken username
+// or email is an error, so the admin must pick a different one.
+async function createPortalUser(username, email) {
+    if (!username) { toast('Enter a username for the new portal account', 'error'); return null; }
+    if (!email.includes('@')) { toast('Enter a valid contact email for the new portal account', 'error'); return null; }
+    await loadAssignableUsers();
+    const byName = assignableUsers.find(u => u.username.toLowerCase() === username.toLowerCase());
+    if (byName) {
+        toast('User "' + byName.username + '" already exists - choose a different username', 'error');
+        return null;
+    }
+    const byEmail = assignableUsers.find(u => (u.email || '').toLowerCase() === email.toLowerCase());
+    if (byEmail) {
+        toast('Email ' + email + ' already belongs to user "' + byEmail.username + '" - use a different email', 'error');
+        return null;
+    }
+    try {
+        const resp = await fetch(API + '/auth/users', {
+            method: 'POST',
+            headers: authHeaders(),
+            body: JSON.stringify({ username, email, role: 'user' }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+            toast('Error creating user: ' + (data.error || resp.status), 'error');
+            return null;
+        }
+        toast('Invitation sent to ' + email, 'success');
+        await loadAssignableUsers();
+        return username;
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+        return null;
+    }
 }
 
 async function ensurePortalUser(identifier, customer) {
