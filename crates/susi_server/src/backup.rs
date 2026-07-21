@@ -260,7 +260,7 @@ pub(crate) fn cli_decrypt(input: &str, output: Option<&str>, hex_key: &str) -> R
     let mut r = BufReader::new(File::open(input).with_context(|| format!("open {}", input))?);
     let mut w = BufWriter::new(File::create(&out).with_context(|| format!("create {}", out))?);
     decrypt_stream(&key, &mut r, &mut w)?;
-    println!("Decrypted to {} — unpack with: tar -xzf {}", out, out);
+    println!("Decrypted to {} - unpack with: tar -xzf {}", out, out);
     Ok(())
 }
 

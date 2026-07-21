@@ -359,7 +359,7 @@ pub(crate) async fn handle_init_recording(
 
     let safe_name = sanitize_filename(&req.file_name);
     let uuid = uuid::Uuid::new_v4().to_string();
-    // workspace_id is the prefix the IAM policy is scoped to — keeping it
+    // workspace_id is the prefix the IAM policy is scoped to - keeping it
     // first means a misconfigured client can't write outside its workspace
     // even with a leaked presigned URL.
     let s3_key = format!("workspaces/{}/recordings/{}-{}", workspace_id, uuid, safe_name);
@@ -488,7 +488,7 @@ pub(crate) async fn handle_delete_recording(
     assert_workspace_member(&state, &workspace_id, &principal)?;
 
     // Tear down DB first to release the s3_key for cleanup; if S3 delete
-    // fails the worst case is an orphan object — we log but don't surface.
+    // fails the worst case is an orphan object - we log but don't surface.
     let s3_key = {
         let db = state.db.lock();
         db.delete_recording(&workspace_id, recording_id)
@@ -506,7 +506,7 @@ pub(crate) async fn handle_delete_recording(
 }
 
 /// Returns the workspace's federation channel secret and the live peer list.
-/// Any workspace member can read — the secret is the symmetric
+/// Any workspace member can read - the secret is the symmetric
 /// key for the ZMQ data plane that all member fusionhubs need to participate.
 pub(crate) async fn handle_get_workspace_federation(
     State(state): State<Arc<AppState>>,
@@ -525,7 +525,7 @@ pub(crate) async fn handle_get_workspace_federation(
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
     let peers = db.list_workspace_peers(&workspace_id)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
-    // Cheap version-only fetch — body is fetched separately via GET /graph
+    // Cheap version-only fetch - body is fetched separately via GET /graph
     // when the polling peer notices its `applied_graph_version` is behind.
     let graph_version = db.get_workspace_graph_version(&workspace_id)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
@@ -622,7 +622,7 @@ pub(crate) async fn handle_put_workspace_graph(
 }
 
 /// Register (or refresh) a FusionHub peer for this workspace. Idempotent on
-/// `(workspace_id, host_id)` — re-registration updates `url`/`label`/`last_seen`.
+/// `(workspace_id, host_id)` - re-registration updates `url`/`label`/`last_seen`.
 pub(crate) async fn handle_register_workspace_peer(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -799,7 +799,7 @@ pub(crate) async fn handle_create_workspace_doc_release(
     // workspace (e.g. created by a prior software upload), we just return the
     // existing release so the caller can attach docs. Cross-scope collisions
     // (different workspace, or a global release with the same tag) are
-    // rejected — those would change ownership semantics.
+    // rejected - those would change ownership semantics.
     let existing_ws = {
         let db = state.db.lock();
         db.get_release_workspace_id(DEFAULT_PRODUCT, &tag)

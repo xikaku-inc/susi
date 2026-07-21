@@ -87,7 +87,7 @@ int main(int argc, char** argv)
     SusiClient client(publicKey, serverUrl);
 
     // -----------------------------------------------------------------------
-    // Test 1: verify_and_refresh — should activate and return Valid
+    // Test 1: verify_and_refresh - should activate and return Valid
     // -----------------------------------------------------------------------
     std::cout << "[susi-cpp-test] Test 1: checkLicenseAndRefresh\n";
     auto status = client.checkLicenseAndRefresh(licenseFile, licenseKey);
@@ -107,7 +107,7 @@ int main(int argc, char** argv)
         fail("unexpected feature 'vehicular_fusion' present");
 
     // -----------------------------------------------------------------------
-    // Test 2: lease renewal — calling again must still be Valid
+    // Test 2: lease renewal - calling again must still be Valid
     // -----------------------------------------------------------------------
     std::cout << "[susi-cpp-test] Test 2: lease renewal\n";
     SusiClient client2(publicKey, serverUrl);
@@ -116,7 +116,7 @@ int main(int argc, char** argv)
         fail("lease renewal: expected Valid");
 
     // -----------------------------------------------------------------------
-    // Test 3: offline fallback — checkLicense from the cached file
+    // Test 3: offline fallback - checkLicense from the cached file
     // -----------------------------------------------------------------------
     std::cout << "[susi-cpp-test] Test 3: offline fallback (cached file)\n";
     SusiClient client3(publicKey);

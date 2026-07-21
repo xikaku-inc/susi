@@ -78,7 +78,7 @@ impl LicenseDb {
     }
 
     /// Mark a backup-code row used. Returns true iff a previously-unused row
-    /// was flipped — false for already-used or unknown IDs (guards against race).
+    /// was flipped - false for already-used or unknown IDs (guards against race).
     pub fn consume_backup_code(&self, id: i64) -> Result<bool, LicenseError> {
         let now = Utc::now().to_rfc3339();
         let n = self

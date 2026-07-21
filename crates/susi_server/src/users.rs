@@ -265,7 +265,7 @@ pub(crate) async fn handle_create_api_token(
     Json(req): Json<CreateApiTokenRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
-    // Token management is intentionally JWT-only — using one API token to mint
+    // Token management is intentionally JWT-only - using one API token to mint
     // another would let a leaked token persist beyond a single revoke.
     if principal.source != AuthSource::Jwt {
         return Err(error_response(StatusCode::FORBIDDEN, "API tokens can only be managed from a browser session"));

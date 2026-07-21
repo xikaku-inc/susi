@@ -639,7 +639,7 @@ static bool isBinarySigned()
 // When SUSI_REQUIRE_SIGNED_BINARY is defined at compile time, a static object
 // is instantiated before main() whose constructor aborts the process if the
 // binary is not code-signed.  This ensures an attacker cannot reach any
-// application logic — including the license verification code — with a
+// application logic - including the license verification code - with a
 // tampered binary.
 //
 // Enable in CMake:

@@ -473,8 +473,8 @@ class Converter:
                     inline_parts.append(self.inline_one(child))
             text = re.sub(r"\s+", " ", "".join(inline_parts)).strip()
             marker = f"{n}." if kind == "ol" else "-"
-            # Renderer has no nested lists: flatten with an en-dash prefix.
-            prefix = "" if depth == 0 else "– "
+            # Renderer has no nested lists: flatten with a dash prefix.
+            prefix = "" if depth == 0 else "- "
             if text:
                 lines.append(f"{marker} {prefix}{text}")
             for nl in nested:

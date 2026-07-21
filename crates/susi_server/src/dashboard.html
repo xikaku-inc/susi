@@ -822,7 +822,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
 
 <div class="container">
 
-<!-- Anonymous landing route — login overlay is auto-shown by route(). -->
+<!-- Anonymous landing route - login overlay is auto-shown by route(). -->
 <div id="page-home" class="dash-page"></div>
 
 <!-- Workspaces page -->
@@ -1183,7 +1183,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
     </div>
 
     <div style="margin-top:40px;margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;">
-        <h2 style="font-size:16px;font-weight:600;">Shop — Products</h2>
+        <h2 style="font-size:16px;font-weight:600;">Shop - Products</h2>
         <button onclick="showProductModal()">+ New Product</button>
     </div>
     <div class="card" style="padding:0;">
@@ -1294,7 +1294,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
 <!-- Backups (Dropbox) -->
 <div id="page-backups" class="dash-page">
     <div style="margin-top:32px;margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
-        <h2 style="font-size:16px;font-weight:600;">Backups — Dropbox</h2>
+        <h2 style="font-size:16px;font-weight:600;">Backups - Dropbox</h2>
         <div style="display:flex;gap:8px;">
             <button class="secondary" onclick="loadBackupPage()">Refresh</button>
             <button id="backupRunBtn" onclick="runBackupNow()">Back up now</button>
@@ -1320,7 +1320,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                 <div id="backupConnectFlow" style="display:none;">
                     <p style="font-size:12px;color:var(--text2);margin:0 0 10px;">
                         1. Open the Dropbox authorization page and approve access.
-                        2. Dropbox shows a one-time code — paste it below and connect.
+                        2. Dropbox shows a one-time code - paste it below and connect.
                         Backups only ever see the app's own folder (Apps/&lt;app name&gt;).
                     </p>
                     <button class="secondary" onclick="openBackupAuthorize()">Open Dropbox authorization</button>
@@ -1453,7 +1453,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
 <!-- Website Pages -->
 <div id="page-website" class="dash-page">
     <div style="margin-top:8px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
-        <h2 style="font-size:16px;font-weight:600;">Website — Pages</h2>
+        <h2 style="font-size:16px;font-weight:600;">Website - Pages</h2>
         <button onclick="showWebsitePageModal()">+ New Page</button>
     </div>
     <p style="margin-top:0;margin-bottom:16px;font-size:12px;color:var(--text2);">
@@ -1478,7 +1478,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
     </div>
 
     <div style="margin-top:40px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
-        <h2 style="font-size:16px;font-weight:600;">Website — Assets</h2>
+        <h2 style="font-size:16px;font-weight:600;">Website - Assets</h2>
         <div style="display:flex;gap:8px;">
             <button class="secondary" onclick="loadWebsiteAssets()">Refresh</button>
             <button onclick="document.getElementById('websiteAssetFile').click()">+ Upload Asset</button>
@@ -1617,7 +1617,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                 <div style="display:flex;gap:10px;align-items:center;">
                     <img id="productImagePreview" alt="" style="width:48px;height:48px;object-fit:cover;border-radius:6px;border:1px solid var(--border);display:none;flex-shrink:0;">
                     <select id="productImage" style="flex:1;min-width:0;" onchange="updateProductImagePreview()">
-                        <option value="">— No image —</option>
+                        <option value="">- No image -</option>
                     </select>
                     <button type="button" class="small secondary" onclick="document.getElementById('productImageFile').click()">Upload…</button>
                     <input type="file" id="productImageFile" accept="image/*" style="display:none;" onchange="uploadProductImage(this.files[0]);this.value='';">
@@ -2015,7 +2015,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
 <div id="forgotPasswordOverlay" class="auth-overlay">
     <div class="auth-card">
         <h2>Reset your password</h2>
-        <div class="subtitle">Enter your username or email — we'll send a reset link if an address is on file.</div>
+        <div class="subtitle">Enter your username or email - we'll send a reset link if an address is on file.</div>
         <div id="forgotPasswordError" class="auth-error"></div>
         <div class="form-row">
             <label>Username or email</label>
@@ -2072,7 +2072,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
     </div>
 </div>
 
-<!-- Password-reset "check your inbox" notice (kept link-based — the email
+<!-- Password-reset "check your inbox" notice (kept link-based - the email
      contains a /#/reset/<token> link, not a code). -->
 <div id="resetSentOverlay" class="auth-overlay">
     <div class="auth-card">
@@ -2164,7 +2164,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
             <p style="color:var(--text2);font-size:13px;margin:0 0 12px;">
                 Long-lived bearer tokens for headless clients (CI scripts, services). Send as
                 <span class="pat-prefix">Authorization: Bearer susi_pat_…</span>.
-                Tokens inherit your role and bypass the interactive 2FA gate — treat them like passwords.
+                Tokens inherit your role and bypass the interactive 2FA gate - treat them like passwords.
             </p>
             <div id="apiTokensTableContainer" style="margin-bottom:16px;max-height:50vh;overflow:auto;">
                 <table>
@@ -2207,7 +2207,7 @@ let authToken = '';
 let currentUsername = '';
 
 // Stable per-browser identifier. Generated once and persisted in localStorage;
-// clearing site data = new device on next login (by design — it re-triggers
+// clearing site data = new device on next login (by design - it re-triggers
 // the sign-in-code check). Not a security signal on its own, just a marker.
 function getDeviceFp() {
     let fp = localStorage.getItem('device_fp');
@@ -2215,7 +2215,7 @@ function getDeviceFp() {
         if (window.crypto && crypto.randomUUID) {
             fp = crypto.randomUUID();
         } else {
-            // Very old browser fallback — 128 bits from Math.random.
+            // Very old browser fallback - 128 bits from Math.random.
             fp = 'fp-' + Array.from({length: 8}, () => Math.random().toString(36).slice(2, 6)).join('');
         }
         localStorage.setItem('device_fp', fp);
@@ -2223,7 +2223,7 @@ function getDeviceFp() {
     return fp;
 }
 function getDeviceLabel() {
-    // Short, human-readable — no PII beyond the UA string.
+    // Short, human-readable - no PII beyond the UA string.
     const ua = navigator.userAgent || 'unknown';
     return ua.length > 200 ? ua.slice(0, 200) : ua;
 }
@@ -2234,7 +2234,7 @@ let totpEnabled = false;
 let backupCodesRemaining = null;
 let mustEnableTotp = false;
 
-// Theme: 'dark' | 'light' | 'system' — persisted in localStorage.
+// Theme: 'dark' | 'light' | 'system' - persisted in localStorage.
 function applyTheme(t) {
     const root = document.documentElement;
     if (t === 'system') {
@@ -2268,7 +2268,7 @@ if (window.matchMedia) {
 let pendingSigninUsername = '';
 
 // Intercept password-reset landings (#/reset/<token>). Runs on both
-// initial page load AND on hashchange — the latter matters when the
+// initial page load AND on hashchange - the latter matters when the
 // email link opens in an already-open tab, which only fires hashchange
 // (not a full reload). Returns true if a reset token was captured. The
 // actual submit happens when the user fills in the new password and
@@ -2400,7 +2400,7 @@ function route() {
     let target = segs[0] || '';
     const allowedAnon = new Set(['', 'home']);
     if (!authToken && !allowedAnon.has(target)) {
-        // Protected page requested by anonymous user — show login.
+        // Protected page requested by anonymous user - show login.
         showLogin();
         return;
     }
@@ -2409,7 +2409,7 @@ function route() {
         showLogin();
     }
     if (authToken && (target === '' || target === 'home')) {
-        // Logged-in user landing on / — pick the first available section.
+        // Logged-in user landing on / - pick the first available section.
         target = (userRole === 'admin') ? 'releases' : 'mylicenses';
         if (location.hash !== '#/' + target) location.hash = '#/' + target;
     }
@@ -2594,7 +2594,7 @@ async function submitSigninCode() {
         return;
     }
     if (!pendingSigninUsername) {
-        errEl.textContent = 'Session expired — sign in again';
+        errEl.textContent = 'Session expired - sign in again';
         errEl.classList.add('visible');
         return;
     }
@@ -2624,7 +2624,7 @@ async function submitSigninCode() {
             return;
         }
 
-        // Success — the server already registered this device under our
+        // Success - the server already registered this device under our
         // fingerprint, so finish the client-side session.
         authToken = data.token;
         localStorage.setItem('auth_token', authToken);
@@ -2693,7 +2693,7 @@ async function submitChangePassword() {
         // Re-sync auth state from the server. enterDashboard() alone leaves
         // mustEnableTotp/currentUsername/totpEnabled stale (sign-in code
         // never populated them), which makes the admin /licenses 403 get
-        // misrouted as another change-password prompt — the loop the user hit.
+        // misrouted as another change-password prompt - the loop the user hit.
         await checkAuthStatus();
     } catch (e) {
         errEl.textContent = 'Connection failed: ' + e.message;
@@ -2784,7 +2784,7 @@ async function submitResetPassword() {
     const confirm = document.getElementById('rpConfirm').value;
     if (newPw.length < 8) { errEl.textContent = 'Password must be at least 8 characters'; errEl.classList.add('visible'); return; }
     if (newPw !== confirm) { errEl.textContent = 'Passwords do not match'; errEl.classList.add('visible'); return; }
-    if (!pendingResetToken) { errEl.textContent = 'Reset link missing — open the email link again'; errEl.classList.add('visible'); return; }
+    if (!pendingResetToken) { errEl.textContent = 'Reset link missing - open the email link again'; errEl.classList.add('visible'); return; }
     try {
         const resp = await fetch(API + '/auth/reset-password', {
             method: 'POST',
@@ -2799,7 +2799,7 @@ async function submitResetPassword() {
         }
         pendingResetToken = '';
         document.getElementById('resetPasswordOverlay').classList.remove('visible');
-        toast('Password reset — please sign in', 'success');
+        toast('Password reset - please sign in', 'success');
         showLogin();
     } catch (e) {
         errEl.textContent = 'Connection failed: ' + e.message;
@@ -3808,11 +3808,11 @@ async function verify2FA() {
 function showBackupCodes(codes, firstTime) {
     const content = document.getElementById('tfaContent');
     const codeList = codes.map(c => '<div class="backup-code">' + esc(c) + '</div>').join('');
-    const heading = firstTime ? '2FA enabled — save your backup codes' : 'Your new backup codes';
+    const heading = firstTime ? '2FA enabled - save your backup codes' : 'Your new backup codes';
     content.innerHTML =
         '<p style="margin-bottom:4px;"><strong>' + heading + '</strong></p>' +
         '<p style="font-size:12px;color:var(--text2);margin-bottom:12px;">' +
-        'Each code works once if you lose your authenticator. Copy them somewhere safe — ' +
+        'Each code works once if you lose your authenticator. Copy them somewhere safe - ' +
         'you will not see them again.' +
         '</p>' +
         '<div class="backup-codes-grid">' + codeList + '</div>' +
@@ -3827,10 +3827,10 @@ function copyBackupCodes(codes) {
     if (navigator.clipboard) {
         navigator.clipboard.writeText(text).then(
             () => toast('Backup codes copied to clipboard', 'success'),
-            () => toast('Copy failed — select and copy manually', 'error'),
+            () => toast('Copy failed - select and copy manually', 'error'),
         );
     } else {
-        toast('Clipboard not supported — select and copy manually', 'error');
+        toast('Clipboard not supported - select and copy manually', 'error');
     }
 }
 
@@ -3981,7 +3981,7 @@ function renderUsers() {
         // firing when dispatched from the dropdown.
         const emailArg = u.email ? esc(JSON.stringify(u.email)) : "''";
         // Resend appears for any user still on must_change_password=1 and
-        // with an email on file — covers both pending and expired-invite cases.
+        // with an email on file - covers both pending and expired-invite cases.
         const canResend = !isSelf && u.must_change_password && u.email;
         const uname = esc(u.username);
         const menuId = 'user-menu-' + u.username.replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -4240,7 +4240,7 @@ function fmtTokenStatus(t) {
     return '<span class="pat-active">Active</span>';
 }
 function fmtTokenDate(s) {
-    if (!s) return '<span style="color:var(--text2);">–</span>';
+    if (!s) return '<span style="color:var(--text2);">-</span>';
     return esc(new Date(s).toLocaleString());
 }
 
@@ -4256,7 +4256,7 @@ async function loadMyApiTokens() {
         }
         tbody.innerHTML = tokens.map(t => {
             const actions = t.revoked_at
-                ? '<span style="color:var(--text2);font-size:11px;">–</span>'
+                ? '<span style="color:var(--text2);font-size:11px;">-</span>'
                 : '<button class="small danger" onclick="revokeMyApiToken(' + t.id + ')">Revoke</button>';
             return '<tr>'
                 + '<td>' + esc(t.name) + '</td>'
@@ -4284,7 +4284,7 @@ async function loadAllApiTokens() {
         }
         tbody.innerHTML = tokens.map(t => {
             const actions = t.revoked_at
-                ? '<span style="color:var(--text2);font-size:11px;">–</span>'
+                ? '<span style="color:var(--text2);font-size:11px;">-</span>'
                 : '<button class="small danger" onclick="revokeAnyApiToken(' + t.id + ')">Revoke</button>';
             return '<tr>'
                 + '<td>' + esc(t.username) + '</td>'
@@ -4328,7 +4328,7 @@ function showNewApiTokenOnce(rawToken, name) {
         '<h2>Token created</h2>' +
         '<p style="margin-bottom:6px;">Token: <strong>' + esc(name) + '</strong></p>' +
         '<p style="font-size:12px;color:var(--text2);margin-bottom:12px;">' +
-        'Copy this now — it will not be shown again. Store it like a password.' +
+        'Copy this now - it will not be shown again. Store it like a password.' +
         '</p>' +
         '<div class="secret-display" id="newPatRaw">' + esc(rawToken) + '</div>' +
         '<div style="display:flex;gap:8px;margin-top:14px;justify-content:flex-end;">' +
@@ -4341,7 +4341,7 @@ function showNewApiTokenOnce(rawToken, name) {
         if (navigator.clipboard) {
             navigator.clipboard.writeText(rawToken).then(
                 () => toast('Token copied to clipboard', 'success'),
-                () => toast('Copy failed — select and copy manually', 'error'),
+                () => toast('Copy failed - select and copy manually', 'error'),
             );
         }
     };
@@ -4963,7 +4963,7 @@ async function showWsDetail(id, tab) {
                     const allUsers = await uResp.json();
                     const candidates = allUsers.filter(u => !memberNames.has(u.username));
                     if (candidates.length === 0) {
-                        sel.innerHTML = '<option value="">No other users — add one via Actions → Users</option>';
+                        sel.innerHTML = '<option value="">No other users - add one via Actions → Users</option>';
                     } else {
                         sel.innerHTML = '<option value="">Select user...</option>' +
                             candidates
@@ -5107,7 +5107,7 @@ async function deleteWsReleaseAsset(tag, fileName) {
 }
 
 // Move a release to a different workspace. The dropdown of targets is built
-// from the cached `workspaces` list (excluding the current workspace) — same
+// from the cached `workspaces` list (excluding the current workspace) - same
 // list rendered on the Workspaces tab, so it's already authoritative.
 function moveWsRelease(tag) {
     if (!selectedWsId) return;
@@ -5146,7 +5146,7 @@ async function confirmMoveRelease() {
         }
         closeMoveReleaseModal();
         toast('Release ' + tag + ' moved', 'success');
-        // Reload current workspace's releases — the moved release is no longer
+        // Reload current workspace's releases - the moved release is no longer
         // in scope here, so the row will disappear.
         loadWsReleases(selectedWsId);
     } catch (e) {
@@ -5768,7 +5768,7 @@ document.addEventListener('keydown', e => {
 });
 
 // ---------------------------------------------------------------------------
-// Shop admin — products + shipping rates
+// Shop admin - products + shipping rates
 // ---------------------------------------------------------------------------
 let shopProducts = [];
 let shopRates = [];
@@ -5801,7 +5801,7 @@ async function loadShopSettings() {
             }
         }
     } catch (e) {
-        // Non-fatal — settings just won't pre-fill.
+        // Non-fatal - settings just won't pre-fill.
     }
 }
 
@@ -5835,7 +5835,7 @@ async function loadSiteSettings() {
         const s = await resp.json();
         document.getElementById('siteSetGaId').value = s.google_analytics_id || '';
     } catch (e) {
-        // Non-fatal — settings just won't pre-fill.
+        // Non-fatal - settings just won't pre-fill.
     }
 }
 
@@ -5879,7 +5879,7 @@ function renderShopProducts() {
     tbody.innerHTML = shopProducts.map(p => {
         const img = p.image_url
             ? '<img src="' + escHtml(p.image_url) + '" style="width:40px;height:40px;object-fit:cover;border-radius:4px;">'
-            : '<span style="color:var(--text2);font-size:11px;">—</span>';
+            : '<span style="color:var(--text2);font-size:11px;">-</span>';
         const price = shopFmtMoney(p.price_cents, p.currency);
         return '<tr>'
             + '<td>' + img + '</td>'
@@ -5993,14 +5993,14 @@ async function loadShopRates() {
 function renderShopRates() {
     const tbody = document.getElementById('shopRatesBody');
     if (!shopRates.length) {
-        tbody.innerHTML = '<tr><td colspan="6" class="empty-state"><p>No shipping rates — orders cannot ship until you add at least one.</p></td></tr>';
+        tbody.innerHTML = '<tr><td colspan="6" class="empty-state"><p>No shipping rates - orders cannot ship until you add at least one.</p></td></tr>';
         return;
     }
     tbody.innerHTML = shopRates.map(r => {
         const regions = (r.regions || []).join(', ');
         const delivery = (r.delivery_min_days != null && r.delivery_max_days != null)
-            ? r.delivery_min_days + '–' + r.delivery_max_days
-            : (r.delivery_min_days != null ? '≥' + r.delivery_min_days : (r.delivery_max_days != null ? '≤' + r.delivery_max_days : '—'));
+            ? r.delivery_min_days + '-' + r.delivery_max_days
+            : (r.delivery_min_days != null ? '≥' + r.delivery_min_days : (r.delivery_max_days != null ? '≤' + r.delivery_max_days : '-'));
         return '<tr>'
             + '<td>' + escHtml(r.label) + '</td>'
             + '<td>' + escHtml(shopFmtMoney(r.amount_cents, r.currency)) + '</td>'
@@ -6053,7 +6053,7 @@ async function saveRate() {
     if (!regions.length) { errEl.textContent = 'At least one region required (US, CA, or * for both)'; errEl.style.display = ''; return; }
     const allowed = new Set(['US', 'CA', '*']);
     const bad = regions.find(r => !allowed.has(r.toUpperCase()));
-    if (bad) { errEl.textContent = 'Unsupported region "' + bad + '" — only US, CA, or * are allowed'; errEl.style.display = ''; return; }
+    if (bad) { errEl.textContent = 'Unsupported region "' + bad + '" - only US, CA, or * are allowed'; errEl.style.display = ''; return; }
     const minDays = document.getElementById('rateMinDays').value;
     const maxDays = document.getElementById('rateMaxDays').value;
     const body = {
@@ -6099,7 +6099,7 @@ async function deleteShopRate(id) {
 const escHtml = esc;
 
 // ---------------------------------------------------------------------------
-// Shop admin — orders
+// Shop admin - orders
 // ---------------------------------------------------------------------------
 let shopOrders = [];
 let viewingOrderId = null;
@@ -6177,7 +6177,7 @@ function renderBackupPage(st) {
     if (st.connected) {
         let space = '';
         if (st.space_used != null && st.space_allocated) {
-            space = ' — ' + formatSize(st.space_used) + ' of ' + formatSize(st.space_allocated) + ' used';
+            space = ' - ' + formatSize(st.space_used) + ' of ' + formatSize(st.space_allocated) + ' used';
         }
         info.innerHTML = 'Account: <strong>' + escHtml(st.account || '(unknown)') + '</strong>'
             + escHtml(space)
@@ -6328,14 +6328,14 @@ function renderShopOrders() {
     }
     tbody.innerHTML = shopOrders.map(o => {
         const total = (o.amount_total_cents / 100).toFixed(2) + ' ' + (o.currency || 'usd').toUpperCase();
-        const customer = o.customer_name || o.customer_email || '—';
+        const customer = o.customer_name || o.customer_email || '-';
         const created = o.created_at ? new Date(o.created_at).toLocaleString() : '';
         const statusColor = o.status === 'shipped' ? 'var(--green)' : 'var(--text2)';
         const tracking = o.tracking_number
             ? (o.tracking_url
                 ? '<a href="' + escHtml(o.tracking_url) + '" target="_blank" rel="noopener">' + escHtml(o.tracking_carrier) + ' ' + escHtml(o.tracking_number) + '</a>'
                 : escHtml(o.tracking_carrier) + ' ' + escHtml(o.tracking_number))
-            : '<span style="color:var(--text2);">—</span>';
+            : '<span style="color:var(--text2);">-</span>';
         return '<tr>'
             + '<td>#' + o.id + '</td>'
             + '<td style="font-size:12px;color:var(--text2);">' + escHtml(created) + '</td>'
@@ -6390,7 +6390,7 @@ function openOrderModal(id) {
         '<div style="display:grid;grid-template-columns:1fr 1fr;gap:18px;">'
         +   '<div>'
         +     '<div style="color:var(--text2);font-size:11px;text-transform:uppercase;">Customer</div>'
-        +     '<div>' + escHtml(o.customer_name || '—') + '</div>'
+        +     '<div>' + escHtml(o.customer_name || '-') + '</div>'
         +     '<div style="color:var(--text2);font-size:12px;">' + escHtml(o.customer_email) + '</div>'
         +     '<div style="color:var(--text2);font-size:11px;text-transform:uppercase;margin-top:14px;">Created</div>'
         +     '<div>' + escHtml(created) + '</div>'
@@ -6453,7 +6453,7 @@ async function submitMarkShipped() {
 // ---------------------------------------------------------------------------
 // Website pages admin
 //
-// We don't ship a full markdown editor in the dashboard — page editing happens
+// We don't ship a full markdown editor in the dashboard - page editing happens
 // inline on /site/{slug} where the existing EasyMDE-based editor lives. This
 // tab just lists pages and lets you create / delete / jump-to-editor.
 // ---------------------------------------------------------------------------
@@ -6483,13 +6483,13 @@ function renderWebsitePagesTable() {
         const editUrl = '/site/' + encodeURIComponent(p.slug);
         const parent = p.parent_slug
             ? '<code>' + escHtml(p.parent_slug) + '</code>'
-            : '<span style="color:var(--text2);">—</span>';
+            : '<span style="color:var(--text2);">-</span>';
         const menuId = 'website-page-menu-' + p.slug.replace(/[^a-zA-Z0-9_-]/g, '_');
         const slugArg = JSON.stringify(p.slug).replace(/"/g, '&quot;');
         const hiddenBadge = p.hidden
             ? ' <span class="badge" style="background:var(--bg3);color:var(--text2);">hidden</span>'
             : '';
-        // Dim the content cells individually — opacity on the <tr> would
+        // Dim the content cells individually - opacity on the <tr> would
         // create a stacking context that traps the fixed-position dropdown
         // menu below the following rows.
         const dim = p.hidden ? ' style="opacity:0.6;"' : '';
@@ -6646,7 +6646,7 @@ async function loadWebsiteAssets() {
 function renderWebsiteAssetsTable() {
     const tbody = document.getElementById('websiteAssetsBody');
     if (!websiteAssets.length) {
-        tbody.innerHTML = '<tr><td colspan="5" class="empty-state"><p>No assets yet — upload one here or from the page editor.</p></td></tr>';
+        tbody.innerHTML = '<tr><td colspan="5" class="empty-state"><p>No assets yet - upload one here or from the page editor.</p></td></tr>';
         return;
     }
     tbody.innerHTML = websiteAssets.map((a, i) => {
@@ -6723,7 +6723,7 @@ async function renameWebsiteAsset(name) {
         });
         const data = await resp.json().catch(() => ({}));
         if (!resp.ok) { toast('Rename failed: ' + (data.error || resp.status), 'error'); return; }
-        toast('Renamed' + (data.pages_updated ? ' — ' + data.pages_updated + ' page(s) updated' : ''), 'success');
+        toast('Renamed' + (data.pages_updated ? ' - ' + data.pages_updated + ' page(s) updated' : ''), 'success');
         await loadWebsiteAssets();
         await loadShopProducts();
     } catch (e) { toast('Rename failed: ' + e.message, 'error'); }
@@ -6733,7 +6733,7 @@ async function deleteWebsiteAsset(name) {
     const a = websiteAssets.find(x => x.name === name);
     const used = a ? (a.pages || []).length + (a.products || []).length : 0;
     let msg = 'Delete asset "' + name + '"?';
-    if (used) msg += '\nIt is referenced by ' + used + ' page(s)/product(s) — those will show a broken image.';
+    if (used) msg += '\nIt is referenced by ' + used + ' page(s)/product(s) - those will show a broken image.';
     msg += '\nThis cannot be undone.';
     if (!confirm(msg)) return;
     try {
@@ -6752,7 +6752,7 @@ function populateProductImageOptions(selected) {
     const sel = document.getElementById('productImage');
     const names = websiteAssets.map(a => a.name).filter(isImageAsset);
     if (selected && !names.includes(selected)) names.unshift(selected);
-    sel.innerHTML = '<option value="">— No image —</option>' + names.map(n =>
+    sel.innerHTML = '<option value="">- No image -</option>' + names.map(n =>
         '<option value="' + escHtml(n) + '"' + (n === selected ? ' selected' : '') + '>' + escHtml(n) + '</option>').join('');
     updateProductImagePreview();
 }

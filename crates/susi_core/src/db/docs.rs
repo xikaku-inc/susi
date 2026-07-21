@@ -6,7 +6,7 @@ impl LicenseDb {
     // -----------------------------------------------------------------------
 
     /// Upsert a single page authored via the editor. Always marks the row as
-    /// `origin='user'` — even if a prior pipeline run had planted the slug.
+    /// `origin='user'` - even if a prior pipeline run had planted the slug.
     /// Manual edits imply ownership: next pipeline run will skip it.
     pub fn upsert_doc_page(
         &self,
@@ -194,7 +194,7 @@ impl LicenseDb {
         Ok((written, skipped))
     }
 
-    /// Upsert an asset uploaded via the editor — always marks origin='user',
+    /// Upsert an asset uploaded via the editor - always marks origin='user',
     /// including when overwriting a prior pipeline-planted row.
     pub fn upsert_doc_asset(
         &self,
@@ -340,7 +340,7 @@ impl LicenseDb {
     }
 
     /// Ensure a release row exists for the given tag under the default product
-    /// — used by bulk doc import when the docs ship before the binary release.
+    /// - used by bulk doc import when the docs ship before the binary release.
     /// Returns the release id.
     pub fn ensure_release(&self, tag: &str, name: &str) -> Result<i64, LicenseError> {
         Ok(self.ensure_release_created(tag, name)?.0)
@@ -360,7 +360,7 @@ impl LicenseDb {
     /// Product- and workspace-aware variant. When `workspace_id` is `Some`, the
     /// release is created with that scope. If the (product, tag) already exists
     /// with a *different* scope (or none), returns the existing id without
-    /// modifying it — a caller that cares should reject that case before
+    /// modifying it - a caller that cares should reject that case before
     /// calling.
     pub fn ensure_release_created_scoped(
         &self,

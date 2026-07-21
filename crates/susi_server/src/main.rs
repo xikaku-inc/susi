@@ -273,7 +273,7 @@ const SECURITY_CSP: &str = "default-src 'self'; \
     form-action 'self'";
 
 
-// Sliding-window rate limit on /api/v1/auth/login — throttles brute force
+// Sliding-window rate limit on /api/v1/auth/login - throttles brute force
 // against weak passwords and caps credential-stuffing throughput.
 const LOGIN_WINDOW: StdDuration = StdDuration::from_secs(60);
 const LOGIN_MAX_ATTEMPTS: usize = 10;
@@ -301,14 +301,14 @@ const CHECKOUT_MAX_ATTEMPTS: usize = 10;
 
 // Generous limit on the Stripe webhook endpoint: legitimate Stripe delivery
 // burst-fires retries from a small IP set, so we keep the cap loose. The
-// signature check is the real gate — this is just defense in depth against
+// signature check is the real gate - this is just defense in depth against
 // spam from a single source.
 const WEBHOOK_WINDOW: StdDuration = StdDuration::from_secs(60);
 const WEBHOOK_MAX_ATTEMPTS: usize = 300;
 
 // How often we'll walk the rate-limit map to drop empty/expired entries.
 // Cleanup is O(map.len()) so under burst traffic the previous trigger
-// (`map.len() > 4096`) ran on every subsequent request — turning a cheap
+// (`map.len() > 4096`) ran on every subsequent request - turning a cheap
 // per-request check into a full scan under the shared mutex. Gating on
 // elapsed seconds amortises that work to once per CLEANUP_PERIOD regardless
 // of map size.
@@ -913,7 +913,7 @@ fn validate_jwt(
         })
 }
 
-// Authenticated source — JWT means an interactive browser session (subject to
+// Authenticated source - JWT means an interactive browser session (subject to
 // password-change and TOTP gates), ApiToken means a long-lived bearer issued
 // via the management UI (intended for service accounts; bypasses interactive gates).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -982,7 +982,7 @@ fn api_token_cache_invalidate(hash: &str) {
     }
 }
 
-/// Drop every cached token. Called by revoke handlers — we don't store the
+/// Drop every cached token. Called by revoke handlers - we don't store the
 /// raw hash on the row and revokes are rare, so a global flush is simpler
 /// than mapping `id → hash`. Cache is bounded to API_TOKEN_CACHE_MAX entries.
 fn api_token_cache_clear() {
@@ -1059,7 +1059,7 @@ pub(crate) fn validate_principal(
 /// round-trip and one mutex cycle instead of the three the legacy
 /// `require_password_changed` + `require_admin` pair did. Use this for any
 /// handler that ends up calling both helpers back-to-back (the typical admin
-/// case) — the old helpers stay around for the few sites that need only one.
+/// case) - the old helpers stay around for the few sites that need only one.
 pub(crate) fn require_admin_full(
     state: &AppState,
     principal: &Principal,
@@ -1222,7 +1222,7 @@ pub(crate) fn release_reader_check(
     Ok(Some(ws_id))
 }
 
-// Argon2 hash + verify are CPU-bound and take ~50–100 ms per call. Run them on
+// Argon2 hash + verify are CPU-bound and take ~50-100 ms per call. Run them on
 // a `spawn_blocking` worker so they don't stall a Tokio runtime worker thread
 // (which would freeze every other handler scheduled on it). Callers must await.
 async fn hash_password(password: &str) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
@@ -1287,7 +1287,7 @@ fn random_magic_token() -> String {
 }
 
 // Generate a 6-digit numeric sign-in code (zero-padded). 20 bits of entropy
-// is intentional — short enough to type by hand from an email, gated by IP
+// is intentional - short enough to type by hand from an email, gated by IP
 // rate limiting + per-user scoping so brute force is impractical.
 fn random_signin_code() -> String {
     let n: u32 = rand::thread_rng().gen_range(0..1_000_000);
@@ -1307,7 +1307,7 @@ fn hash_signin_code(username: &str, code: &str) -> String {
 }
 
 fn mask_email(addr: &str) -> String {
-    // "klaus@lp-research.com" -> "k***@lp-research.com" — shown to the user so
+    // "klaus@lp-research.com" -> "k***@lp-research.com" - shown to the user so
     // they can confirm they're checking the right inbox without leaking the
     // full address to someone who's only guessed a username.
     if let Some((local, domain)) = addr.split_once('@') {
@@ -1427,7 +1427,7 @@ fn verify_totp_or_backup(
     if trimmed.len() == 6 && trimmed.chars().all(|c| c.is_ascii_digit()) {
         return verify_totp_code(state, username, trimmed);
     }
-    // Backup-code path — strip separators users might type in (space or dash).
+    // Backup-code path - strip separators users might type in (space or dash).
     let normalized: String = trimmed
         .chars()
         .filter(|c| c.is_ascii_alphanumeric())
@@ -1465,7 +1465,7 @@ fn verify_totp_or_backup(
 
 // Generate N fresh backup codes. Each is 10 characters from an unambiguous
 // alphabet (no 0/O/1/I/L), displayed to the user in "XXXXX-XXXXX" form.
-// ~50 bits of entropy per code — plenty given login rate limiting.
+// ~50 bits of entropy per code - plenty given login rate limiting.
 fn generate_backup_codes(n: usize) -> Vec<String> {
     const ALPHA: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
     let mut rng = rand::thread_rng();
@@ -1496,7 +1496,7 @@ fn hash_backup_code(code: &str) -> Result<String, (StatusCode, Json<ErrorRespons
 }
 
 // Exchange a sign-in code for a JWT. Also registers the device as trusted.
-// `username` is required so the lookup can be scoped per user — two users
+// `username` is required so the lookup can be scoped per user - two users
 // can hold the same 6-digit code in flight without colliding.
 #[derive(Deserialize)]
 struct SigninCodeRequest {
@@ -1548,13 +1548,13 @@ struct ChangePasswordRequest {
 // Password reset (forgot-password) flow
 // ---------------------------------------------------------------------------
 //
-// 1. POST /auth/forgot-password { identifier } — identifier is either a
+// 1. POST /auth/forgot-password { identifier } - identifier is either a
 //    username or an email address. Always responds 200 (no enumeration).
 //    If the account is found and has an email and SMTP is configured, a
 //    one-time reset link is sent to the on-file address.
 // 2. User clicks the link, lands at /#/reset/<token>. Frontend prompts for a
 //    new password and POSTs it to /auth/reset-password.
-// 3. POST /auth/reset-password { token, new_password } — consumes the token,
+// 3. POST /auth/reset-password { token, new_password } - consumes the token,
 //    updates the password, clears must_change_password (since the user just
 //    proved control of the inbox).
 //
@@ -1566,7 +1566,7 @@ const INVITE_TTL_HOURS: i64 = 24 * 7;
 
 #[derive(Deserialize)]
 struct ForgotPasswordRequest {
-    /// Username OR email — users may not remember their login name.
+    /// Username OR email - users may not remember their login name.
     identifier: String,
 }
 
@@ -1714,7 +1714,7 @@ fn verify_rsa(ca_spki_der: &[u8], tbs: &[u8], sig: &[u8], alg_oid: &str) -> bool
 }
 
 fn verify_ecdsa(ca_spki_der: &[u8], tbs: &[u8], sig: &[u8], alg_oid: &str) -> bool {
-    // Use ring for ECDSA verification — it is already in the dependency graph
+    // Use ring for ECDSA verification - it is already in the dependency graph
     // via rcgen.
     use ring::signature::{self, UnparsedPublicKey};
 
@@ -1903,7 +1903,7 @@ fn get_owned_license(
 struct CreateUserRequest {
     username: String,
     /// Optional. When absent, the user is created with an unusable random
-    /// password and an invitation email is sent — the recommended flow.
+    /// password and an invitation email is sent - the recommended flow.
     /// When set (admin chose "set password manually"), no email is sent and
     /// the admin must courier the temp password out-of-band.
     #[serde(default)]
@@ -1920,7 +1920,7 @@ fn default_user_role() -> String {
 /// Mint a one-time invitation link for `username` and email it. Replaces any
 /// outstanding reset/invite tokens for that user so only the freshest link
 /// works. Caller is expected to have held the DB lock briefly *before* this
-/// — we re-acquire it here and drop it before spawning the SMTP task.
+/// - we re-acquire it here and drop it before spawning the SMTP task.
 async fn issue_and_send_invitation(
     state: &AppState,
     username: &str,
@@ -2022,7 +2022,7 @@ fn normalize_email(raw: &str) -> Result<Option<String>, (StatusCode, Json<ErrorR
     if trimmed.is_empty() {
         return Ok(None);
     }
-    // Very light validation — the real check is "does the sign-in email arrive".
+    // Very light validation - the real check is "does the sign-in email arrive".
     // We just catch obvious typos so we don't store garbage.
     if !trimmed.contains('@') || trimmed.contains(' ') || trimmed.len() > 254 {
         return Err(error_response(StatusCode::BAD_REQUEST, "Invalid email address"));
@@ -2449,7 +2449,7 @@ struct PutGraphRequest {
     /// very first push of a workspace (no row yet). Mismatch ⇒ 409.
     #[serde(default)]
     expected_version: Option<u32>,
-    /// Raw config JSON — same shape the editor exports / loads.
+    /// Raw config JSON - same shape the editor exports / loads.
     config: serde_json::Value,
 }
 
@@ -2589,7 +2589,7 @@ async fn main() -> Result<()> {
         .with_context(|| format!("Failed to create docs dir at {}", docs_dir.display()))?;
 
     let email_service = if cli.smtp_host.is_empty() {
-        log::info!("SMTP not configured (--smtp-host empty) — sign-in code login disabled");
+        log::info!("SMTP not configured (--smtp-host empty) - sign-in code login disabled");
         None
     } else if cli.smtp_user.is_empty() || cli.smtp_password.is_empty() || cli.smtp_from_addr.is_empty() {
         log::warn!(
@@ -2615,7 +2615,7 @@ async fn main() -> Result<()> {
                 Some(svc)
             }
             Err(e) => {
-                log::error!("Failed to init SMTP transport: {:#} — sign-in code disabled", e);
+                log::error!("Failed to init SMTP transport: {:#} - sign-in code disabled", e);
                 None
             }
         }
@@ -2626,14 +2626,14 @@ async fn main() -> Result<()> {
     }
 
     if cli.stripe_secret_key.is_empty() {
-        log::info!("Stripe not configured — /api/v1/shop/checkout will respond 503");
+        log::info!("Stripe not configured - /api/v1/shop/checkout will respond 503");
     } else {
         log::info!(
             "Stripe configured (key prefix: {})",
             &cli.stripe_secret_key[..cli.stripe_secret_key.len().min(8)],
         );
         if cli.stripe_webhook_secret.is_empty() {
-            log::warn!("STRIPE_SECRET_KEY is set but STRIPE_WEBHOOK_SECRET is not — webhook will reject all events");
+            log::warn!("STRIPE_SECRET_KEY is set but STRIPE_WEBHOOK_SECRET is not - webhook will reject all events");
         }
     }
 
@@ -2649,7 +2649,7 @@ async fn main() -> Result<()> {
         .context("Failed to build HTTP client")?;
 
     // S3 for workspace recordings. Missing env (bucket/region/creds) is
-    // tolerated at startup — the recording endpoints respond 503 instead
+    // tolerated at startup - the recording endpoints respond 503 instead
     // and the rest of the server stays up.
     let s3_storage = match s3::S3Storage::from_env().await {
         Ok(Some(s)) => {
@@ -2657,11 +2657,11 @@ async fn main() -> Result<()> {
             Some(s)
         }
         Ok(None) => {
-            log::info!("S3 not configured (SUSI_S3_BUCKET/REGION empty) — recording endpoints will respond 503");
+            log::info!("S3 not configured (SUSI_S3_BUCKET/REGION empty) - recording endpoints will respond 503");
             None
         }
         Err(e) => {
-            log::error!("S3 init failed: {:#} — recording endpoints will respond 503", e);
+            log::error!("S3 init failed: {:#} - recording endpoints will respond 503", e);
             None
         }
     };
@@ -2669,9 +2669,9 @@ async fn main() -> Result<()> {
     if cli.contact_to_addr.is_empty() {
         log::info!("Contact form disabled (SUSI_CONTACT_TO_ADDR empty)");
     } else if email_service.is_none() {
-        log::warn!("Contact form: SUSI_CONTACT_TO_ADDR is set but SMTP isn't configured — endpoint will respond 503");
+        log::warn!("Contact form: SUSI_CONTACT_TO_ADDR is set but SMTP isn't configured - endpoint will respond 503");
     } else if cli.turnstile_secret.is_empty() || cli.turnstile_site_key.is_empty() {
-        log::warn!("Contact form enabled with NO captcha (turnstile keys empty) — relying on honeypot + rate-limit only");
+        log::warn!("Contact form enabled with NO captcha (turnstile keys empty) - relying on honeypot + rate-limit only");
     } else {
         log::info!("Contact form enabled, recipient = {}, Turnstile active", cli.contact_to_addr);
     }
@@ -2748,7 +2748,7 @@ async fn main() -> Result<()> {
     }
 
     // Periodic session cleanup. Lease-expired machine activations are NOT
-    // deleted anymore — they persist as "seen but stale" history for the
+    // deleted anymore - they persist as "seen but stale" history for the
     // dashboard and simply stop counting toward the seat limit.
     {
         let state_bg = Arc::clone(&state);
@@ -2796,7 +2796,7 @@ async fn main() -> Result<()> {
         .route("/llms.txt", get(website::handle_llms_txt))
         .route("/llms-full.txt", get(docs::handle_llms_full_txt))
         .route("/googledb0d71a54eee8f70.html", get(website::handle_google_site_verification))
-        // IndexNow key file — Bing/Yandex/etc. fetch this to verify ownership
+        // IndexNow key file - Bing/Yandex/etc. fetch this to verify ownership
         // before accepting our URL update notifications. Lives under /api/v1
         // so the standard nginx /api proxy reaches it without extra routing.
         .route("/api/v1/indexnow/{filename}", get(website::handle_indexnow_key_file))
@@ -2864,7 +2864,7 @@ async fn main() -> Result<()> {
             "/api/v1/licenses/{key}/machines/{machine_code}/tombstone",
             axum::routing::delete(licenses::handle_clear_machine_tombstone),
         )
-        // Releases — client endpoints (license-key protected)
+        // Releases - client endpoints (license-key protected)
         .route("/api/v1/updates/releases", get(releases::handle_get_releases))
         .route("/api/v1/updates/download/{tag}/{asset}", get(releases::handle_download_asset))
         .route("/api/v1/updates/download-ticket", post(releases::handle_mint_download_ticket))
@@ -2872,7 +2872,7 @@ async fn main() -> Result<()> {
         // e.g. /download/fusionhub/windows -> newest matching asset. Lets the
         // marketing site link a stable URL that never needs editing per release.
         .route("/download/{product}/{platform}", get(releases::handle_public_latest_download))
-        // Releases — admin endpoints (JWT protected)
+        // Releases - admin endpoints (JWT protected)
         .route("/api/v1/releases", get(releases::handle_list_releases_admin))
         .merge(
             Router::new()
@@ -2916,7 +2916,7 @@ async fn main() -> Result<()> {
             "/api/v1/products/{product}",
             axum::routing::put(releases::handle_update_product).delete(releases::handle_delete_product),
         )
-        // Docs — legacy tag-only endpoints (back-compat shim: pin the default
+        // Docs - legacy tag-only endpoints (back-compat shim: pin the default
         // product so already-deployed FusionHubs keep working. Remove once every
         // client uses the product-scoped routes below).
         .route("/api/v1/docs/releases", get(docs::handle_list_doc_releases))
@@ -2927,7 +2927,7 @@ async fn main() -> Result<()> {
             "/api/v1/docs/{tag}/assets/{file}",
             get(docs::handle_get_doc_asset).delete(docs::handle_delete_doc_asset),
         )
-        // Docs — product-scoped endpoints (`/api/v1/products/{product}/docs/...`),
+        // Docs - product-scoped endpoints (`/api/v1/products/{product}/docs/...`),
         // parallel to the workspace docs routes.
         .route("/api/v1/products/{product}/docs/releases", get(docs::handle_list_doc_releases_p))
         .route("/api/v1/products/{product}/docs/releases/latest", get(docs::handle_latest_doc_release_p))
@@ -2937,7 +2937,7 @@ async fn main() -> Result<()> {
             "/api/v1/products/{product}/docs/{tag}/assets/{file}",
             get(docs::handle_get_doc_asset_p).delete(docs::handle_delete_doc_asset_p),
         )
-        // Docs — admin write endpoints (JWT). Bulk import + asset upload get the larger body limit.
+        // Docs - admin write endpoints (JWT). Bulk import + asset upload get the larger body limit.
         .merge(
             Router::new()
                 .route("/api/v1/docs/{tag}/import", post(docs::handle_bulk_import_docs))
@@ -2964,11 +2964,11 @@ async fn main() -> Result<()> {
             "/api/v1/products/{product}/docs/{tag}/pages/{slug}/rename",
             post(docs::handle_rename_doc_page_p),
         )
-        // Website — public read
+        // Website - public read
         .route("/api/v1/website/pages", get(website::handle_list_pages))
         .route("/api/v1/website/pages/{slug}", get(website::handle_get_page))
         .route("/api/v1/website/assets/{file}", get(website::handle_get_asset))
-        // Website — admin write (asset upload gets the larger body limit)
+        // Website - admin write (asset upload gets the larger body limit)
         .merge(
             Router::new()
                 .route("/api/v1/website/assets", post(website::handle_upload_asset))
@@ -2991,7 +2991,7 @@ async fn main() -> Result<()> {
             "/api/v1/website/assets/{file}",
             axum::routing::delete(website::handle_delete_asset),
         )
-        // Website admin — page revisions (history)
+        // Website admin - page revisions (history)
         .route(
             "/api/v1/website/pages/{slug}/revisions",
             get(website::handle_list_page_revisions),
@@ -3004,7 +3004,7 @@ async fn main() -> Result<()> {
             "/api/v1/website/pages/{slug}/revisions/{id}/restore",
             post(website::handle_restore_page_revision),
         )
-        // Website admin — asset admin (usage, rename)
+        // Website admin - asset admin (usage, rename)
         .route(
             "/api/v1/website/admin/assets",
             get(website::handle_list_assets_with_usage),
@@ -3017,7 +3017,7 @@ async fn main() -> Result<()> {
             post(website::handle_rename_asset),
         )
         // ---- Shop ----
-        // Public HTML shell — same shell serves /shop, /shop/{sku}, /shop/success, /shop/cancel.
+        // Public HTML shell - same shell serves /shop, /shop/{sku}, /shop/success, /shop/cancel.
         .route("/shop", get(shop::handle_shop_page))
         .route("/shop/success", get(shop::handle_shop_page))
         .route("/shop/cancel", get(shop::handle_shop_page))
@@ -3047,20 +3047,20 @@ async fn main() -> Result<()> {
             axum::routing::put(shop::handle_update_shipping_rate)
                 .delete(shop::handle_delete_shipping_rate),
         )
-        // Orders (JWT) — Stripe is the source of truth for payment, susi
+        // Orders (JWT) - Stripe is the source of truth for payment, susi
         // tracks fulfillment state on top of it.
         .route("/api/v1/shop/admin/orders", get(shop::handle_admin_list_orders))
         .route("/api/v1/shop/admin/orders/{id}", get(shop::handle_admin_get_order))
         .route("/api/v1/shop/admin/orders/{id}/ship", post(shop::handle_admin_mark_shipped))
         .route("/api/v1/shop/admin/orders/{id}/notes", axum::routing::put(shop::handle_admin_update_order_notes))
-        // Shop settings (JWT) — admin notification recipients, customer email
+        // Shop settings (JWT) - admin notification recipients, customer email
         // toggles, support contact, etc.
         .route(
             "/api/v1/shop/admin/settings",
             get(shop::handle_admin_get_settings)
                 .put(shop::handle_admin_put_settings),
         )
-        // Site-wide settings (JWT) — analytics IDs and other site-level config.
+        // Site-wide settings (JWT) - analytics IDs and other site-level config.
         .route(
             "/api/v1/site/admin/settings",
             get(website::handle_admin_get_site_settings)

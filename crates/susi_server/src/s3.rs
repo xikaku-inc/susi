@@ -1,6 +1,6 @@
 //! S3 client wrapper for workspace recordings.
 //!
-//! Susi never streams object bytes — it only generates presigned URLs the
+//! Susi never streams object bytes - it only generates presigned URLs the
 //! client uses directly against S3, and handles HEAD/DELETE for finalize and
 //! cleanup. The `S3Storage` is built once at startup from env vars and lives
 //! on `AppState` as `Option` (so missing config degrades cleanly to a

@@ -26,7 +26,7 @@ impl LicenseDb {
     }
 
     /// Look up a magic-link token WITHOUT consuming it. Returns the row only
-    /// if it is unknown-unused AND still within its TTL — the same validity
+    /// if it is unknown-unused AND still within its TTL - the same validity
     /// rules `consume_login_token` applies, minus the mark-as-used step.
     ///
     /// This exists because magic-link exchange may require a second input
@@ -69,7 +69,7 @@ impl LicenseDb {
     ///
     /// Returns the (username, device_fp, device_label) on success. Returns
     /// `Ok(None)` if the token is unknown, already used, or expired. The token
-    /// is single-use — once consumed, subsequent lookups return `None`.
+    /// is single-use - once consumed, subsequent lookups return `None`.
     pub fn consume_login_token(
         &self,
         token_hash: &str,
@@ -105,7 +105,7 @@ impl LicenseDb {
             )
             .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))?;
         if n == 0 {
-            // Race — another consumer beat us to it.
+            // Race - another consumer beat us to it.
             return Ok(None);
         }
         Ok(Some(LoginTokenRow {
@@ -170,7 +170,7 @@ impl LicenseDb {
         Ok(())
     }
 
-    /// Invalidate every outstanding reset/invite token for a user — used
+    /// Invalidate every outstanding reset/invite token for a user - used
     /// when re-issuing an invitation so the previous link stops working.
     pub fn invalidate_setup_tokens(&self, username: &str) -> Result<(), LicenseError> {
         let now = Utc::now().to_rfc3339();

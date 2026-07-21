@@ -296,7 +296,7 @@ fn free_port() -> u16 {
 // ubuntu-latest where /sys/block/<disk>/serial is empty), which would
 // cause every verify_signed call to fall through to LicenseStatus::Error
 // regardless of actual signature validity. The tests do not care about
-// machine-binding — inject a stable synthetic code via the cache.
+// machine-binding - inject a stable synthetic code via the cache.
 const TEST_MACHINE_CODE: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
 
@@ -514,7 +514,7 @@ fn test_fallback_to_cached_file() {
     let status = client.activate(&license_path, &license_key, None);
     assert!(status.is_valid(), "initial: {:?}", status);
 
-    // Kill server — dir (and cached file) remain alive.
+    // Kill server - dir (and cached file) remain alive.
     child.kill().ok();
     child.wait().ok();
 
@@ -838,7 +838,7 @@ fn test_cpp_client_against_server() {
     #[cfg(not(susi_cpp_built))]
     panic!(
         "conan is installed but C++ build failed: {}",
-        option_env!("SUSI_CPP_BUILD_ERROR").unwrap_or("unknown reason — check cargo:warning output")
+        option_env!("SUSI_CPP_BUILD_ERROR").unwrap_or("unknown reason - check cargo:warning output")
     );
 
     #[cfg(susi_cpp_built)]
@@ -1075,7 +1075,7 @@ fn test_product_scoped_docs_flow() {
         .expect("lpvr page");
     assert_eq!(resp.json::<Value>().unwrap()["body_md"].as_str().unwrap(), "# Hello LPVR");
 
-    // The default product has NO docs yet — isolation holds on both the
+    // The default product has NO docs yet - isolation holds on both the
     // product-scoped and the legacy routes.
     for url in [
         format!("{}/products/fusionhub/docs/releases", server.api_url),
@@ -1086,7 +1086,7 @@ fn test_product_scoped_docs_flow() {
         assert!(body["releases"].as_array().unwrap().is_empty(), "{} must be empty", url);
     }
 
-    // Reuse the same tag under the default product via the legacy route — the
+    // Reuse the same tag under the default product via the legacy route - the
     // composite (product, tag) key allows it, and the two pages are distinct.
     let resp = http
         .put(format!("{}/docs/v1.0/pages/intro", server.api_url))
@@ -1419,6 +1419,17 @@ fn test_release_download_product_entitlement() {
         }
         req.send().expect("mint ticket").status().as_u16()
     };
+
+    // The default product ships download_public=1 (public FusionHub
+    // installers); switch it off so this test exercises the entitlement gate.
+    client
+        .put(format!("{}/products/fusionhub", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({"name": "FusionHub", "download_public": false}))
+        .send()
+        .expect("gate default product")
+        .error_for_status()
+        .expect("gate default product ok");
 
     client
         .post(format!("{}/products", server.api_url))
@@ -3042,7 +3053,7 @@ fn test_workspace_member_doc_authoring() {
 
 /// Hiding a website page removes it from every public surface (page list,
 /// direct fetch, sitemap, llms.txt) while keeping it visible to admins so it
-/// can be edited and shown again — without deleting any content.
+/// can be edited and shown again - without deleting any content.
 #[test]
 fn test_website_page_hide_show() {
     let server = TestServer::start();
@@ -3124,7 +3135,7 @@ fn test_website_page_hide_show() {
         .send().expect("get after edit");
     assert_eq!(resp.status().as_u16(), 404, "editing must not unhide the page");
 
-    // Show it again — public access is restored.
+    // Show it again - public access is restored.
     let resp = http
         .post(format!("{}/website/pages/secret/visibility", server.api_url))
         .bearer_auth(&token)

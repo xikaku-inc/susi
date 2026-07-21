@@ -44,7 +44,7 @@ pub struct ApiTokenAuthRow {
     pub revoked: bool,
 }
 
-/// Public-facing metadata about a token. Never includes the hash or raw token —
+/// Public-facing metadata about a token. Never includes the hash or raw token -
 /// `prefix` is enough for humans to spot which token a row refers to.
 #[derive(Debug, Serialize)]
 pub struct ApiTokenInfo {
@@ -423,7 +423,7 @@ impl LicenseDb {
             -- Workspace peer registry. Each FusionHub instance that logs into
             -- a workspace registers its externally-reachable URL here. Other
             -- members poll this list to populate their peer set without mDNS.
-            -- `network_id` is a peer-side scope string — peers only federate
+            -- `network_id` is a peer-side scope string - peers only federate
             -- with others sharing the same value (workspace membership is
             -- necessary but not sufficient). Empty string means isolated.
             CREATE TABLE IF NOT EXISTS workspace_peers (
@@ -708,14 +708,14 @@ impl LicenseDb {
         // Tag doc pages / assets with their origin so a new release tag can
         // inherit hand-authored pages from the prior release without dragging
         // along the pipeline-regenerated ones. Existing rows default to 'user'
-        // — safe because it keeps them in the carry-over set; next pipeline run
+        // - safe because it keeps them in the carry-over set; next pipeline run
         // re-stamps its own pages as 'pipeline'.
         let _ = self.conn.execute_batch(
             "ALTER TABLE doc_pages ADD COLUMN origin TEXT NOT NULL DEFAULT 'user';
              ALTER TABLE doc_assets ADD COLUMN origin TEXT NOT NULL DEFAULT 'user';",
         );
 
-        // Add email column to users (nullable — admin sets it per user)
+        // Add email column to users (nullable - admin sets it per user)
         let _ = self
             .conn
             .execute_batch("ALTER TABLE users ADD COLUMN email TEXT;");
@@ -1450,7 +1450,7 @@ mod tests {
             .unwrap();
         }
 
-        // Reopen — runs init_tables + migrate (adds product, rebuilds releases).
+        // Reopen - runs init_tables + migrate (adds product, rebuilds releases).
         let db = LicenseDb::open(&p).unwrap();
 
         // Existing release is preserved and now belongs to the default product.
@@ -1509,7 +1509,7 @@ mod tests {
             .unwrap();
         assert!(db.is_device_known("admin", "fp1").unwrap());
 
-        // Upsert on repeat — last_seen should update but no duplicate row.
+        // Upsert on repeat - last_seen should update but no duplicate row.
         db.register_device("admin", "fp1", "").unwrap();
         let devices = db.list_devices("admin").unwrap();
         assert_eq!(devices.len(), 1);
@@ -1546,7 +1546,7 @@ mod tests {
         db.seed_admin("hash").unwrap();
         db.insert_login_token("hashP", "admin", "fp1", "", 900)
             .unwrap();
-        // Peek twice — token should still be consumable after.
+        // Peek twice - token should still be consumable after.
         assert!(db.peek_login_token("hashP").unwrap().is_some());
         assert!(db.peek_login_token("hashP").unwrap().is_some());
         assert!(db.consume_login_token("hashP").unwrap().is_some());
@@ -1636,7 +1636,7 @@ mod tests {
         let id = unused[0].0;
         assert!(db.consume_backup_code(id).unwrap());
         assert_eq!(db.count_unused_backup_codes("admin").unwrap(), 7);
-        // Double-consume returns false — race protection.
+        // Double-consume returns false - race protection.
         assert!(!db.consume_backup_code(id).unwrap());
 
         // Replace wipes old rows (including used ones).
@@ -1731,7 +1731,7 @@ mod tests {
             .unwrap()
             .is_none());
 
-        // Add tombstone — present with a future expiry
+        // Add tombstone - present with a future expiry
         db.add_machine_tombstone(&license.id, "mX", 24).unwrap();
         let exp = db
             .machine_tombstone_expires_at(&license.id, "mX")
@@ -1822,7 +1822,7 @@ mod tests {
             0
         );
 
-        // Client restarts and tries to activate again. This MUST be blocked —
+        // Client restarts and tries to activate again. This MUST be blocked -
         // otherwise the admin's removal is effectively a no-op, which is the
         // exact bug we are guarding against.
         let err = sim_client_activate(&db, &license.id, "mc-laptop", "nico-lpLaptop").unwrap_err();
@@ -1845,7 +1845,7 @@ mod tests {
     #[test]
     fn regression_client_self_deactivate_does_not_tombstone() {
         // A user who hits "Remove THIS machine" in their own FusionHub UI is
-        // explicitly resetting the install — they must be able to re-activate
+        // explicitly resetting the install - they must be able to re-activate
         // immediately. Only *admin* removal is sticky.
         let db = test_db();
         let license = License::new(
@@ -2400,7 +2400,7 @@ mod tests {
         let a = assets.iter().find(|(n, _)| n == "a.bin").unwrap();
         assert_eq!(a.1, 33);
 
-        // Delete one — the other remains.
+        // Delete one - the other remains.
         assert!(db.delete_release_asset(rid, "a.bin").unwrap());
         let remaining = db.get_release_assets(rid).unwrap();
         assert_eq!(remaining.len(), 1);
@@ -2745,7 +2745,7 @@ mod tests {
         let all = db.list_releases().unwrap();
         assert_eq!(all.len(), 2);
 
-        // Workspace list shows ONLY workspace-specific releases — global
+        // Workspace list shows ONLY workspace-specific releases - global
         // releases are surfaced through the public/admin endpoints instead.
         let ws_releases = db.list_releases_for_workspace("ws-1").unwrap();
         assert_eq!(ws_releases.len(), 1);
@@ -2818,7 +2818,7 @@ mod tests {
                 .unwrap();
         }
 
-        // Reopen — migration adds `kind` and backfills doc-only rows.
+        // Reopen - migration adds `kind` and backfills doc-only rows.
         let db = LicenseDb::open(&p).unwrap();
         let all = db.list_releases().unwrap();
         assert_eq!(all.len(), 1);
@@ -2936,7 +2936,7 @@ mod tests {
         assert_eq!(peers_ws2.len(), 1);
         assert_eq!(peers_ws2[0].1, "https://other.local");
 
-        // Re-register hostA with a new URL — must update in place.
+        // Re-register hostA with a new URL - must update in place.
         std::thread::sleep(std::time::Duration::from_millis(5));
         db.upsert_workspace_peer(
             "ws-1",
@@ -3021,7 +3021,7 @@ mod tests {
             .unwrap();
         db.upsert_workspace_graph("ws-1", Some(1), r#"{"v":2}"#, "alice")
             .unwrap();
-        // Caller still thinks it's at v1 — must fail with current=2.
+        // Caller still thinks it's at v1 - must fail with current=2.
         let err = db
             .upsert_workspace_graph("ws-1", Some(1), r#"{"v":3}"#, "bob")
             .unwrap_err();
@@ -3039,7 +3039,7 @@ mod tests {
     #[test]
     fn test_workspace_graph_no_expected_version_after_first_save_conflicts() {
         // Once a row exists, `expected_version = None` must NOT silently
-        // overwrite — that would be the same "forgot to load" footgun.
+        // overwrite - that would be the same "forgot to load" footgun.
         let db = test_db();
         db.create_workspace("ws-1", "WS", "", "", "admin").unwrap();
         db.upsert_workspace_graph("ws-1", None, r#"{"v":1}"#, "alice")
@@ -3094,7 +3094,7 @@ mod tests {
             .unwrap();
         assert!(db.has_pending_invitation("alice").unwrap());
 
-        // Same consume function handles both kinds — invitee uses the
+        // Same consume function handles both kinds - invitee uses the
         // existing /#/reset/<token> endpoint to pick their initial password.
         let user = db.consume_password_reset_token("inv-1").unwrap();
         assert_eq!(user.as_deref(), Some("alice"));
@@ -3112,7 +3112,7 @@ mod tests {
         db.create_user("bob", "h", "user").unwrap();
 
         db.insert_invitation_token("old", "bob", 3600).unwrap();
-        // Admin resends — must invalidate the old link before minting the new one.
+        // Admin resends - must invalidate the old link before minting the new one.
         db.invalidate_setup_tokens("bob").unwrap();
         db.insert_invitation_token("new", "bob", 3600).unwrap();
 

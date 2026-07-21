@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ===========================================================================
-# Susi Server — EC2 / Lightsail deployment (image-based)
+# Susi Server - EC2 / Lightsail deployment (image-based)
 #
 # Usage:
 #   ./deploy.sh <user@host> [SSH_KEY_PATH] [--staging]
@@ -14,17 +14,17 @@ set -euo pipefail
 # What it does:
 #   1. Builds the susi-server Docker image LOCALLY. On-server builds on
 #      Lightsail's 1.9 GiB box hit ~1.7 GiB swap and run several times
-#      slower than they would on a beefy laptop — and risk OOM. Same
+#      slower than they would on a beefy laptop - and risk OOM. Same
 #      pattern fusionhub already uses.
 #   2. Saves the image to a gzipped tarball and scps it to the server.
 #   3. rsyncs the deployment files (compose files) into /opt/susi.
 #   4. Creates an empty .env + RSA keypair on first deploy.
 #   5. `docker load` of the shipped image + `docker compose up -d` (no
-#      `--build` flag — uses the loaded image directly).
+#      `--build` flag - uses the loaded image directly).
 #
 # Local prereqs:
 #   - docker (build host), rsync, ssh, openssl, gzip.
-#   - On Windows: run from WSL — Git Bash lacks rsync. SSH key must be
+#   - On Windows: run from WSL - Git Bash lacks rsync. SSH key must be
 #     in WSL's home (~/.ssh/...) with chmod 600.
 #
 # Remote prereqs:
@@ -36,7 +36,7 @@ set -euo pipefail
 # Staging mode (--staging):
 #   Deploys to port 3101 with a separate database volume. Use it to
 #   test before deploying to production. Both modes ship the *same*
-#   image — they differ only in compose file + env + volume.
+#   image - they differ only in compose file + env + volume.
 # ===========================================================================
 
 STAGING=false
@@ -89,7 +89,7 @@ echo "==> Preparing remote directory"
 ssh_cmd "sudo mkdir -p $REMOTE_DIR && sudo chown \$(whoami) $REMOTE_DIR"
 
 echo "==> Syncing deployment files (compose)"
-# Minimal whitelist — the binary lives inside the image, sources aren't
+# Minimal whitelist - the binary lives inside the image, sources aren't
 # needed on the server. Keep the rsync small so the box doesn't spend
 # minutes pushing crates/ that no one reads.
 if command -v rsync &>/dev/null; then
@@ -150,7 +150,7 @@ ssh_cmd "
     fi
 "
 
-# Clean up local tarball — it's idempotent to regenerate next deploy.
+# Clean up local tarball - it's idempotent to regenerate next deploy.
 rm -f "$IMAGE_TAR"
 
 echo ""

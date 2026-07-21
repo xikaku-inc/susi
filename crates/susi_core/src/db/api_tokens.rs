@@ -24,7 +24,7 @@ impl LicenseDb {
     }
 
     /// Lookup by hash, returning the minimum needed to authorize a request.
-    /// Auth-hot path — must be cheap.
+    /// Auth-hot path - must be cheap.
     pub fn find_api_token_by_hash(
         &self,
         token_hash: &str,
@@ -72,7 +72,7 @@ impl LicenseDb {
             .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))
     }
 
-    /// Update last_used_at. Called on every authenticated request — best-effort,
+    /// Update last_used_at. Called on every authenticated request - best-effort,
     /// callers ignore errors so a transient DB hiccup doesn't 500 the request.
     pub fn touch_api_token_used(&self, id: i64) -> Result<(), LicenseError> {
         let now = Utc::now().to_rfc3339();
@@ -134,7 +134,7 @@ impl LicenseDb {
         Ok(n > 0)
     }
 
-    /// Look up just the owning username — used for permission checks (e.g.
+    /// Look up just the owning username - used for permission checks (e.g.
     /// "is this token-id owned by the caller before they revoke it").
     pub fn get_api_token_owner(&self, id: i64) -> Result<Option<String>, LicenseError> {
         self.conn
@@ -247,7 +247,7 @@ impl LicenseDb {
     /// Single-row fetch of every user attribute the admin gate needs:
     /// (role, must_change_password, totp_enabled). Replaces the three
     /// separate `get_user_role` / `user_must_change_password` /
-    /// `user_totp_enabled` calls — saves two SQLite round-trips and two
+    /// `user_totp_enabled` calls - saves two SQLite round-trips and two
     /// extra mutex cycles per admin request. Returns `None` if the
     /// username doesn't exist (which the caller should treat as a denied
     /// auth, same as the unwrap-defaults the old helpers used).
