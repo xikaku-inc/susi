@@ -20,7 +20,7 @@ use serde::Deserialize;
 use serde_json::json;
 use susi_core::error::LicenseError;
 
-use crate::docs::{harden_svg_response, safe_filename};
+use crate::docs::{docs_llms_section, docs_sitemap_entries, harden_svg_response, safe_filename, DOCS_PUBLIC_BASE};
 use crate::{error_response, require_admin_full, validate_principal, AppState, ErrorResponse};
 
 fn assets_dir(state: &AppState) -> std::path::PathBuf {
@@ -685,13 +685,13 @@ fn canonical_page_url(slug: &str, is_home: bool) -> String {
 
 /// Convert SQLite's "YYYY-MM-DD HH:MM:SS" timestamp to ISO 8601 with a Z
 /// suffix so schema.org consumers (Google, Bing) parse it correctly.
-fn iso8601_z(sqlite_ts: &str) -> String {
+pub(crate) fn iso8601_z(sqlite_ts: &str) -> String {
     if sqlite_ts.is_empty() { return String::new(); }
     if sqlite_ts.contains('T') { return sqlite_ts.to_string(); }
     format!("{}Z", sqlite_ts.replacen(' ', "T", 1))
 }
 
-fn html_escape(s: &str) -> String {
+pub(crate) fn html_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
@@ -711,7 +711,7 @@ fn xml_escape(s: &str) -> String { html_escape(s) }
 /// Strip markdown to a plain-text description. Good-enough heuristic for SEO:
 /// drop ATX headings, images, code fences, HTML tags, and link syntax, collapse
 /// whitespace, take the first non-empty paragraph, cap length.
-fn derive_description(body_md: &str) -> String {
+pub(crate) fn derive_description(body_md: &str) -> String {
     let mut cleaned = String::with_capacity(body_md.len());
     let mut in_code_fence = false;
     for line in body_md.lines() {
@@ -924,7 +924,7 @@ fn try_rewrite_image_at(s: &str) -> Option<(usize, String)> {
 /// allowed so the image attributes emitted above survive. The client-side
 /// renderer escapes raw HTML entirely, so nothing user-visible relies on
 /// markup this strips.
-fn render_body_html(body_md: &str) -> String {
+pub(crate) fn render_body_html(body_md: &str) -> String {
     use pulldown_cmark::{html, Options, Parser};
     let cleaned = rewrite_pandoc_image_attrs(body_md);
     let mut opts = Options::empty();
@@ -1270,7 +1270,19 @@ pub fn analytics_head(state: &Arc<AppState>) -> String {
     )
 }
 
-pub async fn handle_robots_txt(_headers: HeaderMap) -> impl IntoResponse {
+/// The sitemap differs per host: the marketing site lives on xikaku.com, the
+/// documentation on susi.lp-research.com. Everything else (robots allow-list,
+/// llms.txt) is host-independent.
+fn is_marketing_host(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(|h| h.to_ascii_lowercase().contains("xikaku.com"))
+        .unwrap_or(false)
+}
+
+pub async fn handle_robots_txt(headers: HeaderMap) -> impl IntoResponse {
+    let sitemap_base = if is_marketing_host(&headers) { PUBLIC_BASE } else { DOCS_PUBLIC_BASE };
     let body = format!(
         concat!(
             "User-agent: *\n",
@@ -1291,7 +1303,7 @@ pub async fn handle_robots_txt(_headers: HeaderMap) -> impl IntoResponse {
             "User-agent: YouBot\nAllow: /\n\n",
             "Sitemap: {base}/sitemap.xml\n",
         ),
-        base = PUBLIC_BASE,
+        base = sitemap_base,
     );
     let mut h = HeaderMap::new();
     h.insert(header::CONTENT_TYPE, "text/plain; charset=utf-8".parse().unwrap());
@@ -1301,27 +1313,38 @@ pub async fn handle_robots_txt(_headers: HeaderMap) -> impl IntoResponse {
 
 pub async fn handle_sitemap_xml(
     State(state): State<Arc<AppState>>,
-    _headers: HeaderMap,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
-    let pages = {
-        let db = state.db.lock();
-        visible_pages(db.list_website_pages().unwrap_or_default())
-    };
-    let home_slug = first_default_slug(&pages).map(|s| s.to_string());
     let mut xml = String::from(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n",
     );
-    for (slug, _title, _parent, _ord, updated_at, _meta, _hidden) in &pages {
-        let is_home = home_slug.as_deref() == Some(slug.as_str());
-        xml.push_str("  <url>\n");
-        xml.push_str(&format!(
-            "    <loc>{}</loc>\n",
-            xml_escape(&canonical_page_url(slug, is_home)),
-        ));
-        if !updated_at.is_empty() {
-            xml.push_str(&format!("    <lastmod>{}</lastmod>\n", xml_escape(&iso8601_z(updated_at))));
+    if is_marketing_host(&headers) {
+        let pages = {
+            let db = state.db.lock();
+            visible_pages(db.list_website_pages().unwrap_or_default())
+        };
+        let home_slug = first_default_slug(&pages).map(|s| s.to_string());
+        for (slug, _title, _parent, _ord, updated_at, _meta, _hidden) in &pages {
+            let is_home = home_slug.as_deref() == Some(slug.as_str());
+            xml.push_str("  <url>\n");
+            xml.push_str(&format!(
+                "    <loc>{}</loc>\n",
+                xml_escape(&canonical_page_url(slug, is_home)),
+            ));
+            if !updated_at.is_empty() {
+                xml.push_str(&format!("    <lastmod>{}</lastmod>\n", xml_escape(&iso8601_z(updated_at))));
+            }
+            xml.push_str("  </url>\n");
         }
-        xml.push_str("  </url>\n");
+    } else {
+        for (url, updated_at) in docs_sitemap_entries(&state) {
+            xml.push_str("  <url>\n");
+            xml.push_str(&format!("    <loc>{}</loc>\n", xml_escape(&url)));
+            if !updated_at.is_empty() {
+                xml.push_str(&format!("    <lastmod>{}</lastmod>\n", xml_escape(&iso8601_z(&updated_at))));
+            }
+            xml.push_str("  </url>\n");
+        }
     }
     xml.push_str("</urlset>\n");
 
@@ -1372,6 +1395,7 @@ pub async fn handle_llms_txt(
             body.push_str(&format!("{}- [{}]({}): {}\n", indent, title, url, desc_source));
         }
     }
+    body.push_str(&docs_llms_section(&state));
 
     let mut h = HeaderMap::new();
     h.insert(header::CONTENT_TYPE, "text/plain; charset=utf-8".parse().unwrap());
