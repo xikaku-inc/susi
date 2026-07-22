@@ -2381,9 +2381,10 @@ window.addEventListener('resize', () => {
 (function init() {
     authToken = localStorage.getItem('auth_token') || '';
 
-    if (tryHandleResetLink()) return;
-    if (isWelcomeLink()) { handleWelcomeLink(); return; }
-
+    // Register the router FIRST. It must exist even when this load is an
+    // email-link landing (reset/welcome below return early), otherwise the
+    // top-nav is dead for the rest of the page load - clicks change the
+    // hash but nothing routes.
     window.addEventListener('hashchange', () => {
         // An email link that opens in an already-open tab only fires
         // hashchange, not a full reload. Catch #/reset/<token> here too.
