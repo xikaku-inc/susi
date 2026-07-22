@@ -795,6 +795,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
         <span class="dropdown" id="headerActions" style="display:none;">
             <button class="small secondary" onclick="toggleDropdown(event,'headerActionsMenu')">Actions &#9662;</button>
             <div id="headerActionsMenu" class="dropdown-menu" style="display:none;">
+                <button id="btnAccount" onclick="location.hash='#/account'" style="display:none;">Account settings</button>
                 <button id="btn2FA" onclick="show2FAModal()" style="display:none;">2FA</button>
                 <button id="btnSessions" onclick="showSessionsModal()" style="display:none;">Sessions</button>
                 <button id="btnApiTokens" onclick="showApiTokensModal()" style="display:none;">API Tokens</button>
@@ -813,6 +814,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
     <div id="navDrawerLinks"></div>
     <div id="navDrawerAccount" class="drawer-actions" style="display:none;">
         <div class="drawer-divider"></div>
+        <button onclick="location.hash='#/account'">Account settings</button>
         <button onclick="show2FAModal()">2FA</button>
         <button onclick="showSessionsModal()">Sessions</button>
         <button onclick="showApiTokensModal()">API Tokens</button>
@@ -1149,6 +1151,46 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
     <h2 style="font-size:16px;font-weight:600;margin-top:32px;margin-bottom:16px;">My Licenses</h2>
     <div id="myLicensesList"></div>
 </div><!-- /page-mylicenses -->
+
+<!-- Account settings page (self-serve: username, email, password) -->
+<div id="page-account" class="dash-page">
+    <h2 style="font-size:16px;font-weight:600;margin-top:32px;margin-bottom:16px;">Account Settings</h2>
+    <div class="card" style="max-width:520px;padding:20px;margin-bottom:16px;">
+        <h3 style="font-size:14px;font-weight:600;margin-bottom:12px;">Username</h3>
+        <div class="form-row">
+            <input type="text" id="accUsername" placeholder="Username">
+        </div>
+        <p style="font-size:12px;color:var(--text2);margin:0 0 12px;">Changing your username signs out your other devices.</p>
+        <button class="secondary" onclick="saveAccountUsername()">Save username</button>
+    </div>
+    <div class="card" style="max-width:520px;padding:20px;margin-bottom:16px;">
+        <h3 style="font-size:14px;font-weight:600;margin-bottom:12px;">Email</h3>
+        <div class="form-row">
+            <input type="email" id="accEmail" placeholder="you@example.com">
+        </div>
+        <p style="font-size:12px;color:var(--text2);margin:0 0 12px;">Used for sign-in codes and license notifications.</p>
+        <button class="secondary" onclick="saveAccountEmail()">Save email</button>
+    </div>
+    <div class="card" style="max-width:520px;padding:20px;margin-bottom:16px;">
+        <h3 style="font-size:14px;font-weight:600;margin-bottom:12px;">Password</h3>
+        <div class="form-row">
+            <label>Current password</label>
+            <input type="password" id="accPwCurrent" autocomplete="current-password">
+        </div>
+        <div class="form-row">
+            <label>New password (min 8 chars)</label>
+            <input type="password" id="accPwNew" autocomplete="new-password">
+        </div>
+        <div class="form-row">
+            <label>Confirm new password</label>
+            <input type="password" id="accPwConfirm" autocomplete="new-password">
+        </div>
+        <button class="secondary" onclick="saveAccountPassword()">Change password</button>
+        <p style="font-size:12px;margin:12px 0 0;">
+            <a href="#" onclick="event.preventDefault();sendAccountResetLink()" style="color:var(--text2);">Don't know your current password? Email me a reset link</a>
+        </p>
+    </div>
+</div><!-- /page-account -->
 
 <!-- Shop page -->
 <div id="page-shop" class="dash-page">
@@ -2392,6 +2434,10 @@ window.addEventListener('resize', () => {
         if (isWelcomeLink()) { handleWelcomeLink(); return; }
         route();
     });
+
+    if (tryHandleResetLink()) return;
+    if (isWelcomeLink()) { handleWelcomeLink(); return; }
+
     if (!authToken) {
         renderNav();
         route();
@@ -2438,6 +2484,7 @@ function showPage(name) {
     const page = document.getElementById('page-' + name);
     if (page) page.classList.add('active');
     if (name === 'mylicenses' && authToken) loadMyLicenses();
+    if (name === 'account' && authToken) loadAccountPage();
     if (name === 'audit' && authToken) loadAudit();
     if (name === 'backups' && authToken) loadBackupPage();
     if (name === 'users' && authToken) loadUsers();
@@ -2496,6 +2543,7 @@ function renderNav() {
     document.getElementById('btnLogin').style.display = authToken ? 'none' : '';
     document.getElementById('headerActions').style.display = authToken ? '' : 'none';
     document.getElementById('currentUser').style.display = authToken ? '' : 'none';
+    document.getElementById('btnAccount').style.display = authToken ? 'block' : 'none';
     document.getElementById('btn2FA').style.display = authToken ? 'block' : 'none';
     document.getElementById('btnSessions').style.display = authToken ? 'block' : 'none';
     document.getElementById('btnApiTokens').style.display = authToken ? 'block' : 'none';
@@ -2799,21 +2847,128 @@ async function submitResetPassword() {
         const resp = await fetch(API + '/auth/reset-password', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ token: pendingResetToken, new_password: newPw }),
+            body: JSON.stringify({ token: pendingResetToken, new_password: newPw, device_fp: getDeviceFp(), device_label: getDeviceLabel() }),
         });
+        const data = await resp.json().catch(() => ({}));
         if (!resp.ok) {
-            const data = await resp.json().catch(() => ({}));
             errEl.textContent = data.error || 'Reset failed';
             errEl.classList.add('visible');
             return;
         }
         pendingResetToken = '';
         document.getElementById('resetPasswordOverlay').classList.remove('visible');
-        toast('Password reset - please sign in', 'success');
-        showLogin();
+        // Setting the password via the emailed link proves inbox control -
+        // the server signs us in directly, no second password entry.
+        if (data.token) {
+            authToken = data.token;
+            localStorage.setItem('auth_token', authToken);
+            userRole = data.role || 'user';
+            currentUsername = data.username || '';
+            toast('Password set - you are signed in', 'success');
+            location.hash = userRole === 'admin' ? '#/releases' : '#/mylicenses';
+            await checkAuthStatus();
+        } else {
+            toast('Password reset - please sign in', 'success');
+            showLogin();
+        }
     } catch (e) {
         errEl.textContent = 'Connection failed: ' + e.message;
         errEl.classList.add('visible');
+    }
+}
+
+// -- Account settings page (self-serve username / email / password) --
+async function loadAccountPage() {
+    document.getElementById('accUsername').value = currentUsername;
+    ['accPwCurrent', 'accPwNew', 'accPwConfirm'].forEach(id => document.getElementById(id).value = '');
+    try {
+        const resp = await fetch(API + '/auth/status', { headers: authHeaders() });
+        if (resp.ok) {
+            const data = await resp.json();
+            document.getElementById('accEmail').value = data.email || '';
+        }
+    } catch (e) {}
+}
+
+async function saveAccountUsername() {
+    const name = document.getElementById('accUsername').value.trim();
+    if (!name) { toast('Username cannot be empty', 'error'); return; }
+    if (name === currentUsername) { toast('Username is unchanged', 'error'); return; }
+    try {
+        const resp = await fetch(API + '/auth/me/username', {
+            method: 'PUT',
+            headers: authHeaders(),
+            body: JSON.stringify({ new_username: name }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) { toast('Error: ' + (data.error || resp.status), 'error'); return; }
+        // The old JWT is bound to the old name - swap in the fresh one.
+        authToken = data.token;
+        localStorage.setItem('auth_token', authToken);
+        currentUsername = data.username;
+        document.getElementById('currentUser').textContent = currentUsername;
+        toast('Username changed to ' + currentUsername, 'success');
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function saveAccountEmail() {
+    const email = document.getElementById('accEmail').value.trim();
+    if (!email.includes('@')) { toast('Enter a valid email address', 'error'); return; }
+    try {
+        const resp = await fetch(API + '/auth/me/email', {
+            method: 'PUT',
+            headers: authHeaders(),
+            body: JSON.stringify({ email }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) { toast('Error: ' + (data.error || resp.status), 'error'); return; }
+        toast('Email updated', 'success');
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function saveAccountPassword() {
+    const current = document.getElementById('accPwCurrent').value;
+    const newPw = document.getElementById('accPwNew').value;
+    const confirm = document.getElementById('accPwConfirm').value;
+    if (newPw.length < 8) { toast('New password must be at least 8 characters', 'error'); return; }
+    if (newPw !== confirm) { toast('Passwords do not match', 'error'); return; }
+    try {
+        const resp = await fetch(API + '/auth/change-password', {
+            method: 'POST',
+            headers: authHeaders(),
+            body: JSON.stringify({ current_password: current, new_password: newPw }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) { toast('Error: ' + (data.error || resp.status), 'error'); return; }
+        // Changing the password revoked every session - keep this one alive
+        // with the fresh token the server handed back.
+        authToken = data.token;
+        localStorage.setItem('auth_token', authToken);
+        ['accPwCurrent', 'accPwNew', 'accPwConfirm'].forEach(id => document.getElementById(id).value = '');
+        toast('Password changed', 'success');
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+// Escape hatch for accounts that never had a usable password (customers
+// invited before the set-password flow): prove inbox control instead of
+// knowing the current password.
+async function sendAccountResetLink() {
+    try {
+        const resp = await fetch(API + '/auth/forgot-password', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ identifier: currentUsername }),
+        });
+        if (!resp.ok) { toast('Could not send the reset link', 'error'); return; }
+        toast('Reset link sent - check your inbox', 'success');
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
     }
 }
 

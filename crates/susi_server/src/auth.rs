@@ -520,6 +520,8 @@ pub(crate) async fn handle_forgot_password(
 
 pub(crate) async fn handle_reset_password_submit(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(req): Json<ResetPasswordSubmitRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     if req.new_password.len() < 8 {
@@ -528,15 +530,41 @@ pub(crate) async fn handle_reset_password_submit(
     let token_hash = hash_token(&req.token);
     let new_hash = hash_password(&req.new_password).await?;
 
-    let db = state.db.lock();
-    let username = db
-        .consume_password_reset_token(&token_hash)
-        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
-        .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "Link is invalid, already used, or expired"))?;
-    db.update_user_password(&username, &new_hash)
-        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    let (username, role) = {
+        let db = state.db.lock();
+        let username = db
+            .consume_password_reset_token(&token_hash)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+            .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "Link is invalid, already used, or expired"))?;
+        db.update_user_password(&username, &new_hash)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+        // The link came from the user's inbox, so email control is proven -
+        // register the device and sign them in directly, exactly like
+        // magic-login. Without this, invitees set a password and are then
+        // dumped on the login form for an immediate re-type.
+        if !req.device_fp.is_empty() {
+            let _ = db.register_device(
+                &username,
+                &req.device_fp,
+                &summarize_user_agent(&req.device_label),
+            );
+        }
+        let role = db.get_user_role(&username).unwrap_or_else(|_| "user".into());
+        (username, role)
+    };
 
-    Ok(Json(serde_json::json!({ "status": "OK", "username": username })))
+    let jwt = create_session_jwt(
+        &state,
+        &username,
+        &summarize_user_agent(&req.device_label),
+        client_ip(peer, &headers),
+    )?;
+    Ok(Json(serde_json::json!({
+        "status": "OK",
+        "token": jwt,
+        "role": role,
+        "username": username,
+    })))
 }
 
 pub(crate) async fn handle_setup_2fa(

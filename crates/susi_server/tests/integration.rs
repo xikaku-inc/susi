@@ -948,6 +948,119 @@ fn test_create_user_with_explicit_password_skips_invite() {
     );
 }
 
+/// Self-serve account settings: rename with uniqueness guard and fresh-JWT
+/// handover, email change with the one-account-per-address rule, and the
+/// reset-password token guard.
+#[test]
+fn test_account_self_service_settings() {
+    let server = TestServer::start();
+    let admin = server.admin_token();
+
+    for (name, email) in [
+        ("selfserve_bob", "selfserve_bob@example.com"),
+        ("selfserve_carol", "selfserve_carol@example.com"),
+    ] {
+        let resp = server
+            .http()
+            .post(format!("{}/auth/users", server.api_url))
+            .bearer_auth(&admin)
+            .json(&json!({"username": name, "email": email, "role": "user", "password": "userpw12345"}))
+            .send()
+            .expect("create user");
+        assert!(resp.status().is_success(), "create {}: {}", name, resp.text().unwrap_or_default());
+    }
+
+    let resp = server
+        .http()
+        .post(format!("{}/auth/login", server.api_url))
+        .json(&json!({"username": "selfserve_bob", "password": "userpw12345"}))
+        .send()
+        .expect("login");
+    assert!(resp.status().is_success(), "login: {}", resp.text().unwrap_or_default());
+    let bob_token = resp.json::<Value>().expect("login json")["token"]
+        .as_str()
+        .expect("token")
+        .to_string();
+
+    // Renaming to a taken username is rejected.
+    let resp = server
+        .http()
+        .put(format!("{}/auth/me/username", server.api_url))
+        .bearer_auth(&bob_token)
+        .json(&json!({"new_username": "selfserve_carol"}))
+        .send()
+        .expect("rename conflict");
+    assert_eq!(resp.status().as_u16(), 409, "taken username must 409");
+
+    // Renaming to a free name succeeds and hands back a JWT bound to it.
+    let resp = server
+        .http()
+        .put(format!("{}/auth/me/username", server.api_url))
+        .bearer_auth(&bob_token)
+        .json(&json!({"new_username": "selfserve_bob2"}))
+        .send()
+        .expect("rename");
+    assert!(resp.status().is_success(), "rename: {}", resp.text().unwrap_or_default());
+    let body = resp.json::<Value>().expect("rename json");
+    assert_eq!(body["username"], json!("selfserve_bob2"));
+    let fresh_token = body["token"].as_str().expect("fresh token").to_string();
+
+    let resp = server
+        .http()
+        .get(format!("{}/auth/status", server.api_url))
+        .bearer_auth(&fresh_token)
+        .send()
+        .expect("status");
+    assert!(resp.status().is_success());
+    assert_eq!(resp.json::<Value>().expect("status json")["username"], json!("selfserve_bob2"));
+
+    // The old name no longer logs in; the new one does, same password.
+    let resp = server
+        .http()
+        .post(format!("{}/auth/login", server.api_url))
+        .json(&json!({"username": "selfserve_bob", "password": "userpw12345"}))
+        .send()
+        .expect("old-name login");
+    assert_eq!(resp.status().as_u16(), 401, "old username must be gone");
+    let resp = server
+        .http()
+        .post(format!("{}/auth/login", server.api_url))
+        .json(&json!({"username": "selfserve_bob2", "password": "userpw12345"}))
+        .send()
+        .expect("new-name login");
+    assert!(resp.status().is_success(), "new-name login: {}", resp.text().unwrap_or_default());
+    assert_eq!(resp.json::<Value>().expect("login json")["username"], json!("selfserve_bob2"));
+
+    // Email change: taking another account's address is rejected, keeping
+    // (re-saving) your own is fine.
+    let resp = server
+        .http()
+        .put(format!("{}/auth/me/email", server.api_url))
+        .bearer_auth(&fresh_token)
+        .json(&json!({"email": "selfserve_carol@example.com"}))
+        .send()
+        .expect("email conflict");
+    assert_eq!(resp.status().as_u16(), 409, "taken email must 409");
+    let resp = server
+        .http()
+        .put(format!("{}/auth/me/email", server.api_url))
+        .bearer_auth(&fresh_token)
+        .json(&json!({"email": "selfserve_bob@example.com"}))
+        .send()
+        .expect("email keep");
+    assert!(resp.status().is_success(), "own email re-save: {}", resp.text().unwrap_or_default());
+
+    // Reset-password guard is unchanged: an unknown token is rejected and
+    // never returns a session.
+    let resp = server
+        .http()
+        .post(format!("{}/auth/reset-password", server.api_url))
+        .json(&json!({"token": "deadbeefdeadbeef", "new_password": "whatever123"}))
+        .send()
+        .expect("bogus reset");
+    assert_eq!(resp.status().as_u16(), 401, "bogus reset token must 401");
+}
+
 /// Without SMTP configured, asking for the invite path (no password) returns
 /// 503 with a clear hint rather than silently creating an unreachable user.
 #[test]

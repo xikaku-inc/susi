@@ -1575,6 +1575,10 @@ struct ForgotPasswordRequest {
 struct ResetPasswordSubmitRequest {
     token: String,
     new_password: String,
+    #[serde(default)]
+    device_fp: String,
+    #[serde(default)]
+    device_label: String,
 }
 
 
@@ -1928,22 +1932,21 @@ async fn issue_and_send_invitation(
 ) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
     let raw_token = random_magic_token();
     let token_hash = hash_token(&raw_token);
-    let passwordless = {
+    {
         let db = state.db.lock();
         let _ = db.purge_old_login_tokens();
         db.invalidate_setup_tokens(username)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
         db.insert_invitation_token(&token_hash, username, INVITE_TTL_HOURS * 3600)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
-        db.get_user_role(username).unwrap_or_default() != "admin"
-    };
+    }
 
-    // Non-admin invitees sign in directly from the link (magic-login);
-    // admins set a password first.
+    // Every invitee sets a password first, then is signed in directly by
+    // the reset submit - otherwise customer accounts end up passwordless
+    // and locked out once the one-shot link is spent.
     let link = format!(
-        "{}/#/{}/{}",
+        "{}/#/reset/{}",
         state.magic_link_base_url.trim_end_matches('/'),
-        if passwordless { "welcome" } else { "reset" },
         raw_token
     );
     let Some(email_service) = state.email.clone() else {
@@ -1956,7 +1959,7 @@ async fn issue_and_send_invitation(
     let uname = username.to_string();
     tokio::spawn(async move {
         if let Err(e) = email_service
-            .send_invitation(&to, &uname, &link, INVITE_TTL_HOURS, passwordless)
+            .send_invitation(&to, &uname, &link, INVITE_TTL_HOURS)
             .await
         {
             log::error!("Failed to send invitation email to {}: {:#}", to, e);
@@ -2818,6 +2821,7 @@ async fn main() -> Result<()> {
         .route("/api/v1/auth/disable-2fa", post(auth::handle_disable_2fa))
         .route("/api/v1/auth/regenerate-backup-codes", post(auth::handle_regenerate_backup_codes))
         .route("/api/v1/auth/me/email", axum::routing::put(users::handle_set_my_email))
+        .route("/api/v1/auth/me/username", axum::routing::put(users::handle_rename_self))
         .route("/api/v1/auth/me/devices", get(users::handle_list_my_devices))
         .route("/api/v1/auth/me/devices/{fingerprint}", axum::routing::delete(users::handle_revoke_my_device))
         // Active sessions (list / revoke)

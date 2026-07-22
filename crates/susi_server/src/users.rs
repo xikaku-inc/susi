@@ -390,9 +390,65 @@ pub(crate) async fn handle_set_my_email(
         None => None,
     };
     let db = state.db.lock();
+    // Same one-account-per-address rule as user creation - a duplicate would
+    // also break email-based login, which requires a unique match.
+    if let Some(ref email) = normalized {
+        if let Some(existing) = db
+            .any_username_by_email(email)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        {
+            if existing != principal.username {
+                return Err(error_response(
+                    StatusCode::CONFLICT,
+                    "This email is already used by another account",
+                ));
+            }
+        }
+    }
     db.set_user_email(&principal.username, normalized.as_deref())
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    audit_db(&db, &principal.username, "user.set_my_email", &principal.username, "");
     Ok(Json(serde_json::json!({ "status": "OK", "email": normalized })))
+}
+
+/// Self-serve rename from the account settings page. Same cascade as the
+/// admin rename; hands back a fresh JWT because the old one is bound to the
+/// previous username.
+pub(crate) async fn handle_rename_self(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(req): Json<RenameUserRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+
+    let new = req.new_username.trim().to_string();
+    if new.is_empty() || new.len() > 64 {
+        return Err(error_response(StatusCode::BAD_REQUEST, "Username must be 1-64 characters"));
+    }
+    if new == principal.username {
+        return Err(error_response(StatusCode::BAD_REQUEST, "New username is the same"));
+    }
+
+    {
+        let db = state.db.lock();
+        if db.user_exists(&new).unwrap_or(false) {
+            return Err(error_response(StatusCode::CONFLICT, "Username already taken"));
+        }
+        db.rename_user(&principal.username, &new)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    }
+    api_token_cache_clear();
+    audit(&state, &new, "user.rename_self", &principal.username, &format!("new={}", new));
+
+    let device_label = summarize_user_agent(
+        headers
+            .get("user-agent")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or(""),
+    );
+    let token = create_session_jwt(&state, &new, &device_label, client_ip(peer, &headers))?;
+    Ok(Json(serde_json::json!({ "status": "OK", "username": new, "token": token })))
 }
 
 pub(crate) async fn handle_set_user_email(
