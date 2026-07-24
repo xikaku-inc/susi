@@ -1728,15 +1728,15 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
         <div class="modal-body">
             <div class="form-row">
                 <label>Customer</label>
-                <input type="text" id="createCustomer" placeholder="Company name" oninput="updateSuggestedUsername()">
+                <input type="text" id="createCustomer" placeholder="Company name">
             </div>
             <div class="form-row">
                 <label>Customer contact email <span style="font-weight:400;color:var(--text2);font-size:11px;">(optional - creates a new portal account + assigns license)</span></label>
-                <input type="email" id="createAssignEmail" placeholder="contact@customer.com" oninput="updateSuggestedUsername()">
+                <input type="email" id="createAssignEmail" placeholder="contact@customer.com">
             </div>
             <div class="form-row">
                 <label>Portal username <span style="font-weight:400;color:var(--text2);font-size:11px;">(for the new account - must not exist yet)</span></label>
-                <input type="text" id="createAssignUsername" placeholder="FirstLastCompany" oninput="createUsernameEdited=true">
+                <input type="text" id="createAssignUsername" placeholder="FirstLastCompany">
             </div>
             <div class="form-row">
                 <label>Product</label>
@@ -3358,7 +3358,6 @@ function showCreateModal() {
     document.querySelectorAll('#createFeaturesContainer input[type=checkbox]').forEach(cb => cb.checked = false);
     document.getElementById('createAssignEmail').value = '';
     document.getElementById('createAssignUsername').value = '';
-    createUsernameEdited = false;
     document.getElementById('createLeaseDuration').value = '';
     document.getElementById('createLeaseGrace').value = '';
     document.getElementById('createRequireSignedBinary').checked = false;
@@ -3542,17 +3541,6 @@ function suggestUsername(email, customer) {
         .map(p => p.charAt(0).toUpperCase() + p.slice(1)).join('');
     const company = (customer || '').replace(/[^a-zA-Z0-9]+/g, '');
     return (name + company) || email;
-}
-
-// Prefill the create-modal username from email + customer until the admin
-// edits the field manually; the final value is always visible before submit.
-let createUsernameEdited = false;
-function updateSuggestedUsername() {
-    if (createUsernameEdited) return;
-    const email = document.getElementById('createAssignEmail').value.trim();
-    document.getElementById('createAssignUsername').value = email.includes('@')
-        ? suggestUsername(email, document.getElementById('createCustomer').value.trim())
-        : '';
 }
 
 // Create a brand-new portal account for the create-license flow. Unlike
