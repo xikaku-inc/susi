@@ -60,8 +60,14 @@ fn safe_slug(slug: &str) -> Result<&str, (StatusCode, Json<ErrorResponse>)> {
 // ---------------------------------------------------------------------------
 
 /// Row shape returned by `list_website_pages`:
-/// (slug, title, parent_slug, ord, updated_at, meta_description, hidden).
-type PageRow = (String, String, Option<String>, i64, String, String, bool);
+/// (slug, title, parent_slug, ord, updated_at, meta_description, hidden,
+///  page_kind, published_at).
+type PageRow = (String, String, Option<String>, i64, String, String, bool, String, String);
+
+/// True for blog-post rows (`page_kind == 'post'`).
+fn is_post(p: &PageRow) -> bool {
+    p.7 == "post"
+}
 
 /// Drop hidden pages - applied before any public-facing use of the page list
 /// (nav, SSR head, sitemap, llms.txt).
@@ -92,7 +98,22 @@ pub async fn handle_list_pages(
     let assets = db.list_website_assets().map_err(db_err)?;
     let pages_json: Vec<_> = pages
         .into_iter()
-        .map(|(slug, title, parent_slug, ord, updated_at, meta_description, hidden)| {
+        .map(|(slug, title, parent_slug, ord, updated_at, meta_description, hidden, page_kind, published_at)| {
+            // Posts carry an excerpt so the client-side blog index can render
+            // one without fetching every post body.
+            let excerpt = if page_kind == "post" {
+                if !meta_description.trim().is_empty() {
+                    meta_description.clone()
+                } else {
+                    db.get_website_page(&slug)
+                        .ok()
+                        .flatten()
+                        .map(|(_t, body, ..)| derive_description(&body))
+                        .unwrap_or_default()
+                }
+            } else {
+                String::new()
+            };
             json!({
                 "slug": slug,
                 "title": title,
@@ -101,6 +122,9 @@ pub async fn handle_list_pages(
                 "updated_at": updated_at,
                 "meta_description": meta_description,
                 "hidden": hidden,
+                "page_kind": page_kind,
+                "published_at": published_at,
+                "excerpt": excerpt,
             })
         })
         .collect();
@@ -126,7 +150,7 @@ pub async fn handle_get_page(
         .get_website_page(&slug)
         .map_err(db_err)?
         .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Page not found"))?;
-    let (title, body_md, parent_slug, ord, updated_at, meta_description, hidden) = page;
+    let (title, body_md, parent_slug, ord, updated_at, meta_description, hidden, page_kind, published_at) = page;
     if hidden && !is_admin {
         return Err(error_response(StatusCode::NOT_FOUND, "Page not found"));
     }
@@ -139,6 +163,8 @@ pub async fn handle_get_page(
         "updated_at": updated_at,
         "meta_description": meta_description,
         "hidden": hidden,
+        "page_kind": page_kind,
+        "published_at": published_at,
     })))
 }
 
@@ -177,6 +203,11 @@ pub struct UpsertPageRequest {
     pub ord: i64,
     #[serde(default)]
     pub meta_description: String,
+    // Omitted -> preserve the existing row's kind/date (new rows: 'page'/'').
+    #[serde(default)]
+    pub page_kind: Option<String>,
+    #[serde(default)]
+    pub published_at: Option<String>,
 }
 
 pub async fn handle_upsert_page(
@@ -189,8 +220,33 @@ pub async fn handle_upsert_page(
     require_admin_full(&state, &principal)?;
     safe_slug(&slug)?;
 
-    let (id, is_home) = {
+    let (id, url) = {
         let mut db = state.db.lock();
+        let existing = db.get_website_page(&slug).map_err(db_err)?;
+        let page_kind = req
+            .page_kind
+            .clone()
+            .or_else(|| existing.as_ref().map(|r| r.7.clone()))
+            .unwrap_or_else(|| "page".to_string());
+        if page_kind != "page" && page_kind != "post" {
+            return Err(error_response(StatusCode::BAD_REQUEST, "page_kind must be 'page' or 'post'"));
+        }
+        let mut published_at = req
+            .published_at
+            .clone()
+            .or_else(|| existing.as_ref().map(|r| r.8.clone()))
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if page_kind == "post" {
+            if published_at.is_empty() {
+                published_at = chrono::Utc::now().format("%Y-%m-%d").to_string();
+            } else if chrono::NaiveDate::parse_from_str(&published_at, "%Y-%m-%d").is_err() {
+                return Err(error_response(StatusCode::BAD_REQUEST, "published_at must be YYYY-MM-DD"));
+            }
+        } else {
+            published_at.clear();
+        }
         let id = db.upsert_website_page(
             &slug,
             &req.title,
@@ -198,15 +254,21 @@ pub async fn handle_upsert_page(
             req.parent_slug.as_deref(),
             req.ord,
             &req.meta_description,
+            &page_kind,
+            &published_at,
             Some(&principal.username),
         )
         .map_err(db_err)?;
-        let pages = visible_pages(db.list_website_pages().unwrap_or_default());
-        let is_home = first_default_slug(&pages) == Some(slug.as_str());
-        (id, is_home)
+        let url = if page_kind == "post" {
+            canonical_post_url(&slug)
+        } else {
+            let pages = visible_pages(db.list_website_pages().unwrap_or_default());
+            canonical_page_url(&slug, first_default_slug(&pages) == Some(slug.as_str()))
+        };
+        (id, url)
     };
     invalidate_page_cache();
-    ping_indexnow(&state, vec![canonical_page_url(&slug, is_home)]);
+    ping_indexnow(&state, vec![url]);
     Ok(Json(json!({ "id": id, "slug": slug })))
 }
 
@@ -273,22 +335,29 @@ pub async fn handle_restore_page_revision(
         .map_err(db_err)?
         .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Revision not found"))?;
     let (title, body_md, parent_slug, ord, _captured_at, _author) = rev;
-    // Preserve the current meta_description when restoring prior body/title.
-    let existing_meta = db
+    // Preserve the current meta_description, kind, and publish date when
+    // restoring prior body/title.
+    let (existing_meta, existing_kind, existing_pub) = db
         .get_website_page(&slug)
         .map_err(db_err)?
-        .map(|(_t, _b, _p, _o, _u, m, _h)| m)
-        .unwrap_or_default();
+        .map(|(_t, _b, _p, _o, _u, m, _h, k, pd)| (m, k, pd))
+        .unwrap_or_else(|| (String::new(), "page".to_string(), String::new()));
     let new_id = db.upsert_website_page(
         &slug, &title, &body_md, parent_slug.as_deref(), ord,
         &existing_meta,
+        &existing_kind,
+        &existing_pub,
         Some(&principal.username),
     ).map_err(db_err)?;
-    let pages = visible_pages(db.list_website_pages().unwrap_or_default());
-    let is_home = first_default_slug(&pages) == Some(slug.as_str());
+    let url = if existing_kind == "post" {
+        canonical_post_url(&slug)
+    } else {
+        let pages = visible_pages(db.list_website_pages().unwrap_or_default());
+        canonical_page_url(&slug, first_default_slug(&pages) == Some(slug.as_str()))
+    };
     drop(db);
     invalidate_page_cache();
-    ping_indexnow(&state, vec![canonical_page_url(&slug, is_home)]);
+    ping_indexnow(&state, vec![url]);
     Ok(Json(json!({ "id": new_id, "slug": slug, "restored_from": id })))
 }
 
@@ -406,14 +475,20 @@ pub async fn handle_rename_page(
     };
     match result {
         Ok(true) => {
-            invalidate_page_cache();
-            ping_indexnow(
-                &state,
+            let renamed_is_post = {
+                let db = state.db.lock();
+                db.get_website_page(new_slug).ok().flatten().map(|r| r.7 == "post").unwrap_or(false)
+            };
+            let urls = if renamed_is_post {
+                vec![canonical_post_url(&slug), canonical_post_url(new_slug)]
+            } else {
                 vec![
                     canonical_page_url(&slug, false),
                     canonical_page_url(new_slug, false),
-                ],
-            );
+                ]
+            };
+            invalidate_page_cache();
+            ping_indexnow(&state, urls);
             Ok(Json(json!({ "slug": new_slug })))
         }
         Ok(false) => Err(error_response(StatusCode::NOT_FOUND, "Page not found")),
@@ -443,15 +518,17 @@ pub async fn handle_set_page_hidden(
     require_admin_full(&state, &principal)?;
     safe_slug(&slug)?;
 
-    let updated = {
+    let (updated, was_post) = {
         let db = state.db.lock();
-        db.set_website_page_hidden(&slug, req.hidden).map_err(db_err)?
+        let was_post = db.get_website_page(&slug).ok().flatten().map(|r| r.7 == "post").unwrap_or(false);
+        (db.set_website_page_hidden(&slug, req.hidden).map_err(db_err)?, was_post)
     };
     if !updated {
         return Err(error_response(StatusCode::NOT_FOUND, "Page not found"));
     }
     invalidate_page_cache();
-    ping_indexnow(&state, vec![canonical_page_url(&slug, false)]);
+    let url = if was_post { canonical_post_url(&slug) } else { canonical_page_url(&slug, false) };
+    ping_indexnow(&state, vec![url]);
     Ok(Json(json!({ "slug": slug, "hidden": req.hidden })))
 }
 
@@ -464,15 +541,17 @@ pub async fn handle_delete_page(
     require_admin_full(&state, &principal)?;
     safe_slug(&slug)?;
 
-    let removed = {
+    let (removed, was_post) = {
         let db = state.db.lock();
-        db.delete_website_page(&slug).map_err(db_err)?
+        let was_post = db.get_website_page(&slug).ok().flatten().map(|r| r.7 == "post").unwrap_or(false);
+        (db.delete_website_page(&slug).map_err(db_err)?, was_post)
     };
     if !removed {
         return Err(error_response(StatusCode::NOT_FOUND, "Page not found"));
     }
     invalidate_page_cache();
-    ping_indexnow(&state, vec![canonical_page_url(&slug, false)]);
+    let url = if was_post { canonical_post_url(&slug) } else { canonical_page_url(&slug, false) };
+    ping_indexnow(&state, vec![url]);
     Ok(Json(json!({ "status": "OK" })))
 }
 
@@ -680,6 +759,20 @@ fn canonical_page_url(slug: &str, is_home: bool) -> String {
         format!("{}/", PUBLIC_BASE)
     } else {
         format!("{}/{}", PUBLIC_BASE, slug)
+    }
+}
+
+/// Blog posts live under `/blog/{slug}`.
+fn canonical_post_url(slug: &str) -> String {
+    format!("{}/blog/{}", PUBLIC_BASE, slug)
+}
+
+/// Format a YYYY-MM-DD publish date for display ("July 26, 2026"); returns
+/// the raw string when it doesn't parse.
+fn format_post_date(date: &str) -> String {
+    match chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d") {
+        Ok(d) => d.format("%B %-d, %Y").to_string(),
+        Err(_) => date.to_string(),
     }
 }
 
@@ -943,9 +1036,33 @@ pub(crate) fn render_body_html(body_md: &str) -> String {
 }
 
 fn first_default_slug(pages: &[PageRow]) -> Option<&str> {
-    let mut top: Vec<&PageRow> = pages.iter().filter(|p| p.2.is_none()).collect();
+    // Posts never become the home page.
+    let mut top: Vec<&PageRow> = pages.iter().filter(|p| p.2.is_none() && !is_post(p)).collect();
     top.sort_by(|a, b| a.3.cmp(&b.3).then_with(|| a.1.cmp(&b.1)));
-    top.first().map(|p| p.0.as_str()).or_else(|| pages.first().map(|p| p.0.as_str()))
+    top.first()
+        .map(|p| p.0.as_str())
+        .or_else(|| pages.iter().find(|p| !is_post(p)).map(|p| p.0.as_str()))
+}
+
+/// Visible posts, newest first (ties broken by title).
+fn sorted_posts(pages: &[PageRow]) -> Vec<&PageRow> {
+    let mut posts: Vec<&PageRow> = pages.iter().filter(|p| is_post(p)).collect();
+    posts.sort_by(|a, b| b.8.cmp(&a.8).then_with(|| a.1.cmp(&b.1)));
+    posts
+}
+
+/// Post excerpt for index/feed surfaces: explicit meta_description when set,
+/// otherwise derived from the post body.
+fn post_excerpt(state: &Arc<AppState>, p: &PageRow) -> String {
+    if !p.5.trim().is_empty() {
+        return p.5.clone();
+    }
+    let db = state.db.lock();
+    db.get_website_page(&p.0)
+        .ok()
+        .flatten()
+        .map(|(_t, body, ..)| derive_description(&body))
+        .unwrap_or_default()
 }
 
 fn build_breadcrumbs(
@@ -955,6 +1072,42 @@ fn build_breadcrumbs(
 ) -> String {
     let by_slug: std::collections::HashMap<&str, &PageRow> =
         pages.iter().map(|p| (p.0.as_str(), p)).collect();
+
+    // Posts always crumb as Home › Blog › Post, independent of parent_slug.
+    if by_slug.get(slug).map(|p| is_post(p)).unwrap_or(false) {
+        let mut items: Vec<String> = Vec::new();
+        let mut pos = 1;
+        if let Some(hs) = home_slug {
+            if let Some(home_page) = by_slug.get(hs) {
+                items.push(format!(
+                    r#"{{"@type":"ListItem","position":{},"name":"{}","item":"{}"}}"#,
+                    pos,
+                    html_escape(&home_page.1),
+                    html_escape(&canonical_page_url(hs, true)),
+                ));
+                pos += 1;
+            }
+        }
+        let blog_title = by_slug.get("blog").map(|p| p.1.as_str()).unwrap_or("Blog");
+        items.push(format!(
+            r#"{{"@type":"ListItem","position":{},"name":"{}","item":"{}"}}"#,
+            pos,
+            html_escape(blog_title),
+            html_escape(&format!("{}/blog", PUBLIC_BASE)),
+        ));
+        pos += 1;
+        items.push(format!(
+            r#"{{"@type":"ListItem","position":{},"name":"{}","item":"{}"}}"#,
+            pos,
+            html_escape(&by_slug[slug].1),
+            html_escape(&canonical_post_url(slug)),
+        ));
+        return format!(
+            r#"{{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{}]}}"#,
+            items.join(",")
+        );
+    }
+
     let mut chain: Vec<&PageRow> = Vec::new();
     let mut cur = by_slug.get(slug).copied();
     while let Some(p) = cur {
@@ -1005,10 +1158,15 @@ fn render_seo_head(
     og_image_override: Option<&str>,
     pages: &[PageRow],
     products: &[(String, String, String, i64, String, Option<String>, String, bool, i64, String)],
+    post_published: Option<&str>,
 ) -> String {
     let home_slug = first_default_slug(pages);
     let is_home = home_slug == Some(slug);
-    let canonical = canonical_page_url(slug, is_home);
+    let canonical = if post_published.is_some() {
+        canonical_post_url(slug)
+    } else {
+        canonical_page_url(slug, is_home)
+    };
     let full_title = if is_home {
         format!("{} - {}", SITE_NAME, SITE_TAGLINE)
     } else {
@@ -1020,10 +1178,23 @@ fn render_seo_head(
     let org_jsonld: &str = &ORG_JSONLD;
 
     // Per-page schema: WebSite (with sitelinks search action stub) for the
-    // home page, WebPage for everything else. This matches what Google's
-    // structured-data parser expects and powers rich results.
+    // home page, BlogPosting for posts, WebPage for everything else. This
+    // matches what Google's structured-data parser expects and powers rich
+    // results.
     let date_modified = iso8601_z(updated_at);
-    let page_jsonld = if is_home {
+    let page_jsonld = if let Some(published) = post_published {
+        format!(
+            r#"{{"@context":"https://schema.org","@type":"BlogPosting","headline":"{title}","description":"{desc}","url":"{url}","mainEntityOfPage":{{"@type":"WebPage","@id":"{url}"}},"datePublished":"{published}","dateModified":"{date}","author":{{"@type":"Organization","name":"{site}","url":"{base}"}},"publisher":{{"@type":"Organization","name":"{site}","url":"{base}","logo":{{"@type":"ImageObject","url":"{logo}"}}}}}}"#,
+            title = html_escape(page_title),
+            desc = html_escape(description),
+            url = html_escape(&canonical),
+            published = html_escape(published),
+            date = html_escape(&date_modified),
+            site = html_escape(SITE_NAME),
+            base = html_escape(PUBLIC_BASE),
+            logo = html_escape(LOGO_URL),
+        )
+    } else if is_home {
         format!(
             r#"{{"@context":"https://schema.org","@type":"WebSite","name":"{name}","url":"{url}","description":"{desc}","publisher":{{"@type":"Organization","name":"{name}","url":"{url}"}}}}"#,
             name = html_escape(SITE_NAME),
@@ -1062,16 +1233,28 @@ fn render_seo_head(
         "<meta property=\"og:image:width\" content=\"1200\">\n\
          <meta property=\"og:image:height\" content=\"630\">\n".to_string()
     };
+    // Posts advertise themselves as articles with publish/modified times.
+    let article_meta = match post_published {
+        Some(published) => format!(
+            "<meta property=\"article:published_time\" content=\"{}\">\n\
+             <meta property=\"article:modified_time\" content=\"{}\">\n",
+            html_escape(published),
+            html_escape(&date_modified),
+        ),
+        None => String::new(),
+    };
     let mut head = format!(
         concat!(
             "<title>{title}</title>\n",
             "<meta name=\"description\" content=\"{desc}\">\n",
             "<link rel=\"canonical\" href=\"{canonical}\">\n",
-            "<meta property=\"og:type\" content=\"website\">\n",
+            "<link rel=\"alternate\" type=\"application/rss+xml\" title=\"{site} Blog\" href=\"{base}/blog/rss.xml\">\n",
+            "<meta property=\"og:type\" content=\"{og_type}\">\n",
             "<meta property=\"og:site_name\" content=\"{site}\">\n",
             "<meta property=\"og:title\" content=\"{title}\">\n",
             "<meta property=\"og:description\" content=\"{desc}\">\n",
             "<meta property=\"og:url\" content=\"{canonical}\">\n",
+            "{article_meta}",
             "<meta property=\"og:image\" content=\"{og_image}\">\n",
             "{og_dims}",
             "<meta name=\"twitter:card\" content=\"summary_large_image\">\n",
@@ -1085,6 +1268,9 @@ fn render_seo_head(
         title = html_escape(&full_title),
         desc = html_escape(description),
         canonical = html_escape(&canonical),
+        base = PUBLIC_BASE,
+        og_type = if post_published.is_some() { "article" } else { "website" },
+        article_meta = article_meta,
         site = html_escape(SITE_NAME),
         og_image = html_escape(og_image),
         og_dims = og_dims,
@@ -1142,7 +1328,7 @@ pub async fn handle_website_render_root(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> axum::response::Response {
-    render_website(&state, &headers, None).into_response()
+    render_website(&state, &headers, None, false).into_response()
 }
 
 pub async fn handle_website_render_slug(
@@ -1150,19 +1336,33 @@ pub async fn handle_website_render_slug(
     headers: HeaderMap,
     Path(slug): Path<String>,
 ) -> axum::response::Response {
-    render_website(&state, &headers, Some(slug)).into_response()
+    render_website(&state, &headers, Some(slug), false).into_response()
+}
+
+/// `/site/blog/{slug}` - blog posts under the /blog/ URL prefix.
+pub async fn handle_website_render_post(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+) -> axum::response::Response {
+    render_website(&state, &headers, Some(slug), true).into_response()
 }
 
 fn render_website(
     state: &Arc<AppState>,
     _headers: &HeaderMap,
     requested_slug: Option<String>,
+    post_path: bool,
 ) -> (HeaderMap, Bytes) {
     // Build the cache key first so we can short-circuit on a hit. Use the raw
     // requested slug (None → "" for the home shell). When the slug resolves to
     // home via `first_default_slug`, the cache still keys on what the client
     // asked for; this is correct because invalidation is global and TTL is short.
-    let cache_key = requested_slug.clone().unwrap_or_default();
+    let cache_key = if post_path {
+        format!("blog/{}", requested_slug.as_deref().unwrap_or_default())
+    } else {
+        requested_slug.clone().unwrap_or_default()
+    };
     if let Some(cached) = page_cache_get(&cache_key) {
         return (build_html_headers(), cached);
     }
@@ -1174,13 +1374,22 @@ fn render_website(
             db.list_products(true).unwrap_or_default(),
         )
     };
+
+    // /blog renders the reverse-chron post index; an optional "blog" page row
+    // supplies the title/intro when present.
+    if !post_path && requested_slug.as_deref() == Some("blog") {
+        let html = render_blog_index(state, &pages, &products);
+        page_cache_put(cache_key, html.clone());
+        return (build_html_headers(), html);
+    }
+
     let slug_owned: Option<String> = requested_slug.or_else(|| {
         first_default_slug(&pages).map(|s| s.to_string())
     });
     // If the requested slug is unknown, render the shell anyway (SPA shows "Page not found")
     // but omit the SEO head - better than 500'ing.
-    let (title, description, updated_at, valid_slug, body_md):
-        (String, String, String, Option<String>, String) =
+    let (title, description, updated_at, valid_slug, body_md, post_published):
+        (String, String, String, Option<String>, String, Option<String>) =
         if let Some(s) = slug_owned.as_deref() {
             let row = {
                 let db = state.db.lock();
@@ -1188,24 +1397,32 @@ fn render_website(
             };
             // A hidden page renders like an unknown slug: bare shell, no SEO
             // head, no body - the SPA shows "Page not found" to visitors.
-            if let Some((t, body, _p, _o, upd, meta, false)) = row {
-                let desc = if !meta.trim().is_empty() {
-                    meta
-                } else {
-                    let d = derive_description(&body);
-                    if d.is_empty() { SITE_TAGLINE.to_string() } else { d }
-                };
-                (t, desc, upd, Some(s.to_string()), body)
-            } else {
-                (SITE_NAME.to_string(), SITE_TAGLINE.to_string(), String::new(), None, String::new())
+            // The /blog/ path only serves posts.
+            match row {
+                Some((t, body, _p, _o, upd, meta, false, kind, published))
+                    if !post_path || kind == "post" =>
+                {
+                    let desc = if !meta.trim().is_empty() {
+                        meta
+                    } else {
+                        let d = derive_description(&body);
+                        if d.is_empty() { SITE_TAGLINE.to_string() } else { d }
+                    };
+                    let published = (kind == "post").then_some(published);
+                    (t, desc, upd, Some(s.to_string()), body, published)
+                }
+                _ => (SITE_NAME.to_string(), SITE_TAGLINE.to_string(), String::new(), None, String::new(), None),
             }
         } else {
-            (SITE_NAME.to_string(), SITE_TAGLINE.to_string(), String::new(), None, String::new())
+            (SITE_NAME.to_string(), SITE_TAGLINE.to_string(), String::new(), None, String::new(), None)
         };
 
     let og_image = first_image_url(&body_md);
     let injected = match valid_slug.as_deref() {
-        Some(s) => render_seo_head(s, &title, &description, &updated_at, og_image.as_deref(), &pages, &products),
+        Some(s) => render_seo_head(
+            s, &title, &description, &updated_at, og_image.as_deref(), &pages, &products,
+            post_published.as_deref(),
+        ),
         None => format!(
             "<title>{}</title>\n<meta name=\"description\" content=\"{}\">\n",
             html_escape(SITE_NAME),
@@ -1216,7 +1433,15 @@ fn render_website(
     let body_html = if body_md.is_empty() {
         "<div class=\"empty-state\">Loading…</div>".to_string()
     } else {
-        render_body_html(&body_md)
+        let mut h = String::new();
+        if let Some(published) = post_published.as_deref() {
+            h.push_str(&format!(
+                "<div class=\"meta\">{}</div>",
+                html_escape(&format_post_date(published)),
+            ));
+        }
+        h.push_str(&render_body_html(&body_md));
+        h
     };
 
     let analytics = analytics_head(state);
@@ -1227,6 +1452,118 @@ fn render_website(
         .into();
     page_cache_put(cache_key, html.clone());
     (build_html_headers(), html)
+}
+
+/// SSR body + head for the /blog index: intro from the optional "blog" page
+/// row, then every visible post newest-first with date and excerpt.
+fn render_blog_index(
+    state: &Arc<AppState>,
+    pages: &[PageRow],
+    products: &[(String, String, String, i64, String, Option<String>, String, bool, i64, String)],
+) -> Bytes {
+    let row = {
+        let db = state.db.lock();
+        db.get_website_page("blog").unwrap_or(None)
+    };
+    let (title, intro_md, updated_at, meta) = match row {
+        Some((t, body, _p, _o, upd, m, false, _k, _pd)) => (t, body, upd, m),
+        _ => ("Blog".to_string(), String::new(), String::new(), String::new()),
+    };
+    let posts = sorted_posts(pages);
+
+    let description = if !meta.trim().is_empty() {
+        meta
+    } else {
+        let d = derive_description(&intro_md);
+        if d.is_empty() { format!("News and updates from {}.", SITE_NAME) } else { d }
+    };
+
+    let mut body_html = if intro_md.is_empty() {
+        format!("<h1>{}</h1>", html_escape(&title))
+    } else {
+        render_body_html(&intro_md)
+    };
+    if posts.is_empty() {
+        body_html.push_str("<p>No posts yet.</p>");
+    } else {
+        body_html.push_str("<div class=\"blog-index\">");
+        for p in &posts {
+            let excerpt = post_excerpt(state, p);
+            body_html.push_str(&format!(
+                "<article class=\"blog-index-item\"><div class=\"meta\">{date}</div>\
+                 <h2><a href=\"/blog/{slug}\">{title}</a></h2>{excerpt}</article>",
+                date = html_escape(&format_post_date(&p.8)),
+                slug = html_escape(&p.0),
+                title = html_escape(&p.1),
+                excerpt = if excerpt.is_empty() {
+                    String::new()
+                } else {
+                    format!("<p>{}</p>", html_escape(&excerpt))
+                },
+            ));
+        }
+        body_html.push_str("</div>");
+    }
+
+    // dateModified for the index: the newest post, else the intro page edit.
+    let updated = posts.first().map(|p| p.4.clone()).unwrap_or(updated_at);
+    let injected = render_seo_head("blog", &title, &description, &updated, None, pages, products, None);
+    let analytics = analytics_head(state);
+    WEBSITE_HTML
+        .replacen("<!--SEO_HEAD-->", &injected, 1)
+        .replacen("<!--ANALYTICS-->", &analytics, 1)
+        .replacen("<!--BODY_CONTENT-->", &body_html, 1)
+        .into()
+}
+
+/// RSS 2.0 feed of visible posts at /blog/rss.xml.
+pub async fn handle_blog_rss(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let pages = {
+        let db = state.db.lock();
+        visible_pages(db.list_website_pages().unwrap_or_default())
+    };
+    let posts = sorted_posts(&pages);
+
+    let mut xml = String::from(concat!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n",
+        "<rss version=\"2.0\" xmlns:atom=\"http://www.w3.org/2005/Atom\">\n",
+        "<channel>\n",
+    ));
+    xml.push_str(&format!("<title>{} Blog</title>\n", xml_escape(SITE_NAME)));
+    xml.push_str(&format!("<link>{}/blog</link>\n", PUBLIC_BASE));
+    xml.push_str(&format!(
+        "<atom:link href=\"{}/blog/rss.xml\" rel=\"self\" type=\"application/rss+xml\"/>\n",
+        PUBLIC_BASE,
+    ));
+    xml.push_str(&format!(
+        "<description>News and updates from {}.</description>\n",
+        xml_escape(SITE_NAME),
+    ));
+    xml.push_str("<language>en</language>\n");
+    for p in &posts {
+        let excerpt = post_excerpt(&state, p);
+        let url = canonical_post_url(&p.0);
+        xml.push_str("<item>\n");
+        xml.push_str(&format!("<title>{}</title>\n", xml_escape(&p.1)));
+        xml.push_str(&format!("<link>{}</link>\n", xml_escape(&url)));
+        xml.push_str(&format!("<guid>{}</guid>\n", xml_escape(&url)));
+        if let Ok(d) = chrono::NaiveDate::parse_from_str(&p.8, "%Y-%m-%d") {
+            xml.push_str(&format!(
+                "<pubDate>{}</pubDate>\n",
+                d.format("%a, %d %b %Y 00:00:00 +0000"),
+            ));
+        }
+        if !excerpt.is_empty() {
+            xml.push_str(&format!("<description>{}</description>\n", xml_escape(&excerpt)));
+        }
+        xml.push_str("</item>\n");
+    }
+    xml.push_str("</channel>\n</rss>\n");
+
+    let mut h = HeaderMap::new();
+    h.insert(header::CONTENT_TYPE, "application/rss+xml; charset=utf-8".parse().unwrap());
+    h.insert(header::CACHE_CONTROL, "public, max-age=600".parse().unwrap());
+    (h, xml)
 }
 
 fn build_html_headers() -> HeaderMap {
@@ -1349,13 +1686,15 @@ pub async fn handle_sitemap_xml(
             visible_pages(db.list_website_pages().unwrap_or_default())
         };
         let home_slug = first_default_slug(&pages).map(|s| s.to_string());
-        for (slug, _title, _parent, _ord, updated_at, _meta, _hidden) in &pages {
+        for (slug, _title, _parent, _ord, updated_at, _meta, _hidden, kind, _published) in &pages {
             let is_home = home_slug.as_deref() == Some(slug.as_str());
+            let loc = if kind == "post" {
+                canonical_post_url(slug)
+            } else {
+                canonical_page_url(slug, is_home)
+            };
             xml.push_str("  <url>\n");
-            xml.push_str(&format!(
-                "    <loc>{}</loc>\n",
-                xml_escape(&canonical_page_url(slug, is_home)),
-            ));
+            xml.push_str(&format!("    <loc>{}</loc>\n", xml_escape(&loc)));
             if !updated_at.is_empty() {
                 xml.push_str(&format!("    <lastmod>{}</lastmod>\n", xml_escape(&iso8601_z(updated_at))));
             }
@@ -1400,7 +1739,10 @@ pub async fn handle_llms_txt(
     ));
 
     body.push_str("## Pages\n");
-    for (slug, title, parent, _ord, _upd, meta, _hidden) in &pages {
+    for (slug, title, parent, _ord, _upd, meta, _hidden, kind, _published) in &pages {
+        if kind == "post" {
+            continue;
+        }
         let desc_source = if !meta.trim().is_empty() {
             meta.clone()
         } else {
@@ -1408,7 +1750,7 @@ pub async fn handle_llms_txt(
                 let db = state.db.lock();
                 db.get_website_page(slug).unwrap_or(None)
             };
-            row.map(|(_t, body, _p, _o, _u, _m, _h)| derive_description(&body))
+            row.map(|(_t, body, ..)| derive_description(&body))
                 .unwrap_or_default()
         };
         let indent = if parent.is_some() { "  " } else { "" };
@@ -1418,6 +1760,19 @@ pub async fn handle_llms_txt(
             body.push_str(&format!("{}- [{}]({})\n", indent, title, url));
         } else {
             body.push_str(&format!("{}- [{}]({}): {}\n", indent, title, url, desc_source));
+        }
+    }
+    let posts = sorted_posts(&pages);
+    if !posts.is_empty() {
+        body.push_str("\n## Blog\n");
+        for p in &posts {
+            let excerpt = post_excerpt(&state, p);
+            let url = canonical_post_url(&p.0);
+            if excerpt.is_empty() {
+                body.push_str(&format!("- [{}]({}) ({})\n", p.1, url, p.8));
+            } else {
+                body.push_str(&format!("- [{}]({}) ({}): {}\n", p.1, url, p.8, excerpt));
+            }
         }
     }
     body.push_str(&docs_llms_section(&state));

@@ -259,6 +259,18 @@ body {
     border-bottom: 1px solid var(--border);
 }
 
+/* Blog index (/blog): one entry per post, date over linked title + excerpt. */
+.blog-index-item { margin: 28px 0; }
+.blog-index-item .meta {
+    margin-bottom: 4px;
+    padding-bottom: 0;
+    border-bottom: none;
+    font-size: 13px;
+}
+.blog-index-item h2 { margin: 0 0 6px; }
+.blog-index-item h2 a { text-decoration: none; }
+.blog-index-item p { margin: 0; color: var(--text2); }
+
 /* EasyMDE theme overrides - match the surrounding dark UI. */
 .EasyMDEContainer { background: var(--bg); }
 .EasyMDEContainer .CodeMirror {
@@ -657,6 +669,7 @@ body {
     <div class="header-right">
         <button id="editBtn" class="btn" onclick="enterEditMode()" style="display:none;">Edit</button>
         <button id="newPageBtn" class="btn" onclick="newPage()" style="display:none;">+ Page</button>
+        <button id="newPostBtn" class="btn" onclick="newPost()" style="display:none;">+ Post</button>
         <button id="btnCart" class="btn cart-btn" onclick="openCart()">Cart<span id="cartBadge" class="cart-badge" style="display:none;">0</span></button>
         <button id="btnTheme" class="btn" onclick="cycleTheme()" title="Toggle theme">🌓</button>
         <button id="navLogoutBtn" class="btn" onclick="logoutFromSite()" style="display:none;">Logout</button>
@@ -749,8 +762,19 @@ const API = '/api/v1';
 // under /site/{slug} so the admin dashboard at / isn't shadowed.
 const CANONICAL_HOSTS = ['xikaku.com', 'www.xikaku.com'];
 const SITE_PATH_PREFIX = CANONICAL_HOSTS.includes(location.host) ? '' : '/site';
-function pageHref(slug) { return SITE_PATH_PREFIX + '/' + encodeURIComponent(slug); }
+function pageHref(slug) {
+    // Posts live under /blog/{slug}; everything else is /{slug}.
+    const p = pages.find(x => x.slug === slug);
+    const prefix = (p && p.page_kind === 'post') ? '/blog/' : '/';
+    return SITE_PATH_PREFIX + prefix + encodeURIComponent(slug);
+}
 function siteRootHref() { return SITE_PATH_PREFIX || '/'; }
+function formatPostDate(s) {
+    if (!s) return '';
+    const d = new Date(s + 'T00:00:00');
+    if (isNaN(d.getTime())) return s;
+    return d.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+}
 // Top-level paths that must NOT be intercepted as website slugs on xikaku.com.
 const RESERVED_TOP_PATHS = new Set(['site', 'shop', 'api', 'static', 'docs', 'robots.txt', 'sitemap.xml', 'llms.txt', 'favicon.ico', 'health', '.well-known']);
 
@@ -784,6 +808,7 @@ async function resolveAdminStatus() {
 function updateAdminChrome() {
     document.getElementById('navLogoutBtn').style.display = isAdmin ? '' : 'none';
     document.getElementById('newPageBtn').style.display = isAdmin ? '' : 'none';
+    document.getElementById('newPostBtn').style.display = isAdmin ? '' : 'none';
     document.getElementById('editBtn').style.display = (isAdmin && currentPage) ? '' : 'none';
 }
 
@@ -1003,10 +1028,14 @@ async function loadPage(slug) {
     const resp = await fetch(API + '/website/pages/' + encodeURIComponent(slug), opts);
     if (!resp.ok) {
         currentPage = null;
-        renderEmptyState('Page "' + slug + '" not found.');
-        return;
+        // The /blog index works without a "blog" page row (title/intro only).
+        if (slug !== 'blog') {
+            renderEmptyState('Page "' + slug + '" not found.');
+            return;
+        }
+    } else {
+        currentPage = await resp.json();
     }
-    currentPage = await resp.json();
     editMode = false;
     previewMode = false;
     editDraft = null;
@@ -1025,7 +1054,9 @@ function renderSidebar() {
     // Treat /shop as a non-empty sidebar context too - even when there are
     // no pages we still want to show the Shop link.
     const onShop = currentSlug === '__shop__';
-    if (pages.length <= 1 && !onShop) {
+    // Posts never appear in the nav; readers reach them via the /blog index.
+    const navPages = pages.filter(p => p.page_kind !== 'post');
+    if (navPages.length <= 1 && !onShop) {
         sb.innerHTML = '';
         if (layout) layout.classList.add('no-sidebar');
         return;
@@ -1033,8 +1064,8 @@ function renderSidebar() {
     if (layout) layout.classList.remove('no-sidebar');
     const byParent = new Map();
     const topLevel = [];
-    const slugSet = new Set(pages.map(p => p.slug));
-    pages.forEach(p => {
+    const slugSet = new Set(navPages.map(p => p.slug));
+    navPages.forEach(p => {
         if (p.parent_slug && slugSet.has(p.parent_slug)) {
             if (!byParent.has(p.parent_slug)) byParent.set(p.parent_slug, []);
             byParent.get(p.parent_slug).push(p);
@@ -1056,7 +1087,7 @@ function renderSidebar() {
             html += '</div>';
         }
     });
-    const orphans = pages.filter(p => p.parent_slug && !slugSet.has(p.parent_slug));
+    const orphans = navPages.filter(p => p.parent_slug && !slugSet.has(p.parent_slug));
     if (orphans.length) {
         const groups = new Map();
         orphans.forEach(o => {
@@ -1089,6 +1120,39 @@ function renderEmptyState(msg) {
     document.getElementById('editBtn').style.display = 'none';
 }
 
+// Public /blog view: optional intro from the "blog" page row, then every
+// post newest-first with date, title link, and excerpt. Admins also see
+// hidden (draft) posts, marked as such.
+function renderBlogIndexView() {
+    const c = document.getElementById('content');
+    updateAdminChrome();
+    let html = currentPage
+        ? renderMarkdown(currentPage.body_md || '')
+        : '<h1>Blog</h1>';
+    const posts = pages.filter(p => p.page_kind === 'post')
+        .sort((a, b) => (b.published_at || '').localeCompare(a.published_at || '')
+            || a.title.localeCompare(b.title));
+    if (!posts.length) {
+        html += '<p>No posts yet.</p>';
+    } else {
+        html += '<div class="blog-index">';
+        posts.forEach(p => {
+            html += '<article class="blog-index-item">'
+                + '<div class="meta">' + escHtml(formatPostDate(p.published_at))
+                + (p.hidden ? ' (hidden)' : '') + '</div>'
+                + '<h2><a href="' + pageHref(p.slug) + '">' + escHtml(p.title) + '</a></h2>'
+                + (p.excerpt ? '<p>' + escHtml(p.excerpt) + '</p>' : '')
+                + '</article>';
+        });
+        html += '</div>';
+    }
+    const { html: withIds, headings } = injectHeadingIds(html);
+    c.innerHTML = withIds;
+    renderToc(headings);
+    revealEmailObfs(c);
+    mountContactForms(c);
+}
+
 function renderNoPages() {
     const layout = document.getElementById('layout');
     if (layout) { layout.classList.add('no-toc'); layout.classList.add('no-sidebar'); }
@@ -1108,6 +1172,12 @@ function renderNoPages() {
 function renderPage() {
     const c = document.getElementById('content');
     const layout = document.getElementById('layout');
+    // The blog index has its own public view; edit/preview of the optional
+    // "blog" intro page still uses the normal editor flow below.
+    if (currentSlug === 'blog' && !editMode && !(previewMode && editDraft)) {
+        renderBlogIndexView();
+        return;
+    }
     if (!currentPage) {
         renderEmptyState('Select a page.');
         return;
@@ -1122,9 +1192,13 @@ function renderPage() {
         renderEditor();
         return;
     }
-    const meta = currentPage.updated_at
-        ? '<div class="meta">Updated ' + escHtml(formatDate(currentPage.updated_at)) + '</div>'
-        : '';
+    const meta = currentPage.page_kind === 'post'
+        ? (currentPage.published_at
+            ? '<div class="meta">' + escHtml(formatPostDate(currentPage.published_at)) + '</div>'
+            : '')
+        : (currentPage.updated_at
+            ? '<div class="meta">Updated ' + escHtml(formatDate(currentPage.updated_at)) + '</div>'
+            : '');
     // Only admins ever receive hidden pages, so this notice is admin-only.
     const hiddenNotice = currentPage.hidden
         ? '<div style="display:inline-block;margin-bottom:14px;padding:4px 12px;border-radius:999px;'
@@ -1247,13 +1321,18 @@ function renderEditor() {
     const body = d ? d.body_md : (currentPage.body_md || '');
     const metaDesc = d ? d.meta_description : (currentPage.meta_description || '');
     const slugVal = d ? d.slug : currentSlug;
-    const parentOptions = buildParentOptions(parent, currentSlug);
+    const isPost = (d ? d.page_kind : currentPage.page_kind) === 'post';
+    const published = d ? (d.published_at || '') : (currentPage.published_at || '');
+    // Posts have a publish date instead of nav placement (parent/order).
+    const placementFields = isPost
+        ? '<label>Published</label><input id="editPublished" type="date" style="width:150px;">'
+        : '<label>Parent</label><select id="editParent" style="min-width:200px;">' + buildParentOptions(parent, currentSlug) + '</select>' +
+          '<label>Order</label><input id="editOrd" type="number" style="width:80px;">';
     c.innerHTML =
         '<div class="edit-meta-row">' +
             '<label>Title</label><input id="editTitle" type="text" style="flex:1;min-width:200px;">' +
             '<label>Slug</label><input id="editSlug" type="text" style="width:160px;">' +
-            '<label>Parent</label><select id="editParent" style="min-width:200px;">' + parentOptions + '</select>' +
-            '<label>Order</label><input id="editOrd" type="number" style="width:80px;">' +
+            placementFields +
         '</div>' +
         '<div class="edit-meta-row" style="margin-top:8px;">' +
             '<label title="Overrides the auto-derived description for SEO / AI crawlers. Leave empty to auto-derive from body.">SEO description</label>' +
@@ -1273,7 +1352,11 @@ function renderEditor() {
         '</div>';
     document.getElementById('editTitle').value = title;
     document.getElementById('editSlug').value = slugVal;
-    document.getElementById('editOrd').value = ord;
+    if (isPost) {
+        document.getElementById('editPublished').value = published;
+    } else {
+        document.getElementById('editOrd').value = ord;
+    }
     document.getElementById('editMetaDesc').value = metaDesc;
     initEasyMDE(body);
 }
@@ -1283,7 +1366,7 @@ function buildParentOptions(selected, excludeSlug) {
     const sorted = [...pages].sort((a, b) => a.title.localeCompare(b.title));
     const known = new Set();
     sorted.forEach(p => {
-        if (p.slug === excludeSlug) return;
+        if (p.slug === excludeSlug || p.page_kind === 'post') return;
         known.add(p.slug);
         const sel = p.slug === selected ? ' selected' : '';
         opts.push('<option value="' + escHtml(p.slug) + '"' + sel + '>'
@@ -1416,13 +1499,19 @@ function cancelEdit() {
 function editorValues() {
     if (previewMode && editDraft) return editDraft;
     const metaDescEl = document.getElementById('editMetaDesc');
+    // Posts render a date input instead of parent/order controls.
+    const parentEl = document.getElementById('editParent');
+    const ordEl = document.getElementById('editOrd');
+    const publishedEl = document.getElementById('editPublished');
     return {
         title: document.getElementById('editTitle').value.trim(),
-        parent: document.getElementById('editParent').value.trim(),
-        ord: parseInt(document.getElementById('editOrd').value, 10) || 0,
+        parent: parentEl ? parentEl.value.trim() : '',
+        ord: ordEl ? (parseInt(ordEl.value, 10) || 0) : ((currentPage && currentPage.ord) || 0),
         body_md: easymde ? easymde.value() : document.getElementById('editBody').value,
         meta_description: metaDescEl ? metaDescEl.value.trim() : '',
         slug: document.getElementById('editSlug').value.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '-'),
+        page_kind: (currentPage && currentPage.page_kind) || 'page',
+        published_at: publishedEl ? publishedEl.value : ((currentPage && currentPage.published_at) || ''),
     };
 }
 
@@ -1492,7 +1581,10 @@ async function savePage() {
     const resp = await fetch(API + '/website/pages/' + encodeURIComponent(targetSlug), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken() },
-        body: JSON.stringify({ title, body_md, parent_slug: parent || null, ord, meta_description }),
+        body: JSON.stringify({
+            title, body_md, parent_slug: parent || null, ord, meta_description,
+            page_kind: v.page_kind, published_at: v.published_at,
+        }),
     });
     if (resp.status === 401) { handleSessionExpired(body_md); return; }
     if (!resp.ok) {
@@ -1573,6 +1665,25 @@ async function newPage() {
     navigateTo(cleanSlug);
 }
 
+// Create a blog post: kind 'post', published today (server default), no nav
+// placement. Reachable at /blog/{slug} and listed on /blog.
+async function newPost() {
+    if (!isPotentialAdmin()) { toast('Login required', 'error'); return; }
+    const slug = prompt('New post slug (lowercase, no spaces):');
+    if (!slug) return;
+    const cleanSlug = slug.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '-');
+    if (!cleanSlug) { toast('Invalid slug', 'error'); return; }
+    const title = prompt('Post title:', cleanSlug) || cleanSlug;
+    const resp = await fetch(API + '/website/pages/' + encodeURIComponent(cleanSlug), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken() },
+        body: JSON.stringify({ title, body_md: '# ' + title + '\n\n', parent_slug: null, ord: 999, page_kind: 'post' }),
+    });
+    if (!resp.ok) { toast('Create failed', 'error'); return; }
+    await loadIndex();
+    navigateTo(cleanSlug);
+}
+
 // ---------------------------------------------------------------------------
 // Routing
 // ---------------------------------------------------------------------------
@@ -1584,6 +1695,9 @@ async function newPage() {
 // resolve cleanly.
 function slugFromLocation() {
     const path = location.pathname || '';
+    // Blog posts: /blog/{slug} (clean) or /site/blog/{slug} (legacy host).
+    const post = path.match(/^(?:\/site)?\/blog\/([^\/\?#]+)$/);
+    if (post) return decodeURIComponent(post[1]);
     // Always recognize legacy /site/{slug} so old links keep working.
     const legacy = path.match(/^\/site\/([^\/\?#]+)/);
     if (legacy) return decodeURIComponent(legacy[1]);
@@ -1648,9 +1762,10 @@ async function route() {
     if (slug) {
         await loadPage(slug);
     } else {
-        // Default: first top-level page by ord
+        // Default: first top-level page by ord (posts never become home)
         const sorted = [...pages].sort((a, b) => a.ord - b.ord || a.title.localeCompare(b.title));
-        const first = sorted.find(p => !p.parent_slug) || sorted[0];
+        const first = sorted.find(p => !p.parent_slug && p.page_kind !== 'post')
+            || sorted.find(p => p.page_kind !== 'post') || sorted[0];
         history.replaceState({}, '', pageHref(first.slug) + (anchor ? '#' + encodeURIComponent(anchor) : ''));
         await loadPage(first.slug);
     }
@@ -1683,6 +1798,15 @@ document.addEventListener('click', (e) => {
         }
         route();
         window.scrollTo(0, 0);
+        return;
+    }
+    // Blog post links: /blog/{slug} or /site/blog/{slug}. The RSS feed is a
+    // real document, not a page - let the browser fetch it.
+    const post = href.match(/^(?:\/site)?\/blog\/([^\/\?#]+)$/);
+    if (post) {
+        if (post[1] === 'rss.xml') return;
+        e.preventDefault();
+        navigateTo(decodeURIComponent(post[1]));
         return;
     }
     // Legacy /site/{slug} form (susi.lp-research.com or old links on xikaku).

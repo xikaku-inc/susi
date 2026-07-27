@@ -477,7 +477,9 @@ impl LicenseDb {
                 ord INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL,
                 meta_description TEXT NOT NULL DEFAULT '',
-                hidden INTEGER NOT NULL DEFAULT 0
+                hidden INTEGER NOT NULL DEFAULT 0,
+                page_kind TEXT NOT NULL DEFAULT 'page',
+                published_at TEXT NOT NULL DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS idx_website_pages_parent ON website_pages(parent_slug);
 
@@ -878,6 +880,13 @@ impl LicenseDb {
                 params![DEFAULT_PRODUCT],
             );
         }
+
+        // Blog posts live in website_pages: kind 'post' plus a publish date
+        // (YYYY-MM-DD). Regular pages keep kind 'page' and an empty date.
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE website_pages ADD COLUMN page_kind TEXT NOT NULL DEFAULT 'page';
+             ALTER TABLE website_pages ADD COLUMN published_at TEXT NOT NULL DEFAULT '';",
+        );
 
         // >> Add new migrations as own execute_batch statements here <<
         Ok(())
@@ -3176,7 +3185,7 @@ mod tests {
     fn test_asset_usage_and_rename_covers_shop_products() {
         let mut db = test_db();
         db.upsert_website_asset("sensor.png", 123).unwrap();
-        db.upsert_website_page("intro", "Intro", "![img](sensor.png)", None, 0, "", None)
+        db.upsert_website_page("intro", "Intro", "![img](sensor.png)", None, 0, "", "page", "", None)
             .unwrap();
         db.upsert_product("lpms-b2", "LPMS-B2", "", 34900, "usd", Some("sensor.png"), "txcd", true, 0)
             .unwrap();
@@ -3206,7 +3215,7 @@ mod tests {
     #[test]
     fn test_website_page_hidden_flag() {
         let mut db = test_db();
-        db.upsert_website_page("about", "About", "# About", None, 0, "", None)
+        db.upsert_website_page("about", "About", "# About", None, 0, "", "page", "", None)
             .unwrap();
 
         // New pages default to visible.
@@ -3218,7 +3227,7 @@ mod tests {
         // Hide, verify, and check that editing the page keeps it hidden.
         assert!(db.set_website_page_hidden("about", true).unwrap());
         assert!(db.get_website_page("about").unwrap().unwrap().6);
-        db.upsert_website_page("about", "About v2", "# About v2", None, 0, "", None)
+        db.upsert_website_page("about", "About v2", "# About v2", None, 0, "", "page", "", None)
             .unwrap();
         assert!(
             db.get_website_page("about").unwrap().unwrap().6,

@@ -6687,7 +6687,7 @@ function renderWebsitePagesTable() {
         return;
     }
     tbody.innerHTML = websitePages.map(p => {
-        const editUrl = '/site/' + encodeURIComponent(p.slug);
+        const editUrl = (p.page_kind === 'post' ? '/site/blog/' : '/site/') + encodeURIComponent(p.slug);
         const parent = p.parent_slug
             ? '<code>' + escHtml(p.parent_slug) + '</code>'
             : '<span style="color:var(--text2);">-</span>';
@@ -6696,13 +6696,16 @@ function renderWebsitePagesTable() {
         const hiddenBadge = p.hidden
             ? ' <span class="badge" style="background:var(--bg3);color:var(--text2);">hidden</span>'
             : '';
+        const postBadge = p.page_kind === 'post'
+            ? ' <span class="badge" style="background:var(--bg3);color:var(--text2);">post</span>'
+            : '';
         // Dim the content cells individually - opacity on the <tr> would
         // create a stacking context that traps the fixed-position dropdown
         // menu below the following rows.
         const dim = p.hidden ? ' style="opacity:0.6;"' : '';
         return '<tr>'
             + '<td' + dim + '><code>' + escHtml(p.slug) + '</code></td>'
-            + '<td' + dim + '>' + escHtml(p.title) + hiddenBadge + '</td>'
+            + '<td' + dim + '>' + escHtml(p.title) + postBadge + hiddenBadge + '</td>'
             + '<td' + dim + '>' + parent + '</td>'
             + '<td' + dim + '>' + p.ord + '</td>'
             + '<td style="color:var(--text2);font-size:12px;' + (p.hidden ? 'opacity:0.6;' : '') + '">' + escHtml(p.updated_at || '') + '</td>'

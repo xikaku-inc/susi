@@ -3266,3 +3266,153 @@ fn test_website_page_hide_show() {
         .send().expect("ssr shown").text().unwrap();
     assert!(ssr.contains("Secret v2"), "SSR must serve the page again after showing");
 }
+
+/// Blog posts: kind/date round-trip, /blog index + /blog/{slug} SSR with
+/// BlogPosting schema, RSS feed, sitemap/llms.txt listing, draft (hidden)
+/// exclusion, and kind preservation on kind-less updates.
+#[test]
+fn test_blog_posts() {
+    let server = TestServer::start();
+    let token = server.admin_token();
+    let http = server.http();
+
+    // Two published posts, one hidden draft, one regular page as home.
+    for (slug, title, body, published, meta) in [
+        ("first-post", "First post", "# First post\n\nHello from the first post body.", "2026-07-01", "First post excerpt"),
+        ("second-post", "Second post", "# Second post\n\nFresh news in the second post.", "2026-07-20", ""),
+        ("draft-post", "Draft post", "# Draft post\n\nNot ready yet.", "2026-07-25", ""),
+    ] {
+        let resp = http
+            .put(format!("{}/website/pages/{}", server.api_url, slug))
+            .bearer_auth(&token)
+            .json(&json!({
+                "title": title, "body_md": body,
+                "page_kind": "post", "published_at": published,
+                "meta_description": meta,
+            }))
+            .send()
+            .expect("create post");
+        assert_eq!(resp.status().as_u16(), 200, "create {}: {}", slug, resp.text().unwrap_or_default());
+    }
+    let resp = http
+        .put(format!("{}/website/pages/home", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "title": "Home", "body_md": "# Home\n\nWelcome to Xikaku.", "ord": 5 }))
+        .send()
+        .expect("create home");
+    assert_eq!(resp.status().as_u16(), 200);
+    let resp = http
+        .post(format!("{}/website/pages/draft-post/visibility", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "hidden": true }))
+        .send()
+        .expect("hide draft");
+    assert_eq!(resp.status().as_u16(), 200);
+
+    // Public page list: posts carry kind/date/excerpt; the draft is absent.
+    let body = http.get(format!("{}/website/pages", server.api_url))
+        .send().expect("list").json::<Value>().unwrap();
+    let pages = body["pages"].as_array().unwrap();
+    assert!(!pages.iter().any(|p| p["slug"] == "draft-post"), "draft must be hidden");
+    let first = pages.iter().find(|p| p["slug"] == "first-post").unwrap();
+    assert_eq!(first["page_kind"], json!("post"));
+    assert_eq!(first["published_at"], json!("2026-07-01"));
+    assert_eq!(first["excerpt"], json!("First post excerpt"));
+    let second = pages.iter().find(|p| p["slug"] == "second-post").unwrap();
+    assert_eq!(second["excerpt"], json!("Fresh news in the second post."), "excerpt derives from body");
+
+    // Post SSR: BlogPosting JSON-LD, /blog canonical, article OG type, date line.
+    let ssr = http.get(format!("{}/site/blog/first-post", server.url))
+        .send().expect("post ssr").text().unwrap();
+    assert!(ssr.contains(r#""@type":"BlogPosting""#), "missing BlogPosting: {}", &ssr[..600]);
+    assert!(ssr.contains(r#"href="https://xikaku.com/blog/first-post""#), "wrong canonical");
+    assert!(ssr.contains(r#"content="article""#), "og:type must be article");
+    assert!(ssr.contains(r#"article:published_time" content="2026-07-01""#));
+    assert!(ssr.contains("July 1, 2026"), "post date line missing");
+    assert!(ssr.contains("Hello from the first post body."));
+
+    // A regular page is not served from the /blog/ path.
+    let ssr = http.get(format!("{}/site/blog/home", server.url))
+        .send().expect("page at post path").text().unwrap();
+    assert!(!ssr.contains("Welcome to Xikaku."), "/blog/ must not serve regular pages");
+
+    // The draft post renders as not-found for anonymous visitors.
+    let ssr = http.get(format!("{}/site/blog/draft-post", server.url))
+        .send().expect("draft ssr").text().unwrap();
+    assert!(!ssr.contains("Not ready yet."), "draft content must not leak");
+
+    // Blog index: newest first, draft excluded, links to /blog/{slug}.
+    let index = http.get(format!("{}/site/blog", server.url))
+        .send().expect("blog index").text().unwrap();
+    let pos_second = index.find(r#"href="/blog/second-post""#).expect("second-post link");
+    let pos_first = index.find(r#"href="/blog/first-post""#).expect("first-post link");
+    assert!(pos_second < pos_first, "index must be newest-first");
+    assert!(!index.contains("draft-post"), "draft must not appear on the index");
+    assert!(index.contains("July 20, 2026"));
+    assert!(index.contains("First post excerpt"));
+
+    // Home page selection ignores posts (home has the highest ord).
+    let root = http.get(format!("{}/site", server.url))
+        .send().expect("root ssr").text().unwrap();
+    assert!(root.contains("Welcome to Xikaku."), "home must be the regular page, not a post");
+
+    // RSS feed: both posts newest-first with RFC 2822 dates, draft excluded.
+    let resp = http.get(format!("{}/site/blog/rss.xml", server.url))
+        .send().expect("rss");
+    assert!(resp.headers()["content-type"].to_str().unwrap().contains("rss"));
+    let rss = resp.text().unwrap();
+    assert!(rss.contains("<link>https://xikaku.com/blog/first-post</link>"));
+    assert!(rss.contains("20 Jul 2026"), "pubDate missing: {}", rss);
+    assert!(!rss.contains("draft-post"));
+    let pos_second = rss.find("second-post").unwrap();
+    let pos_first = rss.find("first-post").unwrap();
+    assert!(pos_second < pos_first, "RSS must be newest-first");
+
+    // Sitemap (marketing host): posts listed under /blog/, draft excluded.
+    let sitemap = http.get(format!("{}/sitemap.xml", server.url))
+        .header("Host", "xikaku.com")
+        .send().expect("sitemap").text().unwrap();
+    assert!(sitemap.contains("https://xikaku.com/blog/first-post"), "sitemap: {}", sitemap);
+    assert!(!sitemap.contains("draft-post"));
+
+    // llms.txt: posts live in a dedicated Blog section with their dates.
+    let llms = http.get(format!("{}/llms.txt", server.url))
+        .send().expect("llms").text().unwrap();
+    assert!(llms.contains("## Blog"), "llms.txt must have a Blog section");
+    assert!(llms.contains("https://xikaku.com/blog/first-post"));
+    assert!(llms.contains("(2026-07-01)"));
+    assert!(!llms.contains("draft-post"));
+
+    // A kind-less update (e.g. from an older client) must not demote the post.
+    let resp = http
+        .put(format!("{}/website/pages/first-post", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "title": "First post", "body_md": "# First post\n\nEdited body." }))
+        .send()
+        .expect("kindless update");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = http.get(format!("{}/website/pages/first-post", server.api_url))
+        .send().expect("get").json::<Value>().unwrap();
+    assert_eq!(body["page_kind"], json!("post"), "kind must survive kind-less updates");
+    assert_eq!(body["published_at"], json!("2026-07-01"), "date must survive kind-less updates");
+
+    // Garbage publish dates are rejected; empty dates default to today.
+    let resp = http
+        .put(format!("{}/website/pages/bad-date", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "title": "X", "body_md": "x", "page_kind": "post", "published_at": "sometime" }))
+        .send()
+        .expect("bad date");
+    assert_eq!(resp.status().as_u16(), 400);
+    let resp = http
+        .put(format!("{}/website/pages/dated-post", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "title": "Dated", "body_md": "x", "page_kind": "post" }))
+        .send()
+        .expect("default date");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = http.get(format!("{}/website/pages/dated-post", server.api_url))
+        .send().expect("get").json::<Value>().unwrap();
+    let published = body["published_at"].as_str().unwrap();
+    assert_eq!(published.len(), 10, "published_at must default to a YYYY-MM-DD date, got {:?}", published);
+}

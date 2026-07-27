@@ -2785,6 +2785,10 @@ async fn main() -> Result<()> {
         // per-page SEO head (title, description, OG, JSON-LD) injected.
         .route("/site", get(website::handle_website_render_root))
         .route("/site/{slug}", get(website::handle_website_render_slug))
+        // Blog: /blog on xikaku.com rewrites to /site/blog (post index, handled
+        // by the {slug} route above); posts live under /site/blog/{slug}.
+        .route("/site/blog/rss.xml", get(website::handle_blog_rss))
+        .route("/site/blog/{slug}", get(website::handle_website_render_post))
         // Brand assets referenced from <head> (og:image, Organization.logo, favicons)
         .route("/static/logo.png", get(website::handle_logo_png))
         .route("/static/logo-dark.png", get(website::handle_logo_dark_png))
