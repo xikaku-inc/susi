@@ -893,6 +893,7 @@ Served at the `/site` chrome and disabled (503) unless `SUSI_CONTACT_TO_ADDR` an
 - Hidden honeypot field that real browsers leave empty
 - Cloudflare Turnstile siteverify when `SUSI_TURNSTILE_SECRET` is set (otherwise honeypot + rate limit only)
 - Per-IP sliding-window rate limit (3/hour, 20/day)
+- All fields mandatory (name, company, email, subject, message) - filters low-effort scam inquiries
 - Field length caps + minimum body length
 - Sender email syntactically validated; outbound mail body is plain text
 

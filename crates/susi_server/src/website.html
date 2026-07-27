@@ -644,6 +644,7 @@ body {
 .contact-form input:focus, .contact-form textarea:focus { outline: none; border-color: var(--accent); }
 .contact-form textarea { min-height: 140px; resize: vertical; }
 .contact-form .hp-field { position: absolute; left: -9999px; width: 1px; height: 1px; opacity: 0; }
+.contact-form .note { font-size: 12px; color: var(--text2); }
 .contact-form .row-actions { display: flex; gap: 10px; align-items: center; }
 .contact-form .status { font-size: 13px; }
 .contact-form .status.ok { color: #4caf75; }
@@ -2432,10 +2433,12 @@ function buildContactForm(slot, cfg) {
     slot.innerHTML =
         '<form class="contact-form" novalidate>'
         + '<label>Your name<input type="text" name="name" required maxlength="200" autocomplete="name"></label>'
+        + '<label>Company<input type="text" name="company" required maxlength="200" autocomplete="organization"></label>'
         + '<label>Email address<input type="email" name="email" required maxlength="320" autocomplete="email"></label>'
-        + '<label>Subject<input type="text" name="subject" maxlength="200"></label>'
+        + '<label>Subject<input type="text" name="subject" required maxlength="200"></label>'
         + '<label>Message<textarea name="message" required minlength="10" maxlength="8000"></textarea></label>'
         + '<label class="hp-field" aria-hidden="true"><input type="text" name="website" tabindex="-1" autocomplete="off"></label>'
+        + '<div class="note">All fields are required.</div>'
         + '<div class="turnstile-slot"></div>'
         + '<div class="row-actions">'
         +   '<button type="submit" class="btn primary">Send message</button>'
@@ -2478,13 +2481,19 @@ function buildContactForm(slot, cfg) {
         status.textContent = '';
         const fd = new FormData(form);
         const payload = {
-            name: (fd.get('name') || '').toString(),
-            email: (fd.get('email') || '').toString(),
-            subject: (fd.get('subject') || '').toString(),
-            message: (fd.get('message') || '').toString(),
+            name: (fd.get('name') || '').toString().trim(),
+            company: (fd.get('company') || '').toString().trim(),
+            email: (fd.get('email') || '').toString().trim(),
+            subject: (fd.get('subject') || '').toString().trim(),
+            message: (fd.get('message') || '').toString().trim(),
             website: (fd.get('website') || '').toString(),
             turnstile_token: tsToken,
         };
+        if (!payload.name || !payload.company || !payload.email || !payload.subject || !payload.message) {
+            status.className = 'status err';
+            status.textContent = 'Please fill in all fields.';
+            return;
+        }
         if (cfg.turnstile_site_key && !tsToken) {
             status.className = 'status err';
             status.textContent = 'Please complete the captcha first.';

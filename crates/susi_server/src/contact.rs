@@ -4,6 +4,7 @@
 //!   - hidden honeypot field that real browsers leave empty
 //!   - Cloudflare Turnstile siteverify (when SUSI_TURNSTILE_SECRET is set)
 //!   - per-IP sliding-window rate limit (3 / hour, 20 / day)
+//!   - every field mandatory (name, company, email, subject, message)
 //!   - field length caps + minimum body length
 //!   - sender email syntactically validated; no HTML in outbound mail body
 //!
@@ -30,6 +31,7 @@ const CONTACT_WINDOW: StdDuration = StdDuration::from_secs(3600);
 const CONTACT_MAX_PER_HOUR: usize = 3;
 
 const MAX_NAME: usize = 200;
+const MAX_COMPANY: usize = 200;
 const MAX_EMAIL: usize = 320; // RFC 5321 max
 const MAX_SUBJECT: usize = 200;
 const MAX_MESSAGE: usize = 8000;
@@ -39,6 +41,8 @@ const MIN_MESSAGE: usize = 10;
 pub struct ContactRequest {
     #[serde(default)]
     pub name: String,
+    #[serde(default)]
+    pub company: String,
     #[serde(default)]
     pub email: String,
     #[serde(default)]
@@ -94,6 +98,7 @@ pub async fn handle_submit(
     )?;
 
     let name = req.name.trim();
+    let company = req.company.trim();
     let email = req.email.trim();
     let subject = req.subject.trim();
     let message = req.message.trim();
@@ -101,11 +106,14 @@ pub async fn handle_submit(
     if name.is_empty() || name.len() > MAX_NAME {
         return Err(error_response(StatusCode::BAD_REQUEST, "Invalid name"));
     }
+    if company.is_empty() || company.len() > MAX_COMPANY {
+        return Err(error_response(StatusCode::BAD_REQUEST, "Invalid company"));
+    }
     if !is_email_like(email) || email.len() > MAX_EMAIL {
         return Err(error_response(StatusCode::BAD_REQUEST, "Invalid email address"));
     }
-    if subject.len() > MAX_SUBJECT {
-        return Err(error_response(StatusCode::BAD_REQUEST, "Subject too long"));
+    if subject.is_empty() || subject.len() > MAX_SUBJECT {
+        return Err(error_response(StatusCode::BAD_REQUEST, "Invalid subject"));
     }
     if message.len() < MIN_MESSAGE || message.len() > MAX_MESSAGE {
         return Err(error_response(
@@ -131,23 +139,21 @@ pub async fn handle_submit(
 
     let email_service = state.email.clone().expect("checked above");
     let to_addr = state.contact_to_addr.clone();
-    let mail_subject = if subject.is_empty() {
-        format!("[Xikaku] {}", name)
-    } else {
-        format!("[Xikaku] {}", subject)
-    };
+    let mail_subject = format!("[Xikaku] {}", subject);
     let body = format!(
         "New contact-form submission\n\
          ---------------------------\n\
          Name:    {name}\n\
+         Company: {company}\n\
          Email:   {email}\n\
          Subject: {subject}\n\
          IP:      {ip}\n\n\
          Message:\n\
          {message}\n",
         name = name,
+        company = company,
         email = email,
-        subject = if subject.is_empty() { "(none)" } else { subject },
+        subject = subject,
         ip = ip,
         message = message,
     );
@@ -167,7 +173,7 @@ pub async fn handle_submit(
         ));
     }
 
-    log::info!("Contact form delivered from {} <{}> (ip {})", name, email, ip);
+    log::info!("Contact form delivered from {} / {} <{}> (ip {})", name, company, email, ip);
     Ok(Json(json!({ "status": "ok" })))
 }
 

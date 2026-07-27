@@ -3416,3 +3416,47 @@ fn test_blog_posts() {
     let published = body["published_at"].as_str().unwrap();
     assert_eq!(published.len(), 10, "published_at must default to a YYYY-MM-DD date, got {:?}", published);
 }
+
+/// Every contact-form field is mandatory - blank company or subject is
+/// rejected before the message is ever queued for delivery.
+#[test]
+fn test_contact_form_requires_all_fields() {
+    let server = TestServer::start_with_env(&[
+        ("SUSI_CONTACT_TO_ADDR", "hello@example.com"),
+        ("SUSI_SMTP_HOST", "127.0.0.1"),
+        ("SUSI_SMTP_PORT", "1"),
+        ("SUSI_SMTP_USER", "user"),
+        ("SUSI_SMTP_PASSWORD", "pass"),
+        ("SUSI_SMTP_FROM_ADDR", "noreply@example.com"),
+    ]);
+    let http = server.http();
+    let submit = |body: Value| {
+        http.post(format!("{}/contact", server.api_url))
+            .json(&body)
+            .send()
+            .expect("submit contact")
+    };
+    let full = json!({
+        "name": "Jane Doe",
+        "company": "Acme Robotics",
+        "email": "jane@acme.example",
+        "subject": "Sensor evaluation",
+        "message": "We would like to evaluate your IMU line.",
+    });
+
+    // Rate limit is 3/hour per IP, so this test gets exactly three shots.
+    let mut no_company = full.clone();
+    no_company["company"] = json!("   ");
+    let resp = submit(no_company);
+    assert_eq!(resp.status().as_u16(), 400, "blank company must be rejected");
+    assert!(resp.text().unwrap_or_default().contains("company"));
+
+    let mut no_subject = full.clone();
+    no_subject["subject"] = json!("");
+    assert_eq!(submit(no_subject).status().as_u16(), 400, "blank subject must be rejected");
+
+    // Complete submission clears validation; delivery then fails against the
+    // dead SMTP port, which is a 500 - anything but 400 proves the fields passed.
+    let status = submit(full).status().as_u16();
+    assert_ne!(status, 400, "complete submission must pass validation");
+}
