@@ -1056,7 +1056,8 @@ function renderSidebar() {
     // no pages we still want to show the Shop link.
     const onShop = currentSlug === '__shop__';
     // Posts never appear in the nav; readers reach them via the /blog index.
-    const navPages = pages.filter(p => p.page_kind !== 'post');
+    // The optional "blog" intro page is covered by the fixed Blog link below.
+    const navPages = pages.filter(p => p.page_kind !== 'post' && p.slug !== 'blog');
     if (navPages.length <= 1 && !onShop) {
         sb.innerHTML = '';
         if (layout) layout.classList.add('no-sidebar');
@@ -1101,6 +1102,9 @@ function renderSidebar() {
             items.forEach(it => html += renderSidebarItem(it, false, false, false));
         }
     }
+    const onPost = currentPage && currentPage.page_kind === 'post';
+    const blogActive = (currentSlug === 'blog' || onPost) ? ' active' : '';
+    html += '<a class="section-head' + blogActive + '" href="' + SITE_PATH_PREFIX + '/blog">Blog</a>';
     const shopActive = currentSlug === '__shop__' ? ' active' : '';
     html += '<a class="section-head' + shopActive + '" href="/shop">Shop</a>';
     sb.innerHTML = html;
