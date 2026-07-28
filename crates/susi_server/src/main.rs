@@ -265,8 +265,8 @@ const SECURITY_CSP: &str = "default-src 'self'; \
     style-src 'self' 'unsafe-inline'; \
     img-src 'self' data: blob: https:; \
     font-src 'self' data:; \
-    connect-src 'self' https://*.google-analytics.com https://*.analytics.google.com https://www.googletagmanager.com; \
-    frame-src https://www.youtube.com https://player.vimeo.com https://challenges.cloudflare.com; \
+    connect-src 'self' https://*.google-analytics.com https://*.analytics.google.com https://www.googletagmanager.com https://www.googleadservices.com https://*.g.doubleclick.net https://*.google.com; \
+    frame-src https://www.youtube.com https://player.vimeo.com https://challenges.cloudflare.com https://td.doubleclick.net; \
     object-src 'none'; \
     frame-ancestors 'none'; \
     base-uri 'self'; \

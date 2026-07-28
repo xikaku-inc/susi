@@ -2318,6 +2318,11 @@ function renderShopSuccess() {
     const sid = params.get('session_id') || '';
     localStorage.removeItem('susi_cart');
     renderCartBadge();
+    if (window.gtag && window.__adsConv && window.__adsConv.purchase) {
+        const conv = { send_to: window.__adsConv.purchase };
+        if (sid) conv.transaction_id = sid;
+        gtag('event', 'conversion', conv);
+    }
     c.innerHTML =
         '<div class="empty-state" style="padding:80px 20px;">'
         +   '<h1>Thank you!</h1>'
@@ -2519,6 +2524,9 @@ function buildContactForm(slot, cfg) {
                 tsToken = '';
                 status.className = 'status ok';
                 status.textContent = 'Thanks - your message is on its way.';
+                if (window.gtag && window.__adsConv && window.__adsConv.contact) {
+                    gtag('event', 'conversion', { send_to: window.__adsConv.contact });
+                }
             } else {
                 const d = await resp.json().catch(() => ({}));
                 status.className = 'status err';

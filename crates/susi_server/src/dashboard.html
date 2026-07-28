@@ -832,7 +832,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
     <div id="workspaceListSection">
     <h2 style="font-size:16px;font-weight:600;margin-top:32px;margin-bottom:16px;">Workspaces</h2>
     <div class="toolbar">
-        <input type="text" id="wsSearch" placeholder="Search workspaces..." oninput="renderWorkspaces()">
+        <input type="search" id="wsSearch" placeholder="Search workspaces..." autocomplete="off" oninput="renderWorkspaces()">
         <div class="spacer"></div>
         <button id="btnCreateWorkspace" onclick="showCreateWorkspaceModal()">+ New Workspace</button>
     </div>
@@ -950,7 +950,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
     <div id="adminReleasesSection" style="margin-top:32px;">
         <h2 style="font-size:16px;font-weight:600;margin-bottom:16px;">Software Releases</h2>
         <div class="toolbar">
-            <input type="text" id="releaseSearch" placeholder="Search releases..." oninput="renderReleases()">
+            <input type="search" id="releaseSearch" placeholder="Search releases..." autocomplete="off" oninput="renderReleases()">
             <div class="spacer"></div>
             <button id="btnUploadRelease" onclick="showUploadReleaseModal()">+ Upload Release</button>
         </div>
@@ -1004,7 +1004,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
     <h2 style="font-size:16px;font-weight:600;margin-top:32px;margin-bottom:16px;">Licenses</h2>
 
     <div id="adminLicenseToolbar" class="toolbar">
-        <input type="text" id="searchInput" placeholder="Search licenses...">
+        <input type="search" id="searchInput" placeholder="Search licenses..." autocomplete="off">
         <div class="spacer"></div>
         <button onclick="showCreateModal()">+ New License</button>
     </div>
@@ -1474,7 +1474,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
     </style>
     <h2 style="font-size:16px;font-weight:600;margin-top:32px;margin-bottom:16px;">User Management</h2>
     <div class="toolbar">
-        <input type="text" id="userSearch" placeholder="Search users (name, email, role, license)..." oninput="onUserSearch()">
+        <input type="search" id="userSearch" placeholder="Search users (name, email, role, license)..." autocomplete="off" oninput="onUserSearch()">
         <span id="userCount" style="font-size:12px;color:var(--text2);white-space:nowrap;"></span>
         <div class="spacer"></div>
         <button onclick="showAddUserModal()">+ Add User</button>
@@ -1558,6 +1558,21 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                     <label for="siteSetGaId">Google Analytics Measurement ID</label>
                     <input type="text" id="siteSetGaId" placeholder="G-XXXXXXXXXX">
                     <div class="field-help">Leave empty to disable. When set, the gtag.js snippet is injected on every public page.</div>
+                </div>
+                <div class="form-row">
+                    <label for="siteSetAdsId">Google Ads Conversion ID</label>
+                    <input type="text" id="siteSetAdsId" placeholder="AW-XXXXXXXXXX">
+                    <div class="field-help">Leave empty to disable. When set, the Google tag is injected on every public page (shares one gtag.js loader with Google Analytics).</div>
+                </div>
+                <div class="form-row">
+                    <label for="siteSetAdsLabelContact">Google Ads conversion label - contact form</label>
+                    <input type="text" id="siteSetAdsLabelContact" placeholder="e.g. AbCdEfGhIjKLMNOP">
+                    <div class="field-help">Label from the Google Ads conversion action. Fired when a contact form is sent successfully.</div>
+                </div>
+                <div class="form-row">
+                    <label for="siteSetAdsLabelPurchase">Google Ads conversion label - shop purchase</label>
+                    <input type="text" id="siteSetAdsLabelPurchase" placeholder="e.g. AbCdEfGhIjKLMNOP">
+                    <div class="field-help">Label from the Google Ads conversion action. Fired on the shop order-complete page.</div>
                 </div>
                 <div class="form-row">
                     <label for="siteSetRedditPixelId">Reddit Pixel ID</label>
@@ -1729,14 +1744,6 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
             <div class="form-row">
                 <label>Customer</label>
                 <input type="text" id="createCustomer" placeholder="Company name">
-            </div>
-            <div class="form-row">
-                <label>Customer contact email <span style="font-weight:400;color:var(--text2);font-size:11px;">(optional - creates a new portal account + assigns license)</span></label>
-                <input type="email" id="createAssignEmail" placeholder="contact@customer.com">
-            </div>
-            <div class="form-row">
-                <label>Portal username <span style="font-weight:400;color:var(--text2);font-size:11px;">(for the new account - must not exist yet)</span></label>
-                <input type="text" id="createAssignUsername" placeholder="FirstLastCompany">
             </div>
             <div class="form-row">
                 <label>Product</label>
@@ -3356,8 +3363,6 @@ async function deleteLicense() {
 // Create modal
 function showCreateModal() {
     document.querySelectorAll('#createFeaturesContainer input[type=checkbox]').forEach(cb => cb.checked = false);
-    document.getElementById('createAssignEmail').value = '';
-    document.getElementById('createAssignUsername').value = '';
     document.getElementById('createLeaseDuration').value = '';
     document.getElementById('createLeaseGrace').value = '';
     document.getElementById('createRequireSignedBinary').checked = false;
@@ -3422,20 +3427,7 @@ async function createLicense() {
     const customer = document.getElementById('createCustomer').value.trim();
     if (!customer) { toast('Customer name is required', 'error'); return; }
 
-    // One-dialog flow: email + username create a NEW portal account (with
-    // invitation) and assign the license to it. Existing accounts are never
-    // matched silently here - assign those from the license detail page.
-    const assignEmail = document.getElementById('createAssignEmail').value.trim();
-    const assignUsername = document.getElementById('createAssignUsername').value.trim();
-    let assignTo = [];
-    if (assignEmail || assignUsername) {
-        const username = await createPortalUser(assignUsername, assignEmail);
-        if (!username) return;
-        assignTo = [username];
-    }
-
     const body = {
-        assign_to: assignTo,
         product: document.getElementById('createProduct').value.trim() || 'FusionHub',
         customer: customer,
         features: getSelectedFeatures(),
@@ -3532,55 +3524,9 @@ async function loadAssignableUsers() {
     } catch (e) {}
 }
 
-// Resolve a username-or-email to an existing account; create + invite a new
-// portal user when given an unknown email. Returns the username or null.
-// Suggest a portal username in the manual convention (FirstLastCompany),
-// derived from the email local part plus the license customer.
-function suggestUsername(email, customer) {
-    const name = email.split('@')[0].split(/[._-]+/).filter(Boolean)
-        .map(p => p.charAt(0).toUpperCase() + p.slice(1)).join('');
-    const company = (customer || '').replace(/[^a-zA-Z0-9]+/g, '');
-    return (name + company) || email;
-}
-
-// Create a brand-new portal account for the create-license flow. Unlike
-// ensurePortalUser this never matches an existing account: a taken username
-// or email is an error, so the admin must pick a different one.
-async function createPortalUser(username, email) {
-    if (!username) { toast('Enter a username for the new portal account', 'error'); return null; }
-    if (!email.includes('@')) { toast('Enter a valid contact email for the new portal account', 'error'); return null; }
-    await loadAssignableUsers();
-    const byName = assignableUsers.find(u => u.username.toLowerCase() === username.toLowerCase());
-    if (byName) {
-        toast('User "' + byName.username + '" already exists - choose a different username', 'error');
-        return null;
-    }
-    const byEmail = assignableUsers.find(u => (u.email || '').toLowerCase() === email.toLowerCase());
-    if (byEmail) {
-        toast('Email ' + email + ' already belongs to user "' + byEmail.username + '" - use a different email', 'error');
-        return null;
-    }
-    try {
-        const resp = await fetch(API + '/auth/users', {
-            method: 'POST',
-            headers: authHeaders(),
-            body: JSON.stringify({ username, email, role: 'user' }),
-        });
-        const data = await resp.json().catch(() => ({}));
-        if (!resp.ok) {
-            toast('Error creating user: ' + (data.error || resp.status), 'error');
-            return null;
-        }
-        toast('Invitation sent to ' + email, 'success');
-        await loadAssignableUsers();
-        return username;
-    } catch (e) {
-        toast('Failed: ' + e.message, 'error');
-        return null;
-    }
-}
-
-async function ensurePortalUser(identifier, customer) {
+// Resolve a username-or-email to an existing account. Returns the username
+// or null. User creation is manual - use the Users page.
+async function ensurePortalUser(identifier) {
     const id = identifier.trim();
     if (!id) return null;
     // Refresh before matching: a user created moments ago (e.g. via the Users
@@ -3589,40 +3535,13 @@ async function ensurePortalUser(identifier, customer) {
     const user = assignableUsers.find(u => u.username === id) ||
                  assignableUsers.find(u => (u.email || '').toLowerCase() === id.toLowerCase());
     if (user) return user.username;
-    if (!id.includes('@')) {
-        toast('No user "' + id + '" - enter an email address to create one', 'error');
-        return null;
-    }
-    // New account: confirm the username instead of silently using the email,
-    // so shortcut-created accounts follow the same naming convention as
-    // manually created ones.
-    const proposed = prompt('New portal account for ' + id + '\nUsername:', suggestUsername(id, customer));
-    if (proposed === null) return null;
-    const username = proposed.trim() || id;
-    try {
-        const resp = await fetch(API + '/auth/users', {
-            method: 'POST',
-            headers: authHeaders(),
-            body: JSON.stringify({ username, email: id, role: 'user' }),
-        });
-        const data = await resp.json().catch(() => ({}));
-        if (!resp.ok) {
-            toast('Error creating user: ' + (data.error || resp.status), 'error');
-            return null;
-        }
-        toast('Invitation sent to ' + id, 'success');
-        await loadAssignableUsers();
-        return username;
-    } catch (e) {
-        toast('Failed: ' + e.message, 'error');
-        return null;
-    }
+    toast('No user "' + id + '" - create the account on the Users page first', 'error');
+    return null;
 }
 
 async function assignLicenseUser() {
     if (!selectedKey) return;
-    const lic = licenses.find(l => l.license_key === selectedKey);
-    const username = await ensurePortalUser(document.getElementById('assignUserInput').value, lic ? lic.customer : '');
+    const username = await ensurePortalUser(document.getElementById('assignUserInput').value);
     if (!username) return;
     try {
         const resp = await fetch(API + '/licenses/' + encodeURIComponent(selectedKey) + '/users', {
@@ -6039,6 +5958,9 @@ async function loadSiteSettings() {
         if (!resp.ok) return;
         const s = await resp.json();
         document.getElementById('siteSetGaId').value = s.google_analytics_id || '';
+        document.getElementById('siteSetAdsId').value = s.google_ads_id || '';
+        document.getElementById('siteSetAdsLabelContact').value = s.google_ads_label_contact || '';
+        document.getElementById('siteSetAdsLabelPurchase').value = s.google_ads_label_purchase || '';
         document.getElementById('siteSetRedditPixelId').value = s.reddit_pixel_id || '';
     } catch (e) {
         // Non-fatal - settings just won't pre-fill.
@@ -6050,6 +5972,9 @@ async function saveSiteSettings() {
     errEl.style.display = 'none';
     const body = {
         google_analytics_id: document.getElementById('siteSetGaId').value.trim(),
+        google_ads_id: document.getElementById('siteSetAdsId').value.trim(),
+        google_ads_label_contact: document.getElementById('siteSetAdsLabelContact').value.trim(),
+        google_ads_label_purchase: document.getElementById('siteSetAdsLabelPurchase').value.trim(),
         reddit_pixel_id: document.getElementById('siteSetRedditPixelId').value.trim(),
     };
     try {

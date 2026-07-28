@@ -1574,6 +1574,9 @@ fn build_html_headers() -> HeaderMap {
 }
 
 pub const SETTING_GOOGLE_ANALYTICS_ID: &str = "google_analytics_id";
+pub const SETTING_GOOGLE_ADS_ID: &str = "google_ads_id";
+pub const SETTING_GOOGLE_ADS_LABEL_CONTACT: &str = "google_ads_label_contact";
+pub const SETTING_GOOGLE_ADS_LABEL_PURCHASE: &str = "google_ads_label_purchase";
 pub const SETTING_REDDIT_PIXEL_ID: &str = "reddit_pixel_id";
 
 /// Validate an analytics tag ID (GA Measurement ID, Reddit Pixel ID).
@@ -1589,27 +1592,67 @@ fn is_valid_analytics_id(s: &str) -> bool {
 /// Render the analytics `<script>` blocks from the configured tag IDs,
 /// or empty string when unset. Called per-request - DB lookups are cheap.
 pub fn analytics_head(state: &Arc<AppState>) -> String {
-    let (ga_id, reddit_id) = {
+    let (ga_id, ads_id, ads_contact, ads_purchase, reddit_id) = {
         let db = state.db.lock();
         (
             db.get_site_setting(SETTING_GOOGLE_ANALYTICS_ID).ok().flatten(),
+            db.get_site_setting(SETTING_GOOGLE_ADS_ID).ok().flatten(),
+            db.get_site_setting(SETTING_GOOGLE_ADS_LABEL_CONTACT).ok().flatten(),
+            db.get_site_setting(SETTING_GOOGLE_ADS_LABEL_PURCHASE).ok().flatten(),
             db.get_site_setting(SETTING_REDDIT_PIXEL_ID).ok().flatten(),
         )
     };
+    render_analytics_head(
+        ga_id.as_deref(),
+        ads_id.as_deref(),
+        ads_contact.as_deref(),
+        ads_purchase.as_deref(),
+        reddit_id.as_deref(),
+    )
+}
+
+/// Pure renderer behind `analytics_head`. Google mandates a single gtag.js
+/// loader per page, so GA and Google Ads share one loader with one
+/// `gtag('config', ...)` line each. Conversion labels (contact form, shop
+/// purchase) are exposed as `window.__adsConv` for the site JS to fire
+/// `gtag('event', 'conversion', ...)` at the right moments.
+fn render_analytics_head(
+    ga_id: Option<&str>,
+    ads_id: Option<&str>,
+    ads_contact: Option<&str>,
+    ads_purchase: Option<&str>,
+    reddit_id: Option<&str>,
+) -> String {
+    let ga_id = ga_id.filter(|s| is_valid_analytics_id(s));
+    let ads_id = ads_id.filter(|s| is_valid_analytics_id(s));
     let mut out = String::new();
-    if let Some(id) = ga_id.filter(|s| is_valid_analytics_id(s)) {
+    if let Some(loader_id) = ga_id.or(ads_id) {
         out.push_str(&format!(
             "<link rel=\"preconnect\" href=\"https://www.googletagmanager.com\" crossorigin>\n\
              <!-- Google tag (gtag.js) -->\n\
-             <script async src=\"https://www.googletagmanager.com/gtag/js?id={id}\"></script>\n\
+             <script async src=\"https://www.googletagmanager.com/gtag/js?id={loader_id}\"></script>\n\
              <script>\n\
              window.dataLayer = window.dataLayer || [];\n\
              function gtag(){{dataLayer.push(arguments);}}\n\
-             gtag('js', new Date());\n\
-             gtag('config', '{id}');\n\
-             </script>\n",
-            id = id,
+             gtag('js', new Date());\n",
         ));
+        if let Some(id) = ga_id {
+            out.push_str(&format!("gtag('config', '{id}');\n"));
+        }
+        if let Some(id) = ads_id {
+            out.push_str(&format!("gtag('config', '{id}');\n"));
+            let mut conv = Vec::new();
+            if let Some(l) = ads_contact.filter(|s| is_valid_analytics_id(s)) {
+                conv.push(format!("contact:'{id}/{l}'"));
+            }
+            if let Some(l) = ads_purchase.filter(|s| is_valid_analytics_id(s)) {
+                conv.push(format!("purchase:'{id}/{l}'"));
+            }
+            if !conv.is_empty() {
+                out.push_str(&format!("window.__adsConv = {{{}}};\n", conv.join(",")));
+            }
+        }
+        out.push_str("</script>\n");
     }
     if let Some(id) = reddit_id.filter(|s| is_valid_analytics_id(s)) {
         out.push_str(&format!(
@@ -1787,7 +1830,13 @@ pub async fn handle_llms_txt(
 // Site settings admin (JWT)
 // ---------------------------------------------------------------------------
 
-const KNOWN_SITE_SETTING_KEYS: &[&str] = &[SETTING_GOOGLE_ANALYTICS_ID, SETTING_REDDIT_PIXEL_ID];
+const KNOWN_SITE_SETTING_KEYS: &[&str] = &[
+    SETTING_GOOGLE_ANALYTICS_ID,
+    SETTING_GOOGLE_ADS_ID,
+    SETTING_GOOGLE_ADS_LABEL_CONTACT,
+    SETTING_GOOGLE_ADS_LABEL_PURCHASE,
+    SETTING_REDDIT_PIXEL_ID,
+];
 
 pub async fn handle_admin_get_site_settings(
     State(state): State<Arc<AppState>>,
@@ -1827,10 +1876,8 @@ pub async fn handle_admin_put_site_settings(
             return Err(error_response(StatusCode::BAD_REQUEST, &format!("Unknown setting: {}", k)));
         }
         let trimmed = v.trim();
-        if (k == SETTING_GOOGLE_ANALYTICS_ID || k == SETTING_REDDIT_PIXEL_ID)
-            && !trimmed.is_empty()
-            && !is_valid_analytics_id(trimmed)
-        {
+        // All known site settings are analytics tag IDs / conversion labels.
+        if !trimmed.is_empty() && !is_valid_analytics_id(trimmed) {
             return Err(error_response(
                 StatusCode::BAD_REQUEST,
                 &format!("{} must contain only letters, digits, '-' or '_' (max 64 chars)", k),
@@ -2074,9 +2121,47 @@ mod tests {
     fn analytics_id_validator() {
         assert!(is_valid_analytics_id("G-XSW6TEN1CZ"));
         assert!(is_valid_analytics_id("UA-12345-1"));
+        assert!(is_valid_analytics_id("AW-18330845601"));
         assert!(is_valid_analytics_id("a2_jdm5gdy9bfis"));
         assert!(!is_valid_analytics_id(""));
         assert!(!is_valid_analytics_id("evil';alert(1)"));
         assert!(!is_valid_analytics_id(&"x".repeat(65)));
+    }
+
+    #[test]
+    fn analytics_head_single_loader_for_ga_and_ads() {
+        let out = render_analytics_head(
+            Some("G-XSW6TEN1CZ"),
+            Some("AW-18330845601"),
+            Some("ctLabel-1"),
+            Some("buyLabel_2"),
+            None,
+        );
+        assert_eq!(out.matches("gtag/js?id=").count(), 1, "got: {}", out);
+        assert!(out.contains("gtag/js?id=G-XSW6TEN1CZ"));
+        assert!(out.contains("gtag('config', 'G-XSW6TEN1CZ');"));
+        assert!(out.contains("gtag('config', 'AW-18330845601');"));
+        assert!(out.contains(
+            "window.__adsConv = {contact:'AW-18330845601/ctLabel-1',purchase:'AW-18330845601/buyLabel_2'};"
+        ));
+    }
+
+    #[test]
+    fn analytics_head_ads_only() {
+        let out = render_analytics_head(None, Some("AW-18330845601"), None, None, None);
+        assert!(out.contains("gtag/js?id=AW-18330845601"));
+        assert!(out.contains("gtag('config', 'AW-18330845601');"));
+        assert!(!out.contains("__adsConv"));
+    }
+
+    #[test]
+    fn analytics_head_labels_ignored_without_ads_id() {
+        let out = render_analytics_head(Some("G-XSW6TEN1CZ"), None, Some("ctLabel-1"), None, None);
+        assert!(!out.contains("__adsConv"));
+    }
+
+    #[test]
+    fn analytics_head_empty_when_unset() {
+        assert_eq!(render_analytics_head(None, None, None, None, None), "");
     }
 }
