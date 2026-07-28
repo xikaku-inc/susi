@@ -99,21 +99,6 @@ pub async fn handle_list_pages(
     let pages_json: Vec<_> = pages
         .into_iter()
         .map(|(slug, title, parent_slug, ord, updated_at, meta_description, hidden, page_kind, published_at)| {
-            // Posts carry an excerpt so the client-side blog index can render
-            // one without fetching every post body.
-            let excerpt = if page_kind == "post" {
-                if !meta_description.trim().is_empty() {
-                    meta_description.clone()
-                } else {
-                    db.get_website_page(&slug)
-                        .ok()
-                        .flatten()
-                        .map(|(_t, body, ..)| derive_description(&body))
-                        .unwrap_or_default()
-                }
-            } else {
-                String::new()
-            };
             json!({
                 "slug": slug,
                 "title": title,
@@ -124,7 +109,6 @@ pub async fn handle_list_pages(
                 "hidden": hidden,
                 "page_kind": page_kind,
                 "published_at": published_at,
-                "excerpt": excerpt,
             })
         })
         .collect();
@@ -1486,20 +1470,23 @@ fn render_blog_index(
     if posts.is_empty() {
         body_html.push_str("<p>No posts yet.</p>");
     } else {
+        // Full posts inline, newest first - the date links to the permalink.
         body_html.push_str("<div class=\"blog-index\">");
         for p in &posts {
-            let excerpt = post_excerpt(state, p);
+            let post_body = {
+                let db = state.db.lock();
+                db.get_website_page(&p.0)
+                    .ok()
+                    .flatten()
+                    .map(|(_t, body, ..)| body)
+                    .unwrap_or_default()
+            };
             body_html.push_str(&format!(
-                "<article class=\"blog-index-item\"><div class=\"meta\">{date}</div>\
-                 <h2><a href=\"/blog/{slug}\">{title}</a></h2>{excerpt}</article>",
-                date = html_escape(&format_post_date(&p.8)),
+                "<article class=\"blog-index-item\"><div class=\"meta\">\
+                 <a href=\"/blog/{slug}\">{date}</a></div>{body}</article>",
                 slug = html_escape(&p.0),
-                title = html_escape(&p.1),
-                excerpt = if excerpt.is_empty() {
-                    String::new()
-                } else {
-                    format!("<p>{}</p>", html_escape(&excerpt))
-                },
+                date = html_escape(&format_post_date(&p.8)),
+                body = render_body_html(&post_body),
             ));
         }
         body_html.push_str("</div>");

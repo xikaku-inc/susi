@@ -3317,9 +3317,6 @@ fn test_blog_posts() {
     let first = pages.iter().find(|p| p["slug"] == "first-post").unwrap();
     assert_eq!(first["page_kind"], json!("post"));
     assert_eq!(first["published_at"], json!("2026-07-01"));
-    assert_eq!(first["excerpt"], json!("First post excerpt"));
-    let second = pages.iter().find(|p| p["slug"] == "second-post").unwrap();
-    assert_eq!(second["excerpt"], json!("Fresh news in the second post."), "excerpt derives from body");
 
     // Post SSR: BlogPosting JSON-LD, /blog canonical, article OG type, date line.
     let ssr = http.get(format!("{}/site/blog/first-post", server.url))
@@ -3341,7 +3338,8 @@ fn test_blog_posts() {
         .send().expect("draft ssr").text().unwrap();
     assert!(!ssr.contains("Not ready yet."), "draft content must not leak");
 
-    // Blog index: newest first, draft excluded, links to /blog/{slug}.
+    // Blog index: full post bodies inline, newest first, draft excluded,
+    // dates linking to /blog/{slug} permalinks.
     let index = http.get(format!("{}/site/blog", server.url))
         .send().expect("blog index").text().unwrap();
     let pos_second = index.find(r#"href="/blog/second-post""#).expect("second-post link");
@@ -3349,7 +3347,8 @@ fn test_blog_posts() {
     assert!(pos_second < pos_first, "index must be newest-first");
     assert!(!index.contains("draft-post"), "draft must not appear on the index");
     assert!(index.contains("July 20, 2026"));
-    assert!(index.contains("First post excerpt"));
+    assert!(index.contains("Hello from the first post body."), "index must render full bodies");
+    assert!(index.contains("Fresh news in the second post."));
 
     // Home page selection ignores posts (home has the highest ord).
     let root = http.get(format!("{}/site", server.url))

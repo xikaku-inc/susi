@@ -259,17 +259,21 @@ body {
     border-bottom: 1px solid var(--border);
 }
 
-/* Blog index (/blog): one entry per post, date over linked title + excerpt. */
+/* Blog index (/blog): full posts inline, separated by a rule; the date line
+   above each post links to its permalink. */
 .blog-index-item { margin: 28px 0; }
+.blog-index-item + .blog-index-item {
+    border-top: 1px solid var(--border);
+    padding-top: 32px;
+}
 .blog-index-item .meta {
     margin-bottom: 4px;
     padding-bottom: 0;
     border-bottom: none;
     font-size: 13px;
 }
-.blog-index-item h2 { margin: 0 0 6px; }
-.blog-index-item h2 a { text-decoration: none; }
-.blog-index-item p { margin: 0; color: var(--text2); }
+.blog-index-item .meta a { color: inherit; text-decoration: none; }
+.blog-index-item .meta a:hover { text-decoration: underline; }
 
 /* EasyMDE theme overrides - match the surrounding dark UI. */
 .EasyMDEContainer { background: var(--bg); }
@@ -1126,9 +1130,9 @@ function renderEmptyState(msg) {
 }
 
 // Public /blog view: optional intro from the "blog" page row, then every
-// post newest-first with date, title link, and excerpt. Admins also see
-// hidden (draft) posts, marked as such.
-function renderBlogIndexView() {
+// post rendered in full, newest first, with the date linking to the
+// permalink. Admins also see hidden (draft) posts, marked as such.
+async function renderBlogIndexView() {
     const c = document.getElementById('content');
     updateAdminChrome();
     let html = currentPage
@@ -1140,13 +1144,20 @@ function renderBlogIndexView() {
     if (!posts.length) {
         html += '<p>No posts yet.</p>';
     } else {
+        const opts = authToken() ? { headers: { 'Authorization': 'Bearer ' + authToken() } } : {};
+        const bodies = await Promise.all(posts.map(async p => {
+            try {
+                const r = await fetch(API + '/website/pages/' + encodeURIComponent(p.slug), opts);
+                return r.ok ? (await r.json()).body_md || '' : '';
+            } catch (e) { return ''; }
+        }));
         html += '<div class="blog-index">';
-        posts.forEach(p => {
+        posts.forEach((p, i) => {
             html += '<article class="blog-index-item">'
-                + '<div class="meta">' + escHtml(formatPostDate(p.published_at))
+                + '<div class="meta"><a href="' + pageHref(p.slug) + '">'
+                + escHtml(formatPostDate(p.published_at)) + '</a>'
                 + (p.hidden ? ' (hidden)' : '') + '</div>'
-                + '<h2><a href="' + pageHref(p.slug) + '">' + escHtml(p.title) + '</a></h2>'
-                + (p.excerpt ? '<p>' + escHtml(p.excerpt) + '</p>' : '')
+                + renderMarkdown(bodies[i])
                 + '</article>';
         });
         html += '</div>';
