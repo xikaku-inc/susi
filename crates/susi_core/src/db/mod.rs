@@ -331,6 +331,9 @@ impl LicenseDb {
                 body TEXT NOT NULL DEFAULT '',
                 prerelease INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
+                -- Vestigial: workspace-scoped releases were replaced by
+                -- workspace_files / workspace_doc_pages; always NULL after the
+                -- startup migration. Kept because older migrations reference it.
                 workspace_id TEXT DEFAULT NULL,
                 product TEXT NOT NULL DEFAULT 'fusionhub',
                 kind TEXT NOT NULL DEFAULT 'software',
@@ -660,6 +663,48 @@ impl LicenseDb {
             );
             CREATE INDEX IF NOT EXISTS idx_workspace_recordings_ws
                 ON workspace_recordings(workspace_id, created_at DESC);
+
+            -- Flat per-workspace file share. Bytes live on disk under
+            -- data_dir/workspaces/{id}/files; rows hold metadata only.
+            CREATE TABLE IF NOT EXISTS workspace_files (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                workspace_id TEXT NOT NULL,
+                file_name TEXT NOT NULL,
+                file_size INTEGER NOT NULL DEFAULT 0,
+                author TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+                UNIQUE(workspace_id, file_name)
+            );
+            CREATE INDEX IF NOT EXISTS idx_workspace_files_ws
+                ON workspace_files(workspace_id, created_at DESC);
+
+            -- Workspace documentation: one flat page tree per workspace. The
+            -- release-tag dimension only exists for global product docs
+            -- (doc_pages); workspace docs are continuous, so no origin column
+            -- and no seeding-forward machinery either.
+            CREATE TABLE IF NOT EXISTS workspace_doc_pages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                workspace_id TEXT NOT NULL,
+                slug TEXT NOT NULL,
+                title TEXT NOT NULL,
+                body_md TEXT NOT NULL DEFAULT '',
+                parent_slug TEXT,
+                ord INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+                UNIQUE(workspace_id, slug)
+            );
+            CREATE INDEX IF NOT EXISTS idx_ws_doc_pages_ws ON workspace_doc_pages(workspace_id);
+
+            CREATE TABLE IF NOT EXISTS workspace_doc_assets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                workspace_id TEXT NOT NULL,
+                file_name TEXT NOT NULL,
+                file_size INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+                UNIQUE(workspace_id, file_name)
+            );
 
             -- Dropbox backup config/state (schedule, retention, sealed OAuth
             -- refresh token). KV so new settings don't need a migration.
@@ -1333,6 +1378,7 @@ mod federation;
 mod workspace_graph;
 mod config_revisions;
 mod recordings;
+mod workspace_files;
 mod releases;
 mod products;
 mod license_listing;
@@ -1475,7 +1521,7 @@ mod tests {
 
         // Composite (product, tag) now lets another product reuse the same tag.
         let other = db
-            .insert_release("lpvr", "v1.0", "LPVR", "", false, None, "software")
+            .insert_release("lpvr", "v1.0", "LPVR", "", false, "software")
             .unwrap();
         assert_ne!(other, 1);
         assert_eq!(
@@ -2395,7 +2441,7 @@ mod tests {
     #[test]
     fn test_release_asset_add_and_delete() {
         let db = test_db();
-        let rid = db.insert_release(DEFAULT_PRODUCT, "v9.9", "Test", "", false, None, "software").unwrap();
+        let rid = db.insert_release(DEFAULT_PRODUCT, "v9.9", "Test", "", false, "software").unwrap();
 
         db.add_release_asset(rid, "a.bin", 11).unwrap();
         db.add_release_asset(rid, "b.bin", 22).unwrap();
@@ -2423,7 +2469,7 @@ mod tests {
     fn test_doc_pages_crud_and_bulk_upsert() {
         let mut db = test_db();
         let rid = db
-            .insert_release(DEFAULT_PRODUCT, "v1.0", "FusionHub 1.0", "", false, None, "software")
+            .insert_release(DEFAULT_PRODUCT, "v1.0", "FusionHub 1.0", "", false, "software")
             .unwrap();
 
         // Editor upsert marks as user
@@ -2484,7 +2530,7 @@ mod tests {
     #[test]
     fn test_doc_page_origin_tracking() {
         let mut db = test_db();
-        let rid = db.insert_release(DEFAULT_PRODUCT, "v1.0", "", "", false, None, "software").unwrap();
+        let rid = db.insert_release(DEFAULT_PRODUCT, "v1.0", "", "", false, "software").unwrap();
 
         // Pipeline bulk plants a page.
         db.upsert_doc_pages(
@@ -2531,7 +2577,7 @@ mod tests {
     #[test]
     fn test_copy_user_docs_to_new_release() {
         let mut db = test_db();
-        let old = db.insert_release(DEFAULT_PRODUCT, "v1.0", "", "", false, None, "software").unwrap();
+        let old = db.insert_release(DEFAULT_PRODUCT, "v1.0", "", "", false, "software").unwrap();
 
         // Mixed origins under the old release.
         db.upsert_doc_pages(
@@ -2572,7 +2618,7 @@ mod tests {
         assert!(created);
 
         let prior = db
-            .latest_prior_release_with_user_docs(new_id, DEFAULT_PRODUCT, None)
+            .latest_prior_release_with_user_docs(new_id, DEFAULT_PRODUCT)
             .unwrap();
         assert_eq!(prior.as_ref().map(|p| p.1.as_str()), Some("v1.0"));
         let (src_id, _src_tag) = prior.unwrap();
@@ -2613,10 +2659,10 @@ mod tests {
     fn test_doc_releases_filters_to_releases_with_pages() {
         let db = test_db();
         let r1 = db
-            .insert_release(DEFAULT_PRODUCT, "v1.0", "with docs", "", false, None, "software")
+            .insert_release(DEFAULT_PRODUCT, "v1.0", "with docs", "", false, "software")
             .unwrap();
         let _r2 = db
-            .insert_release(DEFAULT_PRODUCT, "v1.1", "no docs", "", false, None, "software")
+            .insert_release(DEFAULT_PRODUCT, "v1.1", "no docs", "", false, "software")
             .unwrap();
         db.upsert_doc_page(r1, "intro", "Intro", "...", None, 0)
             .unwrap();
@@ -2651,85 +2697,89 @@ mod tests {
     }
 
     #[test]
-    fn test_doc_release_listings_are_scope_separated() {
-        let db = test_db();
+    fn test_ws_doc_pages_are_workspace_separated() {
+        let mut db = test_db();
         db.create_workspace("ws-a", "A", "", "", "admin").unwrap();
         db.create_workspace("ws-b", "B", "", "", "admin").unwrap();
 
-        let g1 = db
-            .insert_release(DEFAULT_PRODUCT, "g1.0", "global", "", false, None, "software")
+        db.upsert_ws_doc_page("ws-a", "guide", "Guide A", "a body", None, 0)
             .unwrap();
-        let a1 = db
-            .insert_release(DEFAULT_PRODUCT, "a1.0", "a-rel", "", false, Some("ws-a"), "software")
+        db.upsert_ws_doc_page("ws-b", "guide", "Guide B", "b body", None, 0)
             .unwrap();
-        let b1 = db
-            .insert_release(DEFAULT_PRODUCT, "b1.0", "b-rel", "", false, Some("ws-b"), "software")
+        db.upsert_ws_doc_page("ws-a", "child", "Child", "c", Some("guide"), 1)
             .unwrap();
-        for rid in [g1, a1, b1] {
-            db.upsert_doc_page(rid, "intro", "Intro", "body", None, 0)
-                .unwrap();
-        }
 
-        // Global list excludes workspace-scoped releases entirely.
-        let global = db.list_doc_releases(DEFAULT_PRODUCT).unwrap();
-        assert_eq!(global.len(), 1);
-        assert_eq!(global[0].1, "g1.0");
+        // Same slug lives independently per workspace.
+        let a = db.get_ws_doc_page("ws-a", "guide").unwrap().unwrap();
+        assert_eq!(a.1, "a body");
+        let b = db.get_ws_doc_page("ws-b", "guide").unwrap().unwrap();
+        assert_eq!(b.1, "b body");
+        assert_eq!(db.list_ws_doc_pages("ws-a").unwrap().len(), 2);
+        assert_eq!(db.list_ws_doc_pages("ws-b").unwrap().len(), 1);
 
-        // Each workspace listing returns only its own releases (no cross-pollination).
-        let a = db.list_doc_releases_for_workspace("ws-a").unwrap();
-        assert_eq!(a.len(), 1);
-        assert_eq!(a[0].1, "a1.0");
+        // Rename cascades to children within the workspace only.
+        assert!(db.rename_ws_doc_page("ws-a", "guide", "manual").unwrap());
+        let child = db.get_ws_doc_page("ws-a", "child").unwrap().unwrap();
+        assert_eq!(child.2.as_deref(), Some("manual"));
+        assert!(db.get_ws_doc_page("ws-b", "guide").unwrap().is_some());
 
-        let b = db.list_doc_releases_for_workspace("ws-b").unwrap();
-        assert_eq!(b.len(), 1);
-        assert_eq!(b[0].1, "b1.0");
+        // Delete affects only the addressed workspace.
+        assert!(db.delete_ws_doc_page("ws-a", "manual").unwrap());
+        assert!(!db.delete_ws_doc_page("ws-a", "manual").unwrap());
+        assert!(db.get_ws_doc_page("ws-b", "guide").unwrap().is_some());
+
+        // Assets: upsert overwrites size, listing is per-workspace.
+        db.upsert_ws_doc_asset("ws-a", "shot.png", 10).unwrap();
+        db.upsert_ws_doc_asset("ws-a", "shot.png", 20).unwrap();
+        assert_eq!(db.list_ws_doc_assets("ws-a").unwrap(), vec![("shot.png".to_string(), 20)]);
+        assert!(db.list_ws_doc_assets("ws-b").unwrap().is_empty());
+        assert!(db.delete_ws_doc_asset("ws-a", "shot.png").unwrap());
     }
 
     #[test]
-    fn test_seed_lookup_does_not_cross_workspace_boundaries() {
+    fn test_migrate_workspace_release_rows() {
         let db = test_db();
         db.create_workspace("ws-a", "A", "", "", "admin").unwrap();
-        db.create_workspace("ws-b", "B", "", "", "admin").unwrap();
 
-        // Set up: a global release with user docs, plus ws-a release with its own user docs.
-        let g_old = db.insert_release(DEFAULT_PRODUCT, "g0.9", "g old", "", false, None, "software").unwrap();
-        db.upsert_doc_page(g_old, "guide", "Guide", "global hand-authored", None, 0)
+        // Two legacy workspace-scoped releases sharing a slug and a file name;
+        // the newer release (higher id) must win both.
+        let old = db
+            .insert_release(DEFAULT_PRODUCT, "v0.9", "old", "", false, "software")
             .unwrap();
+        let new = db
+            .insert_release(DEFAULT_PRODUCT, "v1.0", "new", "", false, "software")
+            .unwrap();
+        db.conn
+            .execute("UPDATE releases SET workspace_id = 'ws-a'", [])
+            .unwrap();
+        for (rid, body) in [(old, "old body"), (new, "new body")] {
+            db.upsert_doc_page(rid, "guide", "Guide", body, None, 0).unwrap();
+            db.upsert_doc_asset(rid, "shot.png", 5).unwrap();
+        }
 
-        let a_old = db
-            .insert_release(DEFAULT_PRODUCT, "a0.9", "a old", "", false, Some("ws-a"), "software")
-            .unwrap();
-        db.upsert_doc_page(a_old, "guide", "Guide", "ws-a hand-authored", None, 0)
-            .unwrap();
-
-        // New global release: prior must come from the global pool.
-        let (g_new, _) = db
-            .ensure_release_created_scoped(DEFAULT_PRODUCT, "g1.0", "g new", None)
-            .unwrap();
-        let prior = db.latest_prior_release_with_user_docs(g_new, DEFAULT_PRODUCT, None).unwrap();
-        assert_eq!(prior.map(|p| p.1), Some("g0.9".to_string()));
-
-        // New ws-a release: prior must come from ws-a's pool, not global, not ws-b.
-        let (a_new, _) = db
-            .ensure_release_created_scoped(DEFAULT_PRODUCT, "a1.0", "a new", Some("ws-a"))
-            .unwrap();
-        let prior = db
-            .latest_prior_release_with_user_docs(a_new, DEFAULT_PRODUCT, Some("ws-a"))
-            .unwrap();
-        assert_eq!(prior.map(|p| p.1), Some("a0.9".to_string()));
-
-        // New ws-b release: no prior in ws-b's scope, so seeding finds nothing
-        // (it must NOT pull from ws-a or global).
-        let (b_new, _) = db
-            .ensure_release_created_scoped(DEFAULT_PRODUCT, "b1.0", "b new", Some("ws-b"))
-            .unwrap();
-        let prior = db
-            .latest_prior_release_with_user_docs(b_new, DEFAULT_PRODUCT, Some("ws-b"))
-            .unwrap();
-        assert!(
-            prior.is_none(),
-            "ws-b must not see prior docs from ws-a or global"
+        // Newest first, so the caller migrates `new` before `old`.
+        let scoped = db.list_workspace_scoped_releases().unwrap();
+        assert_eq!(
+            scoped.iter().map(|r| r.1.as_str()).collect::<Vec<_>>(),
+            vec!["v1.0", "v0.9"],
         );
+
+        for (rid, tag, ..) in &scoped {
+            let assets = db.migrate_release_docs_to_workspace(*rid, "ws-a").unwrap();
+            assert_eq!(assets, vec!["shot.png".to_string()], "release {}", tag);
+            db.delete_release_by_id(*rid).unwrap();
+        }
+
+        // The newer release's page content won; rows exist exactly once.
+        let page = db.get_ws_doc_page("ws-a", "guide").unwrap().unwrap();
+        assert_eq!(page.1, "new body");
+        assert_eq!(db.list_ws_doc_pages("ws-a").unwrap().len(), 1);
+        assert_eq!(db.list_ws_doc_assets("ws-a").unwrap().len(), 1);
+
+        // Release rows and their children are gone; nothing left to migrate.
+        assert!(db.list_workspace_scoped_releases().unwrap().is_empty());
+        assert!(db.get_release_by_product_tag(DEFAULT_PRODUCT, "v1.0").unwrap().is_none());
+        assert!(db.get_doc_page(new, "guide").unwrap().is_none());
     }
 
     #[test]
@@ -2741,64 +2791,56 @@ mod tests {
     }
 
     #[test]
-    fn test_releases_with_workspace_scoping() {
+    fn test_workspace_files_crud() {
         let db = test_db();
         db.create_workspace("ws-1", "WS", "", "", "admin").unwrap();
+        db.create_workspace("ws-2", "WS2", "", "", "admin").unwrap();
 
-        db.insert_release(DEFAULT_PRODUCT, "v1.0", "Global", "", false, None, "software")
-            .unwrap();
-        db.insert_release(DEFAULT_PRODUCT, "v1.1", "Scoped", "", false, Some("ws-1"), "software")
-            .unwrap();
+        db.upsert_workspace_file("ws-1", "build.zip", 100, "alice").unwrap();
+        db.upsert_workspace_file("ws-2", "build.zip", 7, "bob").unwrap();
+        assert!(db.workspace_file_exists("ws-1", "build.zip").unwrap());
+        assert!(!db.workspace_file_exists("ws-1", "other.zip").unwrap());
 
-        // Global list shows all releases regardless of scope.
-        let all = db.list_releases().unwrap();
-        assert_eq!(all.len(), 2);
+        // Re-upload overwrites size + author in place.
+        db.upsert_workspace_file("ws-1", "build.zip", 200, "carol").unwrap();
+        let files = db.list_workspace_files("ws-1").unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].0, "build.zip");
+        assert_eq!(files[0].1, 200);
+        assert_eq!(files[0].2, "carol");
 
-        // Workspace list shows ONLY workspace-specific releases - global
-        // releases are surfaced through the public/admin endpoints instead.
-        let ws_releases = db.list_releases_for_workspace("ws-1").unwrap();
-        assert_eq!(ws_releases.len(), 1);
-        assert_eq!(ws_releases[0].1, "v1.1");
-
-        // Different workspace sees none of these.
-        let other = db.list_releases_for_workspace("ws-other").unwrap();
-        assert_eq!(other.len(), 0);
+        // Workspaces stay separated; delete only hits the addressed row.
+        assert_eq!(db.list_workspace_files("ws-2").unwrap()[0].1, 7);
+        assert!(db.delete_workspace_file("ws-1", "build.zip").unwrap());
+        assert!(!db.delete_workspace_file("ws-1", "build.zip").unwrap());
+        assert_eq!(db.list_workspace_files("ws-2").unwrap().len(), 1);
     }
 
     #[test]
     fn test_doc_collections_hidden_from_release_lists() {
         let db = test_db();
-        db.create_workspace("ws-1", "WS", "", "", "admin").unwrap();
 
-        db.insert_release(DEFAULT_PRODUCT, "v1.0", "Software", "", false, Some("ws-1"), "software")
+        db.insert_release(DEFAULT_PRODUCT, "v1.0", "Software", "", false, "software")
             .unwrap();
         let doc_id = db
-            .insert_release(DEFAULT_PRODUCT, "sales-manual", "Sales Manual", "", false, Some("ws-1"), "docs")
+            .insert_release(DEFAULT_PRODUCT, "sales-manual", "Sales Manual", "", false, "docs")
             .unwrap();
 
         // Doc-only collections never surface in software release lists.
         let all = db.list_releases().unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].1, "v1.0");
-        let ws = db.list_releases_for_workspace("ws-1").unwrap();
-        assert_eq!(ws.len(), 1);
-        assert_eq!(ws[0].1, "v1.0");
-
-        // The docs surface still sees the collection.
-        let doc_rows = db.list_doc_releases_for_workspace("ws-1").unwrap();
-        assert!(doc_rows.iter().any(|r| r.1 == "sales-manual"));
 
         // Attaching binaries promotes the collection to a software release.
         db.set_release_kind(doc_id, "software").unwrap();
         assert_eq!(db.list_releases().unwrap().len(), 2);
 
-        // The docs insert path creates 'docs' rows.
+        // The docs insert path creates 'docs' rows that stay hidden.
         let (_, created) = db
-            .ensure_release_created_scoped(DEFAULT_PRODUCT, "manual-2", "Manual 2", Some("ws-1"))
+            .ensure_release_created_for(DEFAULT_PRODUCT, "manual-2", "Manual 2")
             .unwrap();
         assert!(created);
-        let ws = db.list_releases_for_workspace("ws-1").unwrap();
-        assert!(ws.iter().all(|r| r.1 != "manual-2"));
+        assert!(db.list_releases().unwrap().iter().all(|r| r.1 != "manual-2"));
     }
 
     #[test]
@@ -2835,23 +2877,6 @@ mod tests {
 
         drop(db);
         let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn test_get_release_workspace_id() {
-        let db = test_db();
-        db.create_workspace("ws-1", "WS", "", "", "admin").unwrap();
-        db.insert_release(DEFAULT_PRODUCT, "v1.0", "Global", "", false, None, "software")
-            .unwrap();
-        db.insert_release(DEFAULT_PRODUCT, "v1.1", "Scoped", "", false, Some("ws-1"), "software")
-            .unwrap();
-
-        assert_eq!(db.get_release_workspace_id(DEFAULT_PRODUCT, "v1.0").unwrap(), Some(None));
-        assert_eq!(
-            db.get_release_workspace_id(DEFAULT_PRODUCT, "v1.1").unwrap(),
-            Some(Some("ws-1".to_string()))
-        );
-        assert_eq!(db.get_release_workspace_id(DEFAULT_PRODUCT, "nonexistent").unwrap(), None);
     }
 
     #[test]

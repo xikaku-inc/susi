@@ -387,18 +387,6 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
 .ws-tab-panel { display: none; }
 .ws-tab-panel.active { display: block; }
 
-/* Releases tab: each release is wrapped in a .ws-release-row so the head and
-   the expanded body visually stay attached, with breathing room between rows. */
-.ws-release-row { margin-bottom: 8px; }
-.ws-release-row.open { margin-bottom: 16px; }
-.ws-release-row .ws-release-head { margin-bottom: 0; }
-.ws-release-row.open .ws-release-head {
-    border-radius: var(--radius) var(--radius) 0 0;
-}
-.ws-release-row.open .ws-release-expand {
-    border-top: 1px solid var(--border);
-}
-
 .dropdown { position: relative; display: inline-block; }
 .dropdown-menu {
     /* Fixed positioning escapes scrollable modal containers that would
@@ -832,7 +820,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
     <div id="workspaceListSection">
     <h2 style="font-size:16px;font-weight:600;margin-top:32px;margin-bottom:16px;">Workspaces</h2>
     <div class="toolbar">
-        <input type="search" id="wsSearch" placeholder="Search workspaces..." autocomplete="off" oninput="renderWorkspaces()">
+        <input type="search" id="wsSearch" placeholder="Search workspaces..." autocomplete="off" readonly onfocus="this.removeAttribute('readonly')" oninput="renderWorkspaces()">
         <div class="spacer"></div>
         <button id="btnCreateWorkspace" onclick="showCreateWorkspaceModal()">+ New Workspace</button>
     </div>
@@ -865,7 +853,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
             </div>
 
             <div class="ws-tabs" role="tablist">
-                <button class="ws-tab active" data-ws-tab="releases" onclick="wsNavTab('releases')">Releases</button>
+                <button class="ws-tab active" data-ws-tab="files" onclick="wsNavTab('files')">Files</button>
                 <button class="ws-tab" data-ws-tab="docs" onclick="wsNavTab('docs')">Docs</button>
                 <button class="ws-tab" data-ws-tab="configs" onclick="wsNavTab('configs')">Configs</button>
                 <button class="ws-tab" data-ws-tab="recordings" onclick="wsNavTab('recordings')">Recordings</button>
@@ -873,20 +861,24 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                 <button class="ws-tab" data-ws-tab="settings" data-ws-admin-only onclick="wsNavTab('settings')">Settings</button>
             </div>
 
-            <div class="ws-tab-panel active" data-ws-panel="releases">
+            <div class="ws-tab-panel active" data-ws-panel="files">
                 <div class="detail-section-title" style="display:flex;align-items:center;justify-content:space-between;">
-                    <span>Releases</span>
-                    <span style="display:flex;gap:6px;">
-                        <button id="wsUploadSoftwareBtn" class="small" style="display:none;" onclick="showUploadReleaseModal(selectedWsId)">Upload software</button>
-                    </span>
+                    <span>Files</span>
+                    <button class="small" onclick="pickWsFiles()">Upload files</button>
                 </div>
-                <div id="wsDetailReleases" class="machines-list"></div>
+                <div id="wsFileUploadProgress" style="display:none;margin-bottom:8px;">
+                    <div style="background:var(--bg);border-radius:4px;height:20px;overflow:hidden;">
+                        <div id="wsFileUploadBar" style="height:100%;background:var(--accent);transition:width 0.3s;width:0%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;color:#fff;"></div>
+                    </div>
+                </div>
+                <div id="wsDetailFiles" class="machines-list"></div>
+                <input type="file" id="wsFileInput" multiple style="display:none;" onchange="uploadWsFiles(this.files)">
             </div>
 
             <div class="ws-tab-panel" data-ws-panel="docs">
                 <div class="detail-section-title" style="display:flex;align-items:center;justify-content:space-between;">
                     <span>Documentation</span>
-                    <button class="small" onclick="createWsDocCollection()">New documentation</button>
+                    <button class="small" onclick="openWsDocsEditor()">Edit documentation</button>
                 </div>
                 <div id="wsDetailDocs" class="machines-list"></div>
             </div>
@@ -950,7 +942,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
     <div id="adminReleasesSection" style="margin-top:32px;">
         <h2 style="font-size:16px;font-weight:600;margin-bottom:16px;">Software Releases</h2>
         <div class="toolbar">
-            <input type="search" id="releaseSearch" placeholder="Search releases..." autocomplete="off" oninput="renderReleases()">
+            <input type="search" id="releaseSearch" placeholder="Search releases..." autocomplete="off" readonly onfocus="this.removeAttribute('readonly')" oninput="renderReleases()">
             <div class="spacer"></div>
             <button id="btnUploadRelease" onclick="showUploadReleaseModal()">+ Upload Release</button>
         </div>
@@ -1004,7 +996,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
     <h2 style="font-size:16px;font-weight:600;margin-top:32px;margin-bottom:16px;">Licenses</h2>
 
     <div id="adminLicenseToolbar" class="toolbar">
-        <input type="search" id="searchInput" placeholder="Search licenses..." autocomplete="off">
+        <input type="search" id="searchInput" placeholder="Search licenses..." autocomplete="off" readonly onfocus="this.removeAttribute('readonly')">
         <div class="spacer"></div>
         <button onclick="showCreateModal()">+ New License</button>
     </div>
@@ -1474,7 +1466,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
     </style>
     <h2 style="font-size:16px;font-weight:600;margin-top:32px;margin-bottom:16px;">User Management</h2>
     <div class="toolbar">
-        <input type="search" id="userSearch" placeholder="Search users (name, email, role, license)..." autocomplete="off" oninput="onUserSearch()">
+        <input type="search" id="userSearch" placeholder="Search users (name, email, role, license)..." autocomplete="off" readonly onfocus="this.removeAttribute('readonly')" oninput="onUserSearch()">
         <span id="userCount" style="font-size:12px;color:var(--text2);white-space:nowrap;"></span>
         <div class="spacer"></div>
         <button onclick="showAddUserModal()">+ Add User</button>
@@ -1894,12 +1886,6 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                 </label>
             </div>
             <div class="form-row">
-                <label>Scope</label>
-                <select id="releaseWorkspace" style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:var(--radius);font-size:13px;width:100%;">
-                    <option value="">Global (all workspaces)</option>
-                </select>
-            </div>
-            <div class="form-row">
                 <label>Asset File (zip)</label>
                 <input type="file" id="releaseFile" multiple style="font-size:13px;color:var(--text);">
             </div>
@@ -1912,54 +1898,6 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                 <button class="secondary" onclick="closeUploadReleaseModal()">Cancel</button>
                 <button id="uploadBtn" onclick="uploadRelease()">Upload</button>
             </div>
-        </div>
-    </div>
-</div>
-
-<!-- Edit Release Modal -->
-<div id="editReleaseModal" class="modal-overlay" onclick="if(event.target===this)closeEditReleaseModal()">
-    <div class="modal">
-        <h2>Edit Release</h2>
-        <div class="form-row">
-            <label>Version Tag</label>
-            <input type="text" id="editReleaseTag" disabled style="opacity:0.6;">
-        </div>
-        <div class="form-row">
-            <label>Release Name</label>
-            <input type="text" id="editReleaseName">
-        </div>
-        <div class="form-row">
-            <label>Release Notes (Markdown)</label>
-            <textarea id="editReleaseBody" rows="6" style="width:100%;resize:vertical;" placeholder="## Changes&#10;- ..."></textarea>
-        </div>
-        <div class="form-row">
-            <label class="checkbox" style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:var(--text2);">
-                <input type="checkbox" id="editReleasePrerelease" style="accent-color:var(--accent);width:16px;height:16px;">
-                Pre-release
-            </label>
-        </div>
-        <div class="form-actions">
-            <button class="secondary" onclick="closeEditReleaseModal()">Cancel</button>
-            <button onclick="saveEditedRelease()">Save</button>
-        </div>
-    </div>
-</div>
-
-<!-- Move Release Modal -->
-<div id="moveReleaseModal" class="modal-overlay" onclick="if(event.target===this)closeMoveReleaseModal()">
-    <div class="modal">
-        <h2>Move Release</h2>
-        <div class="form-row">
-            <label>Release</label>
-            <input type="text" id="moveReleaseTag" disabled style="opacity:0.6;">
-        </div>
-        <div class="form-row">
-            <label>Target workspace</label>
-            <select id="moveReleaseTarget" style="width:100%;"></select>
-        </div>
-        <div class="form-actions">
-            <button class="secondary" onclick="closeMoveReleaseModal()">Cancel</button>
-            <button onclick="confirmMoveRelease()">Move</button>
         </div>
     </div>
 </div>
@@ -4605,12 +4543,6 @@ function renderReleases() {
         const prod = (r.product && r.product !== DEFAULT_PRODUCT)
             ? ' <span style="background:rgba(52,211,153,0.15);color:#34d399;font-size:11px;font-weight:600;padding:2px 8px;border-radius:4px;" title="Product">' + esc(r.product) + '</span>'
             : '';
-        let scope = '';
-        if (r.workspace_id) {
-            const ws = workspaces.find(w => w.id === r.workspace_id);
-            const label = ws ? ws.name : r.workspace_id;
-            scope = ' <span style="background:rgba(96,165,250,0.15);color:var(--accent);font-size:11px;font-weight:600;padding:2px 8px;border-radius:4px;" title="Workspace-scoped release">' + esc(label) + '</span>';
-        }
         const arrow = '<span style="color:var(--text2);font-size:11px;margin-right:6px;">' + (expanded ? '&#9662;' : '&#9656;') + '</span>';
         const deleteRow = isAdmin
             ? '<div style="display:flex;justify-content:flex-end;margin-top:10px;padding-top:8px;border-top:1px solid var(--border);">' +
@@ -4628,7 +4560,7 @@ function renderReleases() {
         return '<div style="padding:10px 0;border-bottom:1px solid var(--border);" class="release-item">' +
             '<div onclick="toggleRelease(\'' + esc(r.tag) + '\')" style="display:flex;align-items:flex-start;justify-content:space-between;cursor:pointer;">' +
                 '<div>' +
-                    '<div style="font-weight:600;font-size:14px;font-family:monospace;">' + arrow + esc(r.tag) + pre + prod + scope + '</div>' +
+                    '<div style="font-weight:600;font-size:14px;font-family:monospace;">' + arrow + esc(r.tag) + pre + prod + '</div>' +
                     (r.name && r.name !== r.tag ? '<div style="font-size:13px;color:var(--text2);margin-left:18px;">' + esc(r.name) + '</div>' : '') +
                     '<div style="font-size:12px;color:var(--text2);margin-top:4px;margin-left:18px;">' + formatDateTime(r.published_at) + '</div>' +
                 '</div>' +
@@ -4638,36 +4570,9 @@ function renderReleases() {
     }).join('');
 }
 
-async function populateReleaseWorkspaceDropdown(presetWorkspaceId) {
-    const sel = document.getElementById('releaseWorkspace');
-    // Non-admins can only target a workspace they're already in, so hide the
-    // "Global" option for them. The preset path is also non-admin-friendly.
-    const isAdmin = userRole === 'admin';
-    sel.innerHTML = isAdmin && !presetWorkspaceId
-        ? '<option value="">Global (all workspaces)</option>' : '';
-    try {
-        const resp = await fetch(API + '/workspaces', { headers: authHeaders() });
-        if (!resp.ok) return;
-        const data = await resp.json();
-        (data.workspaces || []).forEach(ws => {
-            const opt = document.createElement('option');
-            opt.value = ws.id;
-            opt.textContent = ws.name + (ws.product ? ' (' + ws.product + ')' : '');
-            sel.appendChild(opt);
-        });
-        if (presetWorkspaceId) {
-            sel.value = presetWorkspaceId;
-            sel.disabled = true;
-        } else {
-            sel.disabled = false;
-        }
-    } catch (e) {}
-}
-
-function showUploadReleaseModal(presetWorkspaceId) {
+function showUploadReleaseModal() {
     const tagInput = document.getElementById('releaseTag');
     tagInput.value = '';
-    tagInput.disabled = false; // may have been locked by addWsReleaseSoftware
     document.getElementById('releaseName').value = '';
     document.getElementById('releaseBody').value = '';
     document.getElementById('releasePrerelease').checked = false;
@@ -4675,12 +4580,7 @@ function showUploadReleaseModal(presetWorkspaceId) {
     document.getElementById('uploadProgress').style.display = 'none';
     document.getElementById('uploadBtn').disabled = false;
     populateReleaseProductDropdown();
-    // Workspace releases are FusionHub-scoped; lock the product there.
-    const prodSel = document.getElementById('releaseProduct');
-    prodSel.value = DEFAULT_PRODUCT;
-    prodSel.disabled = !!presetWorkspaceId;
     document.getElementById('uploadReleaseModal').classList.add('visible');
-    populateReleaseWorkspaceDropdown(presetWorkspaceId);
     tagInput.focus();
 }
 
@@ -4707,7 +4607,6 @@ async function uploadRelease() {
     const name = document.getElementById('releaseName').value.trim();
     const body = document.getElementById('releaseBody').value;
     const prerelease = document.getElementById('releasePrerelease').checked;
-    const workspaceId = document.getElementById('releaseWorkspace').value;
     const product = document.getElementById('releaseProduct').value || DEFAULT_PRODUCT;
     const fileInput = document.getElementById('releaseFile');
 
@@ -4720,7 +4619,6 @@ async function uploadRelease() {
     formData.append('body', body);
     formData.append('product', product);
     formData.append('prerelease', prerelease ? 'true' : 'false');
-    if (workspaceId) formData.append('workspace_id', workspaceId);
     // The backend handler iterates over every "file" multipart field, so a
     // single submission can attach (or replace) several binaries at once.
     for (const f of fileInput.files) formData.append('file', f);
@@ -4746,9 +4644,7 @@ async function uploadRelease() {
             if (xhr.status >= 200 && xhr.status < 300) {
                 toast('Release ' + tag + ' uploaded', 'success');
                 closeUploadReleaseModal();
-                if (workspaceId && selectedWsId === workspaceId) {
-                    loadWsReleases(workspaceId);
-                } else if (typeof loadReleases === 'function' && userRole === 'admin') {
+                if (typeof loadReleases === 'function' && userRole === 'admin') {
                     loadReleases();
                 }
             } else {
@@ -4998,10 +4894,12 @@ function setWorkspaceRoute(id, tab) {
         hideWsDetail();
         return;
     }
+    if (tab === 'releases') tab = 'files'; // old bookmarks
+
     document.getElementById('workspaceListSection').style.display = 'none';
     if (wsDetailLoadedId === id) {
         document.getElementById('wsDetailPanel').classList.add('visible');
-        setWsTab(tab || 'releases');
+        setWsTab(tab || 'files');
     } else {
         showWsDetail(id, tab);
     }
@@ -5027,9 +4925,9 @@ async function showWsDetail(id, tab) {
     document.getElementById('workspaceListSection').style.display = 'none';
     const panel = document.getElementById('wsDetailPanel');
     panel.classList.add('visible');
-    // Default to Releases when opening the panel fresh; callers that refresh
+    // Default to Files when opening the panel fresh; callers that refresh
     // after an in-tab action (e.g. add/remove member) pass the tab to keep.
-    setWsTab(tab || 'releases');
+    setWsTab(tab || 'files');
 
     try {
         const resp = await fetch(API + '/workspaces/' + id, { headers: authHeaders() });
@@ -5100,13 +4998,9 @@ async function showWsDetail(id, tab) {
             }
         }
 
-        // Only site admins upload software, even into a workspace they're a
-        // member of. Documentation (Docs tab) is member-writable.
-        document.getElementById('wsUploadSoftwareBtn').style.display = userRole === 'admin' ? '' : 'none';
-
-        // Load configs and the unified releases list.
         loadWsConfigs(id);
-        loadWsReleases(id);
+        loadWsFiles(id);
+        loadWsDocs(id);
         loadWsRecordings(id);
     } catch (e) {
         toast('Error: ' + e.message, 'error');
@@ -5153,508 +5047,149 @@ document.addEventListener('click', () => {
     document.querySelectorAll('.dropdown-menu').forEach(el => { el.style.display = 'none'; });
 });
 
-// Open the upload modal pre-filled with the release's metadata so the user can
-// add one or more new binaries. The tag input is locked (backend keys assets
-// off the tag); same-named uploads overwrite via add_release_asset upsert.
-async function addWsReleaseSoftware(tag) {
-    if (!selectedWsId) return;
-    try {
-        const resp = await fetch(API + '/workspaces/' + selectedWsId + '/releases', { headers: authHeaders() });
-        if (!resp.ok) { toast('Failed to load release', 'error'); return; }
-        const data = await resp.json();
-        const r = (data.releases || []).find(x => x.tag === tag);
-        if (!r) { toast('Release not found', 'error'); return; }
-        showUploadReleaseModal(selectedWsId);
-        const tagInput = document.getElementById('releaseTag');
-        tagInput.value = r.tag;
-        tagInput.disabled = true;
-        document.getElementById('releaseName').value = r.name || '';
-        document.getElementById('releaseBody').value = r.body || '';
-        document.getElementById('releasePrerelease').checked = !!r.prerelease;
-        document.getElementById('releaseFile').focus();
-    } catch (e) {
-        toast('Failed: ' + e.message, 'error');
-    }
-}
+// ---------------------------------------------------------------------------
+// Workspace files: flat member-writable file share
+// ---------------------------------------------------------------------------
 
-// Replace one specific asset on a release. Opens a hidden file picker; the
-// chosen file is POSTed to the per-asset replace endpoint which atomically
-// removes the old row+file and writes the new one (the new file may have a
-// different name than the old).
-function replaceWsReleaseAsset(tag, fileName) {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.style.display = 'none';
-    input.addEventListener('change', async () => {
-        const file = input.files && input.files[0];
-        input.remove();
-        if (!file) return;
-        const fd = new FormData();
-        fd.append('file', file);
-        try {
-            const resp = await fetch(
-                API + '/releases/' + encodeURIComponent(tag) + '/assets/' + encodeURIComponent(fileName) + '/replace',
-                { method: 'POST', headers: authHeaders(), body: fd }
-            );
-            if (!resp.ok) {
-                const d = await resp.json().catch(() => ({}));
-                toast('Error: ' + (d.error || 'Could not replace file'), 'error');
-                return;
-            }
-            toast('File replaced', 'success');
-            if (selectedWsId) loadWsReleases(selectedWsId);
-        } catch (e) {
-            toast('Failed: ' + e.message, 'error');
-        }
-    });
-    document.body.appendChild(input);
-    input.click();
-}
-
-async function deleteWsReleaseAsset(tag, fileName) {
-    if (!confirm('Remove file "' + fileName + '" from release ' + tag + '?')) return;
+async function loadWsFiles(wsId) {
+    const container = document.getElementById('wsDetailFiles');
     try {
-        const resp = await fetch(
-            API + '/releases/' + encodeURIComponent(tag) + '/assets/' + encodeURIComponent(fileName),
-            { method: 'DELETE', headers: authHeaders() }
-        );
+        const resp = await fetch(API + '/workspaces/' + wsId + '/files', { headers: authHeaders() });
         if (!resp.ok) {
-            const d = await resp.json().catch(() => ({}));
-            toast('Error: ' + (d.error || 'Could not remove file'), 'error');
+            container.innerHTML = '<div style="color:var(--text2);font-size:13px;">Could not load files</div>';
             return;
         }
-        toast('File removed', 'success');
-        if (selectedWsId) loadWsReleases(selectedWsId);
+        const data = await resp.json();
+        renderWsFiles(data.files || []);
     } catch (e) {
-        toast('Failed: ' + e.message, 'error');
+        container.innerHTML = '<div style="color:var(--text2);font-size:13px;">Error: ' + esc(e.message) + '</div>';
     }
 }
 
-// Move a release to a different workspace. The dropdown of targets is built
-// from the cached `workspaces` list (excluding the current workspace) - same
-// list rendered on the Workspaces tab, so it's already authoritative.
-function moveWsRelease(tag) {
-    if (!selectedWsId) return;
-    const select = document.getElementById('moveReleaseTarget');
-    const options = (workspaces || [])
-        .filter(w => w.id !== selectedWsId)
-        .map(w => '<option value="' + esc(w.id) + '">' + esc(w.name) + '</option>')
-        .join('');
-    if (!options) {
-        toast('No other workspaces available', 'error');
+function renderWsFiles(files) {
+    const container = document.getElementById('wsDetailFiles');
+    if (files.length === 0) {
+        container.innerHTML = '<div class="empty-state">No files yet. Use "Upload files" to share software builds or other files with this workspace.</div>';
         return;
     }
-    select.innerHTML = options;
-    document.getElementById('moveReleaseTag').value = tag;
-    document.getElementById('moveReleaseModal').classList.add('visible');
+    container.innerHTML = files.map(f =>
+        '<div class="machine-item">' +
+            '<span style="display:flex;flex-direction:column;gap:2px;min-width:0;">' +
+                '<strong style="font-family:monospace;font-size:13px;word-break:break-all;">' + esc(f.name) + '</strong>' +
+                '<span style="font-size:12px;color:var(--text2);">' + formatBytes(f.size) + (f.author ? ' · ' + esc(f.author) : '') + ' · ' + formatDateTime(f.created_at) + '</span>' +
+            '</span>' +
+            '<span style="display:flex;gap:6px;flex-shrink:0;">' +
+                '<button class="small" onclick="downloadWsFile(\'' + esc(f.name) + '\')">Download</button>' +
+                '<button class="small danger" onclick="deleteWsFile(\'' + esc(f.name) + '\')">Delete</button>' +
+            '</span>' +
+        '</div>'
+    ).join('');
 }
 
-function closeMoveReleaseModal() {
-    document.getElementById('moveReleaseModal').classList.remove('visible');
+function pickWsFiles() {
+    document.getElementById('wsFileInput').click();
 }
 
-async function confirmMoveRelease() {
-    const tag = document.getElementById('moveReleaseTag').value;
-    const target = document.getElementById('moveReleaseTarget').value;
-    if (!tag || !target) return;
-    try {
-        const resp = await fetch(API + '/releases/' + encodeURIComponent(tag) + '/move', {
-            method: 'POST',
-            headers: authHeaders(),
-            body: JSON.stringify({ workspace_id: target }),
-        });
-        if (!resp.ok) {
-            const data = await resp.json().catch(() => ({}));
-            toast('Error: ' + (data.error || 'Could not move release'), 'error');
-            return;
+function uploadWsFiles(fileList) {
+    if (!selectedWsId || !fileList || fileList.length === 0) return;
+    const wsId = selectedWsId;
+    const formData = new FormData();
+    for (const f of fileList) formData.append('file', f);
+    document.getElementById('wsFileInput').value = '';
+
+    const progress = document.getElementById('wsFileUploadProgress');
+    const bar = document.getElementById('wsFileUploadBar');
+    progress.style.display = '';
+    bar.style.width = '0%'; bar.textContent = '';
+
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', API + '/workspaces/' + encodeURIComponent(wsId) + '/files');
+    xhr.setRequestHeader('Authorization', 'Bearer ' + authToken);
+    xhr.upload.onprogress = function(e) {
+        if (e.lengthComputable) {
+            const pct = Math.round((e.loaded / e.total) * 100);
+            bar.style.width = pct + '%';
+            bar.textContent = pct + '%';
         }
-        closeMoveReleaseModal();
-        toast('Release ' + tag + ' moved', 'success');
-        // Reload current workspace's releases - the moved release is no longer
-        // in scope here, so the row will disappear.
-        loadWsReleases(selectedWsId);
-    } catch (e) {
-        toast('Failed: ' + e.message, 'error');
-    }
+    };
+    xhr.onload = function() {
+        progress.style.display = 'none';
+        if (xhr.status >= 200 && xhr.status < 300) {
+            toast('Uploaded', 'success');
+            if (selectedWsId === wsId) loadWsFiles(wsId);
+        } else {
+            try {
+                const d = JSON.parse(xhr.responseText);
+                toast('Error: ' + (d.error || 'Upload failed'), 'error');
+            } catch { toast('Upload failed', 'error'); }
+        }
+    };
+    xhr.onerror = function() {
+        progress.style.display = 'none';
+        toast('Upload failed', 'error');
+    };
+    xhr.send(formData);
 }
 
-// Open the documentation editor for a release. Idempotently ensures a
-// doc-release row exists for the tag (so the docs page has something to load
-// and the user can immediately add pages), then opens /docs in a new tab.
-async function editWsReleaseDocs(tag) {
+function downloadWsFile(name) {
     if (!selectedWsId) return;
-    try {
-        const resp = await fetch(API + '/workspaces/' + selectedWsId + '/docs/releases', {
-            method: 'POST',
-            headers: authHeaders(),
-            body: JSON.stringify({ tag, name: tag }),
-        });
-        if (!resp.ok) {
-            const data = await resp.json().catch(() => ({}));
-            toast('Error: ' + (data.error || 'Could not open documentation'), 'error');
-            return;
-        }
-        const url = '/docs?workspace=' + encodeURIComponent(selectedWsId) + '&tag=' + encodeURIComponent(tag);
-        window.open(url, '_blank');
-    } catch (e) {
-        toast('Failed: ' + e.message, 'error');
-    }
+    // <a>-style navigation can't carry the Authorization header; pass the JWT
+    // via ?auth= (same fallback the doc asset endpoint uses).
+    const url = API + '/workspaces/' + encodeURIComponent(selectedWsId) + '/files/' + encodeURIComponent(name)
+        + '?auth=' + encodeURIComponent(authToken);
+    window.open(url, '_blank');
 }
 
-async function editWsRelease(tag) {
+async function deleteWsFile(name) {
     if (!selectedWsId) return;
-    // Pull the current metadata so the modal pre-fills accurately. The
-    // workspace releases listing has the fields we need; one extra fetch
-    // keeps things idempotent if other admins changed the row meanwhile.
+    if (!confirm('Delete file "' + name + '"?')) return;
     try {
-        const resp = await fetch(API + '/workspaces/' + selectedWsId + '/releases', { headers: authHeaders() });
-        if (!resp.ok) { toast('Failed to load release', 'error'); return; }
-        const data = await resp.json();
-        const r = (data.releases || []).find(x => x.tag === tag);
-        if (!r) { toast('Release not found', 'error'); return; }
-        document.getElementById('editReleaseTag').value = r.tag;
-        document.getElementById('editReleaseName').value = r.name || '';
-        document.getElementById('editReleaseBody').value = r.body || '';
-        document.getElementById('editReleasePrerelease').checked = !!r.prerelease;
-        document.getElementById('editReleaseModal').classList.add('visible');
-    } catch (e) {
-        toast('Failed: ' + e.message, 'error');
-    }
-}
-
-function closeEditReleaseModal() {
-    document.getElementById('editReleaseModal').classList.remove('visible');
-}
-
-async function saveEditedRelease() {
-    const tag = document.getElementById('editReleaseTag').value;
-    const name = document.getElementById('editReleaseName').value.trim();
-    const body = document.getElementById('editReleaseBody').value;
-    const prerelease = document.getElementById('editReleasePrerelease').checked;
-    if (!tag) return;
-    try {
-        const resp = await fetch(API + '/releases/' + encodeURIComponent(tag), {
-            method: 'PUT',
-            headers: authHeaders(),
-            body: JSON.stringify({ name, body, prerelease }),
+        const resp = await fetch(API + '/workspaces/' + encodeURIComponent(selectedWsId) + '/files/' + encodeURIComponent(name), {
+            method: 'DELETE', headers: authHeaders(),
         });
-        if (!resp.ok) {
-            const d = await resp.json().catch(() => ({}));
-            toast('Error: ' + (d.error || 'Could not save'), 'error');
-            return;
-        }
-        toast('Release ' + tag + ' updated', 'success');
-        closeEditReleaseModal();
-        if (selectedWsId) loadWsReleases(selectedWsId);
-    } catch (e) {
-        toast('Failed: ' + e.message, 'error');
-    }
+        if (!resp.ok) { const d = await resp.json().catch(() => ({})); toast('Error: ' + (d.error || 'Delete failed'), 'error'); return; }
+        toast('File deleted', 'success');
+        loadWsFiles(selectedWsId);
+    } catch (e) { toast('Failed: ' + e.message, 'error'); }
 }
 
-async function deleteWsRelease(tag) {
+// ---------------------------------------------------------------------------
+// Workspace docs: flat page tree, edited in the docs editor
+// ---------------------------------------------------------------------------
+
+function openWsDocsEditor() {
     if (!selectedWsId) return;
-    if (!confirm('Delete release "' + tag + '"? Binary assets and any documentation pages on this release will be removed.')) return;
-    try {
-        const resp = await fetch(API + '/releases/' + encodeURIComponent(tag), {
-            method: 'DELETE',
-            headers: authHeaders(),
-        });
-        if (!resp.ok) {
-            const d = await resp.json().catch(() => ({}));
-            toast('Error: ' + (d.error || 'Could not delete'), 'error');
-            return;
-        }
-        toast('Release ' + tag + ' deleted', 'success');
-        loadWsReleases(selectedWsId);
-    } catch (e) {
-        toast('Failed: ' + e.message, 'error');
-    }
+    window.open('/docs?workspace=' + encodeURIComponent(selectedWsId), '_blank');
 }
 
-async function saveWsProperties() {
-    if (!selectedWsId) return;
-    const name = document.getElementById('wsEditName').value.trim();
-    const product = document.getElementById('wsEditProduct').value.trim();
-    const description = document.getElementById('wsEditDesc').value;
-    const createdBy = document.getElementById('wsEditCreatedBy').value;
-    if (!name) { toast('Name is required', 'error'); return; }
-    const payload = { name, product, description };
-    if (createdBy) payload.created_by = createdBy;
-    try {
-        const resp = await fetch(API + '/workspaces/' + selectedWsId, {
-            method: 'PUT',
-            headers: authHeaders(),
-            body: JSON.stringify(payload),
-        });
-        if (!resp.ok) {
-            const d = await resp.json().catch(() => ({}));
-            toast('Error: ' + (d.error || 'Could not save'), 'error');
-            return;
-        }
-        toast('Workspace updated', 'success');
-        // Refresh both the card grid and the panel header.
-        loadWorkspaces();
-        document.getElementById('wsDetailTitle').textContent = name;
-        document.getElementById('wsDetailProduct').textContent = product || '-';
-        document.getElementById('wsDetailDesc').textContent = description || '-';
-        document.getElementById('wsDetailCreatedBy').textContent = createdBy || '-';
-    } catch (e) {
-        toast('Failed: ' + e.message, 'error');
-    }
-}
-
-// Create a member-only documentation collection (a doc-only release row under
-// the hood; the tag is derived from the name) and jump straight into the
-// editor so the first page can be written immediately.
-async function createWsDocCollection() {
-    if (!selectedWsId) return;
-    const name = prompt('Documentation name (e.g. "Sales Handbook"):');
-    if (!name || !name.trim()) return;
-    const trimmedName = name.trim();
-    let tag = trimmedName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
-    if (!tag) tag = 'doc-' + Date.now().toString(36);
-    try {
-        const resp = await fetch(API + '/workspaces/' + selectedWsId + '/docs/releases', {
-            method: 'POST',
-            headers: authHeaders(),
-            body: JSON.stringify({ tag, name: trimmedName }),
-        });
-        if (!resp.ok) {
-            const data = await resp.json().catch(() => ({}));
-            toast('Error: ' + (data.error || 'Could not create documentation'), 'error');
-            return;
-        }
-        toast('Documentation "' + trimmedName + '" created', 'success');
-        loadWsReleases(selectedWsId);
-        window.open('/docs?workspace=' + encodeURIComponent(selectedWsId) + '&tag=' + encodeURIComponent(tag), '_blank');
-    } catch (e) {
-        toast('Failed: ' + e.message, 'error');
-    }
-}
-
-// Cached state for the unified Releases tab so toggling expansion doesn't
-// trigger a network refetch.
-let wsReleasesData = { wsId: null, allRels: [], docPageCounts: new Map() };
-const wsExpandedTags = new Set();
-const wsReleasePages = new Map(); // tag -> [{slug, title, parent_slug, ord}]
-
-async function loadWsReleases(wsId) {
-    const container = document.getElementById('wsDetailReleases');
-    try {
-        // Pull both the software view (assets) and the doc view (page counts)
-        // and merge by tag. Both endpoints are workspace-scoped now, so the
-        // union is the full per-workspace release set.
-        const [relsResp, docsResp] = await Promise.all([
-            fetch(API + '/workspaces/' + wsId + '/releases', { headers: authHeaders() }),
-            fetch(API + '/workspaces/' + wsId + '/docs/releases', { headers: authHeaders() }),
-        ]);
-        if (!relsResp.ok) { container.innerHTML = '<div style="color:var(--text2);font-size:13px;">Failed to load</div>'; return; }
-        const relsData = await relsResp.json();
-        const docsData = docsResp.ok ? await docsResp.json() : { releases: [] };
-
-        const docPageCounts = new Map();
-        (docsData.releases || []).forEach(r => docPageCounts.set(r.tag, r.page_count || 0));
-
-        const merged = new Map();
-        (relsData.releases || []).forEach(r => merged.set(r.tag, r));
-        (docsData.releases || []).forEach(d => {
-            if (!merged.has(d.tag)) {
-                merged.set(d.tag, { tag: d.tag, name: d.name, published_at: d.published_at, prerelease: false, assets: [] });
-            }
-        });
-        const allRels = Array.from(merged.values())
-            .sort((a, b) => (b.published_at || '').localeCompare(a.published_at || ''));
-
-        // Reset expansion state on workspace change so we don't carry stale
-        // open rows from a different workspace.
-        if (wsReleasesData.wsId !== wsId) {
-            wsExpandedTags.clear();
-            wsReleasePages.clear();
-        }
-        wsReleasesData = { wsId, allRels, docPageCounts };
-        renderWsReleases();
-    } catch (e) {
-        container.innerHTML = '<div style="color:var(--text2);font-size:13px;">Failed to load releases</div>';
-    }
-}
-
-// Rows with software files render in the Releases tab; rows without any are
-// documentation collections and render in the Docs tab instead.
-function renderWsReleases() {
-    const { wsId, allRels, docPageCounts } = wsReleasesData;
-    if (!wsId) return;
-    const software = allRels.filter(r => (r.assets || []).length > 0);
-    const docs = allRels.filter(r => (r.assets || []).length === 0);
-    renderWsSoftwareReleases(software, docPageCounts);
-    renderWsDocCollections(docs, docPageCounts);
-}
-
-function renderWsSoftwareReleases(rels, docPageCounts) {
-    const container = document.getElementById('wsDetailReleases');
-    if (rels.length === 0) {
-        container.innerHTML = '<div style="color:var(--text2);font-size:13px;">No software releases yet.</div>';
-        return;
-    }
-    const isAdmin = userRole === 'admin';
-    container.innerHTML = rels.map(r => {
-        const pre = r.prerelease ? ' <span style="background:rgba(251,191,36,0.15);color:var(--yellow);font-size:10px;font-weight:600;padding:1px 6px;border-radius:4px;">Pre</span>' : '';
-        const menuId = 'rel-menu-' + r.tag.replace(/[^a-zA-Z0-9_-]/g, '_');
-        const adminBtns = isAdmin
-            ? ' <span class="dropdown" onclick="event.stopPropagation();">' +
-                '<button class="small secondary" onclick="toggleDropdown(event,\'' + menuId + '\')">Actions &#9662;</button>' +
-                '<div id="' + menuId + '" class="dropdown-menu" style="display:none;">' +
-                    '<button onclick="editWsRelease(\'' + esc(r.tag) + '\')">Edit metadata</button>' +
-                    '<button onclick="addWsReleaseSoftware(\'' + esc(r.tag) + '\')">Add software</button>' +
-                    '<div class="divider"></div>' +
-                    '<button onclick="editWsReleaseDocs(\'' + esc(r.tag) + '\')">Edit documentation</button>' +
-                    '<button onclick="moveWsRelease(\'' + esc(r.tag) + '\')">Move to workspace…</button>' +
-                    '<div class="divider"></div>' +
-                    '<button class="danger" onclick="deleteWsRelease(\'' + esc(r.tag) + '\')">Delete</button>' +
-                '</div>' +
-              '</span>'
-            : '';
-        const expanded = wsExpandedTags.has(r.tag);
-        const chev = expanded ? '&#9662;' : '&#9656;';
-        const expandedBlock = expanded ? renderWsReleaseExpansion(r, docPageCounts.has(r.tag), false) : '';
-        return '<div class="ws-release-row' + (expanded ? ' open' : '') + '">' +
-            '<div class="machine-item ws-release-head" style="flex-wrap:wrap;gap:8px;cursor:pointer;" onclick="toggleWsRelease(\'' + esc(r.tag) + '\')">' +
-                '<span style="flex:1;min-width:200px;display:flex;align-items:center;gap:6px;">' +
-                    '<span class="ws-release-chev" style="color:var(--text2);width:12px;display:inline-block;">' + chev + '</span>' +
-                    '<strong style="font-family:monospace;">' + esc(r.tag) + '</strong>' + pre +
-                    (r.name && r.name !== r.tag ? ' <span style="color:var(--text2);margin-left:6px;">' + esc(r.name) + '</span>' : '') +
-                    ' <span style="color:var(--text2);margin-left:6px;font-size:11px;">' + formatDate(r.published_at) + '</span>' +
-                '</span>' +
-                '<span style="display:flex;gap:4px;flex-wrap:wrap;align-items:center;justify-content:flex-end;">' +
-                    adminBtns +
-                '</span>' +
-            '</div>' +
-            expandedBlock +
-        '</div>';
-    }).join('');
-}
-
-function renderWsDocCollections(rels, docPageCounts) {
+async function loadWsDocs(wsId) {
     const container = document.getElementById('wsDetailDocs');
-    if (rels.length === 0) {
-        container.innerHTML = '<div style="color:var(--text2);font-size:13px;">No documentation yet. Create member-only pages - handbooks, guides, internal notes - with "New documentation".</div>';
-        return;
-    }
-    const isAdmin = userRole === 'admin';
-    const wsId = wsReleasesData.wsId;
-    container.innerHTML = rels.map(r => {
-        const menuId = 'doc-menu-' + r.tag.replace(/[^a-zA-Z0-9_-]/g, '_');
-        const pageCount = docPageCounts.get(r.tag) || 0;
-        const adminBtns = isAdmin
-            ? ' <span class="dropdown" onclick="event.stopPropagation();">' +
-                '<button class="small secondary" onclick="toggleDropdown(event,\'' + menuId + '\')">Actions &#9662;</button>' +
-                '<div id="' + menuId + '" class="dropdown-menu" style="display:none;">' +
-                    '<button onclick="editWsRelease(\'' + esc(r.tag) + '\')">Rename</button>' +
-                    '<button onclick="moveWsRelease(\'' + esc(r.tag) + '\')">Move to workspace…</button>' +
-                    '<div class="divider"></div>' +
-                    '<button class="danger" onclick="deleteWsRelease(\'' + esc(r.tag) + '\')">Delete</button>' +
-                '</div>' +
-              '</span>'
-            : '';
-        const openUrl = '/docs?workspace=' + encodeURIComponent(wsId) + '&tag=' + encodeURIComponent(r.tag);
-        const expanded = wsExpandedTags.has(r.tag);
-        const chev = expanded ? '&#9662;' : '&#9656;';
-        const expandedBlock = expanded ? renderWsReleaseExpansion(r, docPageCounts.has(r.tag), true) : '';
-        return '<div class="ws-release-row' + (expanded ? ' open' : '') + '">' +
-            '<div class="machine-item ws-release-head" style="flex-wrap:wrap;gap:8px;cursor:pointer;" onclick="toggleWsRelease(\'' + esc(r.tag) + '\')">' +
-                '<span style="flex:1;min-width:200px;display:flex;align-items:center;gap:6px;">' +
-                    '<span class="ws-release-chev" style="color:var(--text2);width:12px;display:inline-block;">' + chev + '</span>' +
-                    '<strong>' + esc(r.name || r.tag) + '</strong>' +
-                    ' <span style="color:var(--text2);margin-left:6px;font-size:11px;">' + pageCount + (pageCount === 1 ? ' page' : ' pages') + ' · ' + formatDate(r.published_at) + '</span>' +
-                '</span>' +
-                '<span style="display:flex;gap:4px;flex-wrap:wrap;align-items:center;justify-content:flex-end;" onclick="event.stopPropagation();">' +
-                    '<button class="small secondary" onclick="window.open(\'' + openUrl + '\',\'_blank\')">Open</button>' +
-                    '<button class="small" onclick="editWsReleaseDocs(\'' + esc(r.tag) + '\')">Edit pages</button>' +
-                    adminBtns +
-                '</span>' +
-            '</div>' +
-            expandedBlock +
-        '</div>';
-    }).join('');
-}
-
-function renderWsReleaseExpansion(r, hasDocReleaseRow, docOnly) {
-    const wsId = wsReleasesData.wsId;
-    const tag = r.tag;
-    const pages = wsReleasePages.get(tag);
-    const docsUrl = '/docs?workspace=' + encodeURIComponent(wsId) + '&tag=' + encodeURIComponent(tag);
-    let pagesHtml;
-    if (!hasDocReleaseRow) {
-        pagesHtml = '<div style="color:var(--text2);font-size:12px;">No documentation pages yet.</div>';
-    } else if (pages === undefined) {
-        pagesHtml = '<div style="color:var(--text2);font-size:12px;">Loading pages…</div>';
-    } else if (pages.length === 0) {
-        pagesHtml = '<div style="color:var(--text2);font-size:12px;">No pages on this release.</div>';
-    } else {
-        const sorted = [...pages].sort((a, b) => (a.ord - b.ord) || a.title.localeCompare(b.title));
-        pagesHtml = '<ul style="list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:2px;">' +
-            sorted.map(p => {
-                const indent = p.parent_slug ? '12px' : '0';
-                const pageUrl = docsUrl + '#/' + encodeURIComponent(tag) + '/' + encodeURIComponent(p.slug);
-                return '<li style="padding-left:' + indent + ';"><a href="' + pageUrl + '" style="color:var(--accent);text-decoration:none;font-size:13px;">' + esc(p.title) + '</a></li>';
-            }).join('') +
-        '</ul>';
-    }
-
-    if (docOnly) {
-        return '<div class="ws-release-expand" style="padding:8px 12px 12px 30px;background:var(--bg);border-radius:0 0 var(--radius) var(--radius);">' +
-            '<div><div class="field-label">Pages</div>' + pagesHtml + '</div>' +
-        '</div>';
-    }
-
-    let filesHtml;
-    const isAdmin = userRole === 'admin';
-    if ((r.assets || []).length === 0) {
-        filesHtml = '<div style="color:var(--text2);font-size:12px;">No software files attached.</div>';
-    } else {
-        filesHtml = '<ul style="list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:2px;">' +
-            r.assets.map(a => {
-                const actions = isAdmin
-                    ? '<button class="small secondary" style="min-width:0;padding:2px 8px;font-size:11px;line-height:1.4;" onclick="replaceWsReleaseAsset(\'' + esc(tag) + '\',\'' + esc(a.name) + '\')" title="Replace this file">Replace</button>' +
-                      '<button class="small danger" style="min-width:0;padding:2px 7px;font-size:12px;line-height:1.4;" onclick="deleteWsReleaseAsset(\'' + esc(tag) + '\',\'' + esc(a.name) + '\')" title="Remove this file">&times;</button>'
-                    : '';
-                return '<li style="display:flex;justify-content:space-between;gap:8px;font-size:13px;align-items:center;">' +
-                    '<a href="#" onclick="event.preventDefault();downloadAsset(event,\'' + DEFAULT_PRODUCT + '\',\'' + esc(tag) + '\',\'' + esc(a.name) + '\')" style="color:var(--accent);text-decoration:none;font-family:monospace;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(a.name) + '</a>' +
-                    '<span style="color:var(--text2);font-size:11px;white-space:nowrap;">' + formatSize(a.size) + '</span>' +
-                    (actions ? '<span style="display:flex;gap:4px;">' + actions + '</span>' : '') +
-                '</li>';
-            }).join('') +
-        '</ul>';
-    }
-
-    return '<div class="ws-release-expand" style="padding:8px 12px 12px 30px;display:grid;grid-template-columns:1fr 1fr;gap:16px;background:var(--bg);border-radius:0 0 var(--radius) var(--radius);">' +
-        '<div><div class="field-label">Documentation pages</div>' + pagesHtml + '</div>' +
-        '<div><div class="field-label">Software files</div>' + filesHtml + '</div>' +
-    '</div>';
-}
-
-async function toggleWsRelease(tag) {
-    if (wsExpandedTags.has(tag)) {
-        wsExpandedTags.delete(tag);
-        renderWsReleases();
-        return;
-    }
-    wsExpandedTags.add(tag);
-    renderWsReleases(); // optimistic; shows "Loading pages…" until fetch returns
-    // Lazy-fetch the pages list once per release tag.
-    if (!wsReleasePages.has(tag) && wsReleasesData.docPageCounts.has(tag)) {
-        try {
-            const resp = await fetch(API + '/docs/' + encodeURIComponent(tag) + '/pages', { headers: authHeaders() });
-            if (resp.ok) {
-                const data = await resp.json();
-                wsReleasePages.set(tag, data.pages || []);
-            } else {
-                wsReleasePages.set(tag, []);
-            }
-        } catch (_) {
-            wsReleasePages.set(tag, []);
+    try {
+        const resp = await fetch(API + '/workspaces/' + wsId + '/docs/pages', { headers: authHeaders() });
+        if (!resp.ok) {
+            container.innerHTML = '<div style="color:var(--text2);font-size:13px;">Could not load documentation</div>';
+            return;
         }
-        if (wsExpandedTags.has(tag)) renderWsReleases();
+        const data = await resp.json();
+        renderWsDocs(wsId, data.pages || []);
+    } catch (e) {
+        container.innerHTML = '<div style="color:var(--text2);font-size:13px;">Error: ' + esc(e.message) + '</div>';
     }
+}
+
+function renderWsDocs(wsId, pages) {
+    const container = document.getElementById('wsDetailDocs');
+    if (pages.length === 0) {
+        container.innerHTML = '<div class="empty-state">No documentation pages yet. Click "Edit documentation" to write the first one.</div>';
+        return;
+    }
+    const base = '/docs?workspace=' + encodeURIComponent(wsId);
+    container.innerHTML = pages.map(p =>
+        '<div class="machine-item">' +
+            '<a href="' + base + '#/' + encodeURIComponent(p.slug) + '" target="_blank" style="color:var(--accent);text-decoration:none;font-size:13px;">' + esc(p.title) + '</a>' +
+            '<span class="machine-code">' + formatDate(p.updated_at) + '</span>' +
+        '</div>'
+    ).join('');
 }
 
 function closeWsDetail() {

@@ -15,7 +15,8 @@
 - **Rust + C++ client libraries** - drop-in verification for both ecosystems
 
 ### Releases & workspaces
-- **Workspaces** - group licenses, releases, configs, and docs per product/team with member roles (`owner` / `editor` / `viewer`)
+- **Workspaces** - group licenses, files, configs, and docs per product/team
+- **Workspace files & docs** - flat member-writable file share and documentation per workspace
 - **Versioned config revisions** - push, fetch, and roll back JSON configs per workspace
 - **Binary release channel** - upload signed installers/binaries; clients fetch via license-key-protected `/api/v1/updates`
 
@@ -776,7 +777,7 @@ susi-admin deactivate --key "XXXXX-XXXXX-XXXXX-XXXXX" --machine-code "a1b2c3..."
 
 ## Workspaces & Config Revisions
 
-Workspaces are the unit of grouping for everything customer-facing: licenses, releases, doc sets, and config revisions can all be scoped to a workspace. Each workspace has a `name`, `product`, optional `description`, a `created_by` user, and a member list with one of three roles:
+Workspaces are the unit of grouping for everything customer-facing: licenses, files, docs, and config revisions can all be scoped to a workspace. Each workspace has a `name`, `product`, optional `description`, a `created_by` user, and a member list with one of three roles:
 
 | Role | Read | Edit pages / configs | Manage members | Delete workspace |
 |---|---|---|---|---|
@@ -802,9 +803,23 @@ Each workspace has an append-only history of JSON configs. Push a new revision a
 
 `susi_client::workspace` provides a typed Rust client (sync + async) over these endpoints.
 
+### Workspace files & docs
+
+Each workspace has a flat, member-writable file share (bytes on disk under the data dir) and its own flat documentation page tree, both independent of the release concept. The `?auth=` query parameter carries the JWT where browsers can't set an Authorization header (`<a href>` downloads, `<img>` loads).
+
+| Method | Endpoint | Auth | Description |
+|---|---|---|---|
+| `GET` / `POST` | `/api/v1/workspaces/{id}/files` | JWT (member) | List / upload files (multipart, up to 500 MB) |
+| `GET` / `DELETE` | `/api/v1/workspaces/{id}/files/{file}` | JWT (member) | Download / delete a file |
+| `GET` | `/api/v1/workspaces/{id}/docs/pages` | JWT (member) | List pages + assets |
+| `GET` / `PUT` / `DELETE` | `/api/v1/workspaces/{id}/docs/pages/{slug}` | JWT (member) | Read / upsert / delete a page |
+| `POST` | `/api/v1/workspaces/{id}/docs/pages/{slug}/rename` | JWT (member) | Rename a page (cascades to children) |
+| `POST` | `/api/v1/workspaces/{id}/docs/assets` | JWT (member) | Upload a doc asset (up to 100 MB) |
+| `GET` / `DELETE` | `/api/v1/workspaces/{id}/docs/assets/{file}` | JWT (member) | Fetch / delete a doc asset |
+
 ## Releases
 
-Upload signed binaries (installers, archives, etc.) and let licensed clients fetch them through an authenticated update channel. Releases can be tagged, pinned to a workspace, and gated by workspace membership.
+Upload signed binaries (installers, archives, etc.) and let licensed clients fetch them through an authenticated update channel. Releases are global per product; per-customer builds belong in workspace files instead.
 
 | Method | Endpoint | Auth | Description |
 |---|---|---|---|
@@ -814,14 +829,12 @@ Upload signed binaries (installers, archives, etc.) and let licensed clients fet
 | `GET` | `/api/v1/releases` | JWT | List all releases (admin view) |
 | `POST` | `/api/v1/releases` | JWT | Upload a new release (multipart, up to 500 MB) |
 | `PUT` / `DELETE` | `/api/v1/releases/{tag}` | JWT | Update metadata / delete |
-| `POST` | `/api/v1/releases/{tag}/move` | JWT | Re-assign to another workspace |
-| `GET` | `/api/v1/workspaces/{id}/releases` | JWT | List releases scoped to a workspace |
 
-When a binary upload creates a new release, the latest workspace doc set is **seeded forward** so that user-edited docs carry over automatically.
+When a binary upload creates a new release, the previous release's user-edited doc set is **seeded forward** so hand-authored docs carry over automatically.
 
 ## Documentation Knowledge Base
 
-The `/docs` page is a per-release documentation site with an in-browser editor (EasyMDE, vendored). Each release has its own collection of pages and assets, addressed by tag.
+The `/docs` page is a per-release documentation site with an in-browser editor (EasyMDE, vendored). Each release has its own collection of pages and assets, addressed by tag. Workspace documentation uses the same viewer/editor (`/docs?workspace={id}`) but is a single flat page tree per workspace (see above).
 
 Pages carry an **origin tag** of either `pipeline` (generated from a build pipeline / bulk import) or `user` (hand-edited in the dashboard). Pipeline pages are replaced wholesale on the next bulk import; user pages are preserved across imports and copied forward into newly-created releases.
 

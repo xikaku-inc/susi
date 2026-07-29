@@ -1151,77 +1151,6 @@ async fn handle_list_audit(
     Ok(Json(serde_json::json!({ "entries": rows })))
 }
 
-/// Check if a principal is a site admin (without enforcing TOTP).
-fn is_site_admin(state: &AppState, principal: &Principal) -> bool {
-    let db = state.db.lock();
-    db.get_user_role(&principal.username)
-        .map(|r| r == "admin")
-        .unwrap_or(false)
-}
-
-/// Permission gate for editing a doc release. Global releases - and tags that
-/// don't exist yet (callers may auto-create them as global) - are admin-only
-/// (TOTP enforced). Workspace-scoped releases accept site admins and workspace
-/// members, matching the write policy of other workspace resources. Returns
-/// the release's workspace id (if any) so callers can keep doc seeding scope-
-/// correct.
-pub(crate) fn release_writer_check(
-    state: &AppState,
-    principal: &Principal,
-    product: &str,
-    tag: &str,
-) -> Result<Option<String>, (StatusCode, Json<ErrorResponse>)> {
-    let scoped_ws = {
-        let db = state.db.lock();
-        db.get_release_workspace_id(product, tag)
-            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
-            .flatten()
-    };
-    match scoped_ws {
-        Some(ws_id) => {
-            require_password_changed(state, principal)?;
-            assert_workspace_member(state, &ws_id, principal)?;
-            Ok(Some(ws_id))
-        }
-        None => {
-            require_admin_full(state, principal)?;
-            Ok(None)
-        }
-    }
-}
-
-/// Permission gate for reading a doc release. Workspace releases require
-/// admin or workspace membership; global releases are public.
-pub(crate) fn release_reader_check(
-    state: &AppState,
-    principal_opt: Option<&Principal>,
-    product: &str,
-    tag: &str,
-) -> Result<Option<String>, (StatusCode, Json<ErrorResponse>)> {
-    let scoped_ws = {
-        let db = state.db.lock();
-        db.get_release_workspace_id(product, tag)
-            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
-            .flatten()
-    };
-    let Some(ws_id) = scoped_ws else { return Ok(None); };
-
-    let principal = principal_opt
-        .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "Authentication required"))?;
-    if is_site_admin(state, principal) {
-        return Ok(Some(ws_id));
-    }
-    let role = {
-        let db = state.db.lock();
-        db.workspace_access(&ws_id, &principal.username)
-            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
-    };
-    if role.is_none() {
-        return Err(error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"));
-    }
-    Ok(Some(ws_id))
-}
-
 // Argon2 hash + verify are CPU-bound and take ~50-100 ms per call. Run them on
 // a `spawn_blocking` worker so they don't stall a Tokio runtime worker thread
 // (which would freeze every other handler scheduled on it). Callers must await.
@@ -2165,21 +2094,11 @@ fn authorize_release_download(
     state: &Arc<AppState>,
     headers: &HeaderMap,
     product: &str,
-    tag: &str,
+    _tag: &str,
 ) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
-    let scoped_ws = {
-        let db = state.db.lock();
-        db.get_release_workspace_id(product, tag)
-            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
-            .flatten()
-    };
-
-    // A publicly-downloadable product exposes its *global* releases with no
-    // auth - the free FusionHub installer linked from xikaku.com. Workspace-
-    // scoped releases stay gated by membership below.
-    if scoped_ws.is_none()
-        && state.db.lock().get_product_download_public(product).unwrap_or(false)
-    {
+    // A publicly-downloadable product exposes its releases with no auth -
+    // the free FusionHub installer linked from xikaku.com.
+    if state.db.lock().get_product_download_public(product).unwrap_or(false) {
         return Ok("public".into());
     }
 
@@ -2189,52 +2108,36 @@ fn authorize_release_download(
         return Err(error_response(StatusCode::UNAUTHORIZED, "Authentication required"));
     }
 
-    if let Some(ws_id) = scoped_ws {
-        let principal = principal_opt.as_ref()
-            .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Workspace membership required"))?;
-        let db = state.db.lock();
+    // A license key only entitles its own product's binaries. A session must
+    // be admin or belong to a customer of the product - a live assigned
+    // license or membership in a workspace scoped to it.
+    let db = state.db.lock();
+    let license_entitled = license_product
+        .as_deref()
+        .is_some_and(|lp| license_covers_product(&db, lp, product));
+    if !license_entitled {
+        let principal = principal_opt.as_ref().ok_or_else(|| {
+            error_response(StatusCode::FORBIDDEN, "License does not cover this product")
+        })?;
         let is_admin = db.get_user_role(&principal.username)
             .map(|r| r == "admin")
             .unwrap_or(false);
         if !is_admin {
-            let role = db.workspace_access(&ws_id, &principal.username)
-                .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
-            if role.is_none() {
-                return Err(error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"));
-            }
-        }
-    } else {
-        // Global release: a license key only entitles its own product's
-        // binaries. A session must be admin or belong to a customer of the
-        // product - a live assigned license or membership in a workspace
-        // scoped to it.
-        let db = state.db.lock();
-        let license_entitled = license_product
-            .as_deref()
-            .is_some_and(|lp| license_covers_product(&db, lp, product));
-        if !license_entitled {
-            let principal = principal_opt.as_ref().ok_or_else(|| {
-                error_response(StatusCode::FORBIDDEN, "License does not cover this product")
-            })?;
-            let is_admin = db.get_user_role(&principal.username)
-                .map(|r| r == "admin")
-                .unwrap_or(false);
-            if !is_admin {
-                let licensed = db
-                    .list_licenses_for_user(&principal.username)
-                    .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
-                    .iter()
-                    .any(|l| !l.revoked && !l.is_expired() && license_covers_product(&db, &l.product, product));
-                let entitled = licensed
-                    || db
-                        .user_in_product_workspace(&principal.username, product)
-                        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
-                if !entitled {
-                    return Err(error_response(StatusCode::FORBIDDEN, "No license for this product"));
-                }
+            let licensed = db
+                .list_licenses_for_user(&principal.username)
+                .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+                .iter()
+                .any(|l| !l.revoked && !l.is_expired() && license_covers_product(&db, &l.product, product));
+            let entitled = licensed
+                || db
+                    .user_in_product_workspace(&principal.username, product)
+                    .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+            if !entitled {
+                return Err(error_response(StatusCode::FORBIDDEN, "No license for this product"));
             }
         }
     }
+    drop(db);
 
     Ok(principal_opt
         .map(|p| p.username)
@@ -2285,12 +2188,6 @@ struct UpdateReleaseRequest {
 }
 
 
-#[derive(Deserialize)]
-struct MoveReleaseRequest {
-    /// Target workspace id, or empty/null to make the release global.
-    #[serde(default)]
-    workspace_id: Option<String>,
-}
 
 
 
@@ -2463,12 +2360,6 @@ struct PutGraphRequest {
 
 
 
-#[derive(serde::Deserialize)]
-struct CreateWorkspaceDocReleaseRequest {
-    tag: String,
-    #[serde(default)]
-    name: String,
-}
 
 
 // ---------------------------------------------------------------------------
@@ -2745,6 +2636,10 @@ async fn main() -> Result<()> {
         backup_running: AtomicBool::new(false),
     });
 
+    // One-time migration: fold retired workspace-scoped releases into
+    // workspace files + workspace docs. No-op once no scoped rows remain.
+    workspaces::migrate_workspace_releases(&state);
+
     // Nightly Dropbox backup scheduler (no-op until enabled + connected).
     if state.backup.configured() {
         backup::spawn_scheduler(Arc::clone(&state));
@@ -2889,7 +2784,6 @@ async fn main() -> Result<()> {
                 .layer(DefaultBodyLimit::max(500 * 1024 * 1024))
         )
         .route("/api/v1/releases/{tag}", axum::routing::put(releases::handle_update_release).delete(releases::handle_delete_release))
-        .route("/api/v1/releases/{tag}/move", post(releases::handle_move_release))
         .route("/api/v1/releases/{tag}/assets/{file}", axum::routing::delete(releases::handle_delete_release_asset))
         // Workspace endpoints (JWT protected)
         .route("/api/v1/workspaces", get(workspaces::handle_list_workspaces).post(workspaces::handle_create_workspace))
@@ -2913,10 +2807,37 @@ async fn main() -> Result<()> {
         .route("/api/v1/workspaces/{id}/recordings/{rid}", axum::routing::delete(workspaces::handle_delete_recording))
         .route("/api/v1/workspaces/{id}/recordings/{rid}/complete", post(workspaces::handle_complete_recording))
         .route("/api/v1/workspaces/{id}/recordings/{rid}/download", get(workspaces::handle_get_recording_download))
+        // Back-compat shim: deployed FusionHub UIs still poll this; answers [].
         .route("/api/v1/workspaces/{id}/releases", get(workspaces::handle_workspace_releases))
+        // Workspace files: flat member-writable file share (upload gets the
+        // large body limit release uploads use).
+        .route("/api/v1/workspaces/{id}/files", get(workspaces::handle_list_workspace_files))
+        .merge(
+            Router::new()
+                .route("/api/v1/workspaces/{id}/files", post(workspaces::handle_upload_workspace_files))
+                .layer(DefaultBodyLimit::max(500 * 1024 * 1024))
+        )
         .route(
-            "/api/v1/workspaces/{id}/docs/releases",
-            get(workspaces::handle_list_workspace_doc_releases).post(workspaces::handle_create_workspace_doc_release),
+            "/api/v1/workspaces/{id}/files/{file}",
+            get(workspaces::handle_download_workspace_file).delete(workspaces::handle_delete_workspace_file),
+        )
+        // Workspace docs: one flat page tree per workspace, member-writable.
+        .route("/api/v1/workspaces/{id}/docs/pages", get(docs::handle_ws_list_doc_pages))
+        .route(
+            "/api/v1/workspaces/{id}/docs/pages/{slug}",
+            get(docs::handle_ws_get_doc_page)
+                .put(docs::handle_ws_upsert_doc_page)
+                .delete(docs::handle_ws_delete_doc_page),
+        )
+        .route("/api/v1/workspaces/{id}/docs/pages/{slug}/rename", post(docs::handle_ws_rename_doc_page))
+        .merge(
+            Router::new()
+                .route("/api/v1/workspaces/{id}/docs/assets", post(docs::handle_ws_upload_doc_asset))
+                .layer(DefaultBodyLimit::max(100 * 1024 * 1024))
+        )
+        .route(
+            "/api/v1/workspaces/{id}/docs/assets/{file}",
+            get(docs::handle_ws_get_doc_asset).delete(docs::handle_ws_delete_doc_asset),
         )
         // Products catalog
         .route("/api/v1/products", get(releases::handle_list_products).post(releases::handle_create_product))

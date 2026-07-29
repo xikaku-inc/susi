@@ -115,8 +115,12 @@ impl TestServer {
     /// Like `start`, with extra environment variables for the child process
     /// (e.g. STRIPE_WEBHOOK_SECRET to enable the webhook endpoint).
     fn start_with_env(envs: &[(&str, &str)]) -> Self {
-        let dir = tempfile::tempdir().expect("temp dir");
+        Self::start_in_dir(tempfile::tempdir().expect("temp dir"), envs)
+    }
 
+    /// Like `start_with_env`, against a caller-prepared data directory - used
+    /// to exercise startup migrations over pre-seeded databases.
+    fn start_in_dir(dir: tempfile::TempDir, envs: &[(&str, &str)]) -> Self {
         let (private_key, public_key) = generate_keypair(2048).expect("keygen");
         let private_pem = private_key_to_pem(&private_key).expect("private pem");
         let public_pem = public_key_to_pem(&public_key).expect("public pem");
@@ -3005,11 +3009,11 @@ fn test_backup_admin_endpoints_require_admin() {
 }
 
 
-/// Workspace members can author their workspace's documentation: create doc
-/// collections (doc-only releases), write pages, and read them back.
-/// Non-members stay denied, and global (workspace-less) docs remain admin-only.
+/// Workspace members can author their workspace's documentation (flat
+/// workspace-scoped page tree) and share files through the workspace file
+/// share. Non-members stay denied, and global docs remain admin-only.
 #[test]
-fn test_workspace_member_doc_authoring() {
+fn test_workspace_member_docs_and_files() {
     let server = TestServer::start();
     let admin = server.admin_token();
     let client = server.http();
@@ -3072,25 +3076,16 @@ fn test_workspace_member_doc_authoring() {
         .error_for_status()
         .expect("add member ok");
 
-    // Member creates a doc collection in their workspace.
+    // Member writes and reads back a workspace doc page.
     let resp = client
-        .post(format!("{}/workspaces/{}/docs/releases", server.api_url, ws_id))
-        .bearer_auth(&member)
-        .json(&json!({"tag": "sales-handbook", "name": "Sales Handbook"}))
-        .send()
-        .expect("member create collection");
-    assert!(resp.status().is_success(), "member creates collection: {}", resp.text().unwrap_or_default());
-
-    // Member writes and reads back a page.
-    let resp = client
-        .put(format!("{}/docs/sales-handbook/pages/intro", server.api_url))
+        .put(format!("{}/workspaces/{}/docs/pages/intro", server.api_url, ws_id))
         .bearer_auth(&member)
         .json(&json!({"title": "Intro", "body_md": "# Hello Xikaku"}))
         .send()
         .expect("member write page");
     assert!(resp.status().is_success(), "member writes page: {}", resp.text().unwrap_or_default());
     let page = client
-        .get(format!("{}/docs/sales-handbook/pages/intro", server.api_url))
+        .get(format!("{}/workspaces/{}/docs/pages/intro", server.api_url, ws_id))
         .bearer_auth(&member)
         .send()
         .expect("member read page")
@@ -3100,61 +3095,57 @@ fn test_workspace_member_doc_authoring() {
 
     // Admins keep full access to workspace docs.
     let resp = client
-        .put(format!("{}/docs/sales-handbook/pages/admin-note", server.api_url))
+        .put(format!("{}/workspaces/{}/docs/pages/admin-note", server.api_url, ws_id))
         .bearer_auth(&admin)
         .json(&json!({"title": "Admin Note", "body_md": "note"}))
         .send()
         .expect("admin write page");
     assert!(resp.status().is_success(), "admin writes workspace page: {}", resp.text().unwrap_or_default());
 
-    // Doc-only collections are kind='docs' and stay out of the software
-    // release listings (admin, user-facing, and workspace).
-    for url in [
-        format!("{}/releases", server.api_url),
-        format!("{}/updates/releases", server.api_url),
-        format!("{}/workspaces/{}/releases", server.api_url, ws_id),
-    ] {
-        let body = client
-            .get(&url)
-            .bearer_auth(&admin)
-            .send()
-            .expect("list releases")
-            .json::<Value>()
-            .expect("releases json");
-        let tags: Vec<&str> = body["releases"].as_array().unwrap().iter()
-            .map(|r| r["tag"].as_str().unwrap()).collect();
-        assert!(!tags.contains(&"sales-handbook"), "{} must hide doc collections, got {:?}", url, tags);
-    }
-
-    // Non-members are denied: collection creation, page writes, page reads.
-    let resp = client
-        .post(format!("{}/workspaces/{}/docs/releases", server.api_url, ws_id))
-        .bearer_auth(&outsider)
-        .json(&json!({"tag": "intruder", "name": "Intruder"}))
+    // Page listing shows both pages; rename cascades and delete works.
+    let listing = client
+        .get(format!("{}/workspaces/{}/docs/pages", server.api_url, ws_id))
+        .bearer_auth(&member)
         .send()
-        .expect("outsider create collection");
-    assert_eq!(resp.status().as_u16(), 403, "outsider cannot create collection");
+        .expect("list pages")
+        .json::<Value>()
+        .expect("pages json");
+    assert_eq!(listing["pages"].as_array().unwrap().len(), 2, "both pages listed: {}", listing);
     let resp = client
-        .put(format!("{}/docs/sales-handbook/pages/intro", server.api_url))
+        .post(format!("{}/workspaces/{}/docs/pages/intro/rename", server.api_url, ws_id))
+        .bearer_auth(&member)
+        .json(&json!({"new_slug": "welcome"}))
+        .send()
+        .expect("rename page");
+    assert!(resp.status().is_success(), "rename: {}", resp.text().unwrap_or_default());
+    let resp = client
+        .delete(format!("{}/workspaces/{}/docs/pages/admin-note", server.api_url, ws_id))
+        .bearer_auth(&member)
+        .send()
+        .expect("delete page");
+    assert!(resp.status().is_success(), "delete: {}", resp.text().unwrap_or_default());
+
+    // Non-members are denied; anonymous is 401.
+    let resp = client
+        .put(format!("{}/workspaces/{}/docs/pages/welcome", server.api_url, ws_id))
         .bearer_auth(&outsider)
         .json(&json!({"title": "Hacked", "body_md": "x"}))
         .send()
         .expect("outsider write page");
     assert_eq!(resp.status().as_u16(), 403, "outsider cannot write workspace page");
     let resp = client
-        .get(format!("{}/docs/sales-handbook/pages/intro", server.api_url))
+        .get(format!("{}/workspaces/{}/docs/pages/welcome", server.api_url, ws_id))
         .bearer_auth(&outsider)
         .send()
         .expect("outsider read page");
     assert_eq!(resp.status().as_u16(), 403, "outsider cannot read workspace page");
     let resp = client
-        .get(format!("{}/docs/sales-handbook/pages/intro", server.api_url))
+        .get(format!("{}/workspaces/{}/docs/pages/welcome", server.api_url, ws_id))
         .send()
         .expect("anon read page");
     assert_eq!(resp.status().as_u16(), 401, "anonymous cannot read workspace page");
 
-    // Global docs (no workspace scope, including not-yet-existing tags) stay
-    // admin-only for writes.
+    // Global docs stay admin-only for writes.
     let resp = client
         .put(format!("{}/docs/v-global/pages/intro", server.api_url))
         .bearer_auth(&member)
@@ -3162,6 +3153,210 @@ fn test_workspace_member_doc_authoring() {
         .send()
         .expect("member write global page");
     assert_eq!(resp.status().as_u16(), 403, "member cannot write global docs");
+
+    // ---- Workspace files ----
+
+    // Member uploads two files in one multipart request.
+    let payload = b"BINARY-BUILD-BYTES".to_vec();
+    let boundary = "susiWSFILESboundary42";
+    let mut mp: Vec<u8> = Vec::new();
+    for fname in ["Cube-Test.zip", "notes.txt"] {
+        mp.extend_from_slice(
+            format!("--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{fname}\"\r\nContent-Type: application/octet-stream\r\n\r\n").as_bytes(),
+        );
+        mp.extend_from_slice(&payload);
+        mp.extend_from_slice(b"\r\n");
+    }
+    mp.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    let resp = client
+        .post(format!("{}/workspaces/{}/files", server.api_url, ws_id))
+        .bearer_auth(&member)
+        .header("content-type", format!("multipart/form-data; boundary={boundary}"))
+        .body(mp)
+        .send()
+        .expect("upload files");
+    assert!(resp.status().is_success(), "member uploads files: {}", resp.text().unwrap_or_default());
+
+    // Listing shows both files with size and author.
+    let listing = client
+        .get(format!("{}/workspaces/{}/files", server.api_url, ws_id))
+        .bearer_auth(&member)
+        .send()
+        .expect("list files")
+        .json::<Value>()
+        .expect("files json");
+    let files = listing["files"].as_array().expect("files array");
+    assert_eq!(files.len(), 2, "two files listed: {}", listing);
+    let zip = files.iter().find(|f| f["name"] == json!("Cube-Test.zip")).expect("zip listed");
+    assert_eq!(zip["size"], json!(payload.len()), "size recorded: {}", zip);
+    assert_eq!(zip["author"], json!("doc_member"), "author recorded: {}", zip);
+
+    // Download returns the exact bytes - both with a bearer header and with
+    // the ?auth= query fallback browsers use for <a href> downloads.
+    let dl = client
+        .get(format!("{}/workspaces/{}/files/Cube-Test.zip", server.api_url, ws_id))
+        .bearer_auth(&member)
+        .send()
+        .expect("download file");
+    assert_eq!(dl.status().as_u16(), 200);
+    assert_eq!(dl.bytes().expect("bytes").as_ref(), payload.as_slice());
+    let dl = client
+        .get(format!("{}/workspaces/{}/files/Cube-Test.zip?auth={}", server.api_url, ws_id, member))
+        .send()
+        .expect("download file via query auth");
+    assert_eq!(dl.status().as_u16(), 200, "query-auth download works");
+
+    // Non-members and anonymous callers are denied.
+    let resp = client
+        .get(format!("{}/workspaces/{}/files/Cube-Test.zip", server.api_url, ws_id))
+        .bearer_auth(&outsider)
+        .send()
+        .expect("outsider download");
+    assert_eq!(resp.status().as_u16(), 403, "outsider cannot download workspace file");
+    let resp = client
+        .get(format!("{}/workspaces/{}/files", server.api_url, ws_id))
+        .send()
+        .expect("anon list");
+    assert_eq!(resp.status().as_u16(), 401, "anonymous cannot list workspace files");
+
+    // The retired workspace releases endpoint still answers (deployed
+    // FusionHub UIs poll it) but is always empty now.
+    let body = client
+        .get(format!("{}/workspaces/{}/releases", server.api_url, ws_id))
+        .bearer_auth(&member)
+        .send()
+        .expect("legacy releases")
+        .json::<Value>()
+        .expect("legacy json");
+    assert_eq!(body["releases"], json!([]), "legacy workspace releases endpoint answers []");
+
+    // Delete removes the file from the listing and from disk.
+    let resp = client
+        .delete(format!("{}/workspaces/{}/files/notes.txt", server.api_url, ws_id))
+        .bearer_auth(&member)
+        .send()
+        .expect("delete file");
+    assert!(resp.status().is_success(), "delete file: {}", resp.text().unwrap_or_default());
+    let listing = client
+        .get(format!("{}/workspaces/{}/files", server.api_url, ws_id))
+        .bearer_auth(&member)
+        .send()
+        .expect("list files after delete")
+        .json::<Value>()
+        .expect("files json");
+    assert_eq!(listing["files"].as_array().unwrap().len(), 1, "one file left: {}", listing);
+    let resp = client
+        .get(format!("{}/workspaces/{}/files/notes.txt", server.api_url, ws_id))
+        .bearer_auth(&member)
+        .send()
+        .expect("download deleted");
+    assert_eq!(resp.status().as_u16(), 404, "deleted file 404s");
+}
+
+/// The startup migration folds legacy workspace-scoped releases (binaries +
+/// per-release doc pages/assets) into workspace files and workspace docs,
+/// then deletes the release rows.
+#[test]
+fn test_workspace_release_startup_migration() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let db_path = dir.path().join("licenses.db");
+    let data_dir = dir.path().to_path_buf();
+
+    // Pre-seed a database the way an old server version would have left it: a
+    // workspace-scoped release with a binary asset, a doc page, and a doc
+    // asset. The workspace_id scoping no longer has a public API, so it is
+    // stamped with raw SQL.
+    {
+        let db = susi_core::db::LicenseDb::open(db_path.to_str().unwrap()).expect("open db");
+        db.create_workspace("wsmig", "Migration WS", "fusionhub", "", "admin")
+            .expect("create ws");
+        let release_id = db
+            .insert_release("fusionhub", "CubeTest-v1", "Cube Test", "", false, "software")
+            .expect("insert release");
+        db.add_release_asset(release_id, "Cube-Test-Varjo.zip", 18).expect("asset row");
+        db.upsert_doc_page(release_id, "how-to-use", "How to Use", "# How to Use", None, 0)
+            .expect("doc page");
+        db.upsert_doc_asset(release_id, "shot.png", 9).expect("doc asset row");
+        drop(db);
+        let conn = rusqlite::Connection::open(&db_path).expect("raw open");
+        conn.execute(
+            "UPDATE releases SET workspace_id = 'wsmig' WHERE id = ?1",
+            rusqlite::params![release_id],
+        )
+        .expect("stamp workspace_id");
+    }
+    // Matching files on disk (default-product flat layouts).
+    let rel_dir = data_dir.join("releases").join("CubeTest-v1");
+    std::fs::create_dir_all(&rel_dir).expect("mk release dir");
+    std::fs::write(rel_dir.join("Cube-Test-Varjo.zip"), b"ZIP-BUILD-BYTES-18").expect("write zip");
+    let doc_dir = data_dir.join("docs").join("CubeTest-v1").join("assets");
+    std::fs::create_dir_all(&doc_dir).expect("mk docs dir");
+    std::fs::write(doc_dir.join("shot.png"), b"PNG-BYTES").expect("write png");
+
+    let server = TestServer::start_in_dir(dir, &[]);
+    let admin = server.admin_token();
+    let client = server.http();
+
+    // Binary asset became a workspace file with the release's date preserved.
+    let files = client
+        .get(format!("{}/workspaces/wsmig/files", server.api_url))
+        .bearer_auth(&admin)
+        .send()
+        .expect("list files")
+        .json::<Value>()
+        .expect("files json");
+    let files = files["files"].as_array().expect("files array");
+    assert_eq!(files.len(), 1, "migrated file listed: {:?}", files);
+    assert_eq!(files[0]["name"], json!("Cube-Test-Varjo.zip"));
+    let dl = client
+        .get(format!("{}/workspaces/wsmig/files/Cube-Test-Varjo.zip", server.api_url))
+        .bearer_auth(&admin)
+        .send()
+        .expect("download migrated file");
+    assert_eq!(dl.status().as_u16(), 200);
+    assert_eq!(dl.bytes().expect("bytes").as_ref(), b"ZIP-BUILD-BYTES-18");
+
+    // Doc page + asset became workspace docs.
+    let docs = client
+        .get(format!("{}/workspaces/wsmig/docs/pages", server.api_url))
+        .bearer_auth(&admin)
+        .send()
+        .expect("list ws docs")
+        .json::<Value>()
+        .expect("docs json");
+    assert_eq!(docs["pages"].as_array().unwrap().len(), 1, "page migrated: {}", docs);
+    assert_eq!(docs["pages"][0]["slug"], json!("how-to-use"));
+    assert_eq!(docs["assets"].as_array().unwrap().len(), 1, "asset migrated: {}", docs);
+    let page = client
+        .get(format!("{}/workspaces/wsmig/docs/pages/how-to-use", server.api_url))
+        .bearer_auth(&admin)
+        .send()
+        .expect("get ws page")
+        .json::<Value>()
+        .expect("page json");
+    assert_eq!(page["body_md"], json!("# How to Use"));
+    let asset = client
+        .get(format!("{}/workspaces/wsmig/docs/assets/shot.png", server.api_url))
+        .bearer_auth(&admin)
+        .send()
+        .expect("get ws doc asset");
+    assert_eq!(asset.status().as_u16(), 200);
+    assert_eq!(asset.bytes().expect("bytes").as_ref(), b"PNG-BYTES");
+
+    // The release row is gone from the admin listing and from the docs API.
+    let rels = client
+        .get(format!("{}/releases", server.api_url))
+        .bearer_auth(&admin)
+        .send()
+        .expect("admin releases")
+        .json::<Value>()
+        .expect("releases json");
+    assert_eq!(rels["releases"].as_array().unwrap().len(), 0, "release row removed: {}", rels);
+    let resp = client
+        .get(format!("{}/docs/CubeTest-v1/pages", server.api_url))
+        .send()
+        .expect("old docs endpoint");
+    assert_eq!(resp.status().as_u16(), 404, "release docs are gone");
 }
 
 /// Hiding a website page removes it from every public surface (page list,

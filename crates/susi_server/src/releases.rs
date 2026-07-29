@@ -117,14 +117,14 @@ pub(crate) async fn handle_get_releases(
         let rows = db
             .list_releases()
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
-        let ids: Vec<i64> = rows.iter().filter(|r| r.6.is_none()).map(|r| r.0).collect();
+        let ids: Vec<i64> = rows.iter().map(|r| r.0).collect();
         let assets_by_id = db.get_assets_for_releases(&ids).unwrap_or_default();
         (rows, assets_by_id)
     };
 
     let mut releases = Vec::new();
-    for (id, tag, name, body, prerelease, created_at, workspace_id, product_col) in &rows {
-        if workspace_id.is_some() || product_col != product { continue; }
+    for (id, tag, name, body, prerelease, created_at, product_col) in &rows {
+        if product_col != product { continue; }
         let assets = assets_by_id.remove(id).unwrap_or_default();
         releases.push(serde_json::json!({
             "tag": tag,
@@ -255,19 +255,19 @@ pub(crate) async fn handle_public_latest_download(
         if !db.get_product_download_public(&product).unwrap_or(false) {
             return Err(error_response(StatusCode::NOT_FOUND, "Not found"));
         }
-        // list_releases is ordered newest-first (id DESC). Keep global releases
-        // for this product; walk newest-first and take the first stable match,
+        // list_releases is ordered newest-first (id DESC). Keep releases for
+        // this product; walk newest-first and take the first stable match,
         // remembering the first prerelease match as a fallback.
         let rows = db.list_releases().unwrap_or_default();
         let ids: Vec<i64> = rows
             .iter()
-            .filter(|r| r.6.is_none() && r.7 == product)
+            .filter(|r| r.6 == product)
             .map(|r| r.0)
             .collect();
         let assets_by_id = db.get_assets_for_releases(&ids).unwrap_or_default();
         let mut fallback: Option<(String, String)> = None;
         let mut chosen: Option<(String, String)> = None;
-        for r in rows.iter().filter(|r| r.6.is_none() && r.7 == product) {
+        for r in rows.iter().filter(|r| r.6 == product) {
             let Some(assets) = assets_by_id.get(&r.0) else { continue };
             let Some((name, _)) = assets.iter().find(|(n, _)| {
                 let lower = n.to_ascii_lowercase();
@@ -317,7 +317,7 @@ pub(crate) async fn handle_list_releases_admin(
     };
 
     let mut releases = Vec::with_capacity(rows.len());
-    for (id, tag, name, body, prerelease, created_at, workspace_id, product) in &rows {
+    for (id, tag, name, body, prerelease, created_at, product) in &rows {
         let assets = assets_by_id.remove(id).unwrap_or_default();
         releases.push(serde_json::json!({
             "tag": tag,
@@ -325,7 +325,6 @@ pub(crate) async fn handle_list_releases_admin(
             "body": body,
             "published_at": created_at,
             "prerelease": prerelease,
-            "workspace_id": workspace_id,
             "product": product,
             "assets": assets.iter().map(|(name, size)| serde_json::json!({
                 "name": name,
@@ -351,7 +350,6 @@ pub(crate) async fn handle_upload_release(
     let mut body = String::new();
     let mut prerelease = false;
     let mut product = DEFAULT_PRODUCT.to_string();
-    let mut workspace_id: Option<String> = None;
     let mut files: Vec<(String, Vec<u8>)> = Vec::new();
 
     while let Some(field) = multipart.next_field().await
@@ -382,13 +380,6 @@ pub(crate) async fn handle_upload_release(
                 let val = field.text().await
                     .map_err(|e| error_response(StatusCode::BAD_REQUEST, &e.to_string()))?;
                 prerelease = val == "true" || val == "1";
-            }
-            "workspace_id" => {
-                let val = field.text().await
-                    .map_err(|e| error_response(StatusCode::BAD_REQUEST, &e.to_string()))?;
-                if !val.is_empty() {
-                    workspace_id = Some(val);
-                }
             }
             "file" => {
                 let file_name = field.file_name().unwrap_or("unknown").to_string();
@@ -423,7 +414,7 @@ pub(crate) async fn handle_upload_release(
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         {
             Some(existing_id) => {
-                db.update_release_metadata(existing_id, &name, &body, prerelease, workspace_id.as_deref())
+                db.update_release_metadata(existing_id, &name, &body, prerelease)
                     .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
                 // Binaries are being attached, so a doc-only collection with
                 // this tag becomes a software release.
@@ -432,7 +423,7 @@ pub(crate) async fn handle_upload_release(
                 (existing_id, false)
             }
             None => {
-                let id = db.insert_release(&product, &tag, &name, &body, prerelease, workspace_id.as_deref(), "software")
+                let id = db.insert_release(&product, &tag, &name, &body, prerelease, "software")
                     .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
                 (id, true)
             }
@@ -444,7 +435,7 @@ pub(crate) async fn handle_upload_release(
     // (binaries) before /api/v1/docs/.../import, so the docs handler's own
     // seed step would otherwise see an existing release row and skip seeding.
     if newly_created {
-        docs::seed_user_docs_into_release(&state, release_id, &product, &tag, workspace_id.as_deref())?;
+        docs::seed_user_docs_into_release(&state, release_id, &product, &tag)?;
     }
 
     // Save files to disk
@@ -481,7 +472,7 @@ pub(crate) async fn handle_upload_release(
 }
 
 /// Update a release's metadata (name/body/prerelease) without touching the
-/// binary assets or its workspace scope. Admin only (JWT).
+/// binary assets. Admin only (JWT).
 pub(crate) async fn handle_update_release(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -498,65 +489,10 @@ pub(crate) async fn handle_update_release(
         .get_release_by_product_tag(product, &tag)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Release not found"))?;
-    let existing_ws = db
-        .get_release_workspace_id(product, &tag)
-        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
-        .flatten();
-    db.update_release_metadata(release_id, &req.name, &req.body, req.prerelease, existing_ws.as_deref())
+    db.update_release_metadata(release_id, &req.name, &req.body, req.prerelease)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
     audit_db(&db, &principal.username, "release.update", &tag, &format!("product={}", product));
     Ok(Json(serde_json::json!({ "status": "OK" })))
-}
-
-/// Move a release to a different workspace (or to global). Admin only.
-/// Files on disk stay put - releases are keyed by tag, not workspace.
-pub(crate) async fn handle_move_release(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Path(tag): Path<String>,
-    Query(pq): Query<ProductQuery>,
-    Json(req): Json<MoveReleaseRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    let principal = validate_principal(&headers, &state)?;
-    require_admin_full(&state, &principal)?;
-    let product = pq.slug();
-
-    let target = req
-        .workspace_id
-        .as_deref()
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty());
-
-    let db = state.db.lock();
-    if let Some(ws) = target {
-        if db
-            .get_workspace(ws)
-            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
-            .is_none()
-        {
-            return Err(error_response(StatusCode::NOT_FOUND, "Target workspace not found"));
-        }
-    }
-    let release_id = db
-        .get_release_by_product_tag(product, &tag)
-        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
-        .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Release not found"))?;
-    db.set_release_workspace(release_id, target)
-        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
-
-    log::info!("Release {} moved to workspace {:?}", tag, target);
-    audit_db(
-        &db,
-        &principal.username,
-        "release.move",
-        &tag,
-        &format!("product={} workspace={}", product, target.unwrap_or("global")),
-    );
-    Ok(Json(serde_json::json!({
-        "status": "OK",
-        "tag": tag,
-        "workspace_id": target,
-    })))
 }
 
 /// Delete a release - admin only (JWT)

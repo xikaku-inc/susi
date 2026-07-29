@@ -18,9 +18,10 @@ use serde_json::json;
 use susi_core::error::LicenseError;
 
 use crate::{
-    error_response, release_reader_check, release_writer_check, validate_principal, AppState,
-    ErrorResponse,
+    assert_workspace_member, error_response, require_admin_full, require_password_changed,
+    validate_principal, AppState, ErrorResponse,
 };
+use crate::workspaces::safe_workspace_id;
 
 // ---------------------------------------------------------------------------
 // Disk layout
@@ -35,12 +36,21 @@ fn docs_root(state: &AppState) -> std::path::PathBuf {
 /// no migration; every other product is namespaced (`docs/{product}/{tag}/...`)
 /// to avoid tag collisions. Back-compat shim: remove the special-case once all
 /// products use the namespaced layout.
-fn assets_dir(state: &AppState, product: &str, tag: &str) -> std::path::PathBuf {
+pub(crate) fn release_assets_dir(state: &AppState, product: &str, tag: &str) -> std::path::PathBuf {
     if product == susi_core::db::DEFAULT_PRODUCT {
         docs_root(state).join(tag).join("assets")
     } else {
         docs_root(state).join(product).join(tag).join("assets")
     }
+}
+
+/// On-disk asset directory for a workspace's documentation.
+pub(crate) fn ws_doc_assets_dir(state: &AppState, workspace_id: &str) -> std::path::PathBuf {
+    std::path::Path::new(&state.data_dir)
+        .join("workspaces")
+        .join(workspace_id)
+        .join("docs")
+        .join("assets")
 }
 
 /// Reject path components that could escape the asset directory.
@@ -117,23 +127,21 @@ fn db_err(e: LicenseError) -> (StatusCode, Json<ErrorResponse>) {
 }
 
 /// Seed a release that was just created with `origin='user'` doc pages +
-/// assets from the most recent prior release in the same scope (workspace or
-/// global). Physical asset files are copied on disk alongside the DB rows.
-/// Idempotent: `INSERT OR IGNORE` makes a second call a no-op. Call from any
-/// code path that creates a release row (binary-asset upload, docs editor,
-/// docs bulk import) so user docs always carry forward - but never across
-/// workspaces.
+/// assets from the most recent prior release of the same product. Physical
+/// asset files are copied on disk alongside the DB rows. Idempotent:
+/// `INSERT OR IGNORE` makes a second call a no-op. Call from any code path
+/// that creates a release row (binary-asset upload, docs editor, docs bulk
+/// import) so user docs always carry forward.
 pub(crate) fn seed_user_docs_into_release(
     state: &AppState,
     dst_id: i64,
     product: &str,
     dst_tag: &str,
-    workspace_id: Option<&str>,
 ) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
     let (src_tag, asset_names) = {
         let mut db = state.db.lock();
         let prior = db
-            .latest_prior_release_with_user_docs(dst_id, product, workspace_id)
+            .latest_prior_release_with_user_docs(dst_id, product)
             .map_err(db_err)?;
         let Some((src_id, src_tag)) = prior else {
             return Ok(());
@@ -148,8 +156,8 @@ pub(crate) fn seed_user_docs_into_release(
     };
 
     if !asset_names.is_empty() {
-        let src_dir = assets_dir(state, product, &src_tag);
-        let dst_dir = assets_dir(state, product, dst_tag);
+        let src_dir = release_assets_dir(state, product, &src_tag);
+        let dst_dir = release_assets_dir(state, product, dst_tag);
         if let Err(e) = std::fs::create_dir_all(&dst_dir) {
             log::warn!("Could not create asset dir {}: {}", dst_dir.display(), e);
         } else {
@@ -170,21 +178,19 @@ pub(crate) fn seed_user_docs_into_release(
 
 /// Ensure the release row for `(product, tag)` exists and, if it was just
 /// created, seed it with hand-authored content from the most recent prior
-/// release in the same scope. Returns the release id.
+/// release of the product. Returns the release id.
 fn ensure_release_with_seed(
     state: &AppState,
     product: &str,
     tag: &str,
     name: &str,
-    workspace_id: Option<&str>,
 ) -> Result<i64, (StatusCode, Json<ErrorResponse>)> {
     let (dst_id, newly_created) = {
         let db = state.db.lock();
-        db.ensure_release_created_scoped(product, tag, name, workspace_id)
-            .map_err(db_err)?
+        db.ensure_release_created_for(product, tag, name).map_err(db_err)?
     };
     if newly_created {
-        seed_user_docs_into_release(state, dst_id, product, tag, workspace_id)?;
+        seed_user_docs_into_release(state, dst_id, product, tag)?;
     }
     Ok(dst_id)
 }
@@ -269,13 +275,10 @@ pub async fn handle_latest_doc_release_p(
 
 async fn list_doc_pages_impl(
     state: &Arc<AppState>,
-    headers: &HeaderMap,
     product: &str,
     tag: &str,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     safe_tag(tag)?;
-    let principal_opt = validate_principal(headers, state).ok();
-    release_reader_check(state, principal_opt.as_ref(), product, tag)?;
     let db = state.db.lock();
     let release_id = db
         .get_release_by_product_tag(product, tag)
@@ -308,31 +311,26 @@ async fn list_doc_pages_impl(
 
 pub async fn handle_list_doc_pages(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Path(tag): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    list_doc_pages_impl(&state, &headers, DEFAULT_PRODUCT, &tag).await
+    list_doc_pages_impl(&state, DEFAULT_PRODUCT, &tag).await
 }
 
 pub async fn handle_list_doc_pages_p(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Path((product, tag)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     safe_product(&product)?;
-    list_doc_pages_impl(&state, &headers, &product, &tag).await
+    list_doc_pages_impl(&state, &product, &tag).await
 }
 
 async fn get_doc_page_impl(
     state: &Arc<AppState>,
-    headers: &HeaderMap,
     product: &str,
     tag: &str,
     slug: &str,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     safe_tag(tag)?;
-    let principal_opt = validate_principal(headers, state).ok();
-    release_reader_check(state, principal_opt.as_ref(), product, tag)?;
     let db = state.db.lock();
     let release_id = db
         .get_release_by_product_tag(product, tag)
@@ -356,40 +354,32 @@ async fn get_doc_page_impl(
 
 pub async fn handle_get_doc_page(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Path((tag, slug)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    get_doc_page_impl(&state, &headers, DEFAULT_PRODUCT, &tag, &slug).await
+    get_doc_page_impl(&state, DEFAULT_PRODUCT, &tag, &slug).await
 }
 
 pub async fn handle_get_doc_page_p(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Path((product, tag, slug)): Path<(String, String, String)>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     safe_product(&product)?;
-    get_doc_page_impl(&state, &headers, &product, &tag, &slug).await
+    get_doc_page_impl(&state, &product, &tag, &slug).await
 }
 
 #[derive(Deserialize)]
 pub struct AssetAuthQuery {
-    /// Bearer token passed via query string. Browser <img> requests can't set
-    /// an Authorization header, so workspace-scoped doc images need this
-    /// fallback. Identical validation path as the header form.
+    /// Bearer token passed via query string. Browser <img> and <a href>
+    /// requests can't set an Authorization header, so workspace-scoped doc
+    /// images and file downloads need this fallback. Identical validation
+    /// path as the header form.
     #[serde(default)]
     auth: Option<String>,
 }
 
-async fn get_doc_asset_impl(
-    state: &Arc<AppState>,
-    headers: &HeaderMap,
-    q: &AssetAuthQuery,
-    product: &str,
-    tag: &str,
-    file_name: &str,
-) -> Result<(HeaderMap, Vec<u8>), (StatusCode, Json<ErrorResponse>)> {
-    safe_tag(tag)?;
-    safe_filename(file_name)?;
+/// Clone the request headers, promoting a `?auth=` query token into an
+/// Authorization header when none is present.
+pub(crate) fn headers_with_query_auth(headers: &HeaderMap, q: &AssetAuthQuery) -> HeaderMap {
     let mut auth_headers = headers.clone();
     if !auth_headers.contains_key("authorization") {
         if let Some(tok) = q.auth.as_deref().filter(|s| !s.is_empty()) {
@@ -398,10 +388,19 @@ async fn get_doc_asset_impl(
             }
         }
     }
-    let principal_opt = validate_principal(&auth_headers, state).ok();
-    release_reader_check(state, principal_opt.as_ref(), product, tag)?;
+    auth_headers
+}
 
-    let path = assets_dir(state, product, tag).join(file_name);
+async fn get_doc_asset_impl(
+    state: &Arc<AppState>,
+    product: &str,
+    tag: &str,
+    file_name: &str,
+) -> Result<(HeaderMap, Vec<u8>), (StatusCode, Json<ErrorResponse>)> {
+    safe_tag(tag)?;
+    safe_filename(file_name)?;
+
+    let path = release_assets_dir(state, product, tag).join(file_name);
     if !path.exists() {
         return Err(error_response(StatusCode::NOT_FOUND, "Asset not found"));
     }
@@ -422,21 +421,17 @@ async fn get_doc_asset_impl(
 
 pub async fn handle_get_doc_asset(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Query(q): Query<AssetAuthQuery>,
     Path((tag, file_name)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    get_doc_asset_impl(&state, &headers, &q, DEFAULT_PRODUCT, &tag, &file_name).await
+    get_doc_asset_impl(&state, DEFAULT_PRODUCT, &tag, &file_name).await
 }
 
 pub async fn handle_get_doc_asset_p(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Query(q): Query<AssetAuthQuery>,
     Path((product, tag, file_name)): Path<(String, String, String)>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
     safe_product(&product)?;
-    get_doc_asset_impl(&state, &headers, &q, &product, &tag, &file_name).await
+    get_doc_asset_impl(&state, &product, &tag, &file_name).await
 }
 
 // ---------------------------------------------------------------------------
@@ -466,15 +461,10 @@ async fn upsert_doc_page_impl(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(headers, state)?;
     safe_tag(tag)?;
-    let workspace_id = release_writer_check(state, &principal, product, tag)?;
+    require_admin_full(state, &principal)?;
 
-    let release_id = ensure_release_with_seed(
-        state,
-        product,
-        tag,
-        req.release_name.as_deref().unwrap_or(""),
-        workspace_id.as_deref(),
-    )?;
+    let release_id =
+        ensure_release_with_seed(state, product, tag, req.release_name.as_deref().unwrap_or(""))?;
     let id = {
         let db = state.db.lock();
         db.upsert_doc_page(
@@ -524,7 +514,7 @@ async fn rename_doc_page_impl(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(headers, state)?;
     safe_tag(tag)?;
-    release_writer_check(state, &principal, product, tag)?;
+    require_admin_full(state, &principal)?;
     let new_slug = req.new_slug.trim();
     if new_slug.is_empty() || new_slug.contains('/') || new_slug.contains('\\') || new_slug.contains('\0') {
         return Err(error_response(StatusCode::BAD_REQUEST, "Invalid slug"));
@@ -577,7 +567,7 @@ async fn delete_doc_page_impl(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(headers, state)?;
     safe_tag(tag)?;
-    release_writer_check(state, &principal, product, tag)?;
+    require_admin_full(state, &principal)?;
 
     let db = state.db.lock();
     let release_id = db
@@ -631,7 +621,7 @@ async fn bulk_import_docs_impl(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
     safe_tag(&tag)?;
-    let workspace_id = release_writer_check(&state, &principal, product, &tag)?;
+    require_admin_full(&state, &principal)?;
 
     let mut release_name = String::new();
     let mut manifest: HashMap<String, PageManifestEntry> = HashMap::new();
@@ -707,7 +697,7 @@ async fn bulk_import_docs_impl(
         })
         .collect();
 
-    let release_id = ensure_release_with_seed(&state, product, &tag, &release_name, workspace_id.as_deref())?;
+    let release_id = ensure_release_with_seed(&state, product, &tag, &release_name)?;
     let (written_pages, skipped_user_slugs) = {
         let mut db = state.db.lock();
         db.upsert_doc_pages(release_id, &row_data).map_err(db_err)?
@@ -715,7 +705,7 @@ async fn bulk_import_docs_impl(
 
     // Pipeline-side asset upsert on disk + DB. User-owned assets with the same
     // file_name are left alone (both on disk and in DB).
-    let asset_path = assets_dir(&state, product, &tag);
+    let asset_path = release_assets_dir(&state, product, &tag);
     let mut written_assets = 0usize;
     let mut skipped_user_assets: Vec<String> = Vec::new();
     if !assets.is_empty() {
@@ -792,7 +782,7 @@ async fn upload_doc_asset_impl(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
     safe_tag(&tag)?;
-    let workspace_id = release_writer_check(&state, &principal, product, &tag)?;
+    require_admin_full(&state, &principal)?;
 
     // Pull the first "file" field from the multipart body.
     let mut file_name = String::new();
@@ -818,9 +808,9 @@ async fn upload_doc_asset_impl(
     safe_filename(&file_name)?;
 
     // Ensure the release exists so the asset has a valid parent row.
-    let release_id = ensure_release_with_seed(&state, product, &tag, "", workspace_id.as_deref())?;
+    let release_id = ensure_release_with_seed(&state, product, &tag, "")?;
 
-    let dir = assets_dir(&state, product, &tag);
+    let dir = release_assets_dir(&state, product, &tag);
     std::fs::create_dir_all(&dir).map_err(|e| {
         error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("mkdir: {}", e))
     })?;
@@ -875,7 +865,7 @@ async fn delete_doc_asset_impl(
     let principal = validate_principal(headers, state)?;
     safe_tag(tag)?;
     safe_filename(file_name)?;
-    release_writer_check(state, &principal, product, tag)?;
+    require_admin_full(state, &principal)?;
 
     let release_id = {
         let db = state.db.lock();
@@ -887,7 +877,7 @@ async fn delete_doc_asset_impl(
         let db = state.db.lock();
         db.delete_doc_asset(release_id, file_name).map_err(db_err)?
     };
-    let _ = std::fs::remove_file(assets_dir(state, product, tag).join(file_name));
+    let _ = std::fs::remove_file(release_assets_dir(state, product, tag).join(file_name));
     if !removed {
         return Err(error_response(StatusCode::NOT_FOUND, "Asset not found"));
     }
@@ -909,6 +899,232 @@ pub async fn handle_delete_doc_asset_p(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     safe_product(&product)?;
     delete_doc_asset_impl(&state, &headers, &product, &tag, &file_name).await
+}
+
+// ---------------------------------------------------------------------------
+// Workspace docs: one flat page tree per workspace, member-writable. Reads
+// and writes both require workspace membership (site admins pass via
+// workspace_access).
+// ---------------------------------------------------------------------------
+
+fn ws_member_check(
+    state: &AppState,
+    headers: &HeaderMap,
+    workspace_id: &str,
+) -> Result<crate::Principal, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(headers, state)?;
+    require_password_changed(state, &principal)?;
+    assert_workspace_member(state, workspace_id, &principal)?;
+    Ok(principal)
+}
+
+pub async fn handle_ws_list_doc_pages(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    ws_member_check(&state, &headers, &workspace_id)?;
+    let db = state.db.lock();
+    let pages = db.list_ws_doc_pages(&workspace_id).map_err(db_err)?;
+    let assets = db.list_ws_doc_assets(&workspace_id).map_err(db_err)?;
+    let pages_json: Vec<_> = pages
+        .into_iter()
+        .map(|(slug, title, parent_slug, ord, updated_at)| {
+            json!({
+                "slug": slug,
+                "title": title,
+                "parent_slug": parent_slug,
+                "ord": ord,
+                "updated_at": updated_at,
+            })
+        })
+        .collect();
+    let assets_json: Vec<_> = assets
+        .into_iter()
+        .map(|(name, size)| json!({ "name": name, "size": size }))
+        .collect();
+    Ok(Json(json!({ "pages": pages_json, "assets": assets_json })))
+}
+
+pub async fn handle_ws_get_doc_page(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((workspace_id, slug)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    ws_member_check(&state, &headers, &workspace_id)?;
+    let db = state.db.lock();
+    let page = db
+        .get_ws_doc_page(&workspace_id, &slug)
+        .map_err(db_err)?
+        .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Page not found"))?;
+    let (title, body_md, parent_slug, ord, updated_at) = page;
+    Ok(Json(json!({
+        "slug": slug,
+        "title": title,
+        "body_md": body_md,
+        "parent_slug": parent_slug,
+        "ord": ord,
+        "updated_at": updated_at,
+    })))
+}
+
+pub async fn handle_ws_upsert_doc_page(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((workspace_id, slug)): Path<(String, String)>,
+    Json(req): Json<UpsertPageRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    ws_member_check(&state, &headers, &workspace_id)?;
+    let id = {
+        let db = state.db.lock();
+        db.upsert_ws_doc_page(
+            &workspace_id,
+            &slug,
+            &req.title,
+            &req.body_md,
+            req.parent_slug.as_deref(),
+            req.ord,
+        )
+        .map_err(db_err)?
+    };
+    Ok(Json(json!({ "id": id, "slug": slug })))
+}
+
+pub async fn handle_ws_rename_doc_page(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((workspace_id, slug)): Path<(String, String)>,
+    Json(req): Json<RenamePageRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    ws_member_check(&state, &headers, &workspace_id)?;
+    let new_slug = req.new_slug.trim();
+    if new_slug.is_empty() || new_slug.contains('/') || new_slug.contains('\\') || new_slug.contains('\0') {
+        return Err(error_response(StatusCode::BAD_REQUEST, "Invalid slug"));
+    }
+    let mut db = state.db.lock();
+    match db.rename_ws_doc_page(&workspace_id, &slug, new_slug) {
+        Ok(true) => Ok(Json(json!({ "slug": new_slug }))),
+        Ok(false) => Err(error_response(StatusCode::NOT_FOUND, "Page not found")),
+        Err(e) => {
+            let msg = format!("{}", e);
+            if msg.contains("UNIQUE") {
+                Err(error_response(StatusCode::CONFLICT, "Target slug already exists"))
+            } else {
+                Err(error_response(StatusCode::INTERNAL_SERVER_ERROR, &msg))
+            }
+        }
+    }
+}
+
+pub async fn handle_ws_delete_doc_page(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((workspace_id, slug)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    ws_member_check(&state, &headers, &workspace_id)?;
+    let removed = {
+        let db = state.db.lock();
+        db.delete_ws_doc_page(&workspace_id, &slug).map_err(db_err)?
+    };
+    if !removed {
+        return Err(error_response(StatusCode::NOT_FOUND, "Page not found"));
+    }
+    Ok(Json(json!({ "status": "OK" })))
+}
+
+pub async fn handle_ws_upload_doc_asset(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<String>,
+    mut multipart: Multipart,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    ws_member_check(&state, &headers, &workspace_id)?;
+    safe_workspace_id(&workspace_id)?;
+
+    let mut file_name = String::new();
+    let mut bytes: Vec<u8> = Vec::new();
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| error_response(StatusCode::BAD_REQUEST, &format!("Multipart: {}", e)))?
+    {
+        if field.name() == Some("file") {
+            file_name = field.file_name().unwrap_or("").to_string();
+            let data = field
+                .bytes()
+                .await
+                .map_err(|e| error_response(StatusCode::BAD_REQUEST, &e.to_string()))?;
+            bytes = data.to_vec();
+            break;
+        }
+    }
+    if file_name.is_empty() || bytes.is_empty() {
+        return Err(error_response(StatusCode::BAD_REQUEST, "Missing 'file' field"));
+    }
+    safe_filename(&file_name)?;
+
+    let dir = ws_doc_assets_dir(&state, &workspace_id);
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("mkdir: {}", e))
+    })?;
+    std::fs::write(dir.join(&file_name), &bytes).map_err(|e| {
+        error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("write: {}", e))
+    })?;
+    {
+        let db = state.db.lock();
+        db.upsert_ws_doc_asset(&workspace_id, &file_name, bytes.len() as u64)
+            .map_err(db_err)?;
+    }
+    let url = format!("/api/v1/workspaces/{}/docs/assets/{}", workspace_id, file_name);
+    Ok(Json(json!({ "name": file_name, "size": bytes.len(), "url": url })))
+}
+
+pub async fn handle_ws_get_doc_asset(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(q): Query<AssetAuthQuery>,
+    Path((workspace_id, file_name)): Path<(String, String)>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    // Browser <img> loads can't set an Authorization header; accept ?auth=.
+    let auth_headers = headers_with_query_auth(&headers, &q);
+    ws_member_check(&state, &auth_headers, &workspace_id)?;
+    safe_workspace_id(&workspace_id)?;
+    safe_filename(&file_name)?;
+
+    let path = ws_doc_assets_dir(&state, &workspace_id).join(&file_name);
+    if !path.exists() {
+        return Err(error_response(StatusCode::NOT_FOUND, "Asset not found"));
+    }
+    let bytes = tokio::fs::read(&path)
+        .await
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("Read: {}", e)))?;
+
+    let mut resp = HeaderMap::new();
+    resp.insert(header::CONTENT_TYPE, content_type_for(&file_name).parse().unwrap());
+    resp.insert(header::CONTENT_LENGTH, bytes.len().into());
+    // Private: workspace assets are membership-gated, so no shared caches.
+    resp.insert(header::CACHE_CONTROL, "private, max-age=3600".parse().unwrap());
+    harden_svg_response(&file_name, &mut resp);
+    Ok((resp, bytes))
+}
+
+pub async fn handle_ws_delete_doc_asset(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((workspace_id, file_name)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    ws_member_check(&state, &headers, &workspace_id)?;
+    safe_workspace_id(&workspace_id)?;
+    safe_filename(&file_name)?;
+    let removed = {
+        let db = state.db.lock();
+        db.delete_ws_doc_asset(&workspace_id, &file_name).map_err(db_err)?
+    };
+    let _ = std::fs::remove_file(ws_doc_assets_dir(&state, &workspace_id).join(&file_name));
+    if !removed {
+        return Err(error_response(StatusCode::NOT_FOUND, "Asset not found"));
+    }
+    Ok(Json(json!({ "status": "OK" })))
 }
 
 /// Pick a title: first H1 in the markdown, else humanize the slug.
@@ -1086,10 +1302,6 @@ fn docs_ssr_response(
     let Some(latest) = latest_public_tag(state) else { return docs_ssr_not_found() };
     let tag = req_tag.unwrap_or_else(|| latest.clone());
     if safe_tag(&tag).is_err() {
-        return docs_ssr_not_found();
-    }
-    // Workspace-scoped releases require auth; they never get an SSR page.
-    if release_reader_check(state, None, DEFAULT_PRODUCT, &tag).is_err() {
         return docs_ssr_not_found();
     }
     let (page, in_latest) = {

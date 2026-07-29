@@ -799,12 +799,24 @@ let products = [];
 let currentProduct = 'fusionhub';
 let currentTag = null;
 
-// Base path for doc page/asset operations. Workspace docs go through the legacy
-// (default-product) routes; global docs are product-scoped.
-function docBase() {
+// URL builders for doc page/asset operations. Workspace docs are scoped to
+// the workspace (no release tag); global docs are product- and tag-scoped.
+function pagesBaseUrl() {
     return currentWorkspaceId
-        ? API + '/docs'
-        : API + '/products/' + encodeURIComponent(currentProduct) + '/docs';
+        ? API + '/workspaces/' + encodeURIComponent(currentWorkspaceId) + '/docs/pages'
+        : API + '/products/' + encodeURIComponent(currentProduct) + '/docs/' + encodeURIComponent(currentTag) + '/pages';
+}
+function pageUrl(slug) {
+    return pagesBaseUrl() + '/' + encodeURIComponent(slug);
+}
+function assetsBaseUrl() {
+    return currentWorkspaceId
+        ? API + '/workspaces/' + encodeURIComponent(currentWorkspaceId) + '/docs/assets'
+        : API + '/products/' + encodeURIComponent(currentProduct) + '/docs/' + encodeURIComponent(currentTag) + '/assets';
+}
+// Hash route for a page: workspace docs have no tag segment.
+function pageHash(slug) {
+    return currentWorkspaceId ? '#/' + slug : '#/' + currentTag + '/' + slug;
 }
 let pages = [];        // [{slug, title, parent_slug, ord, updated_at}]
 let assets = [];       // [{name, size}]
@@ -813,12 +825,10 @@ let currentPage = null; // {title, body_md, parent_slug, ord, updated_at}
 let editMode = false;
 
 // Workspace mode: when ?workspace=<id> is present in the URL, the editor
-// scopes itself to that workspace. The release listing comes from a
-// workspace-only endpoint and all read fetches send auth (workspace doc reads
-// require membership). Initial tag may also be pinned via ?tag=<tag>.
+// scopes itself to that workspace's flat page tree (no releases, no tags).
+// All workspace doc fetches send auth (reads require membership).
 const workspaceParams = new URLSearchParams(location.search);
 const currentWorkspaceId = workspaceParams.get('workspace') || null;
-const initialTagParam = workspaceParams.get('tag') || null;
 let currentWorkspaceName = null;
 
 // Deep links carry the product as `?product=<slug>` (absent = the default
@@ -853,7 +863,7 @@ function refreshEditButtons() {
     const editBtn = document.getElementById('editBtn');
     const newBtn = document.getElementById('newPageBtn');
     if (editBtn && currentPage) editBtn.style.display = canEditDocs() ? '' : 'none';
-    if (newBtn) newBtn.style.display = (canEditDocs() && currentTag) ? '' : 'none';
+    if (newBtn) newBtn.style.display = (canEditDocs() && (currentWorkspaceId || currentTag)) ? '' : 'none';
     // "+ Version" lets an admin start a fresh version for the current product.
     // Hidden in workspace mode (releases there are created from the Workspaces
     // page and are workspace-scoped).
@@ -1021,8 +1031,10 @@ function logoutFromDocs() {
 // Build the nav once on load.
 renderTopNav();
 
-// In workspace mode, show the workspace name in the header.
+// In workspace mode, show the workspace name in the header. Workspace docs
+// have no release dimension, so the release picker stays hidden.
 if (currentWorkspaceId) {
+    document.getElementById('releasePicker').style.display = 'none';
     (async () => {
         try {
             const r = await fetch(API + '/workspaces/' + encodeURIComponent(currentWorkspaceId), {
@@ -1108,7 +1120,7 @@ function renderInline(s) {
     // Links [text](url)
     out = out.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, text, url) => {
         const safe = url.startsWith('http') || url.startsWith('#') || url.startsWith('/')
-            ? url : '#/' + currentTag + '/' + url;
+            ? url : pageHash(url);
         return '<a href="' + safe + '">' + text + '</a>';
     });
     out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
@@ -1118,8 +1130,8 @@ function renderInline(s) {
 
 function resolveAssetUrl(url) {
     if (url.startsWith('http') || url.startsWith('/') || url.startsWith('data:')) return url;
-    if (!currentTag) return url;
-    let assetUrl = docBase() + '/' + encodeURIComponent(currentTag) + '/assets/' + encodeURIComponent(url);
+    if (!currentWorkspaceId && !currentTag) return url;
+    let assetUrl = assetsBaseUrl() + '/' + encodeURIComponent(url);
     // Workspace-scoped doc reads require auth, but browser <img> requests don't
     // send the Authorization header. Pass the JWT via query string for these.
     if (currentWorkspaceId && authToken()) {
@@ -1305,16 +1317,12 @@ async function onProductChanged() {
 }
 
 async function loadReleases() {
-    const url = currentWorkspaceId
-        ? API + '/workspaces/' + encodeURIComponent(currentWorkspaceId) + '/docs/releases'
-        : API + '/products/' + encodeURIComponent(currentProduct) + '/docs/releases';
+    const url = API + '/products/' + encodeURIComponent(currentProduct) + '/docs/releases';
     const resp = await fetch(url, { headers: docHeaders() });
     // null = fetch denied/failed (error state already rendered), so route()
     // won't overwrite it with the "no releases yet" hint.
     if (!resp.ok) {
-        renderEmptyState(currentWorkspaceId
-            ? 'Could not load workspace documentation. Are you signed in as a workspace member?'
-            : 'Could not load documentation index.');
+        renderEmptyState('Could not load documentation index.');
         return null;
     }
     const data = await resp.json();
@@ -1329,7 +1337,7 @@ async function loadReleases() {
 async function loadRelease(tag) {
     currentTag = tag;
     document.getElementById('releasePicker').value = tag;
-    const resp = await fetch(docBase() + '/' + encodeURIComponent(tag) + '/pages', { headers: docHeaders() });
+    const resp = await fetch(pagesBaseUrl(), { headers: docHeaders() });
     if (!resp.ok) {
         renderEmptyState('Release "' + tag + '" not found.');
         return;
@@ -1340,13 +1348,29 @@ async function loadRelease(tag) {
     renderSidebar();
 }
 
+// Workspace mode: fetch the workspace's flat page tree. Returns false (and
+// renders an error state) when the fetch is denied.
+let wsPagesLoaded = false;
+async function loadWorkspacePages() {
+    const resp = await fetch(pagesBaseUrl(), { headers: docHeaders() });
+    if (!resp.ok) {
+        renderEmptyState('Could not load workspace documentation. Are you signed in as a workspace member?');
+        return false;
+    }
+    const data = await resp.json();
+    pages = data.pages || [];
+    assets = data.assets || [];
+    renderSidebar();
+    return true;
+}
+
 async function loadPage(slug) {
-    if (!currentTag) return;
+    if (!currentWorkspaceId && !currentTag) return;
     currentSlug = slug;
-    const resp = await fetch(docBase() + '/' + encodeURIComponent(currentTag) + '/pages/' + encodeURIComponent(slug), { headers: docHeaders() });
+    const resp = await fetch(pageUrl(slug), { headers: docHeaders() });
     if (!resp.ok) {
         currentPage = null;
-        renderEmptyState('Page "' + slug + '" not found in this release.');
+        renderEmptyState('Page "' + slug + '" not found.');
         return;
     }
     currentPage = await resp.json();
@@ -1405,7 +1429,7 @@ function renderSidebar() {
 
 function renderSidebarItem(p, isHead) {
     const cls = (p.slug === currentSlug ? 'active' : '') + (isHead ? ' section-head' : '');
-    return '<a class="' + cls + '" href="#/' + escHtml(currentTag) + '/' + escHtml(p.slug) + '">' + escHtml(p.title) + '</a>';
+    return '<a class="' + cls + '" href="' + escHtml(pageHash(p.slug)) + '">' + escHtml(p.title) + '</a>';
 }
 
 function renderEmptyState(msg) {
@@ -1460,10 +1484,11 @@ function scrollToAnchor(id) {
     }
 }
 
-// Shareable route for a section of the current page: "#/{tag}/{slug}/{id}".
-// Written with replaceState so it doesn't trigger the hash router.
+// Shareable route for a section of the current page: "#/{tag}/{slug}/{id}"
+// (workspace mode: "#/{slug}/{id}"). Written with replaceState so it doesn't
+// trigger the hash router.
 function markSection(id) {
-    history.replaceState({}, '', '#/' + currentTag + '/' + currentSlug + '/' + encodeURIComponent(id));
+    history.replaceState({}, '', pageHash(currentSlug) + '/' + encodeURIComponent(id));
 }
 
 // In-content same-page anchor links ("#heading-id"): scroll instead of letting
@@ -1702,12 +1727,12 @@ function easymdePreviewRender(plainText) {
 /// Signature: (file, onSuccess(url), onError(msg))
 async function easymdeImageUpload(file, onSuccess, onError) {
     if (!canEditDocs()) { onError('Login required'); return; }
-    if (!currentTag) { onError('No release selected'); return; }
+    if (!currentWorkspaceId && !currentTag) { onError('No release selected'); return; }
     const name = generateAssetName(file);
     try {
         const fd = new FormData();
         fd.append('file', file, name);
-        const resp = await fetch(docBase() + '/' + encodeURIComponent(currentTag) + '/assets', {
+        const resp = await fetch(assetsBaseUrl(), {
             method: 'POST',
             headers: { 'Authorization': 'Bearer ' + authToken() },
             body: fd,
@@ -1784,7 +1809,7 @@ async function savePage() {
 
     let targetSlug = currentSlug;
     if (newSlug !== currentSlug) {
-        const renameResp = await fetch(docBase() + '/' + encodeURIComponent(currentTag) + '/pages/' + encodeURIComponent(currentSlug) + '/rename', {
+        const renameResp = await fetch(pageUrl(currentSlug) + '/rename', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken() },
             body: JSON.stringify({ new_slug: newSlug }),
@@ -1798,7 +1823,7 @@ async function savePage() {
         targetSlug = newSlug;
     }
 
-    const resp = await fetch(docBase() + '/' + encodeURIComponent(currentTag) + '/pages/' + encodeURIComponent(targetSlug), {
+    const resp = await fetch(pageUrl(targetSlug), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken() },
         body: JSON.stringify({ title, body_md, parent_slug: parent || null, ord }),
@@ -1815,9 +1840,9 @@ async function savePage() {
     toast('Saved', 'success');
     editMode = false;
     if (targetSlug !== currentSlug) {
-        location.hash = '#/' + currentTag + '/' + targetSlug;
+        location.hash = pageHash(targetSlug);
     } else {
-        await loadRelease(currentTag);
+        if (currentWorkspaceId) { await loadWorkspacePages(); } else { await loadRelease(currentTag); }
         await loadPage(currentSlug);
     }
 }
@@ -1859,15 +1884,20 @@ function handleSessionExpired(currentBody) {
 
 async function deletePage() {
     if (!confirm('Delete page "' + currentPage.title + '"? This cannot be undone.')) return;
-    const resp = await fetch(docBase() + '/' + encodeURIComponent(currentTag) + '/pages/' + encodeURIComponent(currentSlug), {
+    const resp = await fetch(pageUrl(currentSlug), {
         method: 'DELETE',
         headers: { 'Authorization': 'Bearer ' + authToken() },
     });
     if (!resp.ok) { toast('Delete failed', 'error'); return; }
     toast('Deleted', 'success');
     currentSlug = null; currentPage = null;
-    await loadRelease(currentTag);
-    location.hash = '#/' + currentTag;
+    if (currentWorkspaceId) {
+        await loadWorkspacePages();
+        if (location.hash) { location.hash = ''; } else { route(); }
+    } else {
+        await loadRelease(currentTag);
+        location.hash = '#/' + currentTag;
+    }
 }
 
 async function newPage() {
@@ -1877,7 +1907,7 @@ async function newPage() {
     const cleanSlug = slug.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '-');
     if (!cleanSlug) { toast('Invalid slug', 'error'); return; }
     const title = prompt('Page title:', cleanSlug) || cleanSlug;
-    const resp = await fetch(docBase() + '/' + encodeURIComponent(currentTag) + '/pages/' + encodeURIComponent(cleanSlug), {
+    const resp = await fetch(pageUrl(cleanSlug), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken() },
         body: JSON.stringify({ title, body_md: '# ' + title + '\n\n', parent_slug: null, ord: 999 }),
@@ -1886,6 +1916,11 @@ async function newPage() {
         let msg = 'Create failed (HTTP ' + resp.status + ')';
         try { const d = await resp.json(); if (d && d.error) msg = d.error; } catch (_) {}
         toast(msg, 'error');
+        return;
+    }
+    if (currentWorkspaceId) {
+        await loadWorkspacePages();
+        location.hash = pageHash(cleanSlug);
         return;
     }
     // The release row is created lazily on the first page save, so refresh the
@@ -1943,30 +1978,57 @@ async function route() {
     window.__SSR = null;
     const hash = location.hash.replace(/^#\/?/, '');
     const parts = hash.split('/').filter(Boolean).map(decodeURIComponent);
+
+    // Workspace mode: no release dimension - routes are "#/{slug}/{anchor?}".
+    if (currentWorkspaceId) {
+        if (!wsPagesLoaded) {
+            if (!(await loadWorkspacePages())) return;
+            wsPagesLoaded = true;
+        }
+        if (pages.length === 0) {
+            currentSlug = null; currentPage = null;
+            document.getElementById('content').innerHTML = '<div class="empty-state"><h2>No documentation pages yet</h2><p style="color:var(--text2);margin-top:8px;">Click <strong>+ Page</strong> to create the first one.</p></div>';
+            document.getElementById('newPageBtn').style.display = canEditDocs() ? '' : 'none';
+            document.getElementById('editBtn').style.display = 'none';
+            return;
+        }
+        const slug = parts[0];
+        const anchor = parts[1] || '';
+        if (anchor && slug === currentSlug && currentPage && !editMode) {
+            scrollToAnchor(anchor);
+            return;
+        }
+        if (slug) {
+            await loadPage(slug);
+            if (anchor) scrollToAnchor(anchor);
+        } else {
+            const sorted = [...pages].sort((a, b) => a.ord - b.ord || a.title.localeCompare(b.title));
+            const first = sorted.find(p => !p.parent_slug) || sorted[0];
+            location.hash = '#/' + first.slug;
+        }
+        return;
+    }
+
     if (parts.length === 0 && ssr && ssr.tag && ssr.slug) {
         parts.push(ssr.tag, ssr.slug);
     }
-    if (!currentWorkspaceId && products.length === 0) await loadProducts();
+    if (products.length === 0) await loadProducts();
     if (releases.length === 0) {
         const ok = await loadReleases();
         if (!ok) {
-            // No releases for this product/workspace - clear any pages left over
-            // from a previously selected product so the sidebar doesn't lie.
+            // No releases for this product - clear any pages left over from a
+            // previously selected product so the sidebar doesn't lie.
             pages = []; assets = []; currentTag = null; currentSlug = null; currentPage = null;
             renderSidebar();
             document.getElementById('editBtn').style.display = 'none';
             document.getElementById('newPageBtn').style.display = 'none';
             if (ok !== null) {
-                renderEmptyState(currentWorkspaceId
-                    ? 'No documentation releases in this workspace yet. Create one from the Workspaces page.'
-                    : 'No documentation has been published yet.');
+                renderEmptyState('No documentation has been published yet.');
             }
             return;
         }
     }
-    // Hash takes precedence; otherwise use ?tag= (one-shot, only on first load)
-    // and fall back to the first release in the listing.
-    const tag = parts[0] || (initialTagParam && releases.some(r => r.tag === initialTagParam) ? initialTagParam : releases[0].tag);
+    const tag = parts[0] || releases[0].tag;
     // Optional third segment: a section anchor within the page
     // ("#/{tag}/{slug}/{heading-id}"). Same-page anchor navigation just
     // scrolls - no refetch, no re-render.
@@ -1978,8 +2040,7 @@ async function route() {
     if (tag !== currentTag) await loadRelease(tag);
     if (pages.length === 0) {
         // Empty release: still surface the "+ Page" button for logged-in users
-        // so they can create the first page. Otherwise newly-created workspace
-        // releases would have no entry point.
+        // so they can create the first page.
         document.getElementById('content').innerHTML = '<div class="empty-state"><h2>No pages in this release</h2><p style="color:var(--text2);margin-top:8px;">Click <strong>+ Page</strong> to create the first one.</p></div>';
         document.getElementById('newPageBtn').style.display = canEditDocs() ? '' : 'none';
         document.getElementById('editBtn').style.display = 'none';

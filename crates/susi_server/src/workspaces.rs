@@ -143,12 +143,18 @@ pub(crate) async fn handle_delete_workspace(
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
 
-    let db = state.db.lock();
-    db.delete_workspace(&id)
-        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    {
+        let db = state.db.lock();
+        db.delete_workspace(&id)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    }
+    // Remove the workspace's on-disk files + doc assets.
+    if safe_workspace_id(&id).is_ok() {
+        let _ = std::fs::remove_dir_all(std::path::Path::new(&state.data_dir).join("workspaces").join(&id));
+    }
 
     log::info!("Workspace {} deleted by {}", id, principal.username);
-    audit_db(&db, &principal.username, "workspace.delete", &id, "");
+    audit(&state, &principal.username, "workspace.delete", &id, "");
     Ok(Json(serde_json::json!({ "status": "OK" })))
 }
 
@@ -695,7 +701,15 @@ pub(crate) async fn handle_rotate_workspace_federation(
     Ok(Json(serde_json::json!({ "status": "OK", "channel_secret": new_secret })))
 }
 
-/// List releases visible to a workspace (workspace-specific + global).
+// ---------------------------------------------------------------------------
+// Workspace files: flat per-workspace file share (replaces the retired
+// workspace-scoped releases). Bytes live on disk under
+// data_dir/workspaces/{id}/files; any workspace member may read and write.
+// ---------------------------------------------------------------------------
+
+/// Deployed FusionHub UIs still poll this endpoint. Workspace releases were
+/// folded into workspace files, so answer with an empty list instead of 404.
+/// Back-compat shim: remove once fielded FusionHubs use the files endpoint.
 pub(crate) async fn handle_workspace_releases(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -703,145 +717,268 @@ pub(crate) async fn handle_workspace_releases(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
     require_password_changed(&state, &principal)?;
-
-    let (rows, mut assets_by_id) = {
-        let db = state.db.lock();
-        db.workspace_access(&workspace_id, &principal.username)
-            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
-            .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
-
-        let rows = db
-            .list_releases_for_workspace(&workspace_id)
-            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
-        let ids: Vec<i64> = rows.iter().map(|r| r.0).collect();
-        let assets_by_id = db.get_assets_for_releases(&ids).unwrap_or_default();
-        (rows, assets_by_id)
-    };
-
-    let mut releases = Vec::new();
-    for (id, tag, name, body, prerelease, created_at) in &rows {
-        let assets = assets_by_id.remove(id).unwrap_or_default();
-        releases.push(serde_json::json!({
-            "tag": tag,
-            "name": name,
-            "body": body,
-            "published_at": created_at,
-            "prerelease": prerelease,
-            "assets": assets.iter().map(|(name, size)| serde_json::json!({
-                "name": name,
-                "size": size,
-            })).collect::<Vec<_>>(),
-        }));
-    }
-
-    Ok(Json(serde_json::json!({ "releases": releases })))
+    assert_workspace_member(&state, &workspace_id, &principal)?;
+    Ok(Json(serde_json::json!({ "releases": [] })))
 }
 
-/// List doc-bearing releases scoped to a single workspace. Workspace members
-/// and site admins may call this; non-members get 403. Mirrors
-/// `handle_list_doc_releases` but filtered to one workspace.
-pub(crate) async fn handle_list_workspace_doc_releases(
+pub(crate) fn workspace_files_dir(state: &AppState, workspace_id: &str) -> std::path::PathBuf {
+    std::path::Path::new(&state.data_dir)
+        .join("workspaces")
+        .join(workspace_id)
+        .join("files")
+}
+
+/// Workspace ids are server-minted UUIDs, but they arrive as a path segment -
+/// reject anything that could escape the workspaces directory before using
+/// one in a filesystem path.
+pub(crate) fn safe_workspace_id(id: &str) -> Result<&str, (StatusCode, Json<ErrorResponse>)> {
+    if id.is_empty()
+        || id.contains('/')
+        || id.contains('\\')
+        || id.contains('\0')
+        || id == "."
+        || id == ".."
+    {
+        return Err(error_response(StatusCode::BAD_REQUEST, "Invalid workspace id"));
+    }
+    Ok(id)
+}
+
+pub(crate) async fn handle_list_workspace_files(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(workspace_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
     require_password_changed(&state, &principal)?;
-    {
-        let db = state.db.lock();
-        db.workspace_access(&workspace_id, &principal.username)
-            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
-            .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
-    }
+    assert_workspace_member(&state, &workspace_id, &principal)?;
 
-    let db = state.db.lock();
-    let rows = db.list_doc_releases_for_workspace(&workspace_id)
-        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
-    let releases: Vec<_> = rows
+    let rows = {
+        let db = state.db.lock();
+        db.list_workspace_files(&workspace_id)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+    };
+    let files: Vec<_> = rows
         .into_iter()
-        .map(|(_id, tag, name, created_at, page_count)| {
+        .map(|(name, size, author, created_at)| {
             serde_json::json!({
-                "tag": tag,
                 "name": name,
-                "published_at": created_at,
-                "page_count": page_count,
+                "size": size,
+                "author": author,
+                "created_at": created_at,
             })
         })
         .collect();
-    Ok(Json(serde_json::json!({ "releases": releases })))
+    Ok(Json(serde_json::json!({ "files": files })))
 }
 
-/// Create a workspace-scoped doc release. Site admins and workspace members
-/// may call this (members author their workspace's documentation). Re-using a
-/// tag that belongs to a different workspace (or to global) is rejected.
-pub(crate) async fn handle_create_workspace_doc_release(
+/// Upload one or more files (repeated multipart `file` fields). Re-uploading
+/// an existing name overwrites it.
+pub(crate) async fn handle_upload_workspace_files(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(workspace_id): Path<String>,
-    Json(req): Json<CreateWorkspaceDocReleaseRequest>,
+    mut multipart: Multipart,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
     require_password_changed(&state, &principal)?;
+    assert_workspace_member(&state, &workspace_id, &principal)?;
+    safe_workspace_id(&workspace_id)?;
+
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    while let Some(field) = multipart.next_field().await
+        .map_err(|e| error_response(StatusCode::BAD_REQUEST, &format!("Multipart error: {}", e)))?
     {
-        let db = state.db.lock();
-        db.workspace_access(&workspace_id, &principal.username)
-            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
-            .ok_or_else(|| error_response(StatusCode::FORBIDDEN, "Not a member of this workspace"))?;
+        if field.name() == Some("file") {
+            let file_name = field.file_name().unwrap_or("unknown").to_string();
+            docs::safe_filename(&file_name)?;
+            let data = field.bytes().await
+                .map_err(|e| error_response(StatusCode::BAD_REQUEST, &format!("File read error: {}", e)))?;
+            files.push((file_name, data.to_vec()));
+        }
+    }
+    if files.is_empty() {
+        return Err(error_response(StatusCode::BAD_REQUEST, "No files uploaded"));
     }
 
-    let tag = req.tag.trim().to_string();
-    docs::safe_tag(&tag)?;
-    if tag.is_empty() {
-        return Err(error_response(StatusCode::BAD_REQUEST, "Missing 'tag'"));
+    let dir = workspace_files_dir(&state, &workspace_id);
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("Cannot create dir: {}", e)))?;
+
+    let mut names = Vec::new();
+    for (file_name, data) in &files {
+        std::fs::write(dir.join(file_name), data)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("Write error: {}", e)))?;
+        let db = state.db.lock();
+        db.upsert_workspace_file(&workspace_id, file_name, data.len() as u64, &principal.username)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+        names.push(file_name.clone());
     }
 
-    // Idempotent within a single workspace: if the tag already lives in this
-    // workspace (e.g. created by a prior software upload), we just return the
-    // existing release so the caller can attach docs. Cross-scope collisions
-    // (different workspace, or a global release with the same tag) are
-    // rejected - those would change ownership semantics.
-    let existing_ws = {
+    audit(&state, &principal.username, "workspace.file_upload", &workspace_id, &names.join(","));
+    Ok(Json(serde_json::json!({ "status": "OK", "files": names })))
+}
+
+pub(crate) async fn handle_download_workspace_file(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((workspace_id, file_name)): Path<(String, String)>,
+    Query(q): Query<docs::AssetAuthQuery>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    // Browser <a href> downloads can't set an Authorization header, so accept
+    // the JWT via ?auth= as well - same fallback the doc asset endpoint uses.
+    let auth_headers = docs::headers_with_query_auth(&headers, &q);
+    let principal = validate_principal(&auth_headers, &state)?;
+    require_password_changed(&state, &principal)?;
+    assert_workspace_member(&state, &workspace_id, &principal)?;
+    safe_workspace_id(&workspace_id)?;
+    docs::safe_filename(&file_name)?;
+
+    let path = workspace_files_dir(&state, &workspace_id).join(&file_name);
+    let file = tokio::fs::File::open(&path)
+        .await
+        .map_err(|_| error_response(StatusCode::NOT_FOUND, "File not found"))?;
+    let metadata = file
+        .metadata()
+        .await
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Read error"))?;
+
+    let mut resp_headers = HeaderMap::new();
+    resp_headers.insert(header::CONTENT_TYPE, "application/octet-stream".parse().unwrap());
+    resp_headers.insert(
+        header::CONTENT_DISPOSITION,
+        format!("attachment; filename=\"{}\"", file_name).parse().unwrap(),
+    );
+    resp_headers.insert(header::CONTENT_LENGTH, metadata.len().into());
+    let stream = tokio_util::io::ReaderStream::new(file);
+    Ok((resp_headers, axum::body::Body::from_stream(stream)))
+}
+
+pub(crate) async fn handle_delete_workspace_file(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((workspace_id, file_name)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    require_password_changed(&state, &principal)?;
+    assert_workspace_member(&state, &workspace_id, &principal)?;
+    safe_workspace_id(&workspace_id)?;
+    docs::safe_filename(&file_name)?;
+
+    let removed = {
         let db = state.db.lock();
-        db.get_release_workspace_id(DEFAULT_PRODUCT, &tag)
+        db.delete_workspace_file(&workspace_id, &file_name)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
     };
-    if let Some(ref existing) = existing_ws {
-        match existing {
-            Some(ws) if ws == &workspace_id => {
-                let id = {
-                    let db = state.db.lock();
-                    db.get_release_by_product_tag(DEFAULT_PRODUCT, &tag)
-                        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
-                        .ok_or_else(|| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Release vanished"))?
-                };
-                // Seeding is INSERT OR IGNORE, so calling again is a no-op
-                // when user pages already exist for this release.
-                docs::seed_user_docs_into_release(&state, id, DEFAULT_PRODUCT, &tag, Some(&workspace_id))?;
-                return Ok(Json(serde_json::json!({
-                    "tag": tag,
-                    "name": req.name,
-                    "workspace_id": workspace_id,
-                    "id": id,
-                    "already_existed": true,
-                })));
+    let _ = std::fs::remove_file(workspace_files_dir(&state, &workspace_id).join(&file_name));
+    if !removed {
+        return Err(error_response(StatusCode::NOT_FOUND, "File not found"));
+    }
+    audit(&state, &principal.username, "workspace.file_delete", &workspace_id, &file_name);
+    Ok(Json(serde_json::json!({ "status": "OK" })))
+}
+
+// ---------------------------------------------------------------------------
+// One-time startup migration: fold the retired workspace-scoped releases into
+// workspace files (binary assets) and workspace docs (pages + assets), then
+// delete the release rows. Idempotent - a run with no scoped rows is a no-op.
+// ---------------------------------------------------------------------------
+
+pub(crate) fn migrate_workspace_releases(state: &AppState) {
+    let scoped = {
+        let db = state.db.lock();
+        match db.list_workspace_scoped_releases() {
+            Ok(v) => v,
+            Err(e) => {
+                log::error!("Workspace release migration: listing failed: {}", e);
+                return;
             }
-            _ => {
-                return Err(error_response(StatusCode::CONFLICT, "Release tag already exists in another scope"));
+        }
+    };
+    if scoped.is_empty() {
+        return;
+    }
+    log::info!("Migrating {} workspace-scoped release(s) into workspace files/docs", scoped.len());
+
+    // Newest first (list is ordered id DESC): on name/slug collisions within a
+    // workspace the newest release wins; older files fall back to a tag prefix.
+    for (release_id, tag, product, ws_id, created_at) in scoped {
+        let res = migrate_one_workspace_release(state, release_id, &tag, &product, &ws_id, &created_at);
+        if let Err(e) = res {
+            log::error!("Workspace release migration: {} ({}): {}", tag, ws_id, e);
+        }
+    }
+}
+
+fn migrate_one_workspace_release(
+    state: &AppState,
+    release_id: i64,
+    tag: &str,
+    product: &str,
+    ws_id: &str,
+    created_at: &str,
+) -> Result<(), String> {
+    if safe_workspace_id(ws_id).is_err() || docs::safe_tag(tag).is_err() || docs::safe_product(product).is_err() {
+        return Err("unsafe path component".into());
+    }
+
+    // Binary assets -> workspace files (move on disk, keep the release date).
+    let assets = {
+        let db = state.db.lock();
+        db.get_release_assets(release_id).map_err(|e| e.to_string())?
+    };
+    let files_dir = workspace_files_dir(state, ws_id);
+    if !assets.is_empty() {
+        std::fs::create_dir_all(&files_dir).map_err(|e| e.to_string())?;
+    }
+    let src_dir = crate::release_tag_dir(state, product, tag);
+    for (name, size) in &assets {
+        let taken = {
+            let db = state.db.lock();
+            db.workspace_file_exists(ws_id, name).map_err(|e| e.to_string())?
+        };
+        let dst_name = if taken { format!("{}-{}", tag, name) } else { name.clone() };
+        let src = src_dir.join(name);
+        let dst = files_dir.join(&dst_name);
+        if src.exists() {
+            if let Err(e) = std::fs::rename(&src, &dst) {
+                log::warn!("Migration: move {} -> {} failed: {}", src.display(), dst.display(), e);
+                continue;
+            }
+        }
+        let db = state.db.lock();
+        db.migrate_workspace_file_row(ws_id, &dst_name, *size, created_at)
+            .map_err(|e| e.to_string())?;
+    }
+
+    // Doc pages + assets -> workspace docs (rows via SQL, asset files on disk).
+    let doc_asset_names = {
+        let db = state.db.lock();
+        db.migrate_release_docs_to_workspace(release_id, ws_id)
+            .map_err(|e| e.to_string())?
+    };
+    if !doc_asset_names.is_empty() {
+        let dst_dir = docs::ws_doc_assets_dir(state, ws_id);
+        std::fs::create_dir_all(&dst_dir).map_err(|e| e.to_string())?;
+        let src_assets = docs::release_assets_dir(state, product, tag);
+        for name in &doc_asset_names {
+            let src = src_assets.join(name);
+            let dst = dst_dir.join(name);
+            if src.exists() && !dst.exists() {
+                if let Err(e) = std::fs::copy(&src, &dst) {
+                    log::warn!("Migration: copy doc asset {} failed: {}", name, e);
+                }
             }
         }
     }
 
-    let release_id = {
+    // Drop the release row (children cascade) and its leftover directories.
+    {
         let db = state.db.lock();
-        db.insert_release(DEFAULT_PRODUCT, &tag, &req.name, "", false, Some(&workspace_id), "docs")
-            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
-    };
-    docs::seed_user_docs_into_release(&state, release_id, DEFAULT_PRODUCT, &tag, Some(&workspace_id))?;
-
-    Ok(Json(serde_json::json!({
-        "tag": tag,
-        "name": req.name,
-        "workspace_id": workspace_id,
-        "id": release_id,
-    })))
+        db.delete_release_by_id(release_id).map_err(|e| e.to_string())?;
+    }
+    let _ = std::fs::remove_dir_all(&src_dir);
+    let _ = std::fs::remove_dir_all(docs::release_assets_dir(state, product, tag));
+    log::info!("Migrated workspace release {} -> workspace {}", tag, ws_id);
+    Ok(())
 }

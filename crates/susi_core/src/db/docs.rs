@@ -306,39 +306,6 @@ impl LicenseDb {
         Ok(rows)
     }
 
-    /// List releases that belong to a specific workspace, regardless of whether
-    /// they have any doc pages yet. Used by the workspace docs editor to show
-    /// all workspace-scoped releases the user can author docs into.
-    pub fn list_doc_releases_for_workspace(
-        &self,
-        workspace_id: &str,
-    ) -> Result<Vec<(i64, String, String, String, i64)>, LicenseError> {
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT r.id, r.tag, r.name, r.created_at,
-                        (SELECT COUNT(*) FROM doc_pages p WHERE p.release_id = r.id)
-                 FROM releases r
-                 WHERE r.workspace_id = ?1
-                 ORDER BY r.id DESC",
-            )
-            .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
-        let rows = stmt
-            .query_map(params![workspace_id], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, i64>(4)?,
-                ))
-            })
-            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
-            .filter_map(|r| r.ok())
-            .collect();
-        Ok(rows)
-    }
-
     /// Ensure a release row exists for the given tag under the default product
     /// - used by bulk doc import when the docs ship before the binary release.
     /// Returns the release id.
@@ -354,60 +321,38 @@ impl LicenseDb {
         tag: &str,
         name: &str,
     ) -> Result<(i64, bool), LicenseError> {
-        self.ensure_release_created_scoped(DEFAULT_PRODUCT, tag, name, None)
+        self.ensure_release_created_for(DEFAULT_PRODUCT, tag, name)
     }
 
-    /// Product- and workspace-aware variant. When `workspace_id` is `Some`, the
-    /// release is created with that scope. If the (product, tag) already exists
-    /// with a *different* scope (or none), returns the existing id without
-    /// modifying it - a caller that cares should reject that case before
-    /// calling.
-    pub fn ensure_release_created_scoped(
+    /// Product-aware variant.
+    pub fn ensure_release_created_for(
         &self,
         product: &str,
         tag: &str,
         name: &str,
-        workspace_id: Option<&str>,
     ) -> Result<(i64, bool), LicenseError> {
         if let Some(id) = self.get_release_by_product_tag(product, tag)? {
             return Ok((id, false));
         }
         // Only doc handlers create releases through here, so a fresh row is a
         // doc-only collection. A later binary upload promotes it to 'software'.
-        let id = self.insert_release(product, tag, name, "", false, workspace_id, "docs")?;
+        let id = self.insert_release(product, tag, name, "", false, "docs")?;
         Ok((id, true))
     }
 
     /// Return (id, tag) of the most recent release that has at least one
     /// `origin='user'` doc page, excluding a given release id. Restricted to
-    /// the same product and workspace scope (`Some(ws)` for a workspace
-    /// release; `None` for a global release) so that user docs never seed
-    /// across products or workspaces.
+    /// the same product so user docs never seed across products.
     pub fn latest_prior_release_with_user_docs(
         &self,
         exclude_id: i64,
         product: &str,
-        workspace_id: Option<&str>,
     ) -> Result<Option<(i64, String)>, LicenseError> {
-        let res = match workspace_id {
-            Some(ws) => self.conn.query_row(
-                "SELECT r.id, r.tag FROM releases r
-                 WHERE r.id != ?1
-                   AND r.product = ?3
-                   AND r.workspace_id = ?2
-                   AND EXISTS (
-                       SELECT 1 FROM doc_pages p
-                       WHERE p.release_id = r.id AND p.origin = 'user'
-                   )
-                 ORDER BY r.id DESC LIMIT 1",
-                params![exclude_id, ws, product],
-                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
-            ),
-            None => self.conn.query_row(
+        self.conn
+            .query_row(
                 "SELECT r.id, r.tag FROM releases r
                  WHERE r.id != ?1
                    AND r.product = ?2
-                   AND r.workspace_id IS NULL
                    AND EXISTS (
                        SELECT 1 FROM doc_pages p
                        WHERE p.release_id = r.id AND p.origin = 'user'
@@ -415,9 +360,8 @@ impl LicenseDb {
                  ORDER BY r.id DESC LIMIT 1",
                 params![exclude_id, product],
                 |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
-            ),
-        };
-        res.optional()
+            )
+            .optional()
             .map_err(|e| LicenseError::Other(format!("DB prior release: {}", e)))
     }
 

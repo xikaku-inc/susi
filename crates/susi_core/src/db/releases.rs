@@ -15,14 +15,13 @@ impl LicenseDb {
         name: &str,
         body: &str,
         prerelease: bool,
-        workspace_id: Option<&str>,
         kind: &str,
     ) -> Result<i64, LicenseError> {
         let now = Utc::now().to_rfc3339();
         self.conn
             .execute(
-                "INSERT INTO releases (product, tag, name, body, prerelease, created_at, workspace_id, kind) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![product, tag, name, body, prerelease as i32, now, workspace_id, kind],
+                "INSERT INTO releases (product, tag, name, body, prerelease, created_at, kind) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![product, tag, name, body, prerelease as i32, now, kind],
             )
             .map_err(|e| LicenseError::Other(format!("DB insert release: {}", e)))?;
         Ok(self.conn.last_insert_rowid())
@@ -79,13 +78,12 @@ impl LicenseDb {
         name: &str,
         body: &str,
         prerelease: bool,
-        workspace_id: Option<&str>,
     ) -> Result<(), LicenseError> {
         let now = Utc::now().to_rfc3339();
         self.conn
             .execute(
-                "UPDATE releases SET name = ?1, body = ?2, prerelease = ?3, workspace_id = ?4, created_at = ?5 WHERE id = ?6",
-                params![name, body, prerelease as i32, workspace_id, now, release_id],
+                "UPDATE releases SET name = ?1, body = ?2, prerelease = ?3, created_at = ?4 WHERE id = ?5",
+                params![name, body, prerelease as i32, now, release_id],
             )
             .map_err(|e| LicenseError::Other(format!("DB update release: {}", e)))?;
         Ok(())
@@ -93,10 +91,9 @@ impl LicenseDb {
 
     pub fn list_releases(
         &self,
-    ) -> Result<Vec<(i64, String, String, String, bool, String, Option<String>, String)>, LicenseError>
-    {
+    ) -> Result<Vec<(i64, String, String, String, bool, String, String)>, LicenseError> {
         let mut stmt = self.conn
-            .prepare("SELECT id, tag, name, body, prerelease, created_at, workspace_id, product FROM releases WHERE kind = 'software' ORDER BY id DESC")
+            .prepare("SELECT id, tag, name, body, prerelease, created_at, product FROM releases WHERE kind = 'software' ORDER BY id DESC")
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
         let rows = stmt
             .query_map([], |r| {
@@ -107,40 +104,7 @@ impl LicenseDb {
                     r.get::<_, String>(3)?,
                     r.get::<_, i32>(4)? != 0,
                     r.get::<_, String>(5)?,
-                    r.get::<_, Option<String>>(6)?,
-                    r.get::<_, String>(7)?,
-                ))
-            })
-            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
-            .filter_map(|r| r.ok())
-            .collect();
-        Ok(rows)
-    }
-
-    /// List releases that belong to a single workspace. Global releases are
-    /// excluded - those are reachable through the public/admin global release
-    /// listing and don't belong on a workspace-specific surface.
-    pub fn list_releases_for_workspace(
-        &self,
-        workspace_id: &str,
-    ) -> Result<Vec<(i64, String, String, String, bool, String)>, LicenseError> {
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT id, tag, name, body, prerelease, created_at FROM releases
-                 WHERE workspace_id = ?1 AND kind = 'software'
-                 ORDER BY id DESC",
-            )
-            .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
-        let rows = stmt
-            .query_map(params![workspace_id], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, i32>(4)? != 0,
-                    r.get::<_, String>(5)?,
+                    r.get::<_, String>(6)?,
                 ))
             })
             .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
@@ -218,42 +182,6 @@ impl LicenseDb {
             |r| r.get(0),
         ) {
             Ok(id) => Ok(Some(id)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(LicenseError::Other(format!("DB query: {}", e))),
-        }
-    }
-
-    /// Reassign a release to a different workspace (or to global with `None`).
-    /// Doesn't touch any other column - doc pages, assets, and software files
-    /// stay attached because they FK on release_id, not on workspace_id.
-    pub fn set_release_workspace(
-        &self,
-        release_id: i64,
-        workspace_id: Option<&str>,
-    ) -> Result<(), LicenseError> {
-        self.conn
-            .execute(
-                "UPDATE releases SET workspace_id = ?1 WHERE id = ?2",
-                params![workspace_id, release_id],
-            )
-            .map_err(|e| LicenseError::Other(format!("DB move release: {}", e)))?;
-        Ok(())
-    }
-
-    /// Return `Some(workspace_id_or_none)` if the (product, tag) exists, else
-    /// `None`. Inner `Option` is `Some(ws_id)` for workspace-scoped, `None` for
-    /// global.
-    pub fn get_release_workspace_id(
-        &self,
-        product: &str,
-        tag: &str,
-    ) -> Result<Option<Option<String>>, LicenseError> {
-        match self.conn.query_row(
-            "SELECT workspace_id FROM releases WHERE product = ?1 AND tag = ?2",
-            params![product, tag],
-            |r| r.get::<_, Option<String>>(0),
-        ) {
-            Ok(ws) => Ok(Some(ws)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(LicenseError::Other(format!("DB query: {}", e))),
         }
