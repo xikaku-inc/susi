@@ -172,9 +172,13 @@ body {
 .sidebar a.section-head {
     padding-left: 24px;
 }
-.sidebar a .chev { display: none; }
-.sidebar .sidebar-children,
-.sidebar .sidebar-children.collapsed { display: block; }
+.sidebar a .chev {
+    display: inline-block;
+    width: 14px;
+    font-size: 9px;
+    color: var(--text2);
+}
+.sidebar .sidebar-children.collapsed { display: none; }
 .sidebar .sidebar-children a { padding-left: 40px; }
 .sidebar .empty { padding: 16px; color: var(--text2); font-size: 14px; }
 
@@ -785,6 +789,8 @@ const RESERVED_TOP_PATHS = new Set(['site', 'shop', 'api', 'static', 'docs', 'ro
 
 let pages = [];
 let assets = [];
+// Sidebar group config from the "nav_structure" site setting (null = flat nav).
+let navStructure = null;
 let currentSlug = null;
 let currentPage = null;
 let editMode = false;
@@ -834,6 +840,12 @@ function escHtml(s) {
     return (s || '')
         .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function decodeEntities(s) {
+    const el = document.createElement('textarea');
+    el.innerHTML = s;
+    return el.value;
 }
 
 // ---------------------------------------------------------------------------
@@ -1022,6 +1034,7 @@ async function loadIndex() {
     const data = await resp.json();
     pages = data.pages || [];
     assets = data.assets || [];
+    navStructure = Array.isArray(data.nav) ? data.nav : null;
     return true;
 }
 
@@ -1080,19 +1093,46 @@ function renderSidebar() {
         }
     });
     topLevel.sort((a, b) => a.ord - b.ord || a.title.localeCompare(b.title));
-    let html = '';
-    topLevel.forEach(p => {
+    const renderTop = p => {
         const children = byParent.get(p.slug) || [];
         children.sort((a, b) => a.ord - b.ord || a.title.localeCompare(b.title));
         const hasChildren = children.length > 0;
         const expanded = hasChildren && (p.slug === currentSlug || children.some(c => c.slug === currentSlug));
-        html += renderSidebarItem(p, true, hasChildren, expanded);
+        let h = renderSidebarItem(p, true, hasChildren, expanded);
         if (hasChildren) {
-            html += '<div class="sidebar-children' + (expanded ? '' : ' collapsed') + '">';
-            children.forEach(c => html += renderSidebarItem(c, false, false, false));
-            html += '</div>';
+            h += '<div class="sidebar-children' + (expanded ? '' : ' collapsed') + '">';
+            children.forEach(c => h += renderSidebarItem(c, false, false, false));
+            h += '</div>';
         }
-    });
+        return h;
+    };
+    // Fixed Blog/Shop links; '__blog__'/'__shop__' place them inside groups.
+    const onPost = currentPage && currentPage.page_kind === 'post';
+    const blogActive = (currentSlug === 'blog' || onPost) ? ' active' : '';
+    const blogLink = '<a class="section-head' + blogActive + '" href="' + SITE_PATH_PREFIX + '/blog">Blog</a>';
+    const shopActive = currentSlug === '__shop__' ? ' active' : '';
+    const shopLink = '<a class="section-head' + shopActive + '" href="/shop">Shop</a>';
+    const bySlug = new Map(topLevel.map(p => [p.slug, p]));
+    let html = '';
+    if (navStructure && navStructure.length) {
+        // Grouped nav from the "nav_structure" site setting. Ungrouped pages
+        // (Home, any newly created top-level page) come first, in ord order.
+        const groupedSlugs = new Set(navStructure.flatMap(g => g.items || []));
+        topLevel.filter(p => !groupedSlugs.has(p.slug)).forEach(p => html += renderTop(p));
+        navStructure.forEach(g => {
+            let body = '';
+            (g.items || []).forEach(s => {
+                if (s === '__blog__') body += blogLink;
+                else if (s === '__shop__') body += shopLink;
+                else if (bySlug.has(s)) body += renderTop(bySlug.get(s));
+            });
+            if (body) html += '<h3>' + escHtml(g.title || '') + '</h3>' + body;
+        });
+    } else {
+        // No nav config: flat top-level list with Blog and Shop at the end.
+        topLevel.forEach(p => html += renderTop(p));
+        html += blogLink + shopLink;
+    }
     const orphans = navPages.filter(p => p.parent_slug && !slugSet.has(p.parent_slug));
     if (orphans.length) {
         const groups = new Map();
@@ -1106,11 +1146,6 @@ function renderSidebar() {
             items.forEach(it => html += renderSidebarItem(it, false, false, false));
         }
     }
-    const onPost = currentPage && currentPage.page_kind === 'post';
-    const blogActive = (currentSlug === 'blog' || onPost) ? ' active' : '';
-    html += '<a class="section-head' + blogActive + '" href="' + SITE_PATH_PREFIX + '/blog">Blog</a>';
-    const shopActive = currentSlug === '__shop__' ? ' active' : '';
-    html += '<a class="section-head' + shopActive + '" href="/shop">Shop</a>';
     sb.innerHTML = html;
 }
 
@@ -1254,7 +1289,8 @@ function injectHeadingIds(html) {
     const out = html.replace(/<h([1-4])(?![^>]*\bid=)([^>]*)>([\s\S]*?)<\/h\1>/g,
         (_m, lvl, attrs, inner) => {
             const level = parseInt(lvl, 10);
-            const text = inner.replace(/<[^>]+>/g, '').trim();
+            // Decode entities so downstream escHtml doesn't double-escape.
+            const text = decodeEntities(inner.replace(/<[^>]+>/g, '')).trim();
             if (!text) return _m;
             const id = slugify(text);
             headings.push({ level, text, id });

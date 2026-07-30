@@ -90,6 +90,7 @@ pub async fn handle_list_pages(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let is_admin = is_admin_request(&headers, &state);
+    let nav = nav_structure_json(&state);
     let db = state.db.lock();
     let mut pages = db.list_website_pages().map_err(db_err)?;
     if !is_admin {
@@ -119,6 +120,7 @@ pub async fn handle_list_pages(
     Ok(Json(json!({
         "pages": pages_json,
         "assets": assets_json,
+        "nav": nav,
     })))
 }
 
@@ -1565,6 +1567,48 @@ pub const SETTING_GOOGLE_ADS_ID: &str = "google_ads_id";
 pub const SETTING_GOOGLE_ADS_LABEL_CONTACT: &str = "google_ads_label_contact";
 pub const SETTING_GOOGLE_ADS_LABEL_PURCHASE: &str = "google_ads_label_purchase";
 pub const SETTING_REDDIT_PIXEL_ID: &str = "reddit_pixel_id";
+pub const SETTING_NAV_STRUCTURE: &str = "nav_structure";
+
+/// Sidebar nav config: JSON array of groups rendered between the ungrouped
+/// pages and nothing else. Items are page slugs, plus the pseudo-slugs
+/// "__blog__" and "__shop__" for the fixed Blog/Shop links.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NavGroup {
+    title: String,
+    items: Vec<String>,
+}
+
+fn is_valid_nav_structure(s: &str) -> bool {
+    if s.len() > 4096 {
+        return false;
+    }
+    match serde_json::from_str::<Vec<NavGroup>>(s) {
+        Ok(groups) => {
+            groups.len() <= 12
+                && groups.iter().all(|g| {
+                    !g.title.trim().is_empty()
+                        && g.title.len() <= 40
+                        && g.items.len() <= 50
+                        && g.items.iter().all(|i| !i.is_empty() && i.len() <= 100)
+                })
+        }
+        Err(_) => false,
+    }
+}
+
+/// Parsed nav structure for the public pages response, or None when the
+/// setting is unset/invalid (the site then falls back to a flat nav).
+pub fn nav_structure_json(state: &Arc<AppState>) -> Option<serde_json::Value> {
+    let raw = {
+        let db = state.db.lock();
+        db.get_site_setting(SETTING_NAV_STRUCTURE).ok().flatten()?
+    };
+    if !is_valid_nav_structure(&raw) {
+        return None;
+    }
+    serde_json::from_str(&raw).ok()
+}
 
 /// Validate an analytics tag ID (GA Measurement ID, Reddit Pixel ID).
 /// Restrict to `[A-Za-z0-9_-]` so it can be safely interpolated into
@@ -1823,6 +1867,7 @@ const KNOWN_SITE_SETTING_KEYS: &[&str] = &[
     SETTING_GOOGLE_ADS_LABEL_CONTACT,
     SETTING_GOOGLE_ADS_LABEL_PURCHASE,
     SETTING_REDDIT_PIXEL_ID,
+    SETTING_NAV_STRUCTURE,
 ];
 
 pub async fn handle_admin_get_site_settings(
@@ -1863,8 +1908,15 @@ pub async fn handle_admin_put_site_settings(
             return Err(error_response(StatusCode::BAD_REQUEST, &format!("Unknown setting: {}", k)));
         }
         let trimmed = v.trim();
-        // All known site settings are analytics tag IDs / conversion labels.
-        if !trimmed.is_empty() && !is_valid_analytics_id(trimmed) {
+        if k == SETTING_NAV_STRUCTURE {
+            if !trimmed.is_empty() && !is_valid_nav_structure(trimmed) {
+                return Err(error_response(
+                    StatusCode::BAD_REQUEST,
+                    "nav_structure must be a JSON array of {\"title\", \"items\"} groups (max 4 KB)",
+                ));
+            }
+        } else if !trimmed.is_empty() && !is_valid_analytics_id(trimmed) {
+            // The remaining site settings are analytics tag IDs / labels.
             return Err(error_response(
                 StatusCode::BAD_REQUEST,
                 &format!("{} must contain only letters, digits, '-' or '_' (max 64 chars)", k),
@@ -2150,5 +2202,28 @@ mod tests {
     #[test]
     fn analytics_head_empty_when_unset() {
         assert_eq!(render_analytics_head(None, None, None, None, None), "");
+    }
+
+    #[test]
+    fn nav_structure_validator_accepts_groups() {
+        assert!(is_valid_nav_structure(
+            r#"[{"title":"Products","items":["sensors","fusionhub","__shop__"]},
+                {"title":"Resources","items":["downloads","use-cases","__blog__"]},
+                {"title":"Company","items":["our-story","contact"]}]"#
+        ));
+        assert!(is_valid_nav_structure("[]"));
+    }
+
+    #[test]
+    fn nav_structure_validator_rejects_bad_shapes() {
+        assert!(!is_valid_nav_structure("not json"));
+        assert!(!is_valid_nav_structure(r#"{"title":"x","items":[]}"#));
+        assert!(!is_valid_nav_structure(r#"[{"title":"","items":["a"]}]"#));
+        assert!(!is_valid_nav_structure(r#"[{"title":"x","items":[""]}]"#));
+        assert!(!is_valid_nav_structure(r#"[{"title":"x","items":["a"],"extra":1}]"#));
+        let long_title = format!(r#"[{{"title":"{}","items":["a"]}}]"#, "t".repeat(41));
+        assert!(!is_valid_nav_structure(&long_title));
+        let too_big = format!(r#"[{{"title":"x","items":["{}"]}}]"#, "a".repeat(5000));
+        assert!(!is_valid_nav_structure(&too_big));
     }
 }

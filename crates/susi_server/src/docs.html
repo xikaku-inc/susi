@@ -1074,6 +1074,12 @@ function escHtml(s) {
         .replace(/'/g, '&#39;');
 }
 
+function decodeEntities(s) {
+    const el = document.createElement('textarea');
+    el.innerHTML = s;
+    return el.value;
+}
+
 // ---------------------------------------------------------------------------
 // Markdown renderer - handles what generate_node_docs.py emits:
 // ATX headers, fenced code blocks, inline code, bold/italic, links, images,
@@ -1552,7 +1558,8 @@ function injectHeadingIds(html) {
     const out = html.replace(/<h([1-4])(?![^>]*\bid=)([^>]*)>([\s\S]*?)<\/h\1>/g,
         (_m, lvl, attrs, inner) => {
             const level = parseInt(lvl, 10);
-            const text = inner.replace(/<[^>]+>/g, '').trim();
+            // Decode entities so downstream escHtml doesn't double-escape.
+            const text = decodeEntities(inner.replace(/<[^>]+>/g, '')).trim();
             if (!text) return _m;
             const id = slugify(text);
             headings.push({ level, text, id });
