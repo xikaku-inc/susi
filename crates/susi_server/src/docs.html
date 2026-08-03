@@ -1716,7 +1716,7 @@ function initEasyMDE(initialBody) {
             { name: 'table', action: EasyMDE.drawTable, text: '⊞', title: 'Insert table' },
             '|',
             { name: 'link', action: EasyMDE.drawLink, text: '🔗', title: 'Insert link' },
-            { name: 'upload-image', action: '*image-upload*', text: '🖼', title: 'Upload image' },
+            { name: 'upload-image', action: EasyMDE.drawUploadedImage, text: '🖼', title: 'Upload image' },
             { name: 'horizontal-rule', action: EasyMDE.drawHorizontalRule, text: '-', title: 'Horizontal rule' },
             '|',
             { name: 'preview', action: EasyMDE.togglePreview, text: '👁', title: 'Toggle preview', noDisable: true },
