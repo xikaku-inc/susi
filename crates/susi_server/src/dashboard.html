@@ -1485,6 +1485,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                 <tr>
                     <th>Slug</th>
                     <th>Title</th>
+                    <th style="width:150px;">Tags</th>
                     <th style="width:140px;">Parent</th>
                     <th style="width:80px;">Ord</th>
                     <th style="width:180px;">Updated</th>
@@ -1492,7 +1493,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                 </tr>
             </thead>
             <tbody id="websitePagesBody">
-                <tr><td colspan="6" class="empty-state"><p>Loading...</p></td></tr>
+                <tr><td colspan="7" class="empty-state"><p>Loading...</p></td></tr>
             </tbody>
         </table>
     </div>
@@ -5525,6 +5526,7 @@ function renderShopProducts() {
             ? '<img src="' + escHtml(p.image_url) + '" style="width:40px;height:40px;object-fit:cover;border-radius:4px;">'
             : '<span style="color:var(--text2);font-size:11px;">-</span>';
         const price = shopFmtMoney(p.price_cents, p.currency);
+        const menuId = 'shop-product-menu-' + p.sku.replace(/[^a-zA-Z0-9_-]/g, '_');
         return '<tr>'
             + '<td>' + img + '</td>'
             + '<td><code>' + escHtml(p.sku) + '</code></td>'
@@ -5533,8 +5535,14 @@ function renderShopProducts() {
             + '<td>' + (p.active ? 'yes' : '<span style="color:var(--text2);">no</span>') + '</td>'
             + '<td>' + p.ord + '</td>'
             + '<td style="text-align:right;">'
-            +   '<button onclick="showProductModal(\'' + escHtml(p.sku) + '\')">Edit</button> '
-            +   '<button class="danger" onclick="deleteShopProduct(\'' + escHtml(p.sku) + '\')">Delete</button>'
+            +   '<span class="dropdown" onclick="event.stopPropagation();">'
+            +     '<button onclick="toggleDropdown(event,\'' + menuId + '\')">Actions &#9662;</button>'
+            +     '<div id="' + menuId + '" class="dropdown-menu" style="display:none;">'
+            +       '<button onclick="showProductModal(\'' + escHtml(p.sku) + '\')">Edit</button>'
+            +       '<div class="divider"></div>'
+            +       '<button class="danger" onclick="deleteShopProduct(\'' + escHtml(p.sku) + '\')">Delete</button>'
+            +     '</div>'
+            +   '</span>'
             + '</td>'
             + '</tr>';
     }).join('');
@@ -5645,6 +5653,7 @@ function renderShopRates() {
         const delivery = (r.delivery_min_days != null && r.delivery_max_days != null)
             ? r.delivery_min_days + '-' + r.delivery_max_days
             : (r.delivery_min_days != null ? '≥' + r.delivery_min_days : (r.delivery_max_days != null ? '≤' + r.delivery_max_days : '-'));
+        const menuId = 'shop-rate-menu-' + r.id;
         return '<tr>'
             + '<td>' + escHtml(r.label) + '</td>'
             + '<td>' + escHtml(shopFmtMoney(r.amount_cents, r.currency)) + '</td>'
@@ -5652,8 +5661,14 @@ function renderShopRates() {
             + '<td>' + escHtml(delivery) + '</td>'
             + '<td>' + (r.active ? 'yes' : '<span style="color:var(--text2);">no</span>') + '</td>'
             + '<td style="text-align:right;">'
-            +   '<button onclick="showShippingRateModal(' + r.id + ')">Edit</button> '
-            +   '<button class="danger" onclick="deleteShopRate(' + r.id + ')">Delete</button>'
+            +   '<span class="dropdown" onclick="event.stopPropagation();">'
+            +     '<button onclick="toggleDropdown(event,\'' + menuId + '\')">Actions &#9662;</button>'
+            +     '<div id="' + menuId + '" class="dropdown-menu" style="display:none;">'
+            +       '<button onclick="showShippingRateModal(' + r.id + ')">Edit</button>'
+            +       '<div class="divider"></div>'
+            +       '<button class="danger" onclick="deleteShopRate(' + r.id + ')">Delete</button>'
+            +     '</div>'
+            +   '</span>'
             + '</td>'
             + '</tr>';
     }).join('');
@@ -6120,7 +6135,7 @@ async function loadWebsitePages() {
 function renderWebsitePagesTable() {
     const tbody = document.getElementById('websitePagesBody');
     if (!websitePages.length) {
-        tbody.innerHTML = '<tr><td colspan="6" class="empty-state"><p>No pages yet</p></td></tr>';
+        tbody.innerHTML = '<tr><td colspan="7" class="empty-state"><p>No pages yet</p></td></tr>';
         return;
     }
     tbody.innerHTML = websitePages.map(p => {
@@ -6130,19 +6145,17 @@ function renderWebsitePagesTable() {
             : '<span style="color:var(--text2);">-</span>';
         const menuId = 'website-page-menu-' + p.slug.replace(/[^a-zA-Z0-9_-]/g, '_');
         const slugArg = JSON.stringify(p.slug).replace(/"/g, '&quot;');
-        const hiddenBadge = p.hidden
-            ? ' <span class="badge" style="background:var(--bg3);color:var(--text2);">hidden</span>'
-            : '';
-        const postBadge = p.page_kind === 'post'
-            ? ' <span class="badge" style="background:var(--bg3);color:var(--text2);">post</span>'
-            : '';
+        const hiddenBadge = p.hidden ? '<span class="badge">hidden</span>' : '';
+        const postBadge = p.page_kind === 'post' ? '<span class="badge">post</span>' : '';
+        const tags = postBadge + hiddenBadge;
         // Dim the content cells individually - opacity on the <tr> would
         // create a stacking context that traps the fixed-position dropdown
         // menu below the following rows.
         const dim = p.hidden ? ' style="opacity:0.6;"' : '';
         return '<tr>'
             + '<td' + dim + '><code>' + escHtml(p.slug) + '</code></td>'
-            + '<td' + dim + '>' + escHtml(p.title) + postBadge + hiddenBadge + '</td>'
+            + '<td' + dim + '>' + escHtml(p.title) + '</td>'
+            + '<td' + dim + '><div style="display:flex;flex-wrap:wrap;gap:4px;">' + tags + '</div></td>'
             + '<td' + dim + '>' + parent + '</td>'
             + '<td' + dim + '>' + p.ord + '</td>'
             + '<td style="color:var(--text2);font-size:12px;' + (p.hidden ? 'opacity:0.6;' : '') + '">' + escHtml(formatDateTime(p.updated_at)) + '</td>'
