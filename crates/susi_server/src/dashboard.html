@@ -96,7 +96,7 @@ button {
     font-size: 13px;
     font-weight: 500;
     transition: background 0.15s;
-    min-width: 180px;
+    min-width: 120px;
 }
 button:hover { background: var(--accent-hover); }
 button.secondary {
@@ -107,10 +107,18 @@ button.secondary {
 button.secondary:hover { background: var(--border); }
 button.danger { background: var(--red); }
 button.danger:hover { background: #ef4444; }
-button.small { padding: 4px 10px; font-size: 12px; }
-/* Header icon-only buttons are an exception to the 180px standard width.
-   The theme toggle holds a single emoji; padding around it is enough. */
-button.header-icon { min-width: 0; padding: 4px 10px; }
+/* Header icon-only buttons are an exception to the 120px standard width.
+   The theme toggle holds a single emoji; padding around it is enough, and
+   the accent fill reads as a primary action it isn't. */
+button.header-icon {
+    min-width: 0;
+    padding: 4px 10px;
+    font-size: 12px;
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    color: var(--text);
+}
+button.header-icon:hover { background: var(--border); }
 
 /* Anchor styled to match the standard <button>. Used where we want
    right-click / middle-click open-in-new-tab semantics but the same
@@ -124,13 +132,12 @@ a.btn, a.btn:visited {
     border-radius: var(--radius);
     font-size: 13px;
     font-weight: 500;
-    min-width: 180px;
+    min-width: 120px;
     text-align: center;
     box-sizing: border-box;
     transition: background 0.15s;
 }
 a.btn:hover { background: var(--accent-hover); color: #fff; }
-a.btn.small { padding: 4px 10px; font-size: 12px; }
 
 input, select, textarea {
     background: var(--bg);
@@ -199,9 +206,11 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
     font-size: 11px;
     font-weight: 600;
     text-transform: uppercase;
-    min-width: 180px;
+    min-width: 120px;
     text-align: center;
     box-sizing: border-box;
+    background: var(--bg3);
+    color: var(--text2);
 }
 .badge.active { background: rgba(74, 222, 128, 0.15); color: var(--green); }
 .badge.expired { background: rgba(251, 191, 36, 0.15); color: var(--yellow); }
@@ -749,7 +758,6 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
     .header-actions { gap: 6px; flex-wrap: wrap; }
     .header-actions button { min-width: 0 !important; padding: 8px 10px; min-height: 36px; }
     button { min-width: 0; padding: 10px 14px; min-height: 40px; }
-    button.small { padding: 6px 10px; min-height: 32px; }
     .badge { min-width: 0; padding: 3px 10px; }
     #searchInput { min-width: 0; width: 100%; }
     .modal { max-width: 95vw !important; width: 95vw !important; padding: 16px !important; }
@@ -779,9 +787,9 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
     <div class="header-actions">
         <span id="connectionStatus" class="status">Connecting...</span>
         <span id="currentUser" style="display:none;font-size:13px;color:var(--text2);"></span>
-        <button id="btnTheme" class="small secondary header-icon" onclick="cycleTheme()" title="Toggle theme">🌓</button>
+        <button id="btnTheme" class="header-icon" onclick="cycleTheme()" title="Toggle theme">🌓</button>
         <span class="dropdown" id="headerActions" style="display:none;">
-            <button class="small secondary" onclick="toggleDropdown(event,'headerActionsMenu')">Actions &#9662;</button>
+            <button onclick="toggleDropdown(event,'headerActionsMenu')">Actions &#9662;</button>
             <div id="headerActionsMenu" class="dropdown-menu" style="display:none;">
                 <button id="btnAccount" onclick="location.hash='#/account'" style="display:none;">Account settings</button>
                 <button id="btn2FA" onclick="show2FAModal()" style="display:none;">2FA</button>
@@ -791,7 +799,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                 <button class="danger" id="btnLogout" onclick="logout()">Logout</button>
             </div>
         </span>
-        <button id="btnLogin" class="small secondary" onclick="showLogin()" style="display:none;">Login</button>
+        <button id="btnLogin" onclick="showLogin()" style="display:none;">Login</button>
     </div>
 </div>
 
@@ -831,7 +839,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
     <div id="wsDetailPanel" class="detail-panel card">
         <div class="detail-header">
             <div style="display:flex;align-items:center;gap:10px;min-width:0;">
-                <button class="small secondary icon-btn" onclick="closeWsDetail()" title="Back to all workspaces">&larr;</button>
+                <button class="icon-btn" onclick="closeWsDetail()" title="Back to all workspaces">&larr;</button>
                 <h3 id="wsDetailTitle">Workspace</h3>
             </div>
             <div></div>
@@ -864,7 +872,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
             <div class="ws-tab-panel active" data-ws-panel="files">
                 <div class="detail-section-title" style="display:flex;align-items:center;justify-content:space-between;">
                     <span>Files</span>
-                    <button class="small" onclick="pickWsFiles()">Upload files</button>
+                    <button onclick="pickWsFiles()">Upload files</button>
                 </div>
                 <div id="wsFileUploadProgress" style="display:none;margin-bottom:8px;">
                     <div style="background:var(--bg);border-radius:4px;height:20px;overflow:hidden;">
@@ -878,7 +886,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
             <div class="ws-tab-panel" data-ws-panel="docs">
                 <div class="detail-section-title" style="display:flex;align-items:center;justify-content:space-between;">
                     <span>Documentation</span>
-                    <button class="small" onclick="openWsDocsEditor()">Edit documentation</button>
+                    <button onclick="openWsDocsEditor()">Edit</button>
                 </div>
                 <div id="wsDetailDocs" class="machines-list"></div>
             </div>
@@ -889,10 +897,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
             </div>
 
             <div class="ws-tab-panel" data-ws-panel="recordings">
-                <div class="detail-section-title" style="display:flex;align-items:center;justify-content:space-between;">
-                    <span>Recordings</span>
-                    <button class="small" onclick="loadWsRecordings(selectedWsId)">Refresh</button>
-                </div>
+                <div class="detail-section-title">Recordings</div>
                 <div id="wsDetailRecordings" class="machines-list"></div>
             </div>
 
@@ -901,7 +906,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                 <div id="wsDetailMembers" class="machines-list"></div>
                 <div id="wsAddMemberRow" style="display:flex;gap:8px;margin-top:8px;">
                     <select id="wsNewMember" style="flex:1;"><option value="">Select user...</option></select>
-                    <button class="small" onclick="addWsMember()">Add</button>
+                    <button onclick="addWsMember()">Add</button>
                 </div>
             </div>
 
@@ -925,12 +930,12 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                         <select id="wsEditCreatedBy"></select>
                     </label>
                     <div>
-                        <button class="small" onclick="saveWsProperties()">Save</button>
+                        <button onclick="saveWsProperties()">Save</button>
                     </div>
                 </div>
                 <div class="detail-section-title" style="margin-top:24px;color:var(--red);">Danger Zone</div>
                 <div style="display:flex;justify-content:flex-start;">
-                    <button class="small danger" onclick="deleteWorkspace()">Delete Workspace</button>
+                    <button class="danger" onclick="deleteWorkspace()">Delete Workspace</button>
                 </div>
             </div>
         </div>
@@ -959,14 +964,14 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
             <h2 style="font-size:16px;font-weight:600;">Products</h2>
         </div>
         <div class="card" style="margin-bottom:20px;">
-            <div style="padding:16px;display:grid;grid-template-columns:150px 1fr 1.4fr 70px 80px 150px;gap:12px;align-items:end;">
+            <div style="padding:16px;display:grid;grid-template-columns:150px 1fr 1.4fr 70px 80px auto;gap:12px;align-items:end;">
                 <div>
                     <label style="display:block;font-size:12px;color:var(--text2);margin-bottom:4px;">Slug</label>
-                    <input type="text" id="newProductSlug" placeholder="lpvr" autocomplete="off" style="width:100%;">
+                    <input type="text" id="newProductSlug" autocomplete="off" style="width:100%;">
                 </div>
                 <div>
                     <label style="display:block;font-size:12px;color:var(--text2);margin-bottom:4px;">Name</label>
-                    <input type="text" id="newProductName" placeholder="LPVR" autocomplete="off" style="width:100%;">
+                    <input type="text" id="newProductName" autocomplete="off" style="width:100%;">
                 </div>
                 <div>
                     <label style="display:block;font-size:12px;color:var(--text2);margin-bottom:4px;">Description</label>
@@ -980,7 +985,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                     <label style="display:block;font-size:12px;color:var(--text2);margin-bottom:4px;" title="Allow downloading this product's global releases without a license or login">Public DL</label>
                     <input type="checkbox" id="newProductPublic" style="width:auto;height:18px;">
                 </div>
-                <button onclick="createProduct()">Add Product</button>
+                <button onclick="createProduct()">Add</button>
             </div>
         </div>
         <div class="card">
@@ -1026,15 +1031,19 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
     <div id="detailPanel" class="detail-panel card">
         <div class="detail-header">
             <div style="display:flex;align-items:center;gap:10px;min-width:0;">
-                <button class="small secondary icon-btn" onclick="closeDetail()" title="Back to all licenses">&larr;</button>
+                <button class="icon-btn" onclick="closeDetail()" title="Back to all licenses">&larr;</button>
                 <h3 id="detailTitle">License Details</h3>
             </div>
-            <div>
-                <button class="small secondary" id="btnEdit" onclick="startEditLicense()">Edit</button>
-                <button class="small secondary" onclick="exportLicense()">Export</button>
-                <button class="small danger" id="btnRevoke" onclick="revokeLicense()">Revoke</button>
-                <button class="small danger" id="btnDelete" onclick="deleteLicense()">Delete</button>
-            </div>
+            <span class="dropdown">
+                <button onclick="toggleDropdown(event,'licenseActionsMenu')">Actions &#9662;</button>
+                <div id="licenseActionsMenu" class="dropdown-menu" style="display:none;">
+                    <button id="btnEdit" onclick="startEditLicense()">Edit</button>
+                    <button onclick="exportLicense()">Export</button>
+                    <div class="divider"></div>
+                    <button class="danger" id="btnRevoke" onclick="revokeLicense()">Revoke</button>
+                    <button class="danger" id="btnDelete" onclick="deleteLicense()">Delete</button>
+                </div>
+            </span>
         </div>
         <!-- View mode -->
         <div class="detail-body" id="detailView">
@@ -1075,9 +1084,9 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                     <div class="field-label">Assigned Users (self-serve portal access)</div>
                     <div class="machines-list" id="detailUsers"></div>
                     <div style="display:flex;gap:8px;margin-top:8px;">
-                        <input type="text" id="assignUserInput" list="assignUserList" placeholder="Username or email" style="flex:1;" onkeydown="if(event.key==='Enter')assignLicenseUser()">
+                        <input type="text" id="assignUserInput" list="assignUserList" style="flex:1;" onkeydown="if(event.key==='Enter')assignLicenseUser()">
                         <datalist id="assignUserList"></datalist>
-                        <button class="small secondary" onclick="assignLicenseUser()">Assign</button>
+                        <button onclick="assignLicenseUser()">Assign</button>
                     </div>
                 </div>
             </div>
@@ -1150,17 +1159,15 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
     <div class="card" style="max-width:520px;padding:20px;margin-bottom:16px;">
         <h3 style="font-size:14px;font-weight:600;margin-bottom:12px;">Username</h3>
         <div class="form-row">
-            <input type="text" id="accUsername" placeholder="Username">
+            <input type="text" id="accUsername">
         </div>
-        <p style="font-size:12px;color:var(--text2);margin:0 0 12px;">Changing your username signs out your other devices.</p>
         <button class="secondary" onclick="saveAccountUsername()">Save username</button>
     </div>
     <div class="card" style="max-width:520px;padding:20px;margin-bottom:16px;">
         <h3 style="font-size:14px;font-weight:600;margin-bottom:12px;">Email</h3>
         <div class="form-row">
-            <input type="email" id="accEmail" placeholder="you@example.com">
+            <input type="email" id="accEmail">
         </div>
-        <p style="font-size:12px;color:var(--text2);margin:0 0 12px;">Used for sign-in codes and license notifications.</p>
         <button class="secondary" onclick="saveAccountEmail()">Save email</button>
     </div>
     <div class="card" style="max-width:520px;padding:20px;margin-bottom:16px;">
@@ -1188,14 +1195,11 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
 <div id="page-shop" class="dash-page">
     <div style="margin-top:32px;margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
         <h2 style="font-size:16px;font-weight:600;">Orders</h2>
-        <div style="display:flex;gap:8px;">
-            <select id="ordersStatusFilter" onchange="loadShopOrders()" style="padding:6px 10px;">
-                <option value="">All statuses</option>
-                <option value="paid">Paid (awaiting fulfillment)</option>
-                <option value="shipped">Shipped</option>
-            </select>
-            <button class="secondary" onclick="loadShopOrders()">Refresh</button>
-        </div>
+        <select id="ordersStatusFilter" onchange="loadShopOrders()" style="padding:6px 10px;">
+            <option value="">All statuses</option>
+            <option value="paid">Paid (awaiting fulfillment)</option>
+            <option value="shipped">Shipped</option>
+        </select>
     </div>
     <div class="card" style="padding:0;">
         <table style="width:100%;" id="shopOrdersTable">
@@ -1260,9 +1264,6 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
             </tbody>
         </table>
     </div>
-    <p style="margin-top:16px;font-size:12px;color:var(--text2);">
-        Tip: shop ships to US and CA only. Use <code>*</code> for both, or <code>US</code> / <code>CA</code> for a single-country rate. Admin fields map directly to Stripe's <code>shipping_options</code>.
-    </p>
 
     <div style="margin-top:40px;margin-bottom:14px;">
         <h2 style="font-size:16px;font-weight:600;margin:0 0 14px;">Settings</h2>
@@ -1273,8 +1274,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
             <div class="detail-body">
                 <div class="form-row">
                     <label for="shopSetEmails">Order notification recipients</label>
-                    <input type="text" id="shopSetEmails" placeholder="klaus@xikaku.com, ops@lp-research.com">
-                    <div class="field-help">Comma-separated. Each address gets the &ldquo;new order&rdquo; email when a customer pays.</div>
+                    <input type="text" id="shopSetEmails">
                     <div id="shopSetEmailsHint" class="field-help" style="display:none;"></div>
                 </div>
                 <div class="toggle-row">
@@ -1283,11 +1283,11 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                 </div>
                 <div class="form-row">
                     <label for="shopSetSupport">Customer support contact (shown in emails)</label>
-                    <input type="text" id="shopSetSupport" placeholder="support@lp-research.com">
+                    <input type="text" id="shopSetSupport">
                 </div>
                 <div class="form-row">
                     <label for="shopSetThankYou">Optional thank-you message (HTML)</label>
-                    <textarea id="shopSetThankYou" rows="3" placeholder="Free-form HTML shown in the customer confirmation email above the items list."></textarea>
+                    <textarea id="shopSetThankYou" rows="3"></textarea>
                 </div>
                 <div id="shopSetError" class="form-error" style="display:none;"></div>
             </div>
@@ -1302,7 +1302,6 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
 <div id="page-audit" class="dash-page">
     <div style="margin-top:32px;margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
         <h2 style="font-size:16px;font-weight:600;">Audit Log</h2>
-        <button class="secondary" onclick="loadAudit()">Refresh</button>
     </div>
     <div class="card" style="padding:0;">
         <table style="width:100%;" id="auditTable">
@@ -1329,10 +1328,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
 <div id="page-backups" class="dash-page">
     <div style="margin-top:32px;margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
         <h2 style="font-size:16px;font-weight:600;">Backups - Dropbox</h2>
-        <div style="display:flex;gap:8px;">
-            <button class="secondary" onclick="loadBackupPage()">Refresh</button>
-            <button id="backupRunBtn" onclick="runBackupNow()">Back up now</button>
-        </div>
+        <button id="backupRunBtn" onclick="runBackupNow()">Back up now</button>
     </div>
 
     <div id="backupNotConfigured" class="card" style="display:none;margin-bottom:20px;">
@@ -1360,7 +1356,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                     <button class="secondary" onclick="openBackupAuthorize()">Open Dropbox authorization</button>
                     <div class="form-row" style="margin-top:12px;">
                         <label for="backupAuthCode">Authorization code</label>
-                        <input type="text" id="backupAuthCode" placeholder="Paste the code shown by Dropbox">
+                        <input type="text" id="backupAuthCode">
                     </div>
                     <button onclick="submitBackupCode()">Connect Dropbox</button>
                 </div>
@@ -1384,13 +1380,11 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                 <div class="form-row">
                     <label for="backupHour">Backup hour (UTC)</label>
                     <input type="number" id="backupHour" min="0" max="23" style="width:100px;">
-                    <div class="field-help">One backup per day at this hour. Failed runs are retried hourly.</div>
                 </div>
                 <div class="form-row">
                     <label style="display:flex;align-items:center;gap:8px;">
                         <input type="checkbox" id="backupIncludeReleases" style="width:auto;"> Include release binaries
                     </label>
-                    <div class="field-help">Off by default: release installers are large, rebuildable artifacts. The database, signing key, secrets and docs are always included.</div>
                 </div>
                 <div style="display:flex;gap:16px;flex-wrap:wrap;">
                     <div class="form-row">
@@ -1406,7 +1400,6 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                         <input type="number" id="backupKeepMonthly" min="0" max="120" style="width:100px;">
                     </div>
                 </div>
-                <div class="field-help">Rotation keeps the newest archive per day/week/month up to these counts and deletes the rest. Anything younger than 48 h is never deleted.</div>
                 <div id="backupSetError" class="form-error" style="display:none;"></div>
             </div>
             <div class="form-footer">
@@ -1437,12 +1430,8 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
 <!-- Users page -->
 <div id="page-users" class="dash-page">
     <style>
-        /* Scoped overrides - the global button/badge min-width:180px from the
-           status-pill design elsewhere is wrong for inline row actions here. */
-        #page-users .role-pill { min-width: 0; padding: 2px 10px; }
         #page-users th { white-space: nowrap; }
         #page-users td.col-actions { text-align: right; white-space: nowrap; }
-        #page-users button.small { min-width: 0; margin-left: 4px; }
         #page-users tr.user-row { cursor: pointer; }
         #page-users td.col-chev { width: 24px; color: var(--text2); font-size: 11px; }
         #page-users .user-name { font-weight: 500; }
@@ -1466,7 +1455,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
     </style>
     <h2 style="font-size:16px;font-weight:600;margin-top:32px;margin-bottom:16px;">User Management</h2>
     <div class="toolbar">
-        <input type="search" id="userSearch" placeholder="Search users (name, email, role, license)..." autocomplete="off" readonly onfocus="this.removeAttribute('readonly')" oninput="onUserSearch()">
+        <input type="search" id="userSearch" placeholder="Search users..." autocomplete="off" readonly onfocus="this.removeAttribute('readonly')" oninput="onUserSearch()">
         <span id="userCount" style="font-size:12px;color:var(--text2);white-space:nowrap;"></span>
         <div class="spacer"></div>
         <button onclick="showAddUserModal()">+ Add User</button>
@@ -1490,9 +1479,6 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
         <h2 style="font-size:16px;font-weight:600;">Website - Pages</h2>
         <button onclick="showWebsitePageModal()">+ New Page</button>
     </div>
-    <p style="margin-top:0;margin-bottom:16px;font-size:12px;color:var(--text2);">
-        Click <em>Open editor</em> to edit a page on the public site (Edit button appears in the header). Pages are reachable at <code>https://xikaku.com/{slug}</code> on the canonical domain.
-    </p>
     <div class="card" style="padding:0;">
         <table style="width:100%;" id="websitePagesTable">
             <thead>
@@ -1514,14 +1500,10 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
     <div style="margin-top:40px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
         <h2 style="font-size:16px;font-weight:600;">Website - Assets</h2>
         <div style="display:flex;gap:8px;">
-            <button class="secondary" onclick="loadWebsiteAssets()">Refresh</button>
             <button onclick="document.getElementById('websiteAssetFile').click()">+ Upload Asset</button>
             <input type="file" id="websiteAssetFile" style="display:none;" onchange="uploadWebsiteAssetFromPage(this.files[0]);this.value='';">
         </div>
     </div>
-    <p style="margin-top:0;margin-bottom:16px;font-size:12px;color:var(--text2);">
-        Images and files served at <code>/api/v1/website/assets/{name}</code>. Referenced from page markdown and as shop product images.
-    </p>
     <div class="card" style="padding:0;">
         <table style="width:100%;" id="websiteAssetsTable">
             <thead>
@@ -1548,33 +1530,27 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
             <div class="detail-body">
                 <div class="form-row">
                     <label for="siteSetGaId">Google Analytics Measurement ID</label>
-                    <input type="text" id="siteSetGaId" placeholder="G-XXXXXXXXXX">
-                    <div class="field-help">Leave empty to disable. When set, the gtag.js snippet is injected on every public page.</div>
+                    <input type="text" id="siteSetGaId">
                 </div>
                 <div class="form-row">
                     <label for="siteSetAdsId">Google Ads Conversion ID</label>
-                    <input type="text" id="siteSetAdsId" placeholder="AW-XXXXXXXXXX">
-                    <div class="field-help">Leave empty to disable. When set, the Google tag is injected on every public page (shares one gtag.js loader with Google Analytics).</div>
+                    <input type="text" id="siteSetAdsId">
                 </div>
                 <div class="form-row">
                     <label for="siteSetAdsLabelContact">Google Ads conversion label - contact form</label>
-                    <input type="text" id="siteSetAdsLabelContact" placeholder="e.g. AbCdEfGhIjKLMNOP">
-                    <div class="field-help">Label from the Google Ads conversion action. Fired when a contact form is sent successfully.</div>
+                    <input type="text" id="siteSetAdsLabelContact">
                 </div>
                 <div class="form-row">
                     <label for="siteSetAdsLabelPurchase">Google Ads conversion label - shop purchase</label>
-                    <input type="text" id="siteSetAdsLabelPurchase" placeholder="e.g. AbCdEfGhIjKLMNOP">
-                    <div class="field-help">Label from the Google Ads conversion action. Fired on the shop order-complete page.</div>
+                    <input type="text" id="siteSetAdsLabelPurchase">
                 </div>
                 <div class="form-row">
                     <label for="siteSetRedditPixelId">Reddit Pixel ID</label>
-                    <input type="text" id="siteSetRedditPixelId" placeholder="a2_xxxxxxxxxxxx">
-                    <div class="field-help">Leave empty to disable. When set, the Reddit Pixel snippet is injected on every public page.</div>
+                    <input type="text" id="siteSetRedditPixelId">
                 </div>
                 <div class="form-row">
                     <label for="siteSetNavStructure">Sidebar navigation groups (JSON)</label>
-                    <textarea id="siteSetNavStructure" rows="6" spellcheck="false" style="font-family:monospace;font-size:12px;" placeholder='[{"title":"Products","items":["sensors","__shop__"]}]'></textarea>
-                    <div class="field-help">JSON array of groups: {"title", "items"}. Items are page slugs plus the pseudo-slugs "__blog__" and "__shop__" for the fixed Blog/Shop links. Pages not listed in any group appear above the groups. Leave empty for a flat nav.</div>
+                    <textarea id="siteSetNavStructure" rows="6" spellcheck="false" style="font-family:monospace;font-size:12px;"></textarea>
                 </div>
                 <div id="siteSetError" class="form-error" style="display:none;"></div>
             </div>
@@ -1605,7 +1581,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                         </select>
                     </div>
                     <div><label>Tracking number</label>
-                        <input type="text" id="orderShipTracking" placeholder="9400 1112 0000 …">
+                        <input type="text" id="orderShipTracking">
                     </div>
                 </div>
                 <div class="form-row">
@@ -1630,15 +1606,14 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
         <div class="modal-body">
             <div class="form-row">
                 <label>Slug</label>
-                <input type="text" id="websitePageSlug" placeholder="my-new-page">
-                <p style="font-size:11px;color:var(--text2);margin:4px 0 0;">Lowercase letters, digits, and hyphens. Will be reachable at <code>/{slug}</code>.</p>
+                <input type="text" id="websitePageSlug">
             </div>
             <div class="form-row">
                 <label>Title</label>
-                <input type="text" id="websitePageTitle" placeholder="My New Page">
+                <input type="text" id="websitePageTitle">
             </div>
             <div class="form-row" style="display:grid;grid-template-columns:1fr 100px;gap:12px;">
-                <div><label>Parent slug (optional)</label><input type="text" id="websitePageParent" placeholder="(top-level)"></div>
+                <div><label>Parent slug (optional)</label><input type="text" id="websitePageParent"></div>
                 <div><label>Ord</label><input type="number" id="websitePageOrd" value="0"></div>
             </div>
             <div id="websitePageError" style="background:rgba(248,113,113,0.15);border:1px solid var(--red);color:var(--red);padding:10px 14px;border-radius:var(--radius);margin-top:12px;font-size:12px;display:none;"></div>
@@ -1657,11 +1632,11 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
         <div class="modal-body">
             <div class="form-row">
                 <label>SKU</label>
-                <input type="text" id="productSku" placeholder="imu-mini">
+                <input type="text" id="productSku">
             </div>
             <div class="form-row">
                 <label>Title</label>
-                <input type="text" id="productTitle" placeholder="IMU Mini">
+                <input type="text" id="productTitle">
             </div>
             <div class="form-row">
                 <label>Description (Markdown)</label>
@@ -1678,10 +1653,9 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                     <select id="productImage" style="flex:1;min-width:0;" onchange="updateProductImagePreview()">
                         <option value="">- No image -</option>
                     </select>
-                    <button type="button" class="small secondary" onclick="document.getElementById('productImageFile').click()">Upload…</button>
+                    <button type="button" onclick="document.getElementById('productImageFile').click()">Upload…</button>
                     <input type="file" id="productImageFile" accept="image/*" style="display:none;" onchange="uploadProductImage(this.files[0]);this.value='';">
                 </div>
-                <p style="font-size:11px;color:var(--text2);margin:4px 0 0;">Pick a website asset or upload a new image. Manage all assets under Admin &rsaquo; Website.</p>
             </div>
             <div class="form-row" style="display:grid;grid-template-columns:1fr 120px 100px;gap:12px;">
                 <div><label>Tax code</label><input type="text" id="productTaxCode" value="txcd_99999999"></div>
@@ -1704,7 +1678,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
         <div class="modal-body">
             <div class="form-row">
                 <label>Label</label>
-                <input type="text" id="rateLabel" placeholder="US Standard">
+                <input type="text" id="rateLabel">
             </div>
             <div class="form-row" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
                 <div><label>Amount (cents)</label><input type="number" id="rateAmount" min="0" value="0"></div>
@@ -1712,7 +1686,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
             </div>
             <div class="form-row">
                 <label>Regions (US, CA, or * for both)</label>
-                <input type="text" id="rateRegions" value="*" placeholder="US, CA">
+                <input type="text" id="rateRegions" value="*">
             </div>
             <div class="form-row" style="display:grid;grid-template-columns:1fr 1fr 100px;gap:12px;">
                 <div><label>Delivery min (days)</label><input type="number" id="rateMinDays" min="0"></div>
@@ -1740,7 +1714,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
         <div class="modal-body">
             <div class="form-row">
                 <label>Customer</label>
-                <input type="text" id="createCustomer" placeholder="Company name">
+                <input type="text" id="createCustomer">
             </div>
             <div class="form-row">
                 <label>Product</label>
@@ -1756,7 +1730,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
             </div>
             <div class="form-row" id="createExpiryValueRow">
                 <label id="createExpiryValueLabel">Days</label>
-                <input type="text" id="createExpiryValue" placeholder="365">
+                <input type="text" id="createExpiryValue">
             </div>
             <div class="form-row">
                 <label>Features</label>
@@ -1766,17 +1740,17 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
             </div>
             <div class="form-row">
                 <label>Max Machines (0 = unlimited)</label>
-                <input type="number" id="createMaxMachines" placeholder="1" min="0">
+                <input type="number" id="createMaxMachines" min="0">
             </div>
             <div class="advanced-options">
                 <div class="advanced-title">Advanced Options</div>
                 <div class="form-row">
                     <label>Lease Duration (hours, 0 = disable lease)</label>
-                    <input type="number" id="createLeaseDuration" placeholder="72" min="0">
+                    <input type="number" id="createLeaseDuration" min="0">
                 </div>
                 <div class="form-row">
                     <label>Grace Period (hours)</label>
-                    <input type="number" id="createLeaseGrace" placeholder="24" min="0">
+                    <input type="number" id="createLeaseGrace" min="0">
                 </div>
                 <div class="form-row">
                     <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;"><input type="checkbox" id="createRequireSignedBinary" style="width:auto;margin:0;"> Require signed binary</label>
@@ -1812,15 +1786,15 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
             </div>
             <div id="exportFileRow" class="form-row">
                 <label>Machine Code (SHA256 fingerprint)</label>
-                <input type="text" id="exportMachineCode" placeholder="Paste machine fingerprint here">
+                <input type="text" id="exportMachineCode">
             </div>
             <div id="exportTokenRow" class="form-row" style="display:none">
                 <label>USB Serial Number</label>
-                <input type="text" id="exportUsbSerial" placeholder="Paste usb serial number here">
+                <input type="text" id="exportUsbSerial">
             </div>
             <div class="form-row">
                 <label>Friendly Name</label>
-                <input type="text" id="exportFriendlyName" placeholder="e.g. Vehicle-ECU-1">
+                <input type="text" id="exportFriendlyName">
             </div>
             <div id="exportTokenHint" class="form-row" style="display:none;font-size:12px;color:var(--text2);line-height:1.5">
                 Put the downloaded file on a USB drive in a folder called <code style="font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:var(--bg3);padding:1px 5px;border-radius:3px">.susi</code>. Make sure the file is called <code style="font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:var(--bg3);padding:1px 5px;border-radius:3px">license.bin</code>
@@ -1849,11 +1823,11 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
             </div>
             <div class="form-row">
                 <label>Machine Code</label>
-                <input type="text" id="myExportMachineCode" placeholder="Paste machine code here">
+                <input type="text" id="myExportMachineCode">
             </div>
             <div class="form-row">
                 <label>Machine Name (optional)</label>
-                <input type="text" id="myExportFriendlyName" placeholder="e.g. Lab PC">
+                <input type="text" id="myExportFriendlyName">
             </div>
             <div class="form-actions">
                 <button class="secondary" onclick="closeMyExportModal()">Cancel</button>
@@ -1874,15 +1848,15 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
             </div>
             <div class="form-row">
                 <label>Version Tag</label>
-                <input type="text" id="releaseTag" placeholder="e.g. v1.3.0">
+                <input type="text" id="releaseTag">
             </div>
             <div class="form-row">
                 <label>Release Name (optional)</label>
-                <input type="text" id="releaseName" placeholder="e.g. FusionHub v1.3.0">
+                <input type="text" id="releaseName">
             </div>
             <div class="form-row">
                 <label>Release Notes (Markdown)</label>
-                <textarea id="releaseBody" rows="6" style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:var(--radius);font-size:13px;font-family:inherit;width:100%;resize:vertical;" placeholder="## Changes&#10;- Fixed something&#10;- Added feature"></textarea>
+                <textarea id="releaseBody" rows="6" style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:var(--radius);font-size:13px;font-family:inherit;width:100%;resize:vertical;"></textarea>
             </div>
             <div class="form-row">
                 <label class="checkbox" style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:var(--text2);">
@@ -1914,15 +1888,15 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
         <div class="modal-body">
             <div class="form-row">
                 <label>Name</label>
-                <input type="text" id="wsCreateName" placeholder="e.g. Nexco Highway Tracking">
+                <input type="text" id="wsCreateName">
             </div>
             <div class="form-row">
                 <label>Product</label>
-                <input type="text" id="wsCreateProduct" placeholder="e.g. FusionHub">
+                <input type="text" id="wsCreateProduct">
             </div>
             <div class="form-row">
                 <label>Description (optional)</label>
-                <input type="text" id="wsCreateDesc" placeholder="Short description">
+                <input type="text" id="wsCreateDesc">
             </div>
         </div>
         <div class="form-actions">
@@ -1939,11 +1913,11 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
         <div class="modal-body">
             <div class="form-row">
                 <label>Username</label>
-                <input type="text" id="newUsername" placeholder="e.g. AliceDemoCorp">
+                <input type="text" id="newUsername">
             </div>
             <div class="form-row">
                 <label>Email</label>
-                <input type="email" id="newUserEmail" placeholder="user@company.com">
+                <input type="email" id="newUserEmail">
             </div>
             <div class="form-row">
                 <label>Role</label>
@@ -1958,7 +1932,6 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                     <label>Password (min 8)</label>
                     <input type="password" id="newPassword">
                 </div>
-                <p style="font-size:11px;color:var(--text2);margin:6px 0 0;">Use only if SMTP isn't configured. Plaintext must be couriered to the user.</p>
             </details>
         </div>
         <div class="form-actions">
@@ -1976,15 +1949,15 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
         <div id="loginError" class="auth-error"></div>
         <div class="form-row">
             <label>Username or email</label>
-            <input type="text" id="loginUsername" placeholder="Username or email" autocomplete="username" onkeydown="if(event.key==='Enter')document.getElementById('loginPassword').focus()">
+            <input type="text" id="loginUsername" autocomplete="username" onkeydown="if(event.key==='Enter')document.getElementById('loginPassword').focus()">
         </div>
         <div class="form-row">
             <label>Password</label>
-            <input type="password" id="loginPassword" placeholder="Password" autocomplete="current-password" onkeydown="if(event.key==='Enter')submitLogin()">
+            <input type="password" id="loginPassword" autocomplete="current-password" onkeydown="if(event.key==='Enter')submitLogin()">
         </div>
         <div id="loginTotpRow" class="form-row" style="display:none;">
             <label>2FA Code <span style="font-weight:400;color:var(--text2);font-size:11px;">(or a backup code)</span></label>
-            <input type="text" id="loginTotp" placeholder="6-digit code, or XXXXX-XXXXX" maxlength="20" autocomplete="one-time-code" onkeydown="if(event.key==='Enter')submitLogin()">
+            <input type="text" id="loginTotp" maxlength="20" autocomplete="one-time-code" onkeydown="if(event.key==='Enter')submitLogin()">
         </div>
         <button onclick="submitLogin()">Sign In</button>
         <div style="text-align:center;margin-top:12px;font-size:12px;display:flex;justify-content:center;gap:16px;">
@@ -2003,7 +1976,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
         <div id="emailCodeError" class="auth-error"></div>
         <div class="form-row">
             <label>Email</label>
-            <input type="text" id="emailCodeIdentifier" placeholder="you@company.com" autocomplete="email" onkeydown="if(event.key==='Enter')submitRequestCode()">
+            <input type="text" id="emailCodeIdentifier" autocomplete="email" onkeydown="if(event.key==='Enter')submitRequestCode()">
         </div>
         <button onclick="submitRequestCode()">Send sign-in code</button>
         <div style="text-align:center;margin-top:12px;font-size:12px;">
@@ -2020,7 +1993,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
         <div id="forgotPasswordError" class="auth-error"></div>
         <div class="form-row">
             <label>Username or email</label>
-            <input type="text" id="forgotIdentifier" placeholder="Username or email" autocomplete="username" onkeydown="if(event.key==='Enter')submitForgotPassword()">
+            <input type="text" id="forgotIdentifier" autocomplete="username" onkeydown="if(event.key==='Enter')submitForgotPassword()">
         </div>
         <button onclick="submitForgotPassword()">Send reset link</button>
         <div style="text-align:center;margin-top:12px;font-size:12px;">
@@ -2037,11 +2010,11 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
         <div id="resetPasswordError" class="auth-error"></div>
         <div class="form-row">
             <label>New Password (min 8 chars)</label>
-            <input type="password" id="rpNew" placeholder="New password" autocomplete="new-password">
+            <input type="password" id="rpNew" autocomplete="new-password">
         </div>
         <div class="form-row">
             <label>Confirm New Password</label>
-            <input type="password" id="rpConfirm" placeholder="Confirm password" autocomplete="new-password" onkeydown="if(event.key==='Enter')submitResetPassword()">
+            <input type="password" id="rpConfirm" autocomplete="new-password" onkeydown="if(event.key==='Enter')submitResetPassword()">
         </div>
         <button onclick="submitResetPassword()">Set new password</button>
     </div>
@@ -2060,11 +2033,11 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
         <div id="signinCodeError" class="auth-error"></div>
         <div class="form-row">
             <label>6-digit code</label>
-            <input type="text" id="signinCodeInput" placeholder="000000" maxlength="7" inputmode="numeric" autocomplete="one-time-code" style="font-family:'SF Mono','Fira Code','Consolas',monospace;letter-spacing:6px;text-align:center;font-size:18px;" onkeydown="if(event.key==='Enter')submitSigninCode()">
+            <input type="text" id="signinCodeInput" maxlength="7" inputmode="numeric" autocomplete="one-time-code" style="font-family:'SF Mono','Fira Code','Consolas',monospace;letter-spacing:6px;text-align:center;font-size:18px;" onkeydown="if(event.key==='Enter')submitSigninCode()">
         </div>
         <div id="signinCodeTotpRow" class="form-row" style="display:none;">
             <label>2FA Code <span style="font-weight:400;color:var(--text2);font-size:11px;">(or a backup code)</span></label>
-            <input type="text" id="signinCodeTotp" placeholder="6-digit code, or XXXXX-XXXXX" maxlength="20" autocomplete="one-time-code" onkeydown="if(event.key==='Enter')submitSigninCode()">
+            <input type="text" id="signinCodeTotp" maxlength="20" autocomplete="one-time-code" onkeydown="if(event.key==='Enter')submitSigninCode()">
         </div>
         <div class="form-actions">
             <button onclick="submitSigninCode()">Sign in</button>
@@ -2096,15 +2069,15 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
         <div id="changePasswordError" class="auth-error"></div>
         <div class="form-row">
             <label>Current Password</label>
-            <input type="password" id="cpCurrent" placeholder="Current password">
+            <input type="password" id="cpCurrent">
         </div>
         <div class="form-row">
             <label>New Password (min 8 chars)</label>
-            <input type="password" id="cpNew" placeholder="New password">
+            <input type="password" id="cpNew">
         </div>
         <div class="form-row">
             <label>Confirm New Password</label>
-            <input type="password" id="cpConfirm" placeholder="Confirm password" onkeydown="if(event.key==='Enter')submitChangePassword()">
+            <input type="password" id="cpConfirm" onkeydown="if(event.key==='Enter')submitChangePassword()">
         </div>
         <button onclick="submitChangePassword()">Change Password</button>
         <div style="text-align:center;margin-top:12px;font-size:12px;">
@@ -2131,9 +2104,6 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
     <div class="modal" style="max-width:min(640px,95vw);width:min(640px,95vw);">
         <h2>Active Sessions</h2>
         <div class="modal-body">
-            <p style="font-size:12px;color:var(--text2);margin-bottom:12px;">
-                Every signed-in browser session for your account. Revoking a session signs that browser out immediately.
-            </p>
             <div id="sessionsList"><p class="empty-state">Loading...</p></div>
         </div>
         <div class="form-actions">
@@ -2149,7 +2119,6 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
         <style>
             #apiTokensModal td, #apiTokensModal th { white-space: nowrap; vertical-align: middle; }
             #apiTokensModal td.col-actions { text-align: right; }
-            #apiTokensModal button.small { min-width: 0; margin-left: 4px; }
             #apiTokensModal .pat-prefix {
                 font-family: "SF Mono", "Fira Code", "Consolas", monospace;
                 font-size: 12px;
@@ -2163,8 +2132,6 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
         <h2>API Tokens</h2>
         <div class="modal-body">
             <p style="color:var(--text2);font-size:13px;margin:0 0 12px;">
-                Long-lived bearer tokens for headless clients (CI scripts, services). Send as
-                <span class="pat-prefix">Authorization: Bearer susi_pat_…</span>.
                 Tokens inherit your role and bypass the interactive 2FA gate - treat them like passwords.
             </p>
             <div id="apiTokensTableContainer" style="margin-bottom:16px;max-height:50vh;overflow:auto;">
@@ -2176,7 +2143,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
             <div style="border-top:1px solid var(--border);padding-top:16px;">
                 <h3 style="font-size:14px;margin-bottom:12px;">Create new token</h3>
                 <div style="display:flex;gap:8px;flex-wrap:wrap;">
-                    <input type="text" id="newApiTokenName" placeholder="Name (e.g. github-actions release)" style="flex:1;min-width:200px;">
+                    <input type="text" id="newApiTokenName" style="flex:1;min-width:200px;">
                     <button onclick="createApiToken()" style="width:auto;">Create</button>
                 </div>
             </div>
@@ -3178,7 +3145,7 @@ function selectLicense(key) {
                 '<div style="display:flex;align-items:baseline;">' +
                     '<a href="#/users/' + encodeURIComponent(u) + '" style="font-weight:600;color:var(--accent);text-decoration:none;" title="Open in user management">' + esc(u) + '</a>' + email +
                 '</div>' +
-                '<button class="small danger" onclick="unassignLicenseUser(\'' + esc(lic.license_key) + '\',\'' + esc(u) + '\')">Remove</button>' +
+                '<button class="danger" onclick="unassignLicenseUser(\'' + esc(lic.license_key) + '\',\'' + esc(u) + '\')">Remove</button>' +
                 '</div>';
         }).join('');
     } else {
@@ -3196,7 +3163,7 @@ function selectLicense(key) {
             '<div><strong>' + esc(m.friendly_name || 'Unknown') + '</strong>' + machineStatusBadge(m) +
             '<br><span class="machine-code">' + esc(m.machine_code) + '</span>' +
             machineSeenLine(m) + '</div>' +
-            '<button class="small danger" onclick="deactivateMachine(\'' + esc(lic.license_key) + '\', \'' + esc(m.machine_code) + '\')">Remove</button>' +
+            '<button class="danger" onclick="deactivateMachine(\'' + esc(lic.license_key) + '\', \'' + esc(m.machine_code) + '\')">Remove</button>' +
             '</div>'
         ).join('');
     } else {
@@ -3631,7 +3598,7 @@ function renderMyLicenses() {
                 '<div><strong>' + esc(m.friendly_name || 'Unknown') + '</strong>' + machineStatusBadge(m) +
                 '<br><span class="machine-code">' + esc(m.machine_code) + '</span>' +
                 machineSeenLine(m) + '</div>' +
-                '<button class="small danger" onclick="myDeactivateMachine(\'' + esc(lic.license_key) + '\',\'' + esc(m.machine_code) + '\')">Remove</button>' +
+                '<button class="danger" onclick="myDeactivateMachine(\'' + esc(lic.license_key) + '\',\'' + esc(m.machine_code) + '\')">Remove</button>' +
                 '</div>').join('')
             : '<div style="color:var(--text2);font-size:13px;padding:8px 0;">No machines activated</div>';
         return '<div class="card" style="margin-bottom:16px;">' +
@@ -3642,7 +3609,7 @@ function renderMyLicenses() {
             '<div class="field-label">License Key</div>' +
             '<div class="field-value" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">' +
             '<span class="key-display">' + esc(lic.license_key) + '</span>' +
-            '<button class="small secondary" onclick="copyMyKey(\'' + esc(lic.license_key) + '\')">Copy</button>' +
+            '<button onclick="copyMyKey(\'' + esc(lic.license_key) + '\')">Copy</button>' +
             '</div></div>' +
             '<div class="detail-field"><div class="field-label">Expires</div><div class="field-value">' + formatDate(lic.expires) + '</div></div>' +
             '<div class="detail-field"><div class="field-label">Machines</div><div class="field-value">' + lic.active_machine_count + ' / ' + (lic.max_machines === 0 ? '∞' : lic.max_machines) + machinesSeenNote(lic) + '</div></div>' +
@@ -3651,7 +3618,7 @@ function renderMyLicenses() {
             '<div class="detail-section-title">Activated Machines</div>' +
             '<div class="machines-list">' + machines + '</div>' +
             '<div style="display:flex;justify-content:flex-end;margin-top:12px;">' +
-            '<button class="small secondary" onclick="showMyExportModal(\'' + esc(lic.license_key) + '\')">Activate offline machine</button>' +
+            '<button onclick="showMyExportModal(\'' + esc(lic.license_key) + '\')">Activate offline machine</button>' +
             '</div>' +
             '</div></div>';
     }).join('');
@@ -3744,7 +3711,7 @@ async function loadSessions() {
             + ' · signed in ' + esc(new Date(s.created_at).toLocaleString())
             + ' · last seen ' + esc(new Date(s.last_seen).toLocaleString()) + '</div>'
             + '</div>'
-            + (s.current ? '' : '<button class="small danger" onclick="revokeSession(' + s.id + ')">Revoke</button>')
+            + (s.current ? '' : '<button class="danger" onclick="revokeSession(' + s.id + ')">Revoke</button>')
             + '</div>'
         ).join('');
     } catch (e) {
@@ -3787,7 +3754,7 @@ function show2FAModal(force) {
             '<p style="margin-bottom:6px;">Two-factor authentication is <strong style="color:var(--green);">enabled</strong>.</p>' +
             backupLine +
             '<div class="form-row"><label>Enter current 2FA code to disable</label>' +
-            '<input type="text" id="tfaDisableCode" placeholder="6-digit code" maxlength="6" autocomplete="one-time-code"></div>' +
+            '<input type="text" id="tfaDisableCode" maxlength="6" autocomplete="one-time-code"></div>' +
             '<button class="danger" onclick="disable2FA()">Disable 2FA</button>';
     } else if (force) {
         content.innerHTML =
@@ -3831,7 +3798,7 @@ async function setup2FA() {
             '<p style="font-size:12px;color:var(--text2);margin-bottom:4px;">Or enter this secret manually:</p>' +
             '<div class="secret-display">' + esc(data.secret) + '</div>' +
             '<div class="form-row" style="margin-top:16px;"><label>Verification Code</label>' +
-            '<input type="text" id="tfaVerifyCode" placeholder="Enter 6-digit code from app" maxlength="6" autocomplete="one-time-code"></div>' +
+            '<input type="text" id="tfaVerifyCode" maxlength="6" autocomplete="one-time-code"></div>' +
             '<button onclick="verify2FA()">Verify &amp; Enable</button>';
     } catch (e) {
         toast('Failed: ' + e.message, 'error');
@@ -4039,9 +4006,7 @@ function renderUsers() {
             status = '<span style="color:var(--green);">Active</span>';
         }
         const tfa = u.totp_enabled ? '<span style="color:var(--green);">Enabled</span>' : '<span style="color:var(--text2);">Off</span>';
-        const roleBadge = u.role === 'admin'
-            ? '<span class="badge role-pill" style="background:rgba(108,140,255,0.15);color:var(--accent);">admin</span>'
-            : '<span class="badge role-pill" style="background:var(--bg3);color:var(--text2);">user</span>';
+        const roleBadge = '<span class="badge">' + (u.role === 'admin' ? 'admin' : 'user') + '</span>';
         // esc(JSON.stringify(x)) is HTML-safe for both the " and ' in the
         // inline onclick attribute. A bare JSON.stringify would break the
         // attribute quoting, which silently stopped the Edit action from
@@ -4067,14 +4032,14 @@ function renderUsers() {
         // (the session token is bound to the old name).
         const actions = isSelf
             ? '<span class="dropdown" onclick="event.stopPropagation();">' +
-                '<button class="small secondary" onclick="toggleDropdown(event,\'' + menuId + '\')">Actions &#9662;</button>' +
+                '<button onclick="toggleDropdown(event,\'' + menuId + '\')">Actions &#9662;</button>' +
                 '<div id="' + menuId + '" class="dropdown-menu" style="display:none;">' +
                   '<button onclick="renameUser(\'' + uname + '\')">Rename</button>' +
                   emailItem +
                 '</div>' +
               '</span>'
             : '<span class="dropdown" onclick="event.stopPropagation();">' +
-                '<button class="small secondary" onclick="toggleDropdown(event,\'' + menuId + '\')">Actions &#9662;</button>' +
+                '<button onclick="toggleDropdown(event,\'' + menuId + '\')">Actions &#9662;</button>' +
                 '<div id="' + menuId + '" class="dropdown-menu" style="display:none;">' +
                   '<button onclick="renameUser(\'' + uname + '\')">Rename</button>' +
                   emailItem +
@@ -4324,7 +4289,7 @@ async function loadMyApiTokens() {
         tbody.innerHTML = tokens.map(t => {
             const actions = t.revoked_at
                 ? '<span style="color:var(--text2);font-size:11px;">-</span>'
-                : '<button class="small danger" onclick="revokeMyApiToken(' + t.id + ')">Revoke</button>';
+                : '<button class="danger" onclick="revokeMyApiToken(' + t.id + ')">Revoke</button>';
             return '<tr>'
                 + '<td>' + esc(t.name) + '</td>'
                 + '<td><span class="pat-prefix">' + esc(t.token_prefix) + '…</span></td>'
@@ -4352,7 +4317,7 @@ async function loadAllApiTokens() {
         tbody.innerHTML = tokens.map(t => {
             const actions = t.revoked_at
                 ? '<span style="color:var(--text2);font-size:11px;">-</span>'
-                : '<button class="small danger" onclick="revokeAnyApiToken(' + t.id + ')">Revoke</button>';
+                : '<button class="danger" onclick="revokeAnyApiToken(' + t.id + ')">Revoke</button>';
             return '<tr>'
                 + '<td>' + esc(t.username) + '</td>'
                 + '<td>' + esc(t.name) + '</td>'
@@ -4551,7 +4516,7 @@ function renderReleases() {
         const arrow = '<span style="color:var(--text2);font-size:11px;margin-right:6px;">' + (expanded ? '&#9662;' : '&#9656;') + '</span>';
         const deleteRow = isAdmin
             ? '<div style="display:flex;justify-content:flex-end;margin-top:10px;padding-top:8px;border-top:1px solid var(--border);">' +
-                '<button class="small danger" onclick="deleteRelease(\'' + esc(prodSlug) + '\',\'' + esc(r.tag) + '\')">Delete release</button>' +
+                '<button class="danger" onclick="deleteRelease(\'' + esc(prodSlug) + '\',\'' + esc(r.tag) + '\')">Delete release</button>' +
               '</div>'
             : '';
         const body = expanded ? (
@@ -4731,7 +4696,7 @@ function renderProducts() {
             : '<div class="divider"></div><button class="danger" onclick="deleteProduct(\'' + esc(p.slug) + '\')">Delete</button>';
         const menu =
             '<span class="dropdown" onclick="event.stopPropagation();" style="justify-self:end;">' +
-                '<button class="small secondary" onclick="toggleDropdown(event,\'' + menuId + '\')">Actions &#9662;</button>' +
+                '<button onclick="toggleDropdown(event,\'' + menuId + '\')">Actions &#9662;</button>' +
                 '<div id="' + menuId + '" class="dropdown-menu" style="display:none;">' +
                     '<button onclick="saveProduct(\'' + esc(p.slug) + '\')">Save changes</button>' +
                     deleteItem +
@@ -4951,7 +4916,7 @@ async function showWsDetail(id, tab) {
             : members.map(m => `
                 <div class="machine-item">
                     <span style="display:flex;align-items:center;gap:8px;"><strong style="min-width:200px;">${esc(m.username)}</strong></span>
-                    ${userRole === 'admin' ? `<button class="small danger" onclick="removeWsMember('${id}','${esc(m.username)}')">Remove</button>` : ''}
+                    ${userRole === 'admin' ? `<button class="danger" onclick="removeWsMember('${id}','${esc(m.username)}')">Remove</button>` : ''}
                 </div>
             `).join('');
 
@@ -5084,8 +5049,8 @@ function renderWsFiles(files) {
                 '<span style="font-size:12px;color:var(--text2);">' + formatBytes(f.size) + (f.author ? ' · ' + esc(f.author) : '') + ' · ' + formatDateTime(f.created_at) + '</span>' +
             '</span>' +
             '<span style="display:flex;gap:6px;flex-shrink:0;">' +
-                '<button class="small" onclick="downloadWsFile(\'' + esc(f.name) + '\')">Download</button>' +
-                '<button class="small danger" onclick="deleteWsFile(\'' + esc(f.name) + '\')">Delete</button>' +
+                '<button onclick="downloadWsFile(\'' + esc(f.name) + '\')">Download</button>' +
+                '<button class="danger" onclick="deleteWsFile(\'' + esc(f.name) + '\')">Delete</button>' +
             '</span>' +
         '</div>'
     ).join('');
@@ -5254,7 +5219,7 @@ async function loadWsRecordings(wsId) {
                 ? ''
                 : '<span style="color:var(--text2);margin-left:6px;">(' + esc(r.status) + ')</span>';
             const dlBtn = ready
-                ? '<button class="small" onclick="downloadWsRecording(' + r.id + ')">Download</button>'
+                ? '<button onclick="downloadWsRecording(' + r.id + ')">Download</button>'
                 : '';
             return '<div class="machine-item">' +
                 '<span style="display:flex;align-items:center;gap:10px;min-width:0;flex:1;">' +
@@ -5266,7 +5231,7 @@ async function loadWsRecordings(wsId) {
                     '<span>' + formatBytes(r.file_size) + '</span>' +
                     '<span>' + esc(r.author) + ' &middot; ' + formatDateTime(r.created_at) + '</span>' +
                     dlBtn +
-                    '<button class="small danger" onclick="deleteWsRecording(' + r.id + ')">Delete</button>' +
+                    '<button class="danger" onclick="deleteWsRecording(' + r.id + ')">Delete</button>' +
                 '</span>' +
             '</div>';
         }).join('');
@@ -5568,8 +5533,8 @@ function renderShopProducts() {
             + '<td>' + (p.active ? 'yes' : '<span style="color:var(--text2);">no</span>') + '</td>'
             + '<td>' + p.ord + '</td>'
             + '<td style="text-align:right;">'
-            +   '<button class="small secondary" onclick="showProductModal(\'' + escHtml(p.sku) + '\')">Edit</button> '
-            +   '<button class="small danger" onclick="deleteShopProduct(\'' + escHtml(p.sku) + '\')">Delete</button>'
+            +   '<button onclick="showProductModal(\'' + escHtml(p.sku) + '\')">Edit</button> '
+            +   '<button class="danger" onclick="deleteShopProduct(\'' + escHtml(p.sku) + '\')">Delete</button>'
             + '</td>'
             + '</tr>';
     }).join('');
@@ -5687,8 +5652,8 @@ function renderShopRates() {
             + '<td>' + escHtml(delivery) + '</td>'
             + '<td>' + (r.active ? 'yes' : '<span style="color:var(--text2);">no</span>') + '</td>'
             + '<td style="text-align:right;">'
-            +   '<button class="small secondary" onclick="showShippingRateModal(' + r.id + ')">Edit</button> '
-            +   '<button class="small danger" onclick="deleteShopRate(' + r.id + ')">Delete</button>'
+            +   '<button onclick="showShippingRateModal(' + r.id + ')">Edit</button> '
+            +   '<button class="danger" onclick="deleteShopRate(' + r.id + ')">Delete</button>'
             + '</td>'
             + '</tr>';
     }).join('');
@@ -6023,7 +5988,7 @@ function renderShopOrders() {
             + '<td style="color:' + statusColor + ';font-weight:500;">' + escHtml(o.status) + '</td>'
             + '<td style="font-size:12px;">' + tracking + '</td>'
             + '<td style="text-align:right;">'
-            +   '<button class="small secondary" onclick="openOrderModal(' + o.id + ')">View</button>'
+            +   '<button onclick="openOrderModal(' + o.id + ')">View</button>'
             + '</td>'
             + '</tr>';
     }).join('');
@@ -6155,7 +6120,7 @@ async function loadWebsitePages() {
 function renderWebsitePagesTable() {
     const tbody = document.getElementById('websitePagesBody');
     if (!websitePages.length) {
-        tbody.innerHTML = '<tr><td colspan="6" class="empty-state"><p>No pages yet</p><button onclick="showWebsitePageModal()">Create your first page</button></td></tr>';
+        tbody.innerHTML = '<tr><td colspan="6" class="empty-state"><p>No pages yet</p></td></tr>';
         return;
     }
     tbody.innerHTML = websitePages.map(p => {
@@ -6180,10 +6145,10 @@ function renderWebsitePagesTable() {
             + '<td' + dim + '>' + escHtml(p.title) + postBadge + hiddenBadge + '</td>'
             + '<td' + dim + '>' + parent + '</td>'
             + '<td' + dim + '>' + p.ord + '</td>'
-            + '<td style="color:var(--text2);font-size:12px;' + (p.hidden ? 'opacity:0.6;' : '') + '">' + escHtml(p.updated_at || '') + '</td>'
+            + '<td style="color:var(--text2);font-size:12px;' + (p.hidden ? 'opacity:0.6;' : '') + '">' + escHtml(formatDateTime(p.updated_at)) + '</td>'
             + '<td>'
             +   '<span class="dropdown" onclick="event.stopPropagation();">'
-            +     '<button class="small secondary" onclick="toggleDropdown(event,\'' + menuId + '\')">Actions &#9662;</button>'
+            +     '<button onclick="toggleDropdown(event,\'' + menuId + '\')">Actions &#9662;</button>'
             +     '<div id="' + menuId + '" class="dropdown-menu" style="display:none;">'
             +       '<a href="' + escHtml(editUrl) + '" target="_blank" rel="noopener">Open editor ↗</a>'
             +       '<button onclick="toggleWebsitePageHidden(' + slugArg + ', ' + (p.hidden ? 'false' : 'true') + ')">' + (p.hidden ? 'Show on site' : 'Hide from site') + '</button>'
@@ -6328,7 +6293,7 @@ async function loadWebsiteAssets() {
 function renderWebsiteAssetsTable() {
     const tbody = document.getElementById('websiteAssetsBody');
     if (!websiteAssets.length) {
-        tbody.innerHTML = '<tr><td colspan="5" class="empty-state"><p>No assets yet - upload one here or from the page editor.</p></td></tr>';
+        tbody.innerHTML = '<tr><td colspan="5" class="empty-state"><p>No assets yet</p></td></tr>';
         return;
     }
     tbody.innerHTML = websiteAssets.map((a, i) => {
@@ -6346,7 +6311,7 @@ function renderWebsiteAssetsTable() {
             + '<td style="font-size:12px;">' + (usedBy.length ? usedBy.join(', ') : '<span style="color:var(--text2);">unused</span>') + '</td>'
             + '<td style="text-align:right;">'
             +   '<span class="dropdown" onclick="event.stopPropagation();">'
-            +     '<button class="small secondary" onclick="toggleDropdown(event,\'' + menuId + '\')">Actions &#9662;</button>'
+            +     '<button onclick="toggleDropdown(event,\'' + menuId + '\')">Actions &#9662;</button>'
             +     '<div id="' + menuId + '" class="dropdown-menu" style="display:none;">'
             +       '<a href="' + assetUrl(a.name) + '" target="_blank" rel="noopener">Open ↗</a>'
             +       '<button onclick="copyAssetUrl(\'' + escHtml(a.name) + '\')">Copy URL</button>'

@@ -1389,7 +1389,6 @@ function renderEditor() {
         '<div class="edit-meta-row" style="margin-top:8px;">' +
             '<label title="Overrides the auto-derived description for SEO / AI crawlers. Leave empty to auto-derive from body.">SEO description</label>' +
             '<input id="editMetaDesc" type="text" maxlength="300" '
-                + 'placeholder="Shown as meta description and in AI/search snippets - keep under ~160 chars. Blank = auto-derive." '
                 + 'style="flex:1;min-width:200px;">' +
         '</div>' +
         '<textarea id="editBody"></textarea>' +
@@ -1818,7 +1817,7 @@ async function route() {
         const sorted = [...pages].sort((a, b) => a.ord - b.ord || a.title.localeCompare(b.title));
         const first = sorted.find(p => !p.parent_slug && p.page_kind !== 'post')
             || sorted.find(p => p.page_kind !== 'post') || sorted[0];
-        history.replaceState({}, '', pageHref(first.slug) + (anchor ? '#' + encodeURIComponent(anchor) : ''));
+        history.replaceState({}, '', pageHref(first.slug) + location.search + (anchor ? '#' + encodeURIComponent(anchor) : ''));
         await loadPage(first.slug);
     }
     if (anchor) scrollToAnchor(anchor);

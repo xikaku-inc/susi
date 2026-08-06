@@ -261,12 +261,12 @@ const SIGNIN_CODE_TTL_MINUTES: i64 = 15;
 // no framing of our pages (clickjacking), images from anywhere over https
 // (site authors may hotlink), fetches only to self + analytics.
 const SECURITY_CSP: &str = "default-src 'self'; \
-    script-src 'self' 'unsafe-inline' https://www.googletagmanager.com https://challenges.cloudflare.com; \
-    style-src 'self' 'unsafe-inline'; \
+    script-src 'self' 'unsafe-inline' https://www.googletagmanager.com https://tagassistant.google.com https://www.googleadservices.com https://googleads.g.doubleclick.net https://www.redditstatic.com https://challenges.cloudflare.com; \
+    style-src 'self' 'unsafe-inline' https://www.googletagmanager.com https://fonts.googleapis.com; \
     img-src 'self' data: blob: https:; \
-    font-src 'self' data:; \
-    connect-src 'self' https://*.google-analytics.com https://*.analytics.google.com https://www.googletagmanager.com https://www.googleadservices.com https://*.g.doubleclick.net https://*.google.com; \
-    frame-src https://www.youtube.com https://player.vimeo.com https://challenges.cloudflare.com https://td.doubleclick.net; \
+    font-src 'self' data: https://fonts.gstatic.com; \
+    connect-src 'self' https://*.google-analytics.com https://*.analytics.google.com https://www.googletagmanager.com https://www.googleadservices.com https://*.doubleclick.net https://*.google.com https://*.reddit.com; \
+    frame-src https://www.googletagmanager.com https://www.youtube.com https://player.vimeo.com https://challenges.cloudflare.com https://*.doubleclick.net; \
     object-src 'none'; \
     frame-ancestors 'none'; \
     base-uri 'self'; \
