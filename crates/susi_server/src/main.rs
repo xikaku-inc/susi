@@ -12,6 +12,7 @@ mod licenses;
 mod users;
 mod releases;
 mod workspaces;
+mod tickets;
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -2839,6 +2840,26 @@ async fn main() -> Result<()> {
             "/api/v1/workspaces/{id}/docs/assets/{file}",
             get(docs::handle_ws_get_doc_asset).delete(docs::handle_ws_delete_doc_asset),
         )
+        // Workspace tickets: member-writable issue list, comments visible to
+        // every member. Cross-workspace admin view lives at /admin/tickets.
+        .route(
+            "/api/v1/workspaces/{id}/tickets",
+            get(tickets::handle_list_tickets).post(tickets::handle_create_ticket),
+        )
+        .route(
+            "/api/v1/workspaces/{id}/tickets/{tid}",
+            get(tickets::handle_get_ticket)
+                .put(tickets::handle_update_ticket)
+                .delete(tickets::handle_delete_ticket),
+        )
+        .route(
+            "/api/v1/workspaces/{id}/tickets/{tid}/comments",
+            post(tickets::handle_add_ticket_comment),
+        )
+        .route(
+            "/api/v1/workspaces/{id}/tickets/{tid}/comments/{cid}",
+            axum::routing::delete(tickets::handle_delete_ticket_comment),
+        )
         // Products catalog
         .route("/api/v1/products", get(releases::handle_list_products).post(releases::handle_create_product))
         .route(
@@ -3007,6 +3028,8 @@ async fn main() -> Result<()> {
         .route("/api/v1/admin/backup/run", post(backup::handle_backup_run))
         // Admin audit trail (JWT, admin-only)
         .route("/api/v1/audit", get(handle_list_audit))
+        // Cross-workspace ticket list (JWT, admin-only)
+        .route("/api/v1/admin/tickets", get(tickets::handle_admin_list_tickets))
         // Output security headers on every response. Inline script/style stay
         // allowed (the dashboard/docs/site/shop shells are inline-heavy SPAs);
         // the external allow-list covers Google Analytics, Cloudflare

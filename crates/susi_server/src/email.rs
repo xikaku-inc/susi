@@ -276,6 +276,104 @@ impl EmailService {
         Ok(())
     }
 
+    /// Workspace-ticket notification: a new ticket, a new comment, or a
+    /// status change. Layout matches the sign-in-code mail - centered
+    /// heading, key/value table, primary CTA, fallback paste-link.
+    ///
+    /// `intro` is one sentence of context, `rows` the key/value pairs, and
+    /// `excerpt` the quoted ticket body or comment (may be empty). `link` is
+    /// omitted when the server has no public base URL configured, in which
+    /// case the CTA and paste-link are left out entirely rather than emitting
+    /// a dead relative URL.
+    pub async fn send_ticket_notification(
+        &self,
+        to_addr: &str,
+        subject: &str,
+        heading: &str,
+        intro: &str,
+        rows: &[(String, String)],
+        excerpt: &str,
+        link: Option<&str>,
+    ) -> Result<()> {
+        let mut text = format!("{}\n\n{}\n\n", heading, intro);
+        for (k, v) in rows {
+            text.push_str(&format!("{}: {}\n", k, v));
+        }
+        if !excerpt.is_empty() {
+            text.push_str(&format!("\n{}\n", excerpt));
+        }
+        if let Some(l) = link {
+            text.push_str(&format!("\nOpen the ticket:\n{}\n", l));
+        }
+        text.push_str("\n- Xikaku / LP-Research\n");
+
+        let rows_html = rows
+            .iter()
+            .map(|(k, v)| {
+                format!(
+                    "<tr><td style=\"padding:3px 12px 3px 0;\">{}</td>\
+                     <td style=\"padding:3px 0;font-weight:600;\">{}</td></tr>",
+                    html_escape(k),
+                    html_escape(v)
+                )
+            })
+            .collect::<String>();
+        let excerpt_html = if excerpt.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "<p style=\"margin:0 0 18px;padding:10px 14px;border-left:3px solid #d8dbe1;\
+                 white-space:pre-wrap;\">{}</p>",
+                html_escape(excerpt)
+            )
+        };
+        let (cta_html, paste_html) = match link {
+            Some(l) => (
+                format!(
+                    "<p style=\"margin:0 0 22px;\"><a href=\"{link}\" style=\"display:inline-block;\
+                     padding:11px 22px;background:#2563eb;color:#ffffff;text-decoration:none;\
+                     border-radius:8px;font-weight:600;\">Open ticket</a></p>",
+                    link = html_escape(l)
+                ),
+                format!(
+                    "<p style=\"margin:0 0 6px;font-size:13px;\">Or paste this into your browser:</p>\
+                     <p style=\"margin:0 0 18px;font-size:13px;word-break:break-all;\">\
+                     <a href=\"{link}\" style=\"color:#2563eb;text-decoration:none;\">{link}</a></p>",
+                    link = html_escape(l)
+                ),
+            ),
+            None => (String::new(), String::new()),
+        };
+
+        let html = format!(
+            "<div style=\"font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;\
+             max-width:540px;margin:0 auto;color:#1a1d23;line-height:1.55;text-align:center;\">\
+                <h2 style=\"margin:0 0 22px;font-weight:600;font-size:22px;\">{heading}</h2>\
+                <div style=\"text-align:left;\">\
+                    <p style=\"margin:0 0 14px;\">{intro}</p>\
+                    <table style=\"margin:0 0 18px;font-size:14px;\">{rows}</table>\
+                    {excerpt}\
+                </div>\
+                {cta}\
+                <div style=\"text-align:left;\">\
+                    {paste}\
+                    <p style=\"margin:0 0 4px;font-size:13px;\">You are receiving this because you \
+                     are a member of this Susi by LP-Research workspace.</p>\
+                    <p style=\"margin:16px 0 0;font-size:13px;\">- Xikaku / LP-Research</p>\
+                </div>\
+             </div>",
+            heading = html_escape(heading),
+            intro = html_escape(intro),
+            rows = rows_html,
+            excerpt = excerpt_html,
+            cta = cta_html,
+            paste = paste_html,
+        );
+
+        self.send_html_rich(to_addr, subject, &text, &html, &[], &[], None)
+            .await
+    }
+
     /// Send a multipart/alternative email with both plain-text and HTML
     /// bodies. Use for customer-facing transactional mails (shipped
     /// notifications, etc.) where HTML formatting is expected.

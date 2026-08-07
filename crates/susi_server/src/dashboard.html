@@ -215,6 +215,12 @@ tr:hover td { background: rgba(108, 140, 255, 0.04); }
 .badge.active { background: rgba(74, 222, 128, 0.15); color: var(--green); }
 .badge.expired { background: rgba(251, 191, 36, 0.15); color: var(--yellow); }
 .badge.revoked { background: rgba(248, 113, 113, 0.15); color: var(--red); }
+/* Ticket status. Narrower than license badges - these sit inline in a list
+   row rather than in a fixed table column. */
+.badge.ticket { min-width: 0; }
+.badge.ticket-open { background: rgba(251, 191, 36, 0.15); color: var(--yellow); }
+.badge.ticket-progress { background: rgba(106, 169, 255, 0.15); color: var(--accent); }
+.badge.ticket-closed { background: rgba(74, 222, 128, 0.15); color: var(--green); }
 
 .feature-tag {
     display: inline-block;
@@ -288,7 +294,8 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
     margin-bottom: 12px;
 }
 .modal .form-row input,
-.modal .form-row select {
+.modal .form-row select,
+.modal .form-row textarea {
     width: 100%;
 }
 .modal .form-actions {
@@ -712,7 +719,10 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
 button.icon-btn {
     min-width: 0;
     width: auto;
-    padding: 4px 12px;
+    /* Optical centring: the arrow glyph's ink sits ~1px below the line-box
+       centre, so the button looks bottom-heavy with symmetric padding. Trade
+       1px of top padding for bottom - same total, so the height is unchanged. */
+    padding: 3px 12px 5px;
 }
 
 /* Shared "peek" expansion anatomy - inset panel + label/value grid used by
@@ -865,6 +875,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                 <button class="ws-tab" data-ws-tab="docs" onclick="wsNavTab('docs')">Docs</button>
                 <button class="ws-tab" data-ws-tab="configs" onclick="wsNavTab('configs')">Configs</button>
                 <button class="ws-tab" data-ws-tab="recordings" onclick="wsNavTab('recordings')">Recordings</button>
+                <button class="ws-tab" data-ws-tab="tickets" onclick="wsNavTab('tickets')">Tickets</button>
                 <button class="ws-tab" data-ws-tab="members" onclick="wsNavTab('members')">Members</button>
                 <button class="ws-tab" data-ws-tab="settings" data-ws-admin-only onclick="wsNavTab('settings')">Settings</button>
             </div>
@@ -899,6 +910,40 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
             <div class="ws-tab-panel" data-ws-panel="recordings">
                 <div class="detail-section-title">Recordings</div>
                 <div id="wsDetailRecordings" class="machines-list"></div>
+            </div>
+
+            <div class="ws-tab-panel" data-ws-panel="tickets">
+                <div id="wsTicketsListView">
+                    <div class="detail-section-title" style="display:flex;align-items:center;justify-content:space-between;">
+                        <span>Tickets</span>
+                        <button onclick="showCreateTicketModal()">+ New ticket</button>
+                    </div>
+                    <div id="wsDetailTickets" class="machines-list"></div>
+                </div>
+                <div id="wsTicketDetailView" style="display:none;">
+                    <div class="detail-section-title" style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
+                        <span style="display:flex;align-items:center;gap:10px;min-width:0;">
+                            <button class="icon-btn" onclick="closeWsTicket()" title="Back to all tickets">&larr;</button>
+                            <span id="wsTicketTitle" style="text-transform:none;letter-spacing:0;font-size:14px;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;"></span>
+                        </span>
+                        <span style="display:flex;gap:8px;align-items:center;flex-shrink:0;">
+                            <select id="wsTicketStatus" onchange="setWsTicketStatus()" style="padding:5px 8px;">
+                                <option value="open">Open</option>
+                                <option value="in_progress">In progress</option>
+                                <option value="closed">Closed</option>
+                            </select>
+                            <button class="secondary" onclick="showEditTicketModal()">Edit</button>
+                        </span>
+                    </div>
+                    <div id="wsTicketMeta" style="font-size:12px;color:var(--text2);margin-bottom:12px;"></div>
+                    <div id="wsTicketBody" style="font-size:13px;white-space:pre-wrap;word-break:break-word;margin-bottom:8px;"></div>
+                    <div class="detail-section-title">Comments</div>
+                    <div id="wsTicketComments" class="machines-list"></div>
+                    <div style="display:flex;gap:8px;margin-top:8px;align-items:flex-start;">
+                        <textarea id="wsTicketNewComment" rows="3" placeholder="Add a comment..." style="flex:1;resize:vertical;"></textarea>
+                        <button onclick="addWsTicketComment()">Comment</button>
+                    </div>
+                </div>
             </div>
 
             <div class="ws-tab-panel" data-ws-panel="members">
@@ -1323,6 +1368,36 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
         <button class="secondary" id="auditLoadMore" onclick="loadAudit(true)" style="display:none;">Load more</button>
     </div>
 </div><!-- /page-audit -->
+
+<!-- Tickets across all workspaces (admin) -->
+<div id="page-tickets" class="dash-page">
+    <div style="margin-top:32px;margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
+        <h2 style="font-size:16px;font-weight:600;">Tickets</h2>
+        <select id="ticketsStatusFilter" onchange="loadTickets()" style="padding:6px 10px;">
+            <option value="">Open and in progress</option>
+            <option value="open">Open</option>
+            <option value="in_progress">In progress</option>
+            <option value="closed">Closed</option>
+            <option value="all">All statuses</option>
+        </select>
+    </div>
+    <div class="card" style="padding:0;">
+        <table style="width:100%;" id="ticketsTable">
+            <thead>
+                <tr>
+                    <th style="width:150px;">Status</th>
+                    <th style="width:180px;">Workspace</th>
+                    <th>Ticket</th>
+                    <th style="width:140px;">Opened by</th>
+                    <th style="width:170px;">Last activity</th>
+                </tr>
+            </thead>
+            <tbody id="ticketsBody">
+                <tr><td colspan="5" class="empty-state"><p>Loading...</p></td></tr>
+            </tbody>
+        </table>
+    </div>
+</div><!-- /page-tickets -->
 
 <!-- Backups (Dropbox) -->
 <div id="page-backups" class="dash-page">
@@ -1907,6 +1982,35 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
     </div>
 </div>
 
+<!-- Ticket Modal (create + edit share it; ticketModalId decides which) -->
+<div id="ticketModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeTicketModal()">
+    <div class="modal">
+        <h2 id="ticketModalHeading">New Ticket</h2>
+        <div class="modal-body">
+            <div class="form-row">
+                <label>Title</label>
+                <input type="text" id="ticketFormTitle" maxlength="200">
+            </div>
+            <div class="form-row">
+                <label>Description</label>
+                <textarea id="ticketFormBody" rows="8" style="resize:vertical;"></textarea>
+            </div>
+            <div class="form-row" id="ticketFormStatusRow" style="display:none;">
+                <label>Status</label>
+                <select id="ticketFormStatus">
+                    <option value="open">Open</option>
+                    <option value="in_progress">In progress</option>
+                    <option value="closed">Closed</option>
+                </select>
+            </div>
+        </div>
+        <div class="form-actions">
+            <button class="secondary" onclick="closeTicketModal()">Cancel</button>
+            <button id="ticketModalSubmit" onclick="submitTicketModal()">Create</button>
+        </div>
+    </div>
+</div>
+
 <!-- Add User Modal -->
 <div id="addUserModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeAddUserModal()">
     <div class="modal">
@@ -2393,7 +2497,7 @@ function route() {
     showPage(target);
     if (authToken) {
         if (target === 'licenses') setLicenseRoute(segs[1] || null);
-        if (target === 'workspaces') setWorkspaceRoute(segs[1] || null, segs[2] || null);
+        if (target === 'workspaces') setWorkspaceRoute(segs[1] || null, segs[2] || null, segs[3] || null);
     }
 }
 
@@ -2404,6 +2508,7 @@ function showPage(name) {
     if (name === 'mylicenses' && authToken) loadMyLicenses();
     if (name === 'account' && authToken) loadAccountPage();
     if (name === 'audit' && authToken) loadAudit();
+    if (name === 'tickets' && authToken) loadTickets();
     if (name === 'backups' && authToken) loadBackupPage();
     if (name === 'users' && authToken) loadUsers();
     activeNavPage = name;
@@ -2443,6 +2548,7 @@ function renderNav() {
         { page: 'releases', label: 'Releases', href: '#/releases', show: !!authToken },
         { page: 'licenses', label: 'Licenses', href: '#/licenses', show: !!authToken && isAdmin },
         { page: 'users', label: 'Users', href: '#/users', show: !!authToken && isAdmin },
+        { page: 'tickets', label: 'Tickets', href: '#/tickets', show: !!authToken && isAdmin, group: 'admin' },
         { page: 'products', label: 'Products', href: '#/products', show: !!authToken && isAdmin, group: 'admin' },
         { page: 'website', label: 'Website', href: '#/website', show: !!authToken && isAdmin, group: 'admin' },
         { page: 'shop', label: 'Shop', href: '#/shop', show: !!authToken && isAdmin, group: 'admin' },
@@ -4860,7 +4966,7 @@ function renderWorkspaces() {
 // wsDetailLoadedId tracks which workspace the panel currently holds.
 let wsDetailLoadedId = null;
 
-function setWorkspaceRoute(id, tab) {
+function setWorkspaceRoute(id, tab, sub) {
     if (!id) {
         hideWsDetail();
         return;
@@ -4871,8 +4977,21 @@ function setWorkspaceRoute(id, tab) {
     if (wsDetailLoadedId === id) {
         document.getElementById('wsDetailPanel').classList.add('visible');
         setWsTab(tab || 'files');
+        applyWsTicketRoute(tab, sub);
     } else {
-        showWsDetail(id, tab);
+        showWsDetail(id, tab, sub);
+    }
+}
+
+// #/workspaces/{id}/tickets[/{ticketId}] - the ticket id sub-segment is what
+// the notification emails deep-link to, so it must work on a cold page load
+// as well as on an in-app tab switch.
+function applyWsTicketRoute(tab, sub) {
+    if (tab !== 'tickets') return;
+    if (sub) {
+        openWsTicket(parseInt(sub, 10));
+    } else {
+        showWsTicketList();
     }
 }
 
@@ -4889,7 +5008,7 @@ function wsNavTab(name) {
     location.hash = '#/workspaces/' + encodeURIComponent(selectedWsId) + '/' + name;
 }
 
-async function showWsDetail(id, tab) {
+async function showWsDetail(id, tab, sub) {
     selectedWsId = id;
     wsDetailLoadedId = id;
     renderWorkspaces();
@@ -4899,6 +5018,7 @@ async function showWsDetail(id, tab) {
     // Default to Files when opening the panel fresh; callers that refresh
     // after an in-tab action (e.g. add/remove member) pass the tab to keep.
     setWsTab(tab || 'files');
+    applyWsTicketRoute(tab, sub);
 
     try {
         const resp = await fetch(API + '/workspaces/' + id, { headers: authHeaders() });
@@ -4973,6 +5093,7 @@ async function showWsDetail(id, tab) {
         loadWsFiles(id);
         loadWsDocs(id);
         loadWsRecordings(id);
+        loadWsTickets(id);
     } catch (e) {
         toast('Error: ' + e.message, 'error');
     }
@@ -5293,6 +5414,297 @@ async function deleteWsRecording(id) {
     }
 }
 
+// ---- Workspace tickets ----
+// The list and the single-ticket view are two divs inside the same tab panel;
+// #/workspaces/{id}/tickets/{tid} selects between them so notification emails
+// can deep-link straight to a ticket.
+let openTicketId = null;
+let openTicketData = null;   // last successfully rendered ticket
+
+const TICKET_STATUS_LABELS = { open: 'Open', in_progress: 'In progress', closed: 'Closed' };
+
+function ticketBadge(status) {
+    const cls = status === 'closed' ? 'ticket-closed' : (status === 'in_progress' ? 'ticket-progress' : 'ticket-open');
+    return '<span class="badge ticket ' + cls + '">' + esc(TICKET_STATUS_LABELS[status] || status) + '</span>';
+}
+
+async function loadWsTickets(wsId) {
+    if (!wsId) return;
+    const container = document.getElementById('wsDetailTickets');
+    if (!container) return;
+    try {
+        const resp = await fetch(API + '/workspaces/' + wsId + '/tickets', { headers: authHeaders() });
+        if (!resp.ok) { container.innerHTML = '<div style="color:var(--text2);font-size:13px;">Failed to load tickets</div>'; return; }
+        const tickets = (await resp.json()).tickets || [];
+        if (tickets.length === 0) {
+            container.innerHTML = '<div class="empty-state">No tickets yet. Use "New ticket" to record a problem, a question, or feedback from a test session.</div>';
+            return;
+        }
+        container.innerHTML = tickets.map(t => {
+            const menuId = 'ws-ticket-menu-' + t.id;
+            const comments = t.comment_count
+                ? '<span style="white-space:nowrap;">' + t.comment_count + (t.comment_count === 1 ? ' comment' : ' comments') + '</span>'
+                : '';
+            return '<div class="machine-item">' +
+                '<span style="display:flex;align-items:center;gap:10px;min-width:0;flex:1;">' +
+                    ticketBadge(t.status) +
+                    '<a href="#/workspaces/' + encodeURIComponent(wsId) + '/tickets/' + t.id + '" style="font-weight:600;color:var(--text);text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">#' + t.id + ' ' + esc(t.title) + '</a>' +
+                '</span>' +
+                '<span class="machine-code" style="display:flex;align-items:center;gap:10px;flex-shrink:0;">' +
+                    comments +
+                    '<span>' + esc(t.author) + ' &middot; ' + formatDateTime(t.created_at) + '</span>' +
+                    '<span class="dropdown" onclick="event.stopPropagation();">' +
+                        '<button onclick="toggleDropdown(event,\'' + menuId + '\')">Actions &#9662;</button>' +
+                        '<div id="' + menuId + '" class="dropdown-menu" style="display:none;">' +
+                            '<button onclick="openWsTicket(' + t.id + ')">Open</button>' +
+                            '<div class="divider"></div>' +
+                            '<button class="danger" onclick="deleteWsTicket(' + t.id + ')">Delete</button>' +
+                        '</div>' +
+                    '</span>' +
+                '</span>' +
+            '</div>';
+        }).join('');
+    } catch (e) {
+        container.innerHTML = '<div style="color:var(--text2);font-size:13px;">Failed to load tickets: ' + esc(e.message) + '</div>';
+    }
+}
+
+function showWsTicketList() {
+    openTicketId = null;
+    openTicketData = null;
+    document.getElementById('wsTicketsListView').style.display = '';
+    document.getElementById('wsTicketDetailView').style.display = 'none';
+}
+
+function closeWsTicket() {
+    if (!selectedWsId) return;
+    location.hash = '#/workspaces/' + encodeURIComponent(selectedWsId) + '/tickets';
+}
+
+async function openWsTicket(id) {
+    if (!selectedWsId || !id || isNaN(id)) { showWsTicketList(); return; }
+    // Keep the URL in step when opened from the Actions menu rather than a link.
+    const want = '#/workspaces/' + encodeURIComponent(selectedWsId) + '/tickets/' + id;
+    if (location.hash !== want) { location.hash = want; return; }
+
+    openTicketId = id;
+    openTicketData = null;
+    document.getElementById('wsTicketsListView').style.display = 'none';
+    document.getElementById('wsTicketDetailView').style.display = '';
+    document.getElementById('wsTicketTitle').textContent = 'Loading...';
+    document.getElementById('wsTicketMeta').textContent = '';
+    document.getElementById('wsTicketBody').textContent = '';
+    document.getElementById('wsTicketComments').innerHTML = '';
+    // Drop any unsent draft - it was written for the previous ticket.
+    document.getElementById('wsTicketNewComment').value = '';
+    await reloadOpenTicket(true);
+}
+
+function renderWsTicketComments(comments) {
+    const container = document.getElementById('wsTicketComments');
+    if (!comments.length) {
+        container.innerHTML = '<div style="color:var(--text2);font-size:13px;padding:4px 0;">No comments yet.</div>';
+        return;
+    }
+    container.innerHTML = comments.map(c => {
+        const menuId = 'ws-ticket-comment-menu-' + c.id;
+        return '<div class="machine-item" style="align-items:flex-start;gap:12px;">' +
+            '<span style="display:flex;flex-direction:column;gap:3px;min-width:0;flex:1;">' +
+                '<span style="font-size:12px;color:var(--text2);">' + esc(c.author) + ' &middot; ' + formatDateTime(c.created_at) + '</span>' +
+                '<span style="white-space:pre-wrap;word-break:break-word;">' + esc(c.body) + '</span>' +
+            '</span>' +
+            '<span class="dropdown" style="flex-shrink:0;" onclick="event.stopPropagation();">' +
+                '<button onclick="toggleDropdown(event,\'' + menuId + '\')">Actions &#9662;</button>' +
+                '<div id="' + menuId + '" class="dropdown-menu" style="display:none;">' +
+                    '<button class="danger" onclick="deleteWsTicketComment(' + c.id + ')">Delete</button>' +
+                '</div>' +
+            '</span>' +
+        '</div>';
+    }).join('');
+}
+
+async function addWsTicketComment() {
+    if (!selectedWsId || !openTicketId) return;
+    const el = document.getElementById('wsTicketNewComment');
+    const body = el.value.trim();
+    if (!body) { toast('Comment cannot be empty', 'error'); return; }
+    try {
+        const resp = await fetch(API + '/workspaces/' + selectedWsId + '/tickets/' + openTicketId + '/comments', {
+            method: 'POST',
+            headers: authHeaders(),
+            body: JSON.stringify({ body }),
+        });
+        if (!resp.ok) {
+            const d = await resp.json().catch(() => ({}));
+            toast('Error: ' + (d.error || 'Could not add comment'), 'error');
+            return;
+        }
+        el.value = '';
+        await reloadOpenTicket();
+        loadWsTickets(selectedWsId);
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+/// Re-fetch and re-render the open ticket without touching the hash. On the
+/// first load (`report`) a failure is surfaced in place; on a refresh after an
+/// action the existing view is left alone rather than blanked.
+async function reloadOpenTicket(report) {
+    if (!selectedWsId || !openTicketId) return;
+    try {
+        const resp = await fetch(API + '/workspaces/' + selectedWsId + '/tickets/' + openTicketId, { headers: authHeaders() });
+        if (!resp.ok) {
+            if (report) document.getElementById('wsTicketTitle').textContent = 'Ticket not found';
+            return;
+        }
+        const data = await resp.json();
+        const t = data.ticket;
+        openTicketData = t;
+        document.getElementById('wsTicketTitle').textContent = '#' + t.id + ' ' + t.title;
+        document.getElementById('wsTicketMeta').textContent =
+            'Opened by ' + t.author + ' on ' + formatDateTime(t.created_at) +
+            (t.updated_at !== t.created_at ? ' · last activity ' + formatDateTime(t.updated_at) : '');
+        const bodyEl = document.getElementById('wsTicketBody');
+        bodyEl.textContent = t.body || 'No description given.';
+        bodyEl.style.color = t.body ? '' : 'var(--text2)';
+        document.getElementById('wsTicketStatus').value = t.status;
+        renderWsTicketComments(data.comments || []);
+    } catch (e) {
+        if (report) document.getElementById('wsTicketTitle').textContent = 'Failed to load: ' + e.message;
+    }
+}
+
+async function deleteWsTicketComment(id) {
+    if (!selectedWsId || !openTicketId) return;
+    if (!confirm('Delete this comment?')) return;
+    try {
+        const resp = await fetch(API + '/workspaces/' + selectedWsId + '/tickets/' + openTicketId + '/comments/' + id, {
+            method: 'DELETE',
+            headers: authHeaders(),
+        });
+        if (!resp.ok) {
+            const d = await resp.json().catch(() => ({}));
+            toast('Error: ' + (d.error || 'Could not delete comment'), 'error');
+            return;
+        }
+        await reloadOpenTicket();
+        loadWsTickets(selectedWsId);
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function setWsTicketStatus() {
+    if (!selectedWsId || !openTicketId || !openTicketData) return;
+    const status = document.getElementById('wsTicketStatus').value;
+    // PUT replaces the whole ticket, so send back the title/body we last
+    // rendered - a status change must not blank the description.
+    const t = openTicketData;
+    try {
+        const resp = await fetch(API + '/workspaces/' + selectedWsId + '/tickets/' + openTicketId, {
+            method: 'PUT',
+            headers: authHeaders(),
+            body: JSON.stringify({ title: t.title, body: t.body, status }),
+        });
+        if (!resp.ok) {
+            const d = await resp.json().catch(() => ({}));
+            toast('Error: ' + (d.error || 'Could not update status'), 'error');
+            document.getElementById('wsTicketStatus').value = t.status;
+            return;
+        }
+        toast('Status updated', 'success');
+        await reloadOpenTicket();
+        loadWsTickets(selectedWsId);
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function deleteWsTicket(id) {
+    if (!selectedWsId) return;
+    if (!confirm('Delete this ticket and all its comments? This cannot be undone.')) return;
+    try {
+        const resp = await fetch(API + '/workspaces/' + selectedWsId + '/tickets/' + id, {
+            method: 'DELETE',
+            headers: authHeaders(),
+        });
+        if (!resp.ok) {
+            const d = await resp.json().catch(() => ({}));
+            toast('Error: ' + (d.error || 'Could not delete ticket'), 'error');
+            return;
+        }
+        toast('Ticket deleted', 'success');
+        loadWsTickets(selectedWsId);
+        if (openTicketId === id) closeWsTicket();
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+// ---- Ticket modal (create + edit) ----
+let ticketModalId = null;   // null = create, otherwise the ticket being edited
+
+function showCreateTicketModal() {
+    if (!selectedWsId) return;
+    ticketModalId = null;
+    document.getElementById('ticketModalHeading').textContent = 'New Ticket';
+    document.getElementById('ticketModalSubmit').textContent = 'Create';
+    document.getElementById('ticketFormTitle').value = '';
+    document.getElementById('ticketFormBody').value = '';
+    document.getElementById('ticketFormStatusRow').style.display = 'none';
+    document.getElementById('ticketModal').classList.add('visible');
+    setTimeout(() => document.getElementById('ticketFormTitle').focus(), 50);
+}
+
+function showEditTicketModal() {
+    if (!selectedWsId || !openTicketData) return;
+    const t = openTicketData;
+    ticketModalId = t.id;
+    document.getElementById('ticketModalHeading').textContent = 'Edit Ticket #' + t.id;
+    document.getElementById('ticketModalSubmit').textContent = 'Save';
+    document.getElementById('ticketFormTitle').value = t.title;
+    document.getElementById('ticketFormBody').value = t.body;
+    document.getElementById('ticketFormStatus').value = t.status;
+    document.getElementById('ticketFormStatusRow').style.display = '';
+    document.getElementById('ticketModal').classList.add('visible');
+    setTimeout(() => document.getElementById('ticketFormTitle').focus(), 50);
+}
+
+function closeTicketModal() {
+    document.getElementById('ticketModal').classList.remove('visible');
+}
+
+async function submitTicketModal() {
+    if (!selectedWsId) return;
+    const title = document.getElementById('ticketFormTitle').value.trim();
+    const body = document.getElementById('ticketFormBody').value.trim();
+    if (!title) { toast('Title is required', 'error'); return; }
+    const editing = ticketModalId !== null;
+    const url = API + '/workspaces/' + selectedWsId + '/tickets' + (editing ? '/' + ticketModalId : '');
+    const payload = editing
+        ? { title, body, status: document.getElementById('ticketFormStatus').value }
+        : { title, body };
+    try {
+        const resp = await fetch(url, {
+            method: editing ? 'PUT' : 'POST',
+            headers: authHeaders(),
+            body: JSON.stringify(payload),
+        });
+        if (!resp.ok) {
+            const d = await resp.json().catch(() => ({}));
+            toast('Error: ' + (d.error || 'Could not save ticket'), 'error');
+            return;
+        }
+        closeTicketModal();
+        toast(editing ? 'Ticket updated' : 'Ticket created', 'success');
+        loadWsTickets(selectedWsId);
+        if (editing) await reloadOpenTicket();
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
 
 async function addWsMember() {
     const username = document.getElementById('wsNewMember').value;
@@ -5331,6 +5743,36 @@ async function removeWsMember(wsId, username) {
         }
         toast('Member removed', 'success');
         showWsDetail(wsId, 'members');
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function saveWsProperties() {
+    if (!selectedWsId) return;
+    const name = document.getElementById('wsEditName').value.trim();
+    if (!name) { toast('Name is required', 'error'); return; }
+    // created_by is optional server-side; an empty value leaves it unchanged.
+    const created_by = document.getElementById('wsEditCreatedBy').value || null;
+    try {
+        const resp = await fetch(API + '/workspaces/' + selectedWsId, {
+            method: 'PUT',
+            headers: authHeaders(),
+            body: JSON.stringify({
+                name,
+                product: document.getElementById('wsEditProduct').value.trim(),
+                description: document.getElementById('wsEditDesc').value.trim(),
+                created_by,
+            }),
+        });
+        if (!resp.ok) {
+            const data = await resp.json().catch(() => ({}));
+            toast('Error: ' + (data.error || 'Could not save workspace'), 'error');
+            return;
+        }
+        toast('Workspace saved', 'success');
+        loadWorkspaces();
+        showWsDetail(selectedWsId, 'settings');
     } catch (e) {
         toast('Failed: ' + e.message, 'error');
     }
@@ -5802,6 +6244,43 @@ async function loadAudit(more) {
         }
         if (entries.length) auditCursor = entries[entries.length - 1].id;
         document.getElementById('auditLoadMore').style.display = entries.length === 100 ? '' : 'none';
+    } catch (e) {
+        tbody.innerHTML = '<tr><td colspan="5" class="empty-state"><p>Failed to load: ' + escHtml(e.message) + '</p></td></tr>';
+    }
+}
+
+// ---- Tickets across all workspaces (admin) ----
+// The default view is the working queue (everything not closed), which the
+// API has no single filter for - so that one case fetches all and drops the
+// closed rows here. Concrete statuses filter server-side.
+async function loadTickets() {
+    const tbody = document.getElementById('ticketsBody');
+    if (!tbody) return;
+    const filter = (document.getElementById('ticketsStatusFilter') || {}).value || '';
+    const serverFilter = (filter && filter !== 'all') ? filter : '';
+    const url = API + '/admin/tickets' + (serverFilter ? '?status=' + encodeURIComponent(serverFilter) : '');
+    try {
+        const resp = await fetch(url, { headers: authHeaders() });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        let tickets = (await resp.json()).tickets || [];
+        if (filter === '') tickets = tickets.filter(t => t.status !== 'closed');
+        if (!tickets.length) {
+            tbody.innerHTML = '<tr><td colspan="5" class="empty-state"><p>No tickets match this filter.</p></td></tr>';
+            return;
+        }
+        tbody.innerHTML = tickets.map(t => {
+            const href = '#/workspaces/' + encodeURIComponent(t.workspace_id) + '/tickets/' + t.id;
+            const comments = t.comment_count
+                ? ' <span style="color:var(--text2);">· ' + t.comment_count + (t.comment_count === 1 ? ' comment' : ' comments') + '</span>'
+                : '';
+            return '<tr>'
+                + '<td>' + ticketBadge(t.status) + '</td>'
+                + '<td style="color:var(--text2);">' + escHtml(t.workspace_name || t.workspace_id) + '</td>'
+                + '<td><a href="' + href + '" style="color:var(--text);text-decoration:none;font-weight:500;">#' + t.id + ' ' + escHtml(t.title) + '</a>' + comments + '</td>'
+                + '<td>' + escHtml(t.author) + '</td>'
+                + '<td style="white-space:nowrap;color:var(--text2);">' + formatDateTime(t.updated_at) + '</td>'
+                + '</tr>';
+        }).join('');
     } catch (e) {
         tbody.innerHTML = '<tr><td colspan="5" class="empty-state"><p>Failed to load: ' + escHtml(e.message) + '</p></td></tr>';
     }

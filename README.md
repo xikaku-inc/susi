@@ -17,6 +17,7 @@
 ### Releases & workspaces
 - **Workspaces** - group licenses, files, configs, and docs per product/team
 - **Workspace files & docs** - flat member-writable file share and documentation per workspace
+- **Workspace tickets** - customer-visible issue list per workspace with comments and email notifications; admins get a cross-workspace queue
 - **Versioned config revisions** - push, fetch, and roll back JSON configs per workspace
 - **Binary release channel** - upload signed installers/binaries; clients fetch via license-key-protected `/api/v1/updates`
 
@@ -816,6 +817,20 @@ Each workspace has a flat, member-writable file share (bytes on disk under the d
 | `POST` | `/api/v1/workspaces/{id}/docs/pages/{slug}/rename` | JWT (member) | Rename a page (cascades to children) |
 | `POST` | `/api/v1/workspaces/{id}/docs/assets` | JWT (member) | Upload a doc asset (up to 100 MB) |
 | `GET` / `DELETE` | `/api/v1/workspaces/{id}/docs/assets/{file}` | JWT (member) | Fetch / delete a doc asset |
+
+### Workspace tickets
+
+The shared record of customer-reported problems, scoped to a workspace so a report sits next to the config revisions, recordings and files that reproduce it. Status is `open`, `in_progress` or `closed`.
+
+Every member reads and writes every ticket and comment in their workspace - there are no internal-only notes, so treat anything written here as customer-visible. Deleting a ticket or a comment is restricted to its author or a site admin; everything else, including status changes, is open to any member. Creating a ticket, commenting, and changing status email every workspace member plus every site admin except the actor (silently skipped when SMTP is unconfigured).
+
+| Method | Endpoint | Auth | Description |
+|---|---|---|---|
+| `GET` / `POST` | `/api/v1/workspaces/{id}/tickets` | JWT (member) | List / open a ticket |
+| `GET` / `PUT` / `DELETE` | `/api/v1/workspaces/{id}/tickets/{tid}` | JWT (member) | Read with comments / update / delete |
+| `POST` | `/api/v1/workspaces/{id}/tickets/{tid}/comments` | JWT (member) | Add a comment |
+| `DELETE` | `/api/v1/workspaces/{id}/tickets/{tid}/comments/{cid}` | JWT (member) | Delete a comment |
+| `GET` | `/api/v1/admin/tickets` | JWT (admin) | Every workspace's tickets, `?status=` optional |
 
 ## Releases
 

@@ -74,7 +74,6 @@
 //! [`TestServer::admin_token`] logs in and clears the forced-password-change
 //! flag so that all admin API endpoints become accessible.
 
-use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
@@ -296,18 +295,24 @@ fn free_port() -> u16 {
 // Tests
 // ---------------------------------------------------------------------------
 
-// Real fingerprint lookup fails on some CI runners (e.g. GitHub's
-// ubuntu-latest where /sys/block/<disk>/serial is empty), which would
-// cause every verify_signed call to fall through to LicenseStatus::Error
-// regardless of actual signature validity. The tests do not care about
-// machine-binding - inject a stable synthetic code via the cache.
+// These tests do not care about machine-binding, so they pin a synthetic
+// fingerprint via `with_machine_code_override` - the same mechanism
+// susi_client's own unit tests use.
+//
+// It must be the override and not `with_machine_code_cache`: the cache is a
+// *fallback* consulted only when the hardware lookup fails, and it is
+// overwritten with the real code whenever the lookup succeeds. Seeding the
+// cache therefore only pins anything on a host where fingerprinting is broken
+// (e.g. GitHub's ubuntu-latest, where /sys/block/<disk>/serial is empty) - on
+// a machine with working WMI or disk serials every client would silently share
+// the one real fingerprint instead.
 const TEST_MACHINE_CODE: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
 
-fn test_machine_code_cache() -> PathBuf {
-    let path = std::env::temp_dir().join("susi_client_test_machine_code");
-    let _ = std::fs::write(&path, TEST_MACHINE_CODE);
-    path
+/// A distinct synthetic fingerprint per simulated machine. Must stay 64 hex
+/// characters to satisfy `is_valid_machine_code`.
+fn machine_code_for(code: char) -> String {
+    code.to_string().repeat(64)
 }
 
 
@@ -325,7 +330,7 @@ fn test_activate_and_refresh_unsigned_ok() {
     let license_path = server._dir.path().join("license.json");
     let client = LicenseClient::with_server(&server.public_key_pem, server.api_url.clone())
         .expect("LicenseClient")
-        .with_machine_code_cache(test_machine_code_cache());
+        .with_machine_code_override(TEST_MACHINE_CODE);
 
     let status = client.activate(&license_path, &license_key, None);
     assert!(status.is_valid(), "expected Valid, got: {:?}", status);
@@ -344,7 +349,7 @@ fn test_lease_renewal_via_server() {
     let license_path = server._dir.path().join("license.json");
     let client = LicenseClient::with_server(&server.public_key_pem, server.api_url.clone())
         .expect("LicenseClient")
-        .with_machine_code_cache(test_machine_code_cache());
+        .with_machine_code_override(TEST_MACHINE_CODE);
 
     let status = client.activate(&license_path, &license_key, None);
     assert!(status.is_valid(), "first check: {:?}", status);
@@ -379,12 +384,11 @@ fn test_expired_lease_kept_as_history_and_seat_freed() {
         .expect("license_key")
         .to_string();
 
+    // Two clients that must look like two genuinely different machines.
     let make_client = |code: char| {
-        let cache = server._dir.path().join(format!("machine_code_{}", code));
-        std::fs::write(&cache, code.to_string().repeat(64)).expect("write code");
         LicenseClient::with_server(&server.public_key_pem, server.api_url.clone())
             .expect("LicenseClient")
-            .with_machine_code_cache(cache)
+            .with_machine_code_override(machine_code_for(code))
     };
 
     let client_a = make_client('a');
@@ -514,7 +518,7 @@ fn test_fallback_to_cached_file() {
     let license_path = dir.path().join("license.json");
     let client = LicenseClient::with_server(&public_pem, api_url.clone())
         .unwrap()
-        .with_machine_code_cache(test_machine_code_cache());
+        .with_machine_code_override(TEST_MACHINE_CODE);
     let status = client.activate(&license_path, &license_key, None);
     assert!(status.is_valid(), "initial: {:?}", status);
 
@@ -525,7 +529,7 @@ fn test_fallback_to_cached_file() {
     // A second client aimed at the now-dead server must fall back to the file.
     let client2 = LicenseClient::with_server(&public_pem, api_url)
         .unwrap()
-        .with_machine_code_cache(test_machine_code_cache());
+        .with_machine_code_override(TEST_MACHINE_CODE);
     let status = client2.verify_and_refresh(&license_path, &license_key, None);
     assert!(status.is_valid(), "fallback: expected Valid from cache, got: {:?}", status);
 }
@@ -577,7 +581,7 @@ fn test_require_signed_binary_enforcement() {
     // Local verification result depends on whether the test binary is signed.
     let client = LicenseClient::new(&server.public_key_pem)
         .expect("LicenseClient")
-        .with_machine_code_cache(test_machine_code_cache());
+        .with_machine_code_override(TEST_MACHINE_CODE);
     let status = client.verify_signed(&signed);
 
     if binary_signing::is_binary_signed() {
@@ -660,7 +664,7 @@ fn test_update_require_signed_binary() {
     // Local check: unsigned binary is now accepted.
     let client = LicenseClient::new(&server.public_key_pem)
         .unwrap()
-        .with_machine_code_cache(test_machine_code_cache());
+        .with_machine_code_override(TEST_MACHINE_CODE);
     let status = client.verify_signed(&signed);
     assert!(status.is_valid(), "expected Valid after update, got: {:?}", status);
 }
@@ -3251,6 +3255,273 @@ fn test_workspace_member_docs_and_files() {
         .send()
         .expect("download deleted");
     assert_eq!(resp.status().as_u16(), 404, "deleted file 404s");
+}
+
+/// Workspace tickets: members file and comment, every member sees every
+/// comment, non-members are locked out entirely, deletes are restricted to
+/// the author or an admin, and the cross-workspace list is admin-only.
+#[test]
+fn test_workspace_tickets() {
+    let server = TestServer::start();
+    let admin = server.admin_token();
+    let client = server.http();
+
+    let user_token = |name: &str| -> String {
+        client
+            .post(format!("{}/auth/users", server.api_url))
+            .bearer_auth(&admin)
+            .json(&json!({
+                "username": name,
+                "email": format!("{}@example.com", name),
+                "role": "user",
+                "password": "ticketpass123",
+            }))
+            .send()
+            .expect("create user")
+            .error_for_status()
+            .expect("create user ok");
+        let token = client
+            .post(format!("{}/auth/login", server.api_url))
+            .json(&json!({"username": name, "password": "ticketpass123"}))
+            .send()
+            .expect("login")
+            .json::<Value>()
+            .expect("login json")["token"]
+            .as_str()
+            .expect("token")
+            .to_string();
+        client
+            .post(format!("{}/auth/change-password", server.api_url))
+            .bearer_auth(&token)
+            .json(&json!({"current_password": "ticketpass123", "new_password": "ticketpass456"}))
+            .send()
+            .expect("change pw")
+            .json::<Value>()
+            .expect("change pw json")["token"]
+            .as_str()
+            .expect("fresh token")
+            .to_string()
+    };
+    let reporter = user_token("tkt_reporter");
+    let colleague = user_token("tkt_colleague");
+    let outsider = user_token("tkt_outsider");
+
+    let mk_ws = |name: &str, members: &[&str]| -> String {
+        let ws = client
+            .post(format!("{}/workspaces", server.api_url))
+            .bearer_auth(&admin)
+            .json(&json!({"name": name, "product": "fusionhub", "description": ""}))
+            .send()
+            .expect("create ws")
+            .json::<Value>()
+            .expect("ws json");
+        let id = ws["id"].as_str().expect("ws id").to_string();
+        for m in members {
+            client
+                .post(format!("{}/workspaces/{}/members", server.api_url, id))
+                .bearer_auth(&admin)
+                .json(&json!({"username": m}))
+                .send()
+                .expect("add member")
+                .error_for_status()
+                .expect("add member ok");
+        }
+        id
+    };
+    let ws_id = mk_ws("Glasses", &["tkt_reporter", "tkt_colleague"]);
+    let other_ws = mk_ws("RTK Box", &["tkt_outsider"]);
+
+    // A member files a ticket.
+    let resp = client
+        .post(format!("{}/workspaces/{}/tickets", server.api_url, ws_id))
+        .bearer_auth(&reporter)
+        .json(&json!({
+            "title": "Yaw-dependent lateral offset",
+            "body": "When I look left-right the image over-compensates during motion."
+        }))
+        .send()
+        .expect("create ticket");
+    assert_eq!(resp.status().as_u16(), 201, "member files a ticket: {}", resp.text().unwrap_or_default());
+    let tid = resp.json::<Value>().expect("ticket json")["id"].as_i64().expect("ticket id");
+
+    // Empty titles are rejected.
+    let resp = client
+        .post(format!("{}/workspaces/{}/tickets", server.api_url, ws_id))
+        .bearer_auth(&reporter)
+        .json(&json!({"title": "   ", "body": "x"}))
+        .send()
+        .expect("blank title");
+    assert_eq!(resp.status().as_u16(), 400, "blank title is rejected");
+
+    // The ticket shows up for another member of the same workspace.
+    let list = client
+        .get(format!("{}/workspaces/{}/tickets", server.api_url, ws_id))
+        .bearer_auth(&colleague)
+        .send()
+        .expect("list tickets")
+        .json::<Value>()
+        .expect("list json");
+    let rows = list["tickets"].as_array().expect("tickets array");
+    assert_eq!(rows.len(), 1, "colleague sees the ticket: {}", list);
+    assert_eq!(rows[0]["status"], json!("open"));
+    assert_eq!(rows[0]["author"], json!("tkt_reporter"));
+    assert_eq!(rows[0]["workspace_name"], json!("Glasses"));
+
+    // Comments from an admin and from a member are visible to every member -
+    // there are no internal-only notes.
+    for (token, body) in [(&admin, "We should run a real OST calibration."), (&colleague, "Seen it too.")] {
+        let resp = client
+            .post(format!("{}/workspaces/{}/tickets/{}/comments", server.api_url, ws_id, tid))
+            .bearer_auth(token)
+            .json(&json!({"body": body}))
+            .send()
+            .expect("comment");
+        assert_eq!(resp.status().as_u16(), 201, "comment accepted: {}", resp.text().unwrap_or_default());
+    }
+    let detail = client
+        .get(format!("{}/workspaces/{}/tickets/{}", server.api_url, ws_id, tid))
+        .bearer_auth(&reporter)
+        .send()
+        .expect("get ticket")
+        .json::<Value>()
+        .expect("detail json");
+    let comments = detail["comments"].as_array().expect("comments array");
+    assert_eq!(comments.len(), 2, "reporter sees the admin comment too: {}", detail);
+    assert_eq!(comments[0]["author"], json!("admin"));
+    assert_eq!(detail["ticket"]["comment_count"], json!(2));
+
+    // Empty comments are rejected.
+    let resp = client
+        .post(format!("{}/workspaces/{}/tickets/{}/comments", server.api_url, ws_id, tid))
+        .bearer_auth(&reporter)
+        .json(&json!({"body": "  "}))
+        .send()
+        .expect("blank comment");
+    assert_eq!(resp.status().as_u16(), 400, "blank comment is rejected");
+
+    // Any member may move the status; an unknown status is rejected.
+    let resp = client
+        .put(format!("{}/workspaces/{}/tickets/{}", server.api_url, ws_id, tid))
+        .bearer_auth(&colleague)
+        .json(&json!({"title": "Yaw-dependent lateral offset", "body": "b", "status": "in_progress"}))
+        .send()
+        .expect("status change");
+    assert!(resp.status().is_success(), "member changes status: {}", resp.text().unwrap_or_default());
+    let resp = client
+        .put(format!("{}/workspaces/{}/tickets/{}", server.api_url, ws_id, tid))
+        .bearer_auth(&colleague)
+        .json(&json!({"title": "t", "body": "b", "status": "wontfix"}))
+        .send()
+        .expect("bad status");
+    assert_eq!(resp.status().as_u16(), 400, "unknown status is rejected");
+
+    // Non-members are shut out of every ticket endpoint, and cannot reach a
+    // ticket by addressing it through their own workspace either.
+    for (method, path) in [
+        ("GET", format!("{}/workspaces/{}/tickets", server.api_url, ws_id)),
+        ("GET", format!("{}/workspaces/{}/tickets/{}", server.api_url, ws_id, tid)),
+    ] {
+        let resp = match method {
+            "GET" => client.get(&path).bearer_auth(&outsider).send(),
+            _ => unreachable!(),
+        }
+        .expect("outsider request");
+        assert_eq!(resp.status().as_u16(), 403, "outsider blocked from {}", path);
+    }
+    let resp = client
+        .get(format!("{}/workspaces/{}/tickets/{}", server.api_url, other_ws, tid))
+        .bearer_auth(&outsider)
+        .send()
+        .expect("cross-workspace id guess");
+    assert_eq!(resp.status().as_u16(), 404, "a ticket id from another workspace 404s");
+
+    // Deleting someone else's comment is refused for a plain member, allowed
+    // for the author and for an admin.
+    let admin_comment_id = comments[0]["id"].as_i64().expect("comment id");
+    let resp = client
+        .delete(format!("{}/workspaces/{}/tickets/{}/comments/{}", server.api_url, ws_id, tid, admin_comment_id))
+        .bearer_auth(&reporter)
+        .send()
+        .expect("delete other's comment");
+    assert_eq!(resp.status().as_u16(), 403, "member cannot delete another user's comment");
+    let resp = client
+        .delete(format!("{}/workspaces/{}/tickets/{}/comments/{}", server.api_url, ws_id, tid, admin_comment_id))
+        .bearer_auth(&admin)
+        .send()
+        .expect("admin deletes comment");
+    assert!(resp.status().is_success(), "admin deletes any comment: {}", resp.text().unwrap_or_default());
+
+    // Same rule for the ticket itself.
+    let resp = client
+        .delete(format!("{}/workspaces/{}/tickets/{}", server.api_url, ws_id, tid))
+        .bearer_auth(&colleague)
+        .send()
+        .expect("non-author delete");
+    assert_eq!(resp.status().as_u16(), 403, "non-author member cannot delete the ticket");
+
+    // The cross-workspace admin list spans workspaces and is admin-only.
+    client
+        .post(format!("{}/workspaces/{}/tickets", server.api_url, other_ws))
+        .bearer_auth(&outsider)
+        .json(&json!({"title": "RTK dropout", "body": ""}))
+        .send()
+        .expect("second ticket")
+        .error_for_status()
+        .expect("second ticket ok");
+    let all = client
+        .get(format!("{}/admin/tickets", server.api_url))
+        .bearer_auth(&admin)
+        .send()
+        .expect("admin list")
+        .json::<Value>()
+        .expect("admin list json");
+    let names: Vec<&str> = all["tickets"]
+        .as_array()
+        .expect("tickets array")
+        .iter()
+        .map(|t| t["workspace_name"].as_str().unwrap_or(""))
+        .collect();
+    assert_eq!(names.len(), 2, "admin sees both workspaces' tickets: {}", all);
+    assert!(names.contains(&"Glasses") && names.contains(&"RTK Box"), "workspace names joined: {:?}", names);
+
+    let filtered = client
+        .get(format!("{}/admin/tickets?status=in_progress", server.api_url))
+        .bearer_auth(&admin)
+        .send()
+        .expect("filtered list")
+        .json::<Value>()
+        .expect("filtered json");
+    assert_eq!(filtered["tickets"].as_array().unwrap().len(), 1, "status filter applies: {}", filtered);
+    let resp = client
+        .get(format!("{}/admin/tickets?status=bogus", server.api_url))
+        .bearer_auth(&admin)
+        .send()
+        .expect("bad filter");
+    assert_eq!(resp.status().as_u16(), 400, "unknown status filter is rejected");
+
+    let resp = client
+        .get(format!("{}/admin/tickets", server.api_url))
+        .bearer_auth(&reporter)
+        .send()
+        .expect("member admin list");
+    assert_eq!(resp.status().as_u16(), 403, "the cross-workspace list is admin-only");
+
+    // Deleting the workspace takes its tickets and comments with it.
+    client
+        .delete(format!("{}/workspaces/{}", server.api_url, ws_id))
+        .bearer_auth(&admin)
+        .send()
+        .expect("delete ws")
+        .error_for_status()
+        .expect("delete ws ok");
+    let all = client
+        .get(format!("{}/admin/tickets", server.api_url))
+        .bearer_auth(&admin)
+        .send()
+        .expect("admin list after ws delete")
+        .json::<Value>()
+        .expect("admin list json");
+    assert_eq!(all["tickets"].as_array().unwrap().len(), 1, "workspace delete cascaded its tickets: {}", all);
 }
 
 /// The startup migration folds legacy workspace-scoped releases (binaries +

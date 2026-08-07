@@ -911,6 +911,7 @@ async function renderTopNav() {
         { label: 'Releases',      href: '/#/releases',   active: false,  show: !!authToken() },
         { label: 'Licenses',      href: '/#/licenses',   active: false,  show: !!authToken() && isAdmin },
         { label: 'Users',         href: '/#/users',      active: false,  show: !!authToken() && isAdmin },
+        { label: 'Tickets',       href: '/#/tickets',    active: false,  show: !!authToken() && isAdmin, group: 'admin' },
         { label: 'Products',      href: '/#/products',   active: false,  show: !!authToken() && isAdmin, group: 'admin' },
         { label: 'Website',       href: '/#/website',    active: false,  show: !!authToken() && isAdmin, group: 'admin' },
         { label: 'Shop',          href: '/#/shop',       active: false,  show: !!authToken() && isAdmin, group: 'admin' },

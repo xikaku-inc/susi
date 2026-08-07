@@ -340,6 +340,8 @@ impl LicenseDb {
         run("UPDATE workspace_graphs SET updated_by = ?1 WHERE updated_by = ?2")?;
         run("UPDATE workspace_peers SET registered_by = ?1 WHERE registered_by = ?2")?;
         run("UPDATE workspace_recordings SET author = ?1 WHERE author = ?2")?;
+        run("UPDATE workspace_tickets SET author = ?1 WHERE author = ?2")?;
+        run("UPDATE workspace_ticket_comments SET author = ?1 WHERE author = ?2")?;
         run("UPDATE website_page_revisions SET author = ?1 WHERE author = ?2")?;
         Ok(())
     }

@@ -104,6 +104,31 @@ pub struct RecordingRow {
     pub completed_at: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct TicketRow {
+    pub id: i64,
+    pub workspace_id: String,
+    /// Joined from `workspaces` so the admin cross-workspace list can label
+    /// each row without a second query.
+    pub workspace_name: String,
+    pub title: String,
+    pub body: String,
+    pub status: String,
+    pub author: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub comment_count: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TicketCommentRow {
+    pub id: i64,
+    pub ticket_id: i64,
+    pub body: String,
+    pub author: String,
+    pub created_at: String,
+}
+
 pub struct LicenseDb {
     conn: Connection,
     /// AES-256-GCM key for at-rest encryption of stored secrets (TOTP seeds,
@@ -723,7 +748,38 @@ impl LicenseDb {
                 archive_name TEXT    NOT NULL DEFAULT '',
                 size_bytes   INTEGER NOT NULL DEFAULT 0,
                 error        TEXT    NOT NULL DEFAULT ''
-            );",
+            );
+
+            -- Per-workspace tickets: the shared record of customer-reported
+            -- problems. Status is open | in_progress | closed. Every workspace
+            -- member sees every ticket and every comment - there are no
+            -- internal-only notes, so nothing written here is admin-private.
+            CREATE TABLE IF NOT EXISTS workspace_tickets (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                workspace_id TEXT    NOT NULL,
+                title        TEXT    NOT NULL,
+                body         TEXT    NOT NULL DEFAULT '',
+                status       TEXT    NOT NULL DEFAULT 'open',
+                author       TEXT    NOT NULL,
+                created_at   TEXT    NOT NULL,
+                updated_at   TEXT    NOT NULL,
+                FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_workspace_tickets_ws
+                ON workspace_tickets(workspace_id, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_workspace_tickets_status
+                ON workspace_tickets(status, created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS workspace_ticket_comments (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticket_id  INTEGER NOT NULL,
+                body       TEXT    NOT NULL,
+                author     TEXT    NOT NULL,
+                created_at TEXT    NOT NULL,
+                FOREIGN KEY (ticket_id) REFERENCES workspace_tickets(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_ws_ticket_comments_ticket
+                ON workspace_ticket_comments(ticket_id, created_at);",
             )
             .map_err(|e| LicenseError::Other(format!("DB init: {}", e)))?;
         self.migrate()?;
@@ -1379,6 +1435,7 @@ mod workspace_graph;
 mod config_revisions;
 mod recordings;
 mod workspace_files;
+mod tickets;
 mod releases;
 mod products;
 mod license_listing;
@@ -1388,6 +1445,8 @@ mod shop;
 mod sessions;
 mod audit;
 mod backup;
+
+pub use tickets::{is_valid_ticket_status, TICKET_STATUSES};
 
 
 fn row_to_api_token_info(r: &rusqlite::Row<'_>) -> rusqlite::Result<ApiTokenInfo> {
@@ -2814,6 +2873,159 @@ mod tests {
         assert!(db.delete_workspace_file("ws-1", "build.zip").unwrap());
         assert!(!db.delete_workspace_file("ws-1", "build.zip").unwrap());
         assert_eq!(db.list_workspace_files("ws-2").unwrap().len(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Workspace ticket tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_ticket_crud_and_workspace_isolation() {
+        let db = test_db();
+        db.create_workspace("ws-1", "Glasses", "", "", "admin").unwrap();
+        db.create_workspace("ws-2", "RTK Box", "", "", "admin").unwrap();
+
+        let t1 = db.create_ticket("ws-1", "Yaw offset", "Lateral offset on rotation", "hiro").unwrap();
+        db.create_ticket("ws-2", "RTK dropout", "", "sheryl").unwrap();
+
+        // New tickets start open and carry the joined workspace name.
+        let got = db.get_ticket("ws-1", t1).unwrap().unwrap();
+        assert_eq!(got.status, "open");
+        assert_eq!(got.title, "Yaw offset");
+        assert_eq!(got.author, "hiro");
+        assert_eq!(got.workspace_name, "Glasses");
+        assert_eq!(got.comment_count, 0);
+        assert_eq!(got.created_at, got.updated_at);
+
+        // A ticket is only reachable through its own workspace.
+        assert!(db.get_ticket("ws-2", t1).unwrap().is_none());
+        assert_eq!(db.list_tickets("ws-1").unwrap().len(), 1);
+        assert_eq!(db.list_tickets("ws-2").unwrap().len(), 1);
+
+        // Update rewrites all three fields and touches updated_at.
+        assert!(db.update_ticket("ws-1", t1, "Yaw offset (FOV)", "new body", "in_progress").unwrap());
+        let got = db.get_ticket("ws-1", t1).unwrap().unwrap();
+        assert_eq!(got.title, "Yaw offset (FOV)");
+        assert_eq!(got.body, "new body");
+        assert_eq!(got.status, "in_progress");
+
+        // Cross-workspace update and delete are no-ops, not silent successes.
+        assert!(!db.update_ticket("ws-2", t1, "x", "y", "closed").unwrap());
+        assert!(!db.delete_ticket("ws-2", t1).unwrap());
+        assert!(db.delete_ticket("ws-1", t1).unwrap());
+        assert!(!db.delete_ticket("ws-1", t1).unwrap());
+        assert_eq!(db.list_tickets("ws-2").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_ticket_comments_and_cascade() {
+        let db = test_db();
+        db.create_workspace("ws-1", "Glasses", "", "", "admin").unwrap();
+        let t = db.create_ticket("ws-1", "Yaw offset", "", "hiro").unwrap();
+
+        let c1 = db.add_ticket_comment("ws-1", t, "Needs an OST calibration", "klaus").unwrap().unwrap();
+        db.add_ticket_comment("ws-1", t, "Agreed", "hiro").unwrap().unwrap();
+
+        let comments = db.list_ticket_comments(t).unwrap();
+        assert_eq!(comments.len(), 2);
+        assert_eq!(comments[0].author, "klaus");
+        assert_eq!(comments[0].body, "Needs an OST calibration");
+        assert_eq!(db.get_ticket("ws-1", t).unwrap().unwrap().comment_count, 2);
+
+        // Commenting on a ticket of another workspace must not create a row.
+        db.create_workspace("ws-2", "RTK Box", "", "", "admin").unwrap();
+        assert!(db.add_ticket_comment("ws-2", t, "wrong workspace", "mallory").unwrap().is_none());
+        assert_eq!(db.list_ticket_comments(t).unwrap().len(), 2);
+
+        // Delete returns the author so the handler can gate on it.
+        assert_eq!(db.delete_ticket_comment(t, c1).unwrap().as_deref(), Some("klaus"));
+        assert!(db.delete_ticket_comment(t, c1).unwrap().is_none());
+        assert_eq!(db.list_ticket_comments(t).unwrap().len(), 1);
+
+        // Deleting the ticket cascades its remaining comments away.
+        assert!(db.delete_ticket("ws-1", t).unwrap());
+        assert_eq!(db.list_ticket_comments(t).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_delete_workspace_cascades_tickets_and_comments() {
+        let db = test_db();
+        db.create_workspace("ws-1", "Glasses", "", "", "admin").unwrap();
+        let t = db.create_ticket("ws-1", "Yaw offset", "", "hiro").unwrap();
+        db.add_ticket_comment("ws-1", t, "note", "klaus").unwrap().unwrap();
+
+        db.delete_workspace("ws-1").unwrap();
+
+        assert_eq!(db.list_tickets("ws-1").unwrap().len(), 0);
+        assert_eq!(db.list_ticket_comments(t).unwrap().len(), 0);
+        assert_eq!(db.list_all_tickets(None).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_list_all_tickets_orders_open_first_and_filters_by_status() {
+        let db = test_db();
+        db.create_workspace("ws-1", "Glasses", "", "", "admin").unwrap();
+        db.create_workspace("ws-2", "RTK Box", "", "", "admin").unwrap();
+
+        // Create the open ticket FIRST so recency alone would rank the closed
+        // one above it - only the status CASE can produce the expected order,
+        // which is what this test is for.
+        let open_a = db.create_ticket("ws-2", "Live thing", "", "sheryl").unwrap();
+        let closed = db.create_ticket("ws-1", "Old thing", "", "hiro").unwrap();
+        db.update_ticket("ws-1", closed, "Old thing", "", "closed").unwrap();
+        assert!(closed > open_a, "the closed ticket must be the newer row");
+
+        let all = db.list_all_tickets(None).unwrap();
+        assert_eq!(all.len(), 2);
+        // Closed sinks below open despite being newer.
+        assert_eq!(all[0].id, open_a);
+        assert_eq!(all[0].workspace_name, "RTK Box");
+        assert_eq!(all[1].id, closed);
+
+        let only_closed = db.list_all_tickets(Some("closed")).unwrap();
+        assert_eq!(only_closed.len(), 1);
+        assert_eq!(only_closed[0].id, closed);
+        assert_eq!(db.list_all_tickets(Some("open")).unwrap().len(), 1);
+        assert_eq!(db.list_all_tickets(Some("in_progress")).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_comment_bumps_ticket_updated_at() {
+        let db = test_db();
+        db.create_workspace("ws-1", "Glasses", "", "", "admin").unwrap();
+        let t = db.create_ticket("ws-1", "Yaw offset", "", "hiro").unwrap();
+        let before = db.get_ticket("ws-1", t).unwrap().unwrap().updated_at;
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        db.add_ticket_comment("ws-1", t, "note", "klaus").unwrap().unwrap();
+
+        let after = db.get_ticket("ws-1", t).unwrap().unwrap();
+        assert!(after.updated_at > before, "{} !> {}", after.updated_at, before);
+        assert_eq!(after.created_at, before, "created_at must not move");
+    }
+
+    #[test]
+    fn test_rename_user_moves_ticket_attribution() {
+        let db = test_db();
+        db.create_user("hiro", "hash", "user").unwrap();
+        db.create_workspace("ws-1", "Glasses", "", "", "admin").unwrap();
+        let t = db.create_ticket("ws-1", "Yaw offset", "", "hiro").unwrap();
+        db.add_ticket_comment("ws-1", t, "note", "hiro").unwrap().unwrap();
+
+        db.rename_user("hiro", "hiro.yasuda").unwrap();
+
+        assert_eq!(db.get_ticket("ws-1", t).unwrap().unwrap().author, "hiro.yasuda");
+        assert_eq!(db.list_ticket_comments(t).unwrap()[0].author, "hiro.yasuda");
+    }
+
+    #[test]
+    fn test_ticket_status_validation() {
+        assert!(is_valid_ticket_status("open"));
+        assert!(is_valid_ticket_status("in_progress"));
+        assert!(is_valid_ticket_status("closed"));
+        assert!(!is_valid_ticket_status("Open"));
+        assert!(!is_valid_ticket_status("wontfix"));
+        assert!(!is_valid_ticket_status(""));
     }
 
     #[test]
