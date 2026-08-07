@@ -5033,7 +5033,7 @@ async function showWsDetail(id, tab, sub) {
         // Members
         const members = ws.members || [];
         document.getElementById('wsDetailMembers').innerHTML = members.length === 0
-            ? '<div style="color:var(--text2);font-size:13px;">No members</div>'
+            ? '<div class="empty-state">No members yet.</div>'
             : members.map(m => `
                 <div class="machine-item">
                     <span style="display:flex;align-items:center;gap:8px;"><strong style="min-width:200px;">${esc(m.username)}</strong></span>
@@ -5161,7 +5161,7 @@ async function loadWsFiles(wsId) {
 function renderWsFiles(files) {
     const container = document.getElementById('wsDetailFiles');
     if (files.length === 0) {
-        container.innerHTML = '<div class="empty-state">No files yet. Use "Upload files" to share software builds or other files with this workspace.</div>';
+        container.innerHTML = '<div class="empty-state">No files yet.</div>';
         return;
     }
     container.innerHTML = files.map((f, i) => {
@@ -5277,7 +5277,7 @@ async function loadWsDocs(wsId) {
 function renderWsDocs(wsId, pages) {
     const container = document.getElementById('wsDetailDocs');
     if (pages.length === 0) {
-        container.innerHTML = '<div class="empty-state">No documentation pages yet. Click "Edit documentation" to write the first one.</div>';
+        container.innerHTML = '<div class="empty-state">No documentation pages yet.</div>';
         return;
     }
     const base = '/docs?workspace=' + encodeURIComponent(wsId);
@@ -5302,7 +5302,7 @@ async function loadWsConfigs(wsId) {
         const data = await resp.json();
         const configs = data.configs || [];
         if (configs.length === 0) {
-            container.innerHTML = '<div style="color:var(--text2);font-size:13px;">No config revisions</div>';
+            container.innerHTML = '<div class="empty-state">No config revisions yet.</div>';
             return;
         }
         container.innerHTML = configs.map((c, i) => `
@@ -5337,7 +5337,7 @@ async function loadWsRecordings(wsId) {
         const data = await resp.json();
         const recordings = data.recordings || [];
         if (recordings.length === 0) {
-            container.innerHTML = '<div style="color:var(--text2);font-size:13px;">No recordings uploaded to this workspace yet.</div>';
+            container.innerHTML = '<div class="empty-state">No recordings yet.</div>';
             return;
         }
         container.innerHTML = recordings.map(r => {
@@ -5437,7 +5437,7 @@ async function loadWsTickets(wsId) {
         if (!resp.ok) { container.innerHTML = '<div style="color:var(--text2);font-size:13px;">Failed to load tickets</div>'; return; }
         const tickets = (await resp.json()).tickets || [];
         if (tickets.length === 0) {
-            container.innerHTML = '<div class="empty-state">No tickets yet. Use "New ticket" to record a problem, a question, or feedback from a test session.</div>';
+            container.innerHTML = '<div class="empty-state">No tickets yet.</div>';
             return;
         }
         container.innerHTML = tickets.map(t => {
