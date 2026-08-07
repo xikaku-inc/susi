@@ -9,8 +9,19 @@
 //! Destructive actions (deleting a ticket or a comment) are restricted to the
 //! author or a site admin; everything else is open to any member so status
 //! changes don't need an admin round-trip.
+//!
+//! Notification email is currently switched OFF - see `SEND_TICKET_EMAILS`.
 
 use crate::*;
+
+/// Master switch for ticket notification email. While `false`, no ticket
+/// event (create, comment, status change) sends anything; the delivery path
+/// in `notify_workspace` is kept intact and compiled, so re-enabling is a
+/// one-line change plus a rebuild.
+///
+/// Only ticket mail is affected. Sign-in codes, invitations, password
+/// resets, shop and contact-form email are unrelated and still send.
+const SEND_TICKET_EMAILS: bool = false;
 
 const MAX_TITLE: usize = 200;
 const MAX_BODY: usize = 20_000;
@@ -433,9 +444,13 @@ fn excerpt(s: &str) -> String {
 
 /// Email every workspace member plus every site admin except the actor.
 ///
-/// Fire-and-forget: recipients are resolved under a short DB lock, then one
-/// task per address is spawned. A missing SMTP config, a member without an
-/// email address, or a failing send never fails the request that triggered it.
+/// Currently a no-op: `SEND_TICKET_EMAILS` is `false`, so this returns before
+/// resolving recipients or touching the DB.
+///
+/// Fire-and-forget once enabled: recipients are resolved under a short DB
+/// lock, then one task per address is spawned. A missing SMTP config, a member
+/// without an email address, or a failing send never fails the request that
+/// triggered it.
 #[allow(clippy::too_many_arguments)]
 fn notify_workspace(
     state: &Arc<AppState>,
@@ -448,6 +463,9 @@ fn notify_workspace(
     rows: Vec<(String, String)>,
     body: &str,
 ) {
+    if !SEND_TICKET_EMAILS {
+        return;
+    }
     let Some(svc) = state.email.clone() else {
         return;
     };

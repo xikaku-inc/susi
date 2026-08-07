@@ -17,7 +17,7 @@
 ### Releases & workspaces
 - **Workspaces** - group licenses, files, configs, and docs per product/team
 - **Workspace files & docs** - flat member-writable file share and documentation per workspace
-- **Workspace tickets** - customer-visible issue list per workspace with comments and email notifications; admins get a cross-workspace queue
+- **Workspace tickets** - customer-visible issue list per workspace with comments; admins get a cross-workspace queue
 - **Versioned config revisions** - push, fetch, and roll back JSON configs per workspace
 - **Binary release channel** - upload signed installers/binaries; clients fetch via license-key-protected `/api/v1/updates`
 
@@ -822,7 +822,9 @@ Each workspace has a flat, member-writable file share (bytes on disk under the d
 
 The shared record of customer-reported problems, scoped to a workspace so a report sits next to the config revisions, recordings and files that reproduce it. Status is `open`, `in_progress` or `closed`.
 
-Every member reads and writes every ticket and comment in their workspace - there are no internal-only notes, so treat anything written here as customer-visible. Deleting a ticket or a comment is restricted to its author or a site admin; everything else, including status changes, is open to any member. Creating a ticket, commenting, and changing status email every workspace member plus every site admin except the actor (silently skipped when SMTP is unconfigured).
+Every member reads and writes every ticket and comment in their workspace - there are no internal-only notes, so treat anything written here as customer-visible. Deleting a ticket or a comment is restricted to its author or a site admin; everything else, including status changes, is open to any member.
+
+Ticket events send **no email**. The notification path (workspace members plus site admins, minus the actor) is implemented but switched off behind `SEND_TICKET_EMAILS` in `crates/susi_server/src/tickets.rs`; flip that const and rebuild to enable it.
 
 | Method | Endpoint | Auth | Description |
 |---|---|---|---|
