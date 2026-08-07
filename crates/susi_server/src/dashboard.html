@@ -5043,18 +5043,23 @@ function renderWsFiles(files) {
         container.innerHTML = '<div class="empty-state">No files yet. Use "Upload files" to share software builds or other files with this workspace.</div>';
         return;
     }
-    container.innerHTML = files.map(f =>
-        '<div class="machine-item">' +
+    container.innerHTML = files.map((f, i) => {
+        const menuId = 'ws-file-menu-' + i;
+        return '<div class="machine-item">' +
             '<span style="display:flex;flex-direction:column;gap:2px;min-width:0;">' +
                 '<strong style="font-family:monospace;font-size:13px;word-break:break-all;">' + esc(f.name) + '</strong>' +
                 '<span style="font-size:12px;color:var(--text2);">' + formatBytes(f.size) + (f.author ? ' · ' + esc(f.author) : '') + ' · ' + formatDateTime(f.created_at) + '</span>' +
             '</span>' +
-            '<span style="display:flex;gap:6px;flex-shrink:0;">' +
-                '<button onclick="downloadWsFile(\'' + esc(f.name) + '\')">Download</button>' +
-                '<button class="danger" onclick="deleteWsFile(\'' + esc(f.name) + '\')">Delete</button>' +
+            '<span class="dropdown" style="flex-shrink:0;" onclick="event.stopPropagation();">' +
+                '<button onclick="toggleDropdown(event,\'' + menuId + '\')">Actions &#9662;</button>' +
+                '<div id="' + menuId + '" class="dropdown-menu" style="display:none;">' +
+                    '<button onclick="downloadWsFile(\'' + esc(f.name) + '\')">Download</button>' +
+                    '<div class="divider"></div>' +
+                    '<button class="danger" onclick="deleteWsFile(\'' + esc(f.name) + '\')">Delete</button>' +
+                '</div>' +
             '</span>' +
-        '</div>'
-    ).join('');
+        '</div>';
+    }).join('');
 }
 
 function pickWsFiles() {
@@ -5219,8 +5224,9 @@ async function loadWsRecordings(wsId) {
             const status = ready
                 ? ''
                 : '<span style="color:var(--text2);margin-left:6px;">(' + esc(r.status) + ')</span>';
+            const menuId = 'ws-recording-menu-' + r.id;
             const dlBtn = ready
-                ? '<button onclick="downloadWsRecording(' + r.id + ')">Download</button>'
+                ? '<button onclick="downloadWsRecording(' + r.id + ')">Download</button><div class="divider"></div>'
                 : '';
             return '<div class="machine-item">' +
                 '<span style="display:flex;align-items:center;gap:10px;min-width:0;flex:1;">' +
@@ -5231,8 +5237,13 @@ async function loadWsRecordings(wsId) {
                 '<span class="machine-code" style="display:flex;align-items:center;gap:10px;">' +
                     '<span>' + formatBytes(r.file_size) + '</span>' +
                     '<span>' + esc(r.author) + ' &middot; ' + formatDateTime(r.created_at) + '</span>' +
-                    dlBtn +
-                    '<button class="danger" onclick="deleteWsRecording(' + r.id + ')">Delete</button>' +
+                    '<span class="dropdown" onclick="event.stopPropagation();">' +
+                        '<button onclick="toggleDropdown(event,\'' + menuId + '\')">Actions &#9662;</button>' +
+                        '<div id="' + menuId + '" class="dropdown-menu" style="display:none;">' +
+                            dlBtn +
+                            '<button class="danger" onclick="deleteWsRecording(' + r.id + ')">Delete</button>' +
+                        '</div>' +
+                    '</span>' +
                 '</span>' +
             '</div>';
         }).join('');
