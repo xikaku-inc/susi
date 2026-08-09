@@ -68,7 +68,7 @@ impl LicenseDb {
         workspace_id: &str,
         username: &str,
     ) -> Result<Option<()>, LicenseError> {
-        if self.get_user_role(username).map(|r| r == "admin").unwrap_or(false) {
+        if self.get_user_role(username).map(|r| is_admin_role(&r)).unwrap_or(false) {
             return Ok(Some(()));
         }
         match self.conn.query_row(

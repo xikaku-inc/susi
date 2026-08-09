@@ -363,7 +363,7 @@ pub(crate) async fn handle_newsletter_config(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
-    require_admin_full(&state, &principal)?;
+    require_owner(&state, &principal)?;
     let google = {
         let db = state.db.lock();
         db.get_newsletter_google_account().ok().flatten()
@@ -384,7 +384,7 @@ pub(crate) async fn handle_newsletter_audience(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
-    require_admin_full(&state, &principal)?;
+    require_owner(&state, &principal)?;
 
     let db = state.db.lock();
     let audience = db
@@ -633,7 +633,7 @@ pub(crate) async fn handle_google_authorize(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
-    require_admin_full(&state, &principal)?;
+    require_owner(&state, &principal)?;
     require_google_config(&state)?;
     let redirect = redirect_uri(&state)?;
 
@@ -790,7 +790,7 @@ pub(crate) async fn handle_google_disconnect(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
-    require_admin_full(&state, &principal)?;
+    require_owner(&state, &principal)?;
     {
         let db = state.db.lock();
         db.clear_newsletter_google_connection()
@@ -1028,7 +1028,7 @@ pub(crate) async fn handle_newsletter_preview(
     Json(req): Json<PreviewRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
-    require_admin_full(&state, &principal)?;
+    require_owner(&state, &principal)?;
 
     let (base, assets) = email_base_urls(&state)?;
     Ok(Json(serde_json::json!({
@@ -1070,7 +1070,7 @@ pub(crate) async fn handle_list_issues(
     headers: HeaderMap,
 ) -> Result<Json<Vec<susi_core::db::NewsletterIssue>>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
-    require_admin_full(&state, &principal)?;
+    require_owner(&state, &principal)?;
     let db = state.db.lock();
     let rows = db
         .list_newsletter_issues()
@@ -1084,7 +1084,7 @@ pub(crate) async fn handle_get_issue(
     Path(id): Path<i64>,
 ) -> Result<Json<susi_core::db::NewsletterIssue>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
-    require_admin_full(&state, &principal)?;
+    require_owner(&state, &principal)?;
     let db = state.db.lock();
     db.get_newsletter_issue(id)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
@@ -1098,7 +1098,7 @@ pub(crate) async fn handle_create_issue(
     Json(req): Json<IssueRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
-    require_admin_full(&state, &principal)?;
+    require_owner(&state, &principal)?;
     validate_issue(&req)?;
 
     let db = state.db.lock();
@@ -1116,7 +1116,7 @@ pub(crate) async fn handle_update_issue(
     Json(req): Json<IssueRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
-    require_admin_full(&state, &principal)?;
+    require_owner(&state, &principal)?;
     validate_issue(&req)?;
 
     let db = state.db.lock();
@@ -1136,7 +1136,7 @@ pub(crate) async fn handle_delete_issue(
     Path(id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
-    require_admin_full(&state, &principal)?;
+    require_owner(&state, &principal)?;
 
     let db = state.db.lock();
     if !db
@@ -1168,7 +1168,7 @@ pub(crate) async fn handle_list_deliveries(
     Path(id): Path<i64>,
 ) -> Result<Json<Vec<susi_core::db::DeliveryRow>>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
-    require_admin_full(&state, &principal)?;
+    require_owner(&state, &principal)?;
     let db = state.db.lock();
     let rows = db
         .list_newsletter_deliveries(id)
@@ -1211,7 +1211,7 @@ pub(crate) async fn handle_test_send(
     Path(id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
-    require_admin_full(&state, &principal)?;
+    require_owner(&state, &principal)?;
     let mailer = require_newsletter_mailer(&state).await?;
     let (base, assets) = email_base_urls(&state)?;
 
@@ -1275,7 +1275,7 @@ pub(crate) async fn handle_send_issue(
     Json(req): Json<SendRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
-    require_admin_full(&state, &principal)?;
+    require_owner(&state, &principal)?;
     require_newsletter_mailer(&state).await?;
     email_base_urls(&state)?;
 

@@ -2240,6 +2240,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                 <select id="newUserRole">
                     <option value="user">User</option>
                     <option value="admin">Admin</option>
+                    <option value="owner" id="newUserRoleOwner">Owner</option>
                 </select>
             </div>
             <details style="margin-top:10px;">
@@ -2512,6 +2513,10 @@ function getDeviceLabel() {
     return ua.length > 200 ? ua.slice(0, 200) : ua;
 }
 let userRole = '';
+// owner is a superset of admin - any check that means "can administer"
+// must accept both, or an owner sees less than an admin.
+function roleIsAdmin(r) { return r === 'admin' || r === 'owner'; }
+function roleIsOwner(r) { return r === 'owner'; }
 let licenses = [];
 let selectedKey = null;
 let totpEnabled = false;
@@ -2699,7 +2704,7 @@ function route() {
     }
     if (authToken && (target === '' || target === 'home')) {
         // Logged-in user landing on / - pick the first available section.
-        target = (userRole === 'admin') ? 'releases' : 'mylicenses';
+        target = roleIsAdmin(userRole) ? 'releases' : 'mylicenses';
         if (location.hash !== '#/' + target) location.hash = '#/' + target;
     }
     if (authToken && target === 'users' && segs[1]) {
@@ -2749,7 +2754,8 @@ document.getElementById('navDrawer').addEventListener('click', e => {
 function renderNav() {
     const nav = document.getElementById('topNav');
     if (!nav) return;
-    const isAdmin = userRole === 'admin';
+    const isAdmin = roleIsAdmin(userRole);
+    const isOwner = roleIsOwner(userRole);
     // Keep in sync with renderTopNav() in docs.html. group:'admin' items
     // collapse into the Admin dropdown on desktop and an Admin section in
     // the mobile drawer.
@@ -2761,7 +2767,7 @@ function renderNav() {
         { page: 'licenses', label: 'Licenses', href: '#/licenses', show: !!authToken && isAdmin },
         { page: 'users', label: 'Users', href: '#/users', show: !!authToken && isAdmin },
         { page: 'tickets', label: 'Tickets', href: '#/tickets', show: !!authToken && isAdmin, group: 'admin' },
-        { page: 'newsletter', label: 'Newsletter', href: '#/newsletter', show: !!authToken && isAdmin, group: 'admin' },
+        { page: 'newsletter', label: 'Newsletter', href: '#/newsletter', show: !!authToken && isOwner, group: 'admin' },
         { page: 'products', label: 'Products', href: '#/products', show: !!authToken && isAdmin, group: 'admin' },
         { page: 'website', label: 'Website', href: '#/website', show: !!authToken && isAdmin, group: 'admin' },
         { page: 'shop', label: 'Shop', href: '#/shop', show: !!authToken && isAdmin, group: 'admin' },
@@ -2856,7 +2862,7 @@ async function submitLogin() {
         localStorage.setItem('auth_token', authToken);
         totpEnabled = data.totp_enabled;
         userRole = data.role || 'user';
-        mustEnableTotp = userRole === 'admin' && !totpEnabled;
+        mustEnableTotp = roleIsAdmin(userRole) && !totpEnabled;
 
         document.getElementById('loginOverlay').classList.remove('visible');
         if (data.must_change_password) {
@@ -2925,7 +2931,7 @@ async function submitSigninCode() {
         localStorage.setItem('auth_token', authToken);
         userRole = data.role || 'user';
         totpEnabled = !!data.totp_enabled;
-        mustEnableTotp = userRole === 'admin' && !totpEnabled;
+        mustEnableTotp = roleIsAdmin(userRole) && !totpEnabled;
         pendingSigninUsername = '';
         document.getElementById('signinCodeOverlay').classList.remove('visible');
         if (data.must_change_password) {
@@ -3102,7 +3108,7 @@ async function submitResetPassword() {
             userRole = data.role || 'user';
             currentUsername = data.username || '';
             toast('Password set - you are signed in', 'success');
-            location.hash = userRole === 'admin' ? '#/releases' : '#/mylicenses';
+            location.hash = roleIsAdmin(userRole) ? '#/releases' : '#/mylicenses';
             await checkAuthStatus();
         } else {
             toast('Password reset - please sign in', 'success');
@@ -3269,7 +3275,7 @@ function enterDashboard() {
     const userEl = document.getElementById('currentUser');
     userEl.textContent = currentUsername;
 
-    const isAdmin = userRole === 'admin';
+    const isAdmin = roleIsAdmin(userRole);
     document.getElementById('adminLicenseToolbar').style.display = isAdmin ? '' : 'none';
     document.getElementById('detailPanel').classList.remove('visible');
     document.getElementById('btnCreateWorkspace').style.display = isAdmin ? '' : 'none';
@@ -3358,7 +3364,7 @@ function machineSeenLine(m) {
 }
 
 async function loadLicenses() {
-    if (userRole !== 'admin') return;
+    if (!roleIsAdmin(userRole)) return;
     const status = document.getElementById('connectionStatus');
     try {
         const resp = await fetch(API + '/licenses', { headers: authHeaders() });
@@ -3772,7 +3778,7 @@ async function loadAssignableUsers() {
         assignableUsers = await resp.json();
         const dl = document.getElementById('assignUserList');
         if (dl) dl.innerHTML = assignableUsers
-            .filter(u => u.role !== 'admin')
+            .filter(u => !roleIsAdmin(u.role))
             .map(u => '<option value="' + esc(u.username) + '">' + esc(u.email || '') + '</option>').join('');
     } catch (e) {}
 }
@@ -4170,7 +4176,7 @@ async function verify2FA() {
         // Pages loaded before enrollment got 403'd by the admin-TOTP gate;
         // re-fetch now that this session can pass the gate. The 2FA modal
         // stays visible on top so the user can still save backup codes.
-        if (userRole === 'admin') {
+        if (roleIsAdmin(userRole)) {
             loadLicenses();
             loadShop();
             loadWebsitePages();
@@ -4290,6 +4296,9 @@ function showAddUserModal() {
     document.getElementById('newUserEmail').value = '';
     document.getElementById('newPassword').value = '';
     document.getElementById('newUserRole').value = 'user';
+    // Only an owner may create another owner.
+    const ownerOpt = document.getElementById('newUserRoleOwner');
+    if (ownerOpt) ownerOpt.style.display = roleIsOwner(userRole) ? '' : 'none';
     document.getElementById('addUserModal').classList.add('visible');
     setTimeout(() => document.getElementById('newUsername').focus(), 50);
 }
@@ -4338,6 +4347,7 @@ function renderUsers() {
         tbody.innerHTML = '<tr><td colspan="6" style="color:var(--text2);">No matching users.</td></tr>';
         return;
     }
+    const isOwner = roleIsOwner(userRole);
     tbody.innerHTML = shown.map(u => {
         const isSelf = u.username === currentUsername;
         let status;
@@ -4352,7 +4362,7 @@ function renderUsers() {
         const newsletter = u.newsletter_opt_in
             ? '<span style="color:var(--green);">Subscribed</span>'
             : '<span style="color:var(--text2);">Not subscribed</span>';
-        const roleBadge = '<span class="badge">' + (u.role === 'admin' ? 'admin' : 'user') + '</span>';
+        const roleBadge = '<span class="badge">' + esc(u.role || 'user') + '</span>';
         // esc(JSON.stringify(x)) is HTML-safe for both the " and ' in the
         // inline onclick attribute. A bare JSON.stringify would break the
         // attribute quoting, which silently stopped the Edit action from
@@ -4367,17 +4377,26 @@ function renderUsers() {
             ? '<button onclick="resendInvitation(\'' + uname + '\')">' +
               (u.pending_invitation ? 'Resend invite' : 'Send invite') + '</button>'
             : '';
-        const roleItem = u.role === 'admin'
-            ? '<button onclick="setUserRole(\'' + uname + '\',\'user\')">Revoke admin</button>'
-            : '<button onclick="setUserRole(\'' + uname + '\',\'admin\')">Make admin</button>';
+        const targetIsOwner = u.role === 'owner';
+        // Administering an owner is owner-only server-side; offering these to
+        // an admin would only produce a 403.
+        const roleItem = (targetIsOwner && !isOwner) ? ''
+            : (roleIsAdmin(u.role)
+                ? '<button onclick="setUserRole(\'' + uname + '\',\'user\')">Revoke admin</button>'
+                : '<button onclick="setUserRole(\'' + uname + '\',\'admin\')">Make admin</button>');
+        const ownerItem = !isOwner ? ''
+            : (targetIsOwner
+                ? '<button onclick="setUserRole(\'' + uname + '\',\'admin\')">Revoke owner</button>'
+                : '<button onclick="setUserRole(\'' + uname + '\',\'owner\')">Make owner</button>');
         const emailItem = '<button onclick="setUserEmail(\'' + uname + '\',' + emailArg + ')">' +
                           (u.email ? 'Edit email' : 'Set email') + '</button>';
         // Newsletter consent defaults to off, so this is how a list gets built
         // for users who gave consent outside the portal.
-        const newsletterItem = '<button onclick="setUserNewsletter(\'' + uname + '\',' +
-                               (u.newsletter_opt_in ? 'false' : 'true') + ')">' +
-                               (u.newsletter_opt_in ? 'Unsubscribe from newsletter' : 'Subscribe to newsletter') +
-                               '</button>';
+        const newsletterItem = !isOwner ? ''
+            : '<button onclick="setUserNewsletter(\'' + uname + '\',' +
+              (u.newsletter_opt_in ? 'false' : 'true') + ')">' +
+              (u.newsletter_opt_in ? 'Unsubscribe from newsletter' : 'Subscribe to newsletter') +
+              '</button>';
         // Self row keeps a reduced Actions menu (rename + email) so admins
         // can manage their own account without exposing the destructive
         // items that would lock them out. Self-rename forces a re-login
@@ -4400,6 +4419,7 @@ function renderUsers() {
                   resendItem +
                   '<button onclick="resetUserPassword(\'' + uname + '\')">Reset password</button>' +
                   roleItem +
+                  ownerItem +
                   '<div class="divider"></div>' +
                   '<button class="danger" onclick="deleteUser(\'' + uname + '\')">Delete</button>' +
                 '</div>' +
@@ -4632,7 +4652,7 @@ function showApiTokensModal() {
     document.getElementById('apiTokensModal').classList.add('visible');
     document.getElementById('newApiTokenName').value = '';
     loadMyApiTokens();
-    if (userRole === 'admin') {
+    if (roleIsAdmin(userRole)) {
         document.getElementById('apiAdminSection').style.display = '';
         loadAllApiTokens();
     } else {
@@ -4757,7 +4777,7 @@ function showNewApiTokenOnce(rawToken, name) {
     overlay.querySelector('#newPatDone').onclick = () => {
         overlay.remove();
         loadMyApiTokens();
-        if (userRole === 'admin') loadAllApiTokens();
+        if (roleIsAdmin(userRole)) loadAllApiTokens();
     };
 }
 
@@ -4768,7 +4788,7 @@ async function revokeMyApiToken(id) {
         if (!resp.ok) { const d = await resp.json(); toast('Error: ' + d.error, 'error'); return; }
         toast('Token revoked', 'success');
         await loadMyApiTokens();
-        if (userRole === 'admin') await loadAllApiTokens();
+        if (roleIsAdmin(userRole)) await loadAllApiTokens();
     } catch (e) { toast('Failed: ' + e.message, 'error'); }
 }
 
@@ -4788,9 +4808,9 @@ let releases = [];
 
 async function loadReleases() {
     const container = document.getElementById('releasesContainer');
-    const endpoint = userRole === 'admin' ? '/releases' : '/updates/releases';
+    const endpoint = roleIsAdmin(userRole) ? '/releases' : '/updates/releases';
     try {
-        if (userRole === 'admin' && workspaces.length === 0) {
+        if (roleIsAdmin(userRole) && workspaces.length === 0) {
             const wresp = await fetch(API + '/workspaces', { headers: authHeaders() });
             if (wresp.ok) workspaces = (await wresp.json()).workspaces || [];
         }
@@ -4876,7 +4896,7 @@ function renderReleases() {
         container.innerHTML = '<span style="color:var(--text2);">No matching releases.</span>';
         return;
     }
-    const isAdmin = userRole === 'admin';
+    const isAdmin = roleIsAdmin(userRole);
     container.innerHTML = shown.map(r => {
         const expanded = expandedRelease === r.tag;
         const prodSlug = r.product || DEFAULT_PRODUCT;
@@ -4991,7 +5011,7 @@ async function uploadRelease() {
             if (xhr.status >= 200 && xhr.status < 300) {
                 toast('Release ' + tag + ' uploaded', 'success');
                 closeUploadReleaseModal();
-                if (typeof loadReleases === 'function' && userRole === 'admin') {
+                if (typeof loadReleases === 'function' && roleIsAdmin(userRole)) {
                     loadReleases();
                 }
             } else {
@@ -5307,12 +5327,12 @@ async function showWsDetail(id, tab, sub) {
             : members.map(m => `
                 <div class="machine-item">
                     <span style="display:flex;align-items:center;gap:8px;"><strong style="min-width:200px;">${esc(m.username)}</strong></span>
-                    ${userRole === 'admin' ? `<button class="danger" onclick="removeWsMember('${id}','${esc(m.username)}')">Remove</button>` : ''}
+                    ${roleIsAdmin(userRole) ? `<button class="danger" onclick="removeWsMember('${id}','${esc(m.username)}')">Remove</button>` : ''}
                 </div>
             `).join('');
 
         // Only admins can manage members, edit workspace properties, or delete.
-        const showMemberMgmt = userRole === 'admin';
+        const showMemberMgmt = roleIsAdmin(userRole);
         document.getElementById('wsAddMemberRow').style.display = showMemberMgmt ? 'flex' : 'none';
         document.querySelectorAll('#wsDetailPanel [data-ws-admin-only]').forEach(el => {
             el.style.display = showMemberMgmt ? '' : 'none';
@@ -6129,7 +6149,7 @@ let editingProductSku = null;  // null = create mode
 let editingRateId = null;      // null = create mode
 
 async function loadShop() {
-    if (userRole !== 'admin') return;
+    if (!roleIsAdmin(userRole)) return;
     await Promise.all([loadShopProducts(), loadShopRates(), loadShopOrders(), loadShopSettings()]);
 }
 
@@ -6181,7 +6201,7 @@ async function saveShopSettings() {
 }
 
 async function loadSiteSettings() {
-    if (userRole !== 'admin') return;
+    if (!roleIsAdmin(userRole)) return;
     try {
         const resp = await fetch(API + '/site/admin/settings', { headers: authHeaders() });
         if (!resp.ok) return;
@@ -7373,7 +7393,7 @@ async function submitMarkShipped() {
 let websitePages = [];
 
 async function loadWebsitePages() {
-    if (userRole !== 'admin') return;
+    if (!roleIsAdmin(userRole)) return;
     const tbody = document.getElementById('websitePagesBody');
     try {
         const resp = await fetch(API + '/website/pages', { headers: authHeaders() });
@@ -7545,7 +7565,7 @@ function fmtAssetSize(bytes) {
 }
 
 async function loadWebsiteAssets() {
-    if (userRole !== 'admin') return;
+    if (!roleIsAdmin(userRole)) return;
     const tbody = document.getElementById('websiteAssetsBody');
     try {
         const resp = await fetch(API + '/website/admin/assets', { headers: authHeaders() });

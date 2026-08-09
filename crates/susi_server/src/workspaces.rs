@@ -40,7 +40,7 @@ pub(crate) async fn handle_list_workspaces(
 
     let db = state.db.lock();
     let is_admin = db.get_user_role(&principal.username)
-        .map(|r| r == "admin")
+        .map(|r| is_admin_role(&r))
         .unwrap_or(false);
     let rows = if is_admin {
         db.list_all_workspaces()
@@ -117,7 +117,7 @@ pub(crate) async fn handle_update_workspace(
     // user exists before persisting.
     let new_created_by = match req.created_by.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
         Some(target) => {
-            let is_admin = db.get_user_role(&principal.username).map(|r| r == "admin").unwrap_or(false);
+            let is_admin = db.get_user_role(&principal.username).map(|r| is_admin_role(&r)).unwrap_or(false);
             if !is_admin {
                 return Err(error_response(StatusCode::FORBIDDEN, "Only site admins can change 'created by'"));
             }

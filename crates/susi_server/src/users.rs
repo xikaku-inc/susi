@@ -51,8 +51,12 @@ pub(crate) async fn handle_create_user(
     if username.is_empty() || username.len() > 64 {
         return Err(error_response(StatusCode::BAD_REQUEST, "Username must be 1-64 characters"));
     }
-    if !matches!(req.role.as_str(), "admin" | "user") {
-        return Err(error_response(StatusCode::BAD_REQUEST, "Role must be admin or user"));
+    if !is_valid_role(&req.role) {
+        return Err(error_response(StatusCode::BAD_REQUEST, "Role must be owner, admin or user"));
+    }
+    // Creating an owner is granting ownership, so it needs the same gate.
+    if is_owner_role(&req.role) {
+        require_owner(&state, &principal)?;
     }
     let email = normalize_email(&req.email)?
         .ok_or_else(|| error_response(StatusCode::BAD_REQUEST, "Email is required"))?;
@@ -164,6 +168,7 @@ pub(crate) async fn handle_delete_user(
     if principal.username == username {
         return Err(error_response(StatusCode::BAD_REQUEST, "Cannot delete your own account"));
     }
+    require_owner_for_owner_target(&state, &principal, &username)?;
 
     let db = state.db.lock();
     db.delete_user(&username)
@@ -219,12 +224,23 @@ pub(crate) async fn handle_set_user_role(
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
 
-    if !matches!(req.role.as_str(), "admin" | "user") {
-        return Err(error_response(StatusCode::BAD_REQUEST, "Role must be admin or user"));
+    if !is_valid_role(&req.role) {
+        return Err(error_response(StatusCode::BAD_REQUEST, "Role must be owner, admin or user"));
     }
     // Block self-demotion so an admin can't lock the org out of admin access.
     if principal.username == username {
         return Err(error_response(StatusCode::BAD_REQUEST, "Cannot change your own role"));
+    }
+
+    // Ownership is closed: only an owner may grant it, and only an owner may
+    // take it away. Without the second rule any admin could demote every owner
+    // and seize the newsletter - the privilege would only look elevated.
+    let target_is_owner = {
+        let db = state.db.lock();
+        db.get_user_role(&username).map(|r| is_owner_role(&r)).unwrap_or(false)
+    };
+    if is_owner_role(&req.role) || target_is_owner {
+        require_owner(&state, &principal)?;
     }
 
     let db = state.db.lock();
@@ -250,6 +266,7 @@ pub(crate) async fn handle_reset_user_password(
     if req.new_password.len() < 8 {
         return Err(error_response(StatusCode::BAD_REQUEST, "Password must be at least 8 characters"));
     }
+    require_owner_for_owner_target(&state, &principal, &username)?;
 
     let pw_hash = hash_password(&req.new_password).await?;
     let db = state.db.lock();
@@ -441,7 +458,9 @@ pub(crate) async fn handle_set_user_newsletter(
     Json(req): Json<SetNewsletterRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
-    require_admin_full(&state, &principal)?;
+    // Managing who receives the newsletter is part of the newsletter
+    // feature, so it carries the same owner gate as sending it.
+    require_owner(&state, &principal)?;
 
     let db = state.db.lock();
     if !db
@@ -469,7 +488,9 @@ pub(crate) async fn handle_set_newsletter_bulk(
     Json(req): Json<SetNewsletterBulkRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
-    require_admin_full(&state, &principal)?;
+    // Managing who receives the newsletter is part of the newsletter
+    // feature, so it carries the same owner gate as sending it.
+    require_owner(&state, &principal)?;
 
     if req.usernames.is_empty() {
         return Err(error_response(StatusCode::BAD_REQUEST, "No usernames given"));
@@ -550,6 +571,7 @@ pub(crate) async fn handle_set_user_email(
         Some(s) => normalize_email(s)?,
         None => None,
     };
+    require_owner_for_owner_target(&state, &principal, &username)?;
     let db = state.db.lock();
     if !db.user_exists(&username).unwrap_or(false) {
         return Err(error_response(StatusCode::NOT_FOUND, "User not found"));

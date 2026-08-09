@@ -16,8 +16,11 @@ impl LicenseDb {
         let now = Utc::now().to_rfc3339();
         self.conn
             .execute(
+                // Owner, not admin: ownership can only be granted by an
+                // existing owner, so a fresh install would otherwise have no
+                // way to ever produce one.
                 "INSERT INTO users (username, password_hash, role, must_change_password, totp_enabled, created_at, updated_at)
-                 VALUES ('admin', ?1, 'admin', 1, 0, ?2, ?2)",
+                 VALUES ('admin', ?1, 'owner', 1, 0, ?2, ?2)",
                 params![password_hash, now],
             )
             .map_err(|e| LicenseError::Other(format!("DB insert: {}", e)))?;
@@ -217,6 +220,43 @@ impl LicenseDb {
             .filter_map(|r| r.ok())
             .collect();
         Ok(rows.into_iter().next())
+    }
+
+    /// Promote every account holding `email` to owner, returning the usernames
+    /// changed. Matching is case-insensitive and covers duplicates, since
+    /// `users.email` has no UNIQUE constraint.
+    ///
+    /// Idempotent: accounts already owners are not reported as changed, so a
+    /// restart is silent rather than logging a promotion every boot.
+    pub fn promote_owner_by_email(&self, email: &str) -> Result<Vec<String>, LicenseError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT username FROM users
+                 WHERE LOWER(TRIM(email)) = LOWER(TRIM(?1)) AND role <> 'owner'",
+            )
+            .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
+        let names: Vec<String> = stmt
+            .query_map(params![email], |r| r.get::<_, String>(0))
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        let now = Utc::now().to_rfc3339();
+        for name in &names {
+            self.conn
+                .execute(
+                    "UPDATE users SET role = 'owner', updated_at = ?1 WHERE username = ?2",
+                    params![now, name],
+                )
+                .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))?;
+        }
+        Ok(names)
+    }
+
+    pub fn count_owners(&self) -> Result<i64, LicenseError> {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM users WHERE role = 'owner'", [], |r| r.get(0))
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))
     }
 
     pub fn get_user_newsletter_opt_in(&self, username: &str) -> Result<bool, LicenseError> {

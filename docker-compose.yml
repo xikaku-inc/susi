@@ -40,6 +40,11 @@ services:
       # host. Static credentials, if set, take precedence.
       - SUSI_GOOGLE_CLIENT_ID=${SUSI_GOOGLE_CLIENT_ID:-}
       - SUSI_GOOGLE_CLIENT_SECRET=${SUSI_GOOGLE_CLIENT_SECRET:-}
+      # Comma-separated emails promoted to the `owner` role on every start.
+      # Ownership is otherwise only grantable by an existing owner, so this is
+      # how the first one exists on a database predating the role - and the way
+      # back in if the last owner is ever lost. Idempotent.
+      - SUSI_OWNER_EMAILS=${SUSI_OWNER_EMAILS:-}
       # FusionHub relay URL handed to workspace members on federation fetch.
       # Empty disables the relay (members fall back to FUSIONHUB_RELAY_URL
       # set locally on each member, or direct TCP only).

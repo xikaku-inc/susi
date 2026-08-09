@@ -249,6 +249,92 @@ impl TestServer {
         token
     }
 
+    /// Log in a non-bootstrap account created with an explicit password.
+    /// These accounts have no trusted device, but the default test server has
+    /// no SMTP either, so the sign-in-code gate is off and a plain login
+    /// returns a token directly.
+    fn login_token(&self, username: &str, password: &str) -> String {
+        let resp = self
+            .http()
+            .post(format!("{}/auth/login", self.api_url))
+            .json(&json!({"username": username, "password": password}))
+            .send()
+            .expect("login");
+        let body = resp.text().unwrap_or_default();
+        serde_json::from_str::<Value>(&body)
+            .ok()
+            .and_then(|v| v["token"].as_str().map(str::to_string))
+            .unwrap_or_else(|| panic!("login for {} returned no token: {}", username, body))
+    }
+
+    /// Bring a freshly created account up to a fully-privileged session:
+    /// clear must_change_password and enrol TOTP, exactly as `admin_token`
+    /// does for the bootstrap user.
+    ///
+    /// Without this an admin fails `require_admin_full` on the password-change
+    /// and TOTP checks, so any "admin is forbidden" assertion would pass for
+    /// the wrong reason and prove nothing about the gate under test.
+    fn elevated_token(&self, username: &str, password: &str) -> String {
+        let client = self.http();
+        let token = self.login_token(username, password);
+        let new_password = format!("{}-elevated", password);
+
+        let resp = client
+            .post(format!("{}/auth/change-password", self.api_url))
+            .bearer_auth(&token)
+            .json(&json!({"current_password": password, "new_password": new_password}))
+            .send()
+            .expect("change-password");
+        let body = resp.text().unwrap_or_default();
+        let token = serde_json::from_str::<Value>(&body)
+            .expect("change-password json")["token"]
+            .as_str()
+            .expect("fresh token")
+            .to_string();
+
+        let resp = client
+            .post(format!("{}/auth/setup-2fa", self.api_url))
+            .bearer_auth(&token)
+            .send()
+            .expect("setup-2fa");
+        let secret_b32 = resp.json::<Value>().expect("setup-2fa json")["secret"]
+            .as_str()
+            .expect("secret")
+            .to_string();
+        let secret_bytes = Secret::Encoded(secret_b32).to_bytes().expect("decode secret");
+        let totp = TOTP::new(
+            Algorithm::SHA1, 6, 1, 30, secret_bytes,
+            Some("Susi License Server".into()), username.to_string(),
+        )
+        .expect("totp");
+        let resp = client
+            .post(format!("{}/auth/verify-2fa", self.api_url))
+            .bearer_auth(&token)
+            .json(&json!({"totp_code": totp.generate_current().expect("totp code")}))
+            .send()
+            .expect("verify-2fa");
+        assert!(
+            resp.status().is_success(),
+            "verify-2fa for {}: {}",
+            username,
+            resp.text().unwrap_or_default()
+        );
+        token
+    }
+
+    /// Hand back the data directory so a caller can restart a server over the
+    /// same database - the only way to exercise startup-time behaviour.
+    fn into_dir(mut self) -> tempfile::TempDir {
+        self.child.kill().ok();
+        self.child.wait().ok();
+        // Drop must not delete the directory we are returning.
+        let dir = std::mem::replace(
+            &mut self._dir,
+            tempfile::tempdir().expect("placeholder temp dir"),
+        );
+        dir
+    }
+
     /// Create a 30-day license via the admin API and return its license key.
     fn create_license(&self, token: &str, require_signed_binary: bool) -> String {
         let resp = self
@@ -2537,7 +2623,9 @@ fn test_set_user_role() {
         .send()
         .expect("self role");
     assert_eq!(resp.status().as_u16(), 400, "self role-change must be rejected");
-    assert_eq!(role_of("admin"), "admin", "admin must remain admin");
+    // The bootstrap account is seeded as an owner - ownership can only be
+    // granted by an owner, so a fresh install must start with one.
+    assert_eq!(role_of("admin"), "owner", "seeded account must keep its role");
 
     // Invalid role rejected.
     let resp = client
@@ -4976,4 +5064,242 @@ fn test_signin_code_send_failure_is_reported() {
         rows.iter().any(|e| e["action"] == json!("auth.signin_code_send_failed")),
         "send failure must be audited"
     );
+}
+
+/// Owner is a SUPERSET of admin. Every admin gate must accept an owner - a
+/// missed role comparison would silently strip their access to the rest of the
+/// app rather than failing loudly, so this walks the main admin surfaces.
+#[test]
+fn test_owner_retains_every_admin_capability() {
+    let server = TestServer::start();
+    // The seeded bootstrap account is an owner (a fresh install must be able
+    // to produce one; ownership cannot otherwise be granted).
+    let owner = server.admin_token();
+    let client = server.http();
+
+    let status = client
+        .get(format!("{}/auth/status", server.api_url))
+        .bearer_auth(&owner)
+        .send()
+        .expect("status")
+        .json::<Value>()
+        .expect("json");
+    assert_eq!(status["role"], json!("owner"), "seeded account must be an owner");
+
+    // Admin-only surfaces, each of which compares a role somewhere.
+    for path in ["/auth/users", "/licenses", "/audit", "/workspaces", "/admin/tickets"] {
+        let resp = client
+            .get(format!("{}{}", server.api_url, path))
+            .bearer_auth(&owner)
+            .send()
+            .expect("admin surface");
+        assert!(
+            resp.status().is_success(),
+            "owner must retain admin access to {} (got {})",
+            path,
+            resp.status()
+        );
+    }
+}
+
+/// Ownership is closed: an admin can neither grant it, take it, nor reach the
+/// newsletter. Without the second half the privilege would only look elevated.
+#[test]
+fn test_owner_privileges_are_closed_to_admins() {
+    let server = TestServer::start();
+    let owner = server.admin_token();
+    let client = server.http();
+
+    // A plain admin, with a password so it can log in without email.
+    let resp = client
+        .post(format!("{}/auth/users", server.api_url))
+        .bearer_auth(&owner)
+        .json(&json!({
+            "username": "plain_admin",
+            "email": "plain_admin@example.com",
+            "role": "admin",
+            "password": "adminpw12345",
+        }))
+        .send()
+        .expect("create admin");
+    assert!(resp.status().is_success(), "{}", resp.text().unwrap_or_default());
+
+    let admin_tok = server.elevated_token("plain_admin", "adminpw12345");
+
+    // The newsletter is owner-only, end to end.
+    for path in ["/newsletter/issues", "/newsletter/config"] {
+        let resp = client
+            .get(format!("{}{}", server.api_url, path))
+            .bearer_auth(&admin_tok)
+            .send()
+            .expect("newsletter as admin");
+        assert_eq!(resp.status().as_u16(), 403, "{} must be owner-only", path);
+    }
+    let resp = client
+        .post(format!("{}/newsletter/issues", server.api_url))
+        .bearer_auth(&admin_tok)
+        .json(&json!({"subject": "Nope", "body_md": "x"}))
+        .send()
+        .expect("create issue as admin");
+    assert_eq!(resp.status().as_u16(), 403);
+
+    // Subscription management is part of the newsletter, so it is closed too.
+    let resp = client
+        .post(format!("{}/auth/newsletter-bulk", server.api_url))
+        .bearer_auth(&admin_tok)
+        .json(&json!({"usernames": ["plain_admin"], "opt_in": true}))
+        .send()
+        .expect("bulk as admin");
+    assert_eq!(resp.status().as_u16(), 403);
+
+    // An admin cannot promote anyone - including themselves - to owner.
+    let resp = client
+        .put(format!("{}/auth/users/plain_admin/role", server.api_url))
+        .bearer_auth(&admin_tok)
+        .json(&json!({"role": "owner"}))
+        .send()
+        .expect("self promote");
+    assert!(
+        resp.status().is_client_error(),
+        "an admin must not be able to grant ownership: {}",
+        resp.status()
+    );
+
+    let resp = client
+        .post(format!("{}/auth/users", server.api_url))
+        .bearer_auth(&admin_tok)
+        .json(&json!({
+            "username": "smuggled_owner",
+            "email": "smuggled@example.com",
+            "role": "owner",
+            "password": "ownerpw12345",
+        }))
+        .send()
+        .expect("create owner as admin");
+    assert_eq!(resp.status().as_u16(), 403, "creating an owner is granting ownership");
+
+    // And an admin cannot take ownership away from the existing owner.
+    let resp = client
+        .put(format!("{}/auth/users/admin/role", server.api_url))
+        .bearer_auth(&admin_tok)
+        .json(&json!({"role": "admin"}))
+        .send()
+        .expect("demote owner");
+    assert_eq!(resp.status().as_u16(), 403, "an admin must not be able to demote an owner");
+}
+
+/// The interesting attacks are not on the role field itself: an admin who can
+/// reset an owner's password, repoint their email, or delete them has taken
+/// ownership by another route.
+#[test]
+fn test_admins_cannot_take_over_an_owner_account() {
+    let server = TestServer::start();
+    let owner = server.admin_token();
+    let client = server.http();
+
+    let resp = client
+        .post(format!("{}/auth/users", server.api_url))
+        .bearer_auth(&owner)
+        .json(&json!({
+            "username": "sneaky_admin",
+            "email": "sneaky@example.com",
+            "role": "admin",
+            "password": "adminpw12345",
+        }))
+        .send()
+        .expect("create admin");
+    assert!(resp.status().is_success(), "{}", resp.text().unwrap_or_default());
+    let admin_tok = server.elevated_token("sneaky_admin", "adminpw12345");
+
+    // Password reset would let them log in as the owner.
+    let resp = client
+        .post(format!("{}/auth/users/admin/reset-password", server.api_url))
+        .bearer_auth(&admin_tok)
+        .json(&json!({"new_password": "hijacked12345"}))
+        .send()
+        .expect("reset owner password");
+    assert_eq!(resp.status().as_u16(), 403, "must not reset an owner's password");
+
+    // Repointing the address enables a password-reset takeover.
+    let resp = client
+        .put(format!("{}/auth/users/admin/email", server.api_url))
+        .bearer_auth(&admin_tok)
+        .json(&json!({"email": "attacker@example.com"}))
+        .send()
+        .expect("repoint owner email");
+    assert_eq!(resp.status().as_u16(), 403, "must not repoint an owner's email");
+
+    // Deleting every owner seizes the newsletter just as effectively.
+    let resp = client
+        .delete(format!("{}/auth/users/admin", server.api_url))
+        .bearer_auth(&admin_tok)
+        .send()
+        .expect("delete owner");
+    assert_eq!(resp.status().as_u16(), 403, "must not delete an owner");
+
+    // The same operations against a non-owner still work, so the guard is
+    // scoped to owners rather than blanket-denying admins.
+    let resp = client
+        .post(format!("{}/auth/users", server.api_url))
+        .bearer_auth(&owner)
+        .json(&json!({
+            "username": "ordinary",
+            "email": "ordinary@example.com",
+            "role": "user",
+            "password": "userpw12345",
+        }))
+        .send()
+        .expect("create user");
+    assert!(resp.status().is_success());
+    let resp = client
+        .post(format!("{}/auth/users/ordinary/reset-password", server.api_url))
+        .bearer_auth(&admin_tok)
+        .json(&json!({"new_password": "newpass12345"}))
+        .send()
+        .expect("reset ordinary password");
+    assert!(
+        resp.status().is_success(),
+        "admins must still administer non-owners: {}",
+        resp.text().unwrap_or_default()
+    );
+}
+
+/// Ownership cannot be granted from inside the app without an existing owner,
+/// so a database predating the role needs an out-of-band way in.
+#[test]
+fn test_owner_emails_env_promotes_at_startup() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    // First boot: no promotion configured, create a plain admin with an email.
+    let server = TestServer::start_in_dir(dir, &[]);
+    let owner = server.admin_token();
+    let resp = server
+        .http()
+        .post(format!("{}/auth/users", server.api_url))
+        .bearer_auth(&owner)
+        .json(&json!({
+            "username": "future_owner",
+            "email": "Klaus@Example.COM",
+            "role": "admin",
+            "password": "userpw12345",
+        }))
+        .send()
+        .expect("create admin");
+    assert!(resp.status().is_success(), "{}", resp.text().unwrap_or_default());
+    let dir = server.into_dir();
+
+    // Reboot the same data directory with the promotion configured. Matching
+    // is case-insensitive: the address is typed by a human into a .env file.
+    let server = TestServer::start_in_dir(dir, &[("SUSI_OWNER_EMAILS", "klaus@example.com")]);
+    // Read the promoted account's own status - no admin rights needed, and the
+    // bootstrap password has already been rotated by the first boot.
+    let tok = server.login_token("future_owner", "userpw12345");
+    let status = server
+        .http()
+        .get(format!("{}/auth/status", server.api_url))
+        .bearer_auth(&tok)
+        .send()
+        .expect("status")
+        .json::<Value>()
+        .expect("json");
+    assert_eq!(status["role"], json!("owner"), "env promotion must apply on boot");
 }

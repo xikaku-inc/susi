@@ -30,6 +30,9 @@ services:
       # a staging admin cannot connect an account and start sending.
       - SUSI_GOOGLE_CLIENT_ID=
       - SUSI_GOOGLE_CLIENT_SECRET=
+      # Owners are still useful on staging (the composer and preview work
+      # there); only sending is disabled above.
+      - SUSI_OWNER_EMAILS=${SUSI_OWNER_EMAILS:-}
       # FusionHub relay URL handed to workspace members on federation fetch.
       # Empty disables the relay (members fall back to FUSIONHUB_RELAY_URL
       # set locally on each member, or direct TCP only).

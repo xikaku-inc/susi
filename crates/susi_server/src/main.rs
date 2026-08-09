@@ -41,7 +41,9 @@ use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation}
 use rand::{Rng, RngCore};
 use sha2::{Digest, Sha256};
 use susi_core::crypto::{private_key_from_pem, sign_license};
-use susi_core::db::{LicenseDb, DEFAULT_PRODUCT};
+use susi_core::db::{
+    is_admin_role, is_owner_role, is_valid_role, LicenseDb, DEFAULT_PRODUCT,
+};
 use susi_core::{License, DEFAULT_LEASE_DURATION_HOURS, DEFAULT_LEASE_GRACE_HOURS};
 use rsa::RsaPrivateKey;
 use serde::{Deserialize, Serialize};
@@ -160,6 +162,15 @@ struct Cli {
     /// OAuth client secret. Prefer setting via env.
     #[arg(long, env = "SUSI_GOOGLE_CLIENT_SECRET", default_value = "")]
     google_client_secret: String,
+
+    /// Comma-separated emails promoted to the `owner` role at every startup.
+    ///
+    /// Ownership can otherwise only be granted by an existing owner, so this
+    /// is how the first one comes into being on a database that predates the
+    /// role - and the way back in if the last owner is ever lost. Applied
+    /// idempotently; accounts already owners are left alone.
+    #[arg(long, env = "SUSI_OWNER_EMAILS", default_value = "")]
+    owner_emails: String,
 
     /// Public base URL where the dashboard is reachable. Used to build the
     /// password-reset and invitation links in outbound email (sign-in itself
@@ -1157,13 +1168,57 @@ pub(crate) fn require_admin_full(
             "Password change required before accessing admin features",
         ));
     }
-    if role != "admin" {
+    if !is_admin_role(&role) {
         return Err(error_response(StatusCode::FORBIDDEN, "Admin access required"));
     }
     if principal.source == AuthSource::Jwt && !totp_enabled {
         return Err(error_response(
             StatusCode::FORBIDDEN,
             "Admin accounts must enable two-factor authentication before performing this action",
+        ));
+    }
+    Ok(())
+}
+
+/// Administering an owner account requires being an owner.
+///
+/// Without this, ownership would only look closed: an admin could reset an
+/// owner's password, or repoint their email and drive a password reset, and
+/// log in as them. Applied to every operation that can take over or remove an
+/// owner account - delete, reset password, set email, change role.
+pub(crate) fn require_owner_for_owner_target(
+    state: &AppState,
+    principal: &Principal,
+    target: &str,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    let target_is_owner = {
+        let db = state.db.lock();
+        db.get_user_role(target).map(|r| is_owner_role(&r)).unwrap_or(false)
+    };
+    if target_is_owner {
+        require_owner(state, principal)?;
+    }
+    Ok(())
+}
+
+/// Owner-only gate: the newsletter, and changing who is an owner.
+///
+/// Layered on top of `require_admin_full` rather than replacing it, so owners
+/// still clear the password-change and TOTP requirements that apply to every
+/// administrator.
+pub(crate) fn require_owner(
+    state: &AppState,
+    principal: &Principal,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    require_admin_full(state, principal)?;
+    let role = {
+        let db = state.db.lock();
+        db.get_user_role(&principal.username).unwrap_or_default()
+    };
+    if !is_owner_role(&role) {
+        return Err(error_response(
+            StatusCode::FORBIDDEN,
+            "Owner access required",
         ));
     }
     Ok(())
@@ -2208,7 +2263,7 @@ fn authorize_release_download(
             error_response(StatusCode::FORBIDDEN, "License does not cover this product")
         })?;
         let is_admin = db.get_user_role(&principal.username)
-            .map(|r| r == "admin")
+            .map(|r| is_admin_role(&r))
             .unwrap_or(false);
         if !is_admin {
             let licensed = db
@@ -2781,6 +2836,33 @@ async fn main() -> Result<()> {
         newsletter_sending: AtomicBool::new(false),
         newsletter_wake: tokio::sync::Notify::new(),
     });
+
+    // Owner bootstrap. Ownership can otherwise only come from an existing
+    // owner, so a database predating the role would have none and the
+    // newsletter would be unreachable for everyone.
+    {
+        let db = state.db.lock();
+        for email in cli.owner_emails.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+            match db.promote_owner_by_email(email) {
+                Ok(names) if !names.is_empty() => {
+                    log::info!("Promoted to owner via SUSI_OWNER_EMAILS: {}", names.join(", "));
+                    for n in &names {
+                        audit_db(&db, "system", "user.set_role", n, "role=owner source=env");
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => log::error!("Owner promotion failed for {}: {}", email, e),
+            }
+        }
+        match db.count_owners() {
+            Ok(0) => log::warn!(
+                "No owner account exists - newsletter features are unavailable. \
+                 Set SUSI_OWNER_EMAILS to an existing user's email and restart."
+            ),
+            Ok(n) => log::info!("{} owner account(s) configured", n),
+            Err(_) => {}
+        }
+    }
 
     // One-time migration: fold retired workspace-scoped releases into
     // workspace files + workspace docs. No-op once no scoped rows remain.

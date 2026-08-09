@@ -807,7 +807,7 @@ async function resolveAdminStatus() {
         const r = await fetch('/api/v1/auth/status', { headers: { 'Authorization': 'Bearer ' + authToken() }});
         if (r.ok) {
             const d = await r.json();
-            isAdmin = (d.role === 'admin');
+            isAdmin = (d.role === 'admin' || d.role === 'owner');
         } else if (r.status === 401) {
             localStorage.removeItem('auth_token');
             isAdmin = false;

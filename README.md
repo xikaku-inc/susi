@@ -614,6 +614,12 @@ The server uses JWT-based authentication with multi-user support. Each team memb
 
 #### Security
 
+- Three roles, each a superset of the one below: **user** (customer portal),
+  **admin** (full site administration), **owner** (admin plus the newsletter and
+  the ability to grant or revoke ownership). Ownership is closed - only an owner
+  can create one, and only an owner can administer an owner account (change its
+  role, reset its password, repoint its email, or delete it), since any of those
+  is a route to taking it over. Bootstrap with `SUSI_OWNER_EMAILS`.
 - Passwords are hashed with **Argon2id**
 - Sessions use **HS256 JWT tokens** with 24-hour expiry
 - 2FA uses **TOTP** with one-shot **backup codes**, plus **trusted-device fingerprints** so a known browser doesn't re-prompt every login
@@ -1103,6 +1109,13 @@ SUSI_NEWSLETTER_RATE_PER_MIN=30
 # password on the host. Static credentials above take precedence if both exist.
 SUSI_GOOGLE_CLIENT_ID=<id>.apps.googleusercontent.com
 SUSI_GOOGLE_CLIENT_SECRET=<secret>
+
+# Accounts promoted to the `owner` role on every start (comma-separated).
+# Owner is the only role that can send newsletters or grant ownership, and it
+# can only be granted by an existing owner - so this is how the first one
+# exists on a database that predates the role, and the way back in if the last
+# owner is ever lost. Applied idempotently on each boot.
+SUSI_OWNER_EMAILS=you@example.com,you@other-domain.com
 
 # Shop (leave empty to disable checkout - product pages still render)
 STRIPE_SECRET_KEY=sk_live_…

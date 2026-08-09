@@ -373,7 +373,7 @@ pub(crate) async fn handle_magic_login(
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
             .ok_or_else(invalid)?;
         let role = db.get_user_role(&username).unwrap_or_else(|_| "user".into());
-        if role == "admin" {
+        if is_admin_role(&role) {
             // Admin invites must go through password setup; their link points
             // at /#/reset/<token>, so landing here means a tampered URL.
             return Err(invalid());
@@ -421,7 +421,7 @@ pub(crate) async fn handle_auth_status(
     let email = db.get_user_email(&principal.username).ok().flatten();
     let backup_codes_remaining = db.count_unused_backup_codes(&principal.username).unwrap_or(0);
     let newsletter_opt_in = db.get_user_newsletter_opt_in(&principal.username).unwrap_or(false);
-    let must_enable_totp = role == "admin" && !totp_enabled;
+    let must_enable_totp = is_admin_role(&role) && !totp_enabled;
     Ok(Json(serde_json::json!({
         "must_change_password": must_change,
         "totp_enabled": totp_enabled,

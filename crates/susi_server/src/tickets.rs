@@ -87,7 +87,7 @@ fn validate_body(s: &str) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
 fn is_site_admin(state: &AppState, principal: &Principal) -> bool {
     let db = state.db.lock();
     db.get_user_role(&principal.username)
-        .map(|r| r == "admin")
+        .map(|r| is_admin_role(&r))
         .unwrap_or(false)
 }
 
@@ -493,7 +493,7 @@ fn notify_workspace(
             if u.username == actor {
                 continue;
             }
-            if !(u.role == "admin" || members.iter().any(|m| m == &u.username)) {
+            if !(is_admin_role(&u.role) || members.iter().any(|m| m == &u.username)) {
                 continue;
             }
             let Some(addr) = u.email.as_deref().map(str::trim).filter(|e| !e.is_empty()) else {

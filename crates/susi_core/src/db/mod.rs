@@ -11,6 +11,39 @@ use crate::license::{License, MachineActivation};
 /// rely on it.
 pub const DEFAULT_PRODUCT: &str = "fusionhub";
 
+// ---------------------------------------------------------------------------
+// Roles
+// ---------------------------------------------------------------------------
+//
+// Three tiers, each a superset of the one below:
+//
+//   user   - customer portal only
+//   admin  - full site administration
+//   owner  - admin, plus newsletter sending and granting/revoking owner
+//
+// `owner` is a SUPERSET of `admin`, so no admin gate may compare the role
+// against "admin" directly - an owner failing such a check would silently lose
+// access to the rest of the application. Every gate goes through
+// `is_admin_role`.
+
+pub const ROLE_USER: &str = "user";
+pub const ROLE_ADMIN: &str = "admin";
+pub const ROLE_OWNER: &str = "owner";
+
+/// Whether a role carries full admin capability. Owners do.
+pub fn is_admin_role(role: &str) -> bool {
+    role == ROLE_ADMIN || role == ROLE_OWNER
+}
+
+/// Owner-only capabilities: the newsletter, and changing who is an owner.
+pub fn is_owner_role(role: &str) -> bool {
+    role == ROLE_OWNER
+}
+
+pub fn is_valid_role(role: &str) -> bool {
+    matches!(role, ROLE_USER | ROLE_ADMIN | ROLE_OWNER)
+}
+
 #[derive(Debug, Serialize)]
 pub struct UserInfo {
     pub username: String,
