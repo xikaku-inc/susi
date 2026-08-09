@@ -152,7 +152,7 @@ impl LicenseDb {
     pub fn list_users(&self) -> Result<Vec<UserInfo>, LicenseError> {
         let mut stmt = self
             .conn
-            .prepare("SELECT username, role, totp_enabled, must_change_password, created_at, email FROM users ORDER BY created_at")
+            .prepare("SELECT username, role, totp_enabled, must_change_password, created_at, email, newsletter_opt_in FROM users ORDER BY created_at")
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
         let users = stmt
             .query_map([], |r| {
@@ -163,6 +163,7 @@ impl LicenseDb {
                     must_change_password: r.get::<_, i32>(3)? != 0,
                     created_at: r.get(4)?,
                     email: r.get(5)?,
+                    newsletter_opt_in: r.get::<_, i32>(6)? != 0,
                 })
             })
             .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
@@ -216,6 +217,65 @@ impl LicenseDb {
             .filter_map(|r| r.ok())
             .collect();
         Ok(rows.into_iter().next())
+    }
+
+    pub fn get_user_newsletter_opt_in(&self, username: &str) -> Result<bool, LicenseError> {
+        let v: i32 = self
+            .conn
+            .query_row(
+                "SELECT newsletter_opt_in FROM users WHERE username = ?1",
+                params![username],
+                |r| r.get(0),
+            )
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?;
+        Ok(v != 0)
+    }
+
+    pub fn set_user_newsletter_opt_in(
+        &self,
+        username: &str,
+        opt_in: bool,
+    ) -> Result<bool, LicenseError> {
+        let now = Utc::now().to_rfc3339();
+        let n = self
+            .conn
+            .execute(
+                "UPDATE users SET newsletter_opt_in = ?1, updated_at = ?2 WHERE username = ?3",
+                params![opt_in as i32, now, username],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))?;
+        Ok(n > 0)
+    }
+
+    /// Set the consent flag on many users at once. Returns the number of rows
+    /// actually changed, which is how the caller detects unknown usernames.
+    pub fn set_newsletter_opt_in_bulk(
+        &self,
+        usernames: &[String],
+        opt_in: bool,
+    ) -> Result<usize, LicenseError> {
+        if usernames.is_empty() {
+            return Ok(0);
+        }
+        let now = Utc::now().to_rfc3339();
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| LicenseError::Other(format!("DB tx: {}", e)))?;
+        let mut changed = 0;
+        {
+            let mut stmt = tx
+                .prepare("UPDATE users SET newsletter_opt_in = ?1, updated_at = ?2 WHERE username = ?3")
+                .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
+            for u in usernames {
+                changed += stmt
+                    .execute(params![opt_in as i32, now, u])
+                    .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))?;
+            }
+        }
+        tx.commit()
+            .map_err(|e| LicenseError::Other(format!("DB commit: {}", e)))?;
+        Ok(changed)
     }
 
     pub fn set_user_email(&self, username: &str, email: Option<&str>) -> Result<(), LicenseError> {

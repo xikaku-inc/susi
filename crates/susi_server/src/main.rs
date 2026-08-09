@@ -13,6 +13,7 @@ mod users;
 mod releases;
 mod workspaces;
 mod tickets;
+mod newsletter;
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -109,6 +110,56 @@ struct Cli {
     /// Sender address for outbound mail (typically an alias of `smtp_user`).
     #[arg(long, env = "SUSI_SMTP_FROM_ADDR", default_value = "")]
     smtp_from_addr: String,
+
+    // -------- Newsletter SMTP (deliberately separate credentials) --------
+    //
+    // Bulk campaign mail does NOT fall back to the SUSI_SMTP_* relay. That
+    // relay carries sign-in codes, password resets and invitations; tripping a
+    // provider's recipient cap or reputation filter with a campaign would lock
+    // users out of the portal. With these unset, newsletter sending is disabled
+    // and the send endpoint reports it - never a silent fallback.
+
+    /// SMTP relay host for newsletters. Empty = newsletter sending disabled.
+    #[arg(long, env = "SUSI_NEWSLETTER_SMTP_HOST", default_value = "")]
+    newsletter_smtp_host: String,
+
+    #[arg(long, env = "SUSI_NEWSLETTER_SMTP_PORT", default_value_t = 587)]
+    newsletter_smtp_port: u16,
+
+    #[arg(long, env = "SUSI_NEWSLETTER_SMTP_USER", default_value = "")]
+    newsletter_smtp_user: String,
+
+    /// Prefer setting via env.
+    #[arg(long, env = "SUSI_NEWSLETTER_SMTP_PASSWORD", default_value = "")]
+    newsletter_smtp_password: String,
+
+    #[arg(long, env = "SUSI_NEWSLETTER_SMTP_FROM_NAME", default_value = "Susi by LP-Research")]
+    newsletter_smtp_from_name: String,
+
+    #[arg(long, env = "SUSI_NEWSLETTER_SMTP_FROM_ADDR", default_value = "")]
+    newsletter_smtp_from_addr: String,
+
+    /// Addresses attempted per minute by the newsletter sender. Kept low by
+    /// default: every send opens a full TCP+STARTTLS+AUTH handshake.
+    #[arg(long, env = "SUSI_NEWSLETTER_RATE_PER_MIN", default_value_t = 30)]
+    newsletter_rate_per_min: u32,
+
+    // -------- Google OAuth for the newsletter relay (optional) --------
+    //
+    // An alternative to SUSI_NEWSLETTER_SMTP_USER/_PASSWORD: an admin connects
+    // a Google Workspace account from the dashboard and susi sends through
+    // Gmail with XOAUTH2, so no app password is stored on the host. The
+    // gmail.send scope is restricted, so the OAuth client must be an
+    // "Internal" app in the Workspace org - an External app would need Google
+    // verification. Static SMTP credentials, if set, take precedence.
+
+    /// OAuth client ID (Google Cloud console, application type "Web").
+    #[arg(long, env = "SUSI_GOOGLE_CLIENT_ID", default_value = "")]
+    google_client_id: String,
+
+    /// OAuth client secret. Prefer setting via env.
+    #[arg(long, env = "SUSI_GOOGLE_CLIENT_SECRET", default_value = "")]
+    google_client_secret: String,
 
     /// Public base URL where the dashboard is reachable. Used to build the
     /// password-reset and invitation links in outbound email (sign-in itself
@@ -234,6 +285,14 @@ struct AppState {
     webhook_attempts: Mutex<HashMap<IpAddr, Vec<Instant>>>,
     contact_attempts: Mutex<HashMap<IpAddr, Vec<Instant>>>,
     email: Option<EmailService>,
+    /// Separate transport for bulk campaign mail. Never falls back to `email`:
+    /// isolating reputation from authentication mail is the whole point.
+    newsletter_email: Option<EmailService>,
+    newsletter_rate_per_min: u32,
+    /// Google OAuth client for the newsletter relay, plus the cached access
+    /// token. Only consulted when `newsletter_email` is None.
+    google_oauth: newsletter::GoogleOAuthConfig,
+    newsletter_token_cache: tokio::sync::Mutex<Option<newsletter::CachedToken>>,
     magic_link_base_url: String,
     /// FusionHub relay URL handed to workspace members via
     /// `GET /workspaces/{id}/federation`. Empty when not configured.
@@ -250,6 +309,11 @@ struct AppState {
     backup: backup::BackupConfig,
     /// Guards against concurrent backup runs (scheduler + manual trigger).
     backup_running: AtomicBool,
+    /// Guards against overlapping newsletter drain ticks.
+    newsletter_sending: AtomicBool,
+    /// Wakes the drain loop the moment a campaign is queued, so Send acts
+    /// immediately instead of waiting out the tick interval.
+    newsletter_wake: tokio::sync::Notify,
 }
 
 // Sign-in code TTL: long enough for a user to switch to their mail client and
@@ -267,7 +331,7 @@ const SECURITY_CSP: &str = "default-src 'self'; \
     img-src 'self' data: blob: https:; \
     font-src 'self' data: https://fonts.gstatic.com; \
     connect-src 'self' https://*.google-analytics.com https://*.analytics.google.com https://www.googletagmanager.com https://www.googleadservices.com https://*.doubleclick.net https://*.google.com https://*.reddit.com; \
-    frame-src https://www.googletagmanager.com https://www.youtube.com https://player.vimeo.com https://challenges.cloudflare.com https://*.doubleclick.net; \
+    frame-src 'self' https://www.googletagmanager.com https://www.youtube.com https://player.vimeo.com https://challenges.cloudflare.com https://*.doubleclick.net; \
     object-src 'none'; \
     frame-ancestors 'none'; \
     base-uri 'self'; \
@@ -614,6 +678,18 @@ struct DownloadTicketClaims {
 
 const DOWNLOAD_TICKET_AUDIENCE: &str = "release-download";
 const DOWNLOAD_TICKET_TTL_SECS: i64 = 60;
+
+/// Claims for the unsubscribe link embedded in every newsletter. A dedicated
+/// audience keeps a leaked token useless anywhere else in the API, and there is
+/// deliberately no `exp`: an unsubscribe link must keep working for as long as
+/// the mail exists in someone's archive.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct UnsubscribeClaims {
+    pub sub: String,
+    pub aud: String,
+}
+
+pub(crate) const UNSUBSCRIBE_AUDIENCE: &str = "newsletter-unsubscribe";
 
 // ---------------------------------------------------------------------------
 // Request / response types
@@ -1950,6 +2026,17 @@ struct SetEmailRequest {
     email: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct SetNewsletterRequest {
+    opt_in: bool,
+}
+
+#[derive(Deserialize)]
+struct SetNewsletterBulkRequest {
+    usernames: Vec<String>,
+    opt_in: bool,
+}
+
 fn normalize_email(raw: &str) -> Result<Option<String>, (StatusCode, Json<ErrorResponse>)> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -2367,8 +2454,15 @@ struct PutGraphRequest {
 // Dashboard (embedded HTML)
 // ---------------------------------------------------------------------------
 
-async fn handle_dashboard() -> Html<&'static str> {
-    Html(include_str!("dashboard.html"))
+async fn handle_dashboard() -> impl IntoResponse {
+    // no-cache = revalidate before reuse, not "don't cache". Without it the
+    // response carries no caching headers at all, and browsers are free to
+    // heuristically reuse a stale copy after a deploy - which shows up as
+    // fixes that "didn't take" until a hard refresh.
+    (
+        [(header::CACHE_CONTROL, "no-cache")],
+        Html(include_str!("dashboard.html")),
+    )
 }
 
 /// Load the JWT secret from disk, or generate and persist one on first boot.
@@ -2520,6 +2614,46 @@ async fn main() -> Result<()> {
         log::warn!("SMTP is configured but --magic-link-base-url is empty; sign-in code login will NOT be enforced");
     }
 
+    let newsletter_email_service = if cli.newsletter_smtp_host.is_empty() {
+        log::info!("Newsletter SMTP not configured - newsletter sending disabled");
+        None
+    } else if cli.newsletter_smtp_user.is_empty()
+        || cli.newsletter_smtp_password.is_empty()
+        || cli.newsletter_smtp_from_addr.is_empty()
+    {
+        log::warn!(
+            "--newsletter-smtp-host set but user / password / from-addr not all set; newsletter sending disabled"
+        );
+        None
+    } else {
+        let cfg = EmailConfig::from_parts(
+            cli.newsletter_smtp_host.clone(),
+            cli.newsletter_smtp_port,
+            cli.newsletter_smtp_user.clone(),
+            cli.newsletter_smtp_password.clone(),
+            &cli.newsletter_smtp_from_name,
+            &cli.newsletter_smtp_from_addr,
+        )
+        .context("Invalid newsletter SMTP configuration")?;
+        match EmailService::new(cfg) {
+            Ok(svc) => {
+                log::info!(
+                    "Newsletter SMTP ready: relay {}:{}, from {} <{}>, {}/min",
+                    cli.newsletter_smtp_host,
+                    cli.newsletter_smtp_port,
+                    cli.newsletter_smtp_from_name,
+                    cli.newsletter_smtp_from_addr,
+                    cli.newsletter_rate_per_min,
+                );
+                Some(svc)
+            }
+            Err(e) => {
+                log::error!("Failed to init newsletter SMTP transport: {:#} - sending disabled", e);
+                None
+            }
+        }
+    };
+
     if cli.stripe_secret_key.is_empty() {
         log::info!("Stripe not configured - /api/v1/shop/checkout will respond 503");
     } else {
@@ -2622,6 +2756,15 @@ async fn main() -> Result<()> {
         webhook_attempts: Mutex::new(HashMap::new()),
         contact_attempts: Mutex::new(HashMap::new()),
         email: email_service,
+        newsletter_email: newsletter_email_service,
+        newsletter_rate_per_min: cli.newsletter_rate_per_min.max(1),
+        google_oauth: newsletter::GoogleOAuthConfig {
+            client_id: cli.google_client_id.clone(),
+            client_secret: cli.google_client_secret.clone(),
+            from_name: cli.newsletter_smtp_from_name.clone(),
+            from_addr_override: cli.newsletter_smtp_from_addr.clone(),
+        },
+        newsletter_token_cache: tokio::sync::Mutex::new(None),
         magic_link_base_url: cli.magic_link_base_url.clone(),
         relay_url: cli.relay_url.clone(),
         stripe_secret_key: cli.stripe_secret_key,
@@ -2635,6 +2778,8 @@ async fn main() -> Result<()> {
         s3: s3_storage,
         backup: backup_config,
         backup_running: AtomicBool::new(false),
+        newsletter_sending: AtomicBool::new(false),
+        newsletter_wake: tokio::sync::Notify::new(),
     });
 
     // One-time migration: fold retired workspace-scoped releases into
@@ -2645,6 +2790,10 @@ async fn main() -> Result<()> {
     if state.backup.configured() {
         backup::spawn_scheduler(Arc::clone(&state));
     }
+
+    // Newsletter drain loop. Independent of backups; self-disables when
+    // newsletter SMTP is unconfigured.
+    newsletter::spawn_sender(Arc::clone(&state));
 
     // Periodic session cleanup. Lease-expired machine activations are NOT
     // deleted anymore - they persist as "seen but stale" history for the
@@ -2721,6 +2870,7 @@ async fn main() -> Result<()> {
         .route("/api/v1/auth/disable-2fa", post(auth::handle_disable_2fa))
         .route("/api/v1/auth/regenerate-backup-codes", post(auth::handle_regenerate_backup_codes))
         .route("/api/v1/auth/me/email", axum::routing::put(users::handle_set_my_email))
+        .route("/api/v1/auth/me/newsletter", axum::routing::put(users::handle_set_my_newsletter))
         .route("/api/v1/auth/me/username", axum::routing::put(users::handle_rename_self))
         .route("/api/v1/auth/me/devices", get(users::handle_list_my_devices))
         .route("/api/v1/auth/me/devices/{fingerprint}", axum::routing::delete(users::handle_revoke_my_device))
@@ -2742,6 +2892,34 @@ async fn main() -> Result<()> {
         .route("/api/v1/auth/users/{username}/role", axum::routing::put(users::handle_set_user_role))
         .route("/api/v1/auth/users/{username}/reset-password", post(users::handle_reset_user_password))
         .route("/api/v1/auth/users/{username}/resend-invitation", post(users::handle_resend_invitation))
+        .route("/api/v1/auth/users/{username}/newsletter", axum::routing::put(users::handle_set_user_newsletter))
+        // Sits above /users/ so the static segment can't shadow {username}.
+        .route("/api/v1/auth/newsletter-bulk", post(users::handle_set_newsletter_bulk))
+        // Newsletters (admin)
+        .route("/api/v1/newsletter/config", get(newsletter::handle_newsletter_config))
+        .route("/api/v1/newsletter/google/authorize", get(newsletter::handle_google_authorize))
+        .route("/api/v1/newsletter/google/disconnect", post(newsletter::handle_google_disconnect))
+        // Public: Google redirects the browser here, so no Authorization
+        // header is possible - the signed `state` parameter is the proof.
+        .route("/api/v1/newsletter/google/callback", get(newsletter::handle_google_callback))
+        .route("/api/v1/newsletter/audience", get(newsletter::handle_newsletter_audience))
+        .route("/api/v1/newsletter/preview", post(newsletter::handle_newsletter_preview))
+        .route("/api/v1/newsletter/issues", get(newsletter::handle_list_issues).post(newsletter::handle_create_issue))
+        .route(
+            "/api/v1/newsletter/issues/{id}",
+            get(newsletter::handle_get_issue)
+                .put(newsletter::handle_update_issue)
+                .delete(newsletter::handle_delete_issue),
+        )
+        .route("/api/v1/newsletter/issues/{id}/deliveries", get(newsletter::handle_list_deliveries))
+        .route("/api/v1/newsletter/issues/{id}/test", post(newsletter::handle_test_send))
+        .route("/api/v1/newsletter/issues/{id}/send", post(newsletter::handle_send_issue))
+        // Public: an <a> click from a mail client carries no auth header, so
+        // the signed token in the query string is the credential.
+        .route(
+            "/api/v1/newsletter/unsubscribe",
+            get(newsletter::handle_unsubscribe).post(newsletter::handle_unsubscribe),
+        )
         // Public client endpoints
         .route("/api/v1/activate", post(client_api::handle_activate))
         .route("/api/v1/verify", post(client_api::handle_verify))

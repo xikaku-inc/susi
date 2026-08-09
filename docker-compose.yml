@@ -23,6 +23,23 @@ services:
       - SUSI_SMTP_FROM_NAME=${SUSI_SMTP_FROM_NAME:-Susi}
       - SUSI_SMTP_FROM_ADDR=${SUSI_SMTP_FROM_ADDR:-}
       - SUSI_MAGIC_LINK_BASE_URL=${SUSI_MAGIC_LINK_BASE_URL:-}
+      # Newsletter relay - deliberately separate credentials from the account
+      # mail above, so a campaign that trips a sending limit cannot take
+      # sign-in codes and password resets down with it. Empty host = campaign
+      # sending disabled (drafts and previews still work).
+      - SUSI_NEWSLETTER_SMTP_HOST=${SUSI_NEWSLETTER_SMTP_HOST:-}
+      - SUSI_NEWSLETTER_SMTP_PORT=${SUSI_NEWSLETTER_SMTP_PORT:-587}
+      - SUSI_NEWSLETTER_SMTP_USER=${SUSI_NEWSLETTER_SMTP_USER:-}
+      - SUSI_NEWSLETTER_SMTP_PASSWORD=${SUSI_NEWSLETTER_SMTP_PASSWORD:-}
+      - SUSI_NEWSLETTER_SMTP_FROM_NAME=${SUSI_NEWSLETTER_SMTP_FROM_NAME:-Susi by LP-Research}
+      - SUSI_NEWSLETTER_SMTP_FROM_ADDR=${SUSI_NEWSLETTER_SMTP_FROM_ADDR:-}
+      - SUSI_NEWSLETTER_RATE_PER_MIN=${SUSI_NEWSLETTER_RATE_PER_MIN:-30}
+      # Optional alternative to the newsletter user/password above: an admin
+      # connects a Google Workspace account from the dashboard and campaign
+      # mail goes out over Gmail with OAuth, so no app password lives on the
+      # host. Static credentials, if set, take precedence.
+      - SUSI_GOOGLE_CLIENT_ID=${SUSI_GOOGLE_CLIENT_ID:-}
+      - SUSI_GOOGLE_CLIENT_SECRET=${SUSI_GOOGLE_CLIENT_SECRET:-}
       # FusionHub relay URL handed to workspace members on federation fetch.
       # Empty disables the relay (members fall back to FUSIONHUB_RELAY_URL
       # set locally on each member, or direct TCP only).

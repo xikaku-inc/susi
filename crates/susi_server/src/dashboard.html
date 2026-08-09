@@ -778,7 +778,84 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
 @media (max-width: 480px) {
     .header-actions span#currentUser { display: none !important; }
 }
+
+/* Newsletter composer - same EasyMDE skin as the docs/website editors
+   (copied from docs.html, variables mapped), so all three markdown surfaces
+   feel identical. Scoped to the composer wrapper. */
+#nlEditorWrap .EasyMDEContainer { background: var(--bg); }
+#nlEditorWrap .EasyMDEContainer .CodeMirror {
+    background: var(--bg2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 0 0 var(--radius) var(--radius);
+    font-family: "SF Mono", "Consolas", "Fira Code", monospace;
+    font-size: 13px;
+}
+/* Editor height lives on the SCROLLER, never the outer box. CodeMirror hides
+   the native scrollbars by oversizing .CodeMirror-scroll 50px (padding-bottom
+   50px, margin-bottom -50px) and letting the box clip the excess - which only
+   works while the box's height is derived from the scroller. A min-height on
+   the box breaks that on short content: the box outgrows the scroller and the
+   native scrollbar band that should be clipped sits mid-box with dead space
+   below it (the docs editor carries the same latent quirk). The +50px keeps
+   the visible editing surface at ~480px. */
+#nlEditorWrap .EasyMDEContainer .CodeMirror-scroll { min-height: 530px; }
+#nlEditorWrap .EasyMDEContainer .CodeMirror-cursor { border-color: var(--text); }
+#nlEditorWrap .EasyMDEContainer .CodeMirror-selected { background: var(--bg3) !important; }
+#nlEditorWrap .EasyMDEContainer .CodeMirror-line { color: var(--text); }
+#nlEditorWrap .editor-toolbar {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius) var(--radius) 0 0;
+    border-bottom: none;
+    opacity: 1 !important;
+    position: sticky;
+    top: 0;
+    z-index: 9;
+}
+#nlEditorWrap .editor-toolbar button {
+    color: var(--text) !important;
+    border: 1px solid transparent !important;
+    border-radius: 4px !important;
+    padding: 4px 8px !important;
+    font-size: 12px !important;
+    font-weight: 500;
+    background: transparent !important;
+    min-width: 32px;
+    text-align: center;
+}
+#nlEditorWrap .editor-toolbar button:hover,
+#nlEditorWrap .editor-toolbar button.active {
+    background: var(--bg3) !important;
+    border-color: var(--border) !important;
+}
+#nlEditorWrap .editor-toolbar i.separator { border-left: 1px solid var(--border); margin: 0 4px; }
+#nlEditorWrap .editor-statusbar {
+    background: var(--bg2);
+    color: var(--text2);
+    border: 1px solid var(--border);
+    border-top: none;
+    border-radius: 0 0 var(--radius) var(--radius);
+    padding: 4px 10px;
+    font-size: 11px;
+}
+/* The preview pane hosts a sandboxed iframe carrying the real email HTML.
+   Email is styled on white by design, so the pane stays white in both themes
+   and imposes nothing of its own. */
+#nlEditorWrap .editor-preview,
+#nlEditorWrap .editor-preview-side {
+    background: #ffffff;
+    border: 1px solid var(--border);
+    padding: 0;
+}
+#nlEditorWrap .editor-preview iframe,
+#nlEditorWrap .editor-preview-side iframe {
+    width: 100%; height: 100%; min-height: 480px; border: 0;
+    background: #ffffff; display: block;
+}
 </style>
+<link rel="stylesheet" href="/docs/easymde.css">
+<script src="/docs/easymde.js" defer></script>
 </head>
 <body>
 
@@ -1026,9 +1103,11 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                     <label style="display:block;font-size:12px;color:var(--text2);margin-bottom:4px;">Order</label>
                     <input type="number" id="newProductOrd" value="0" style="width:100%;">
                 </div>
-                <div>
+                <div style="align-self:stretch;display:flex;flex-direction:column;">
                     <label style="display:block;font-size:12px;color:var(--text2);margin-bottom:4px;" title="Allow downloading this product's global releases without a license or login">Public DL</label>
-                    <input type="checkbox" id="newProductPublic" style="width:auto;height:18px;">
+                    <div style="flex:1;display:flex;align-items:center;">
+                        <input type="checkbox" id="newProductPublic" style="width:auto;height:18px;">
+                    </div>
                 </div>
                 <button onclick="createProduct()">Add</button>
             </div>
@@ -1234,6 +1313,18 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
             <a href="#" onclick="event.preventDefault();sendAccountResetLink()" style="color:var(--text2);">Don't know your current password? Email me a reset link</a>
         </p>
     </div>
+    <div class="card" style="max-width:520px;padding:20px;margin-bottom:16px;">
+        <h3 style="font-size:14px;font-weight:600;margin-bottom:12px;">Newsletter</h3>
+        <div style="display:flex;align-items:flex-start;gap:9px;">
+            <input type="checkbox" id="accNewsletter" style="width:auto;margin:2px 0 0;cursor:pointer;accent-color:var(--accent);" onchange="saveAccountNewsletter()">
+            <label for="accNewsletter" style="margin:0;cursor:pointer;text-transform:none;letter-spacing:0;font-size:13px;font-weight:400;">
+                Email me about new features and releases
+            </label>
+        </div>
+        <p style="font-size:12px;margin:12px 0 0;color:var(--text2);">
+            Sign-in codes, password resets and other account email are sent regardless of this setting.
+        </p>
+    </div>
 </div><!-- /page-account -->
 
 <!-- Shop page -->
@@ -1399,6 +1490,101 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
     </div>
 </div><!-- /page-tickets -->
 
+<!-- Newsletter (admin) -->
+<div id="page-newsletter" class="dash-page">
+<div id="newsletterListView">
+    <div style="margin-top:32px;margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
+        <h2 style="font-size:16px;font-weight:600;">Newsletter</h2>
+        <button onclick="openNewsletterEditor(null)">New issue</button>
+    </div>
+
+    <!-- Gmail connection. Only rendered when the server has an OAuth client
+         configured and no static SMTP credentials (those take precedence). -->
+    <div id="newsletterGoogleCard" class="card settings-card" style="display:none;margin-bottom:20px;">
+        <div class="detail-header">
+            <h3>Gmail connection</h3>
+            <span id="nlGoogleBadge" class="badge">not connected</span>
+        </div>
+        <div class="detail-body">
+            <p id="nlGoogleInfo" style="font-size:13px;margin:0 0 12px;"></p>
+            <p style="font-size:12px;margin:0;color:var(--text2);">
+                Campaign mail is sent over Gmail with OAuth, so no app password is stored on the
+                server. Account email - sign-in codes, password resets - keeps using its own relay.
+            </p>
+        </div>
+        <div class="form-footer">
+            <button id="nlGoogleConnectBtn" class="primary" onclick="connectNewsletterGoogle()">Connect Gmail</button>
+            <button id="nlGoogleDisconnectBtn" class="danger" style="display:none;" onclick="disconnectNewsletterGoogle()">Disconnect</button>
+        </div>
+    </div>
+
+    <div id="newsletterNotConfigured" class="card" style="display:none;margin-bottom:20px;">
+        <p style="font-size:13px;margin:0;">
+            Newsletter sending is not configured. Set <code>SUSI_NEWSLETTER_SMTP_HOST</code>,
+            <code>SUSI_NEWSLETTER_SMTP_USER</code>, <code>SUSI_NEWSLETTER_SMTP_PASSWORD</code> and
+            <code>SUSI_NEWSLETTER_SMTP_FROM_ADDR</code> in the host environment and restart.
+            Campaign mail deliberately uses its own credentials and never falls back to the
+            account-email relay, so a campaign cannot affect sign-in codes or password resets.
+            Drafts can still be written and previewed.
+        </p>
+    </div>
+
+    <div class="card" style="padding:0;">
+        <table style="width:100%;" id="newsletterTable">
+            <thead>
+                <tr>
+                    <th style="width:110px;">Status</th>
+                    <th>Subject</th>
+                    <th style="width:200px;">Delivery</th>
+                    <th style="width:170px;">Created</th>
+                    <th style="width:110px;"></th>
+                </tr>
+            </thead>
+            <tbody id="newsletterBody">
+                <tr><td colspan="5" class="empty-state"><p>Loading...</p></td></tr>
+            </tbody>
+        </table>
+    </div>
+</div><!-- /newsletterListView -->
+
+<!-- Full-width composer. A modal was too cramped for writing an actual
+     newsletter, so this mirrors the website/docs editors: same EasyMDE
+     toolbar, same drag-and-drop image upload, and a preview that renders
+     through the real email pipeline rather than a web renderer. -->
+<div id="newsletterEditView" style="display:none;">
+    <div style="margin-top:32px;margin-bottom:16px;display:flex;align-items:center;gap:12px;">
+        <button class="icon-btn" onclick="closeNewsletterEditor()" title="Back to all newsletters">&larr;</button>
+        <h2 id="nlEditHeading" style="font-size:16px;font-weight:600;margin:0;">New Issue</h2>
+        <span id="nlEditStatus" class="badge">draft</span>
+        <div style="flex:1;"></div>
+        <span id="nlSavedHint" style="font-size:12px;color:var(--text2);"></span>
+    </div>
+
+    <div class="form-row" style="margin-bottom:14px;">
+        <label for="nlSubject">Subject</label>
+        <input type="text" id="nlSubject" maxlength="200" oninput="nlClearError()">
+    </div>
+
+    <div id="nlAudience" style="margin-bottom:14px;padding:10px 14px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;">
+        <span style="color:var(--text2);">Resolving audience…</span>
+    </div>
+
+    <div id="nlEditorWrap" style="margin-bottom:14px;">
+        <textarea id="nlBody"></textarea>
+    </div>
+
+    <div id="nlError" class="form-error" style="display:none;margin-bottom:12px;"></div>
+
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:40px;">
+        <button class="secondary" id="nlPreviewBtn" onclick="toggleNewsletterPreview()">Preview</button>
+        <button class="secondary" id="nlTestBtn" onclick="sendNewsletterTest()">Send test to me</button>
+        <div style="flex:1;"></div>
+        <button class="secondary" id="nlSaveBtn" onclick="saveNewsletter()">Save draft</button>
+        <button id="nlSendBtn" onclick="sendNewsletter()">Send to subscribers</button>
+    </div>
+</div><!-- /newsletterEditView -->
+</div><!-- /page-newsletter -->
+
 <!-- Backups (Dropbox) -->
 <div id="page-backups" class="dash-page">
     <div style="margin-top:32px;margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
@@ -1538,8 +1724,8 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
     <div class="card" style="padding:0;margin-bottom:12px;">
         <div id="usersTableContainer" style="overflow:auto;">
             <table style="width:100%;">
-                <thead><tr><th></th><th>User</th><th>Role</th><th>Status</th><th></th></tr></thead>
-                <tbody id="usersTableBody"><tr><td colspan="5">Loading...</td></tr></tbody>
+                <thead><tr><th></th><th>User</th><th>Role</th><th>Status</th><th>Newsletter</th><th></th></tr></thead>
+                <tbody id="usersTableBody"><tr><td colspan="6">Loading...</td></tr></tbody>
             </table>
         </div>
     </div>
@@ -2007,6 +2193,31 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
         <div class="form-actions">
             <button class="secondary" onclick="closeTicketModal()">Cancel</button>
             <button id="ticketModalSubmit" onclick="submitTicketModal()">Create</button>
+        </div>
+    </div>
+</div>
+
+<!-- Newsletter delivery report -->
+<div id="newsletterDeliveriesModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeNewsletterDeliveries()">
+    <div class="modal" style="max-width:720px;">
+        <h2>Delivery report</h2>
+        <div class="modal-body">
+            <div class="card" style="padding:0;">
+                <table style="width:100%;">
+                    <thead>
+                        <tr>
+                            <th style="width:100px;">Status</th>
+                            <th>Recipient</th>
+                            <th style="width:70px;">Tries</th>
+                            <th style="width:170px;">Sent</th>
+                        </tr>
+                    </thead>
+                    <tbody id="nlDeliveriesBody"></tbody>
+                </table>
+            </div>
+        </div>
+        <div class="form-actions">
+            <button class="secondary" onclick="closeNewsletterDeliveries()">Close</button>
         </div>
     </div>
 </div>
@@ -2509,6 +2720,7 @@ function showPage(name) {
     if (name === 'account' && authToken) loadAccountPage();
     if (name === 'audit' && authToken) loadAudit();
     if (name === 'tickets' && authToken) loadTickets();
+    if (name === 'newsletter' && authToken) loadNewsletter();
     if (name === 'backups' && authToken) loadBackupPage();
     if (name === 'users' && authToken) loadUsers();
     activeNavPage = name;
@@ -2549,6 +2761,7 @@ function renderNav() {
         { page: 'licenses', label: 'Licenses', href: '#/licenses', show: !!authToken && isAdmin },
         { page: 'users', label: 'Users', href: '#/users', show: !!authToken && isAdmin },
         { page: 'tickets', label: 'Tickets', href: '#/tickets', show: !!authToken && isAdmin, group: 'admin' },
+        { page: 'newsletter', label: 'Newsletter', href: '#/newsletter', show: !!authToken && isAdmin, group: 'admin' },
         { page: 'products', label: 'Products', href: '#/products', show: !!authToken && isAdmin, group: 'admin' },
         { page: 'website', label: 'Website', href: '#/website', show: !!authToken && isAdmin, group: 'admin' },
         { page: 'shop', label: 'Shop', href: '#/shop', show: !!authToken && isAdmin, group: 'admin' },
@@ -2910,8 +3123,31 @@ async function loadAccountPage() {
         if (resp.ok) {
             const data = await resp.json();
             document.getElementById('accEmail').value = data.email || '';
+            document.getElementById('accNewsletter').checked = !!data.newsletter_opt_in;
         }
     } catch (e) {}
+}
+
+async function saveAccountNewsletter() {
+    const box = document.getElementById('accNewsletter');
+    const optIn = box.checked;
+    try {
+        const resp = await fetch(API + '/auth/me/newsletter', {
+            method: 'PUT',
+            headers: authHeaders(),
+            body: JSON.stringify({ opt_in: optIn }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+            box.checked = !optIn;
+            toast('Error: ' + (data.error || resp.status), 'error');
+            return;
+        }
+        toast(optIn ? 'Subscribed to the newsletter' : 'Unsubscribed from the newsletter', 'success');
+    } catch (e) {
+        box.checked = !optIn;
+        toast('Failed: ' + e.message, 'error');
+    }
 }
 
 async function saveAccountUsername() {
@@ -4099,7 +4335,7 @@ function renderUsers() {
     document.getElementById('usersShowMore').style.display =
         shown.length < filtered.length ? '' : 'none';
     if (!shown.length) {
-        tbody.innerHTML = '<tr><td colspan="5" style="color:var(--text2);">No matching users.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="6" style="color:var(--text2);">No matching users.</td></tr>';
         return;
     }
     tbody.innerHTML = shown.map(u => {
@@ -4113,6 +4349,9 @@ function renderUsers() {
             status = '<span style="color:var(--green);">Active</span>';
         }
         const tfa = u.totp_enabled ? '<span style="color:var(--green);">Enabled</span>' : '<span style="color:var(--text2);">Off</span>';
+        const newsletter = u.newsletter_opt_in
+            ? '<span style="color:var(--green);">Subscribed</span>'
+            : '<span style="color:var(--text2);">Not subscribed</span>';
         const roleBadge = '<span class="badge">' + (u.role === 'admin' ? 'admin' : 'user') + '</span>';
         // esc(JSON.stringify(x)) is HTML-safe for both the " and ' in the
         // inline onclick attribute. A bare JSON.stringify would break the
@@ -4133,6 +4372,12 @@ function renderUsers() {
             : '<button onclick="setUserRole(\'' + uname + '\',\'admin\')">Make admin</button>';
         const emailItem = '<button onclick="setUserEmail(\'' + uname + '\',' + emailArg + ')">' +
                           (u.email ? 'Edit email' : 'Set email') + '</button>';
+        // Newsletter consent defaults to off, so this is how a list gets built
+        // for users who gave consent outside the portal.
+        const newsletterItem = '<button onclick="setUserNewsletter(\'' + uname + '\',' +
+                               (u.newsletter_opt_in ? 'false' : 'true') + ')">' +
+                               (u.newsletter_opt_in ? 'Unsubscribe from newsletter' : 'Subscribe to newsletter') +
+                               '</button>';
         // Self row keeps a reduced Actions menu (rename + email) so admins
         // can manage their own account without exposing the destructive
         // items that would lock them out. Self-rename forces a re-login
@@ -4143,6 +4388,7 @@ function renderUsers() {
                 '<div id="' + menuId + '" class="dropdown-menu" style="display:none;">' +
                   '<button onclick="renameUser(\'' + uname + '\')">Rename</button>' +
                   emailItem +
+                  newsletterItem +
                 '</div>' +
               '</span>'
             : '<span class="dropdown" onclick="event.stopPropagation();">' +
@@ -4150,6 +4396,7 @@ function renderUsers() {
                 '<div id="' + menuId + '" class="dropdown-menu" style="display:none;">' +
                   '<button onclick="renameUser(\'' + uname + '\')">Rename</button>' +
                   emailItem +
+                  newsletterItem +
                   resendItem +
                   '<button onclick="resetUserPassword(\'' + uname + '\')">Reset password</button>' +
                   roleItem +
@@ -4167,16 +4414,20 @@ function renderUsers() {
             '<td><span class="user-name">' + esc(u.username) + '</span>' + emailLine + '</td>' +
             '<td>' + roleBadge + '</td>' +
             '<td>' + status + '</td>' +
+            '<td>' + newsletter + '</td>' +
             '<td class="col-actions">' + actions + '</td></tr>';
         if (expanded) {
             const licDetail = (u.licenses && u.licenses.length)
                 ? u.licenses.map(l => '<a class="feature-tag" href="#/licenses/' + encodeURIComponent(l.license_key) + '" title="' + esc(l.license_key) + '">' + esc(l.product) + '</a>').join(' ')
                 : '<span style="color:var(--text2);">(none)</span>';
-            rows += '<tr class="user-detail"><td></td><td colspan="4">' +
+            rows += '<tr class="user-detail"><td></td><td colspan="5">' +
                 '<div class="peek-body"><div class="peek-grid">' +
                     '<div><span class="label">Email</span>' + (u.email ? esc(u.email) : '<span style="color:var(--text2);">(none)</span>') + '</div>' +
                     '<div><span class="label">Licenses</span>' + licDetail + '</div>' +
                     '<div><span class="label">2FA</span>' + tfa + '</div>' +
+                    '<div><span class="label">Newsletter</span>' + (u.newsletter_opt_in
+                        ? '<span style="color:var(--green);">Subscribed</span>'
+                        : '<span style="color:var(--text2);">Not subscribed</span>') + '</div>' +
                 '</div></div>' +
             '</td></tr>';
         }
@@ -4329,6 +4580,25 @@ async function setUserRole(username, role) {
             return;
         }
         toast(role === 'admin' ? username + ' is now an admin' : username + ' is now a user', 'success');
+        await loadUsers();
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function setUserNewsletter(username, optIn) {
+    try {
+        const resp = await fetch(API + '/auth/users/' + encodeURIComponent(username) + '/newsletter', {
+            method: 'PUT',
+            headers: authHeaders(),
+            body: JSON.stringify({ opt_in: optIn }),
+        });
+        if (!resp.ok) {
+            const data = await resp.json().catch(() => ({}));
+            toast('Error: ' + (data.error || resp.status), 'error');
+            return;
+        }
+        toast(optIn ? username + ' subscribed to the newsletter' : username + ' unsubscribed', 'success');
         await loadUsers();
     } catch (e) {
         toast('Failed: ' + e.message, 'error');
@@ -4794,7 +5064,7 @@ function renderProducts() {
     }
     const GRID = 'display:grid;grid-template-columns:150px 1fr 1.4fr 70px 80px 150px;gap:12px;align-items:center;';
     const header =
-        '<div style="' + GRID + 'padding:0 0 8px;border-bottom:1px solid var(--border);font-size:12px;font-weight:600;color:var(--text2);">' +
+        '<div style="' + GRID + 'padding:0 0 8px;border-bottom:1px solid var(--border);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;color:var(--text2);">' +
         '<div>Slug</div><div>Name</div><div>Description</div><div>Order</div><div>Public DL</div><div></div></div>';
     const rows = products.map(p => {
         const isDefault = p.slug === DEFAULT_PRODUCT;
@@ -6286,6 +6556,500 @@ async function loadTickets() {
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// Newsletter (admin)
+// ---------------------------------------------------------------------------
+// One newsletter, sent to everyone who subscribed. Consent is opt-in, so most
+// accounts start unsubscribed - the audience panel reports the breakdown
+// (subscribed / not subscribed / no email) rather than a single number.
+
+let newsletterModalId = null;
+let newsletterAudienceCount = null;
+let nlEditor = null;   // EasyMDE instance for the composer
+let nlPreviewObserver = null;  // watches the preview-active class
+
+function renderNewsletterConfig(cfg) {
+    const ok = cfg.sending_configured && cfg.base_url_configured;
+    document.getElementById('newsletterNotConfigured').style.display = ok ? 'none' : '';
+
+    // Static SMTP credentials win server-side, so offering a Gmail connection
+    // alongside them would imply a choice the server does not actually make.
+    const showCard = cfg.google_oauth_available && !cfg.static_smtp_configured;
+    document.getElementById('newsletterGoogleCard').style.display = showCard ? '' : 'none';
+    if (!showCard) return;
+
+    const connected = !!cfg.google_account;
+    const badge = document.getElementById('nlGoogleBadge');
+    badge.className = connected ? 'badge active' : 'badge';
+    badge.textContent = connected ? 'connected' : 'not connected';
+    document.getElementById('nlGoogleInfo').innerHTML = connected
+        ? 'Sending as <strong>' + escHtml(cfg.google_account) + '</strong>'
+          + (cfg.google_connected_at ? ' · connected ' + formatDateTime(cfg.google_connected_at) : '')
+        : 'No Google account connected yet. Newsletters cannot be sent until one is.';
+    document.getElementById('nlGoogleConnectBtn').textContent = connected ? 'Reconnect' : 'Connect Gmail';
+    document.getElementById('nlGoogleDisconnectBtn').style.display = connected ? '' : 'none';
+}
+
+async function connectNewsletterGoogle() {
+    try {
+        const resp = await fetch(API + '/newsletter/google/authorize', { headers: authHeaders() });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) { toast('Error: ' + (data.error || resp.status), 'error'); return; }
+        // Google redirects back to the callback route, which stores the token
+        // and renders its own confirmation page.
+        window.open(data.url, '_blank', 'noopener');
+        toast('Approve access in the new tab, then reload this page', 'success');
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function disconnectNewsletterGoogle() {
+    if (!confirm('Disconnect Gmail? Newsletters cannot be sent until an account is reconnected.')) return;
+    try {
+        const resp = await fetch(API + '/newsletter/google/disconnect', {
+            method: 'POST', headers: authHeaders(), body: JSON.stringify({}),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) { toast('Error: ' + (data.error || resp.status), 'error'); return; }
+        toast('Gmail disconnected', 'success');
+        await loadNewsletter();
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+function nlStatusBadge(status) {
+    if (status === 'sent') return '<span class="badge active">sent</span>';
+    if (status === 'sending') return '<span class="badge expired">sending</span>';
+    return '<span class="badge">draft</span>';
+}
+
+async function loadNewsletter() {
+    const tbody = document.getElementById('newsletterBody');
+    if (!tbody) return;
+    // Surface a missing relay up front, so nobody writes a whole issue and
+    // only finds out at Send time.
+    try {
+        const resp = await fetch(API + '/newsletter/config', { headers: authHeaders() });
+        if (resp.ok) renderNewsletterConfig(await resp.json());
+    } catch (e) {}
+    try {
+        const resp = await fetch(API + '/newsletter/issues', { headers: authHeaders() });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const issues = await resp.json();
+        if (!issues.length) {
+            tbody.innerHTML = '<tr><td colspan="5" class="empty-state"><p>No newsletters yet.</p></td></tr>';
+            return;
+        }
+        tbody.innerHTML = issues.map(i => {
+            const menuId = 'nl-menu-' + String(i.id);
+            const isDraft = i.status === 'draft';
+            const total = i.pending + i.sent + i.failed;
+            let delivery = '<span style="color:var(--text2);">-</span>';
+            if (total) {
+                const parts = [i.sent + ' sent'];
+                if (i.pending) parts.push(i.pending + ' pending');
+                if (i.failed) parts.push('<span style="color:var(--red);">' + i.failed + ' failed</span>');
+                delivery = parts.join(' · ');
+            }
+            const items = [
+                '<button onclick="openNewsletterEditor(' + i.id + ')">' + (isDraft ? 'Edit' : 'View') + '</button>',
+                total ? '<button onclick="showNewsletterDeliveries(' + i.id + ')">Delivery report</button>' : '',
+                isDraft ? '<div class="divider"></div><button class="danger" onclick="deleteNewsletterIssue(' + i.id + ')">Delete</button>' : '',
+            ].join('');
+            return '<tr>'
+                + '<td>' + nlStatusBadge(i.status) + '</td>'
+                + '<td style="font-weight:500;">' + escHtml(i.subject) + '</td>'
+                + '<td style="white-space:nowrap;">' + delivery + '</td>'
+                + '<td style="white-space:nowrap;color:var(--text2);">' + formatDateTime(i.created_at) + '</td>'
+                + '<td class="col-actions"><span class="dropdown" onclick="event.stopPropagation();">'
+                +   '<button onclick="toggleDropdown(event,\'' + menuId + '\')">Actions &#9662;</button>'
+                +   '<div id="' + menuId + '" class="dropdown-menu" style="display:none;">' + items + '</div>'
+                + '</span></td>'
+                + '</tr>';
+        }).join('');
+    } catch (e) {
+        tbody.innerHTML = '<tr><td colspan="5" class="empty-state"><p>Failed to load: ' + escHtml(e.message) + '</p></td></tr>';
+    }
+}
+
+async function openNewsletterEditor(id) {
+    newsletterModalId = id;
+    newsletterAudienceCount = null;
+    document.getElementById('nlError').style.display = 'none';
+    document.getElementById('nlSavedHint').textContent = '';
+    document.getElementById('nlEditHeading').textContent = id ? 'Edit Issue' : 'New Issue';
+
+    let issue = null;
+    if (id) {
+        try {
+            const resp = await fetch(API + '/newsletter/issues/' + id, { headers: authHeaders() });
+            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+            issue = await resp.json();
+        } catch (e) {
+            toast('Failed to load issue: ' + e.message, 'error');
+            return;
+        }
+    }
+    document.getElementById('nlSubject').value = issue ? issue.subject : '';
+
+    const badge = document.getElementById('nlEditStatus');
+    badge.outerHTML = nlStatusBadge(issue ? issue.status : 'draft').replace('<span ', '<span id="nlEditStatus" ');
+
+    // A sent or sending issue is a delivery record: it stays readable but
+    // nothing about it can change.
+    const locked = !!issue && issue.status !== 'draft';
+    document.getElementById('nlSubject').disabled = locked;
+    document.getElementById('nlSaveBtn').style.display = locked ? 'none' : '';
+    // Both sends act on a stored issue, so neither appears until one exists.
+    document.getElementById('nlSendBtn').style.display = (locked || !id) ? 'none' : '';
+    document.getElementById('nlTestBtn').style.display = (locked || !id) ? 'none' : '';
+
+    document.getElementById('newsletterListView').style.display = 'none';
+    document.getElementById('newsletterEditView').style.display = '';
+    initNewsletterEditor(issue ? issue.body_md : '', locked);
+    loadNewsletterAudience();
+}
+
+function closeNewsletterEditor() {
+    destroyNewsletterEditor();
+    document.getElementById('newsletterEditView').style.display = 'none';
+    document.getElementById('newsletterListView').style.display = '';
+    newsletterModalId = null;
+    loadNewsletter();
+}
+
+function destroyNewsletterEditor() {
+    if (nlPreviewObserver) { nlPreviewObserver.disconnect(); nlPreviewObserver = null; }
+    if (nlEditor) {
+        try { nlEditor.toTextArea(); } catch (e) {}
+        nlEditor = null;
+    }
+}
+
+function nlBodyValue() {
+    return nlEditor ? nlEditor.value() : document.getElementById('nlBody').value;
+}
+
+// Same editor the website and docs pages use: identical toolbar, drag-and-drop
+// and paste image upload. The one difference is previewRender, which goes
+// through the server's EMAIL renderer - the web renderers style for the page,
+// so reusing one would show a preview that lies about the actual mail.
+function initNewsletterEditor(initialBody, locked) {
+    destroyNewsletterEditor();
+    const ta = document.getElementById('nlBody');
+    ta.value = initialBody || '';
+    if (typeof EasyMDE === 'undefined') {
+        // Degrade to the plain textarea rather than losing the composer.
+        ta.style.cssText = 'width:100%;min-height:460px;padding:12px;resize:vertical;'
+            + "font-family:'SF Mono','Fira Code',Consolas,monospace;font-size:13px;";
+        ta.disabled = !!locked;
+        toast('Rich editor failed to load - using a plain text box', 'error');
+        return;
+    }
+    nlEditor = new EasyMDE({
+        element: ta,
+        initialValue: initialBody || '',
+        autofocus: false,
+        spellChecker: false,
+        autoDownloadFontAwesome: false,
+        status: ['lines', 'words'],
+        uploadImage: true,
+        imageUploadFunction: newsletterImageUpload,
+        imageMaxSize: 25 * 1024 * 1024,
+        imageAccept: 'image/*',
+        imageTexts: {
+            sbInit: 'Attach images by drag-and-drop, paste, or the upload button.',
+            sbOnDrop: 'Uploading #images_names#…',
+            sbProgress: 'Uploading #file_name#: #progress#%',
+            sbOnUploaded: 'Uploaded #image_name#',
+            sizeUnits: ' B, KB, MB',
+        },
+        previewRender: newsletterPreviewRender,
+        renderingConfig: { singleLineBreaks: false, codeSyntaxHighlighting: false },
+        toolbar: [
+            { name: 'bold', action: EasyMDE.toggleBold, text: 'B', title: 'Bold' },
+            { name: 'italic', action: EasyMDE.toggleItalic, text: 'I', title: 'Italic' },
+            { name: 'heading', action: EasyMDE.toggleHeadingSmaller, text: 'H', title: 'Heading' },
+            '|',
+            { name: 'quote', action: EasyMDE.toggleBlockquote, text: '❝', title: 'Quote' },
+            { name: 'code', action: EasyMDE.toggleCodeBlock, text: '</>', title: 'Code block' },
+            { name: 'unordered-list', action: EasyMDE.toggleUnorderedList, text: '•', title: 'Bulleted list' },
+            { name: 'ordered-list', action: EasyMDE.toggleOrderedList, text: '1.', title: 'Numbered list' },
+            { name: 'table', action: EasyMDE.drawTable, text: '⊞', title: 'Insert table' },
+            '|',
+            { name: 'link', action: EasyMDE.drawLink, text: '🔗', title: 'Insert link' },
+            { name: 'upload-image', action: EasyMDE.drawUploadedImage, text: '🖼', title: 'Upload image' },
+            { name: 'horizontal-rule', action: EasyMDE.drawHorizontalRule, text: '-', title: 'Horizontal rule' },
+            '|',
+            // Routed through our toggle so the bottom button's label stays in
+            // sync no matter which control flipped the preview.
+            { name: 'preview', action: function () { toggleNewsletterPreview(); }, text: '👁', title: 'Preview as email', noDisable: true },
+        ],
+    });
+    if (locked) {
+        nlEditor.codemirror.setOption('readOnly', 'nocursor');
+    }
+    // Fresh instance starts with preview off - reflect that on the button.
+    nlSyncPreviewButton();
+    nlWatchPreviewState();
+}
+
+// Drive the button label off the DOM rather than off our own call sites.
+// Preview can be toggled three ways - the bottom button, the toolbar eye, and
+// the Ctrl-P/Cmd-P shortcut - and the shortcut never reaches our code, so any
+// label we set imperatively would go stale.
+function nlWatchPreviewState() {
+    if (nlPreviewObserver) { nlPreviewObserver.disconnect(); nlPreviewObserver = null; }
+    if (!nlEditor || !nlEditor.codemirror) return;
+    const wrap = nlEditor.codemirror.getWrapperElement();
+    if (!wrap || typeof MutationObserver === 'undefined') return;
+    nlPreviewObserver = new MutationObserver(nlSyncPreviewButton);
+    nlPreviewObserver.observe(wrap, {
+        attributes: true, attributeFilter: ['class'], subtree: true,
+    });
+}
+
+// Two-argument form: EasyMDE accepts a null return and lets us fill the pane
+// ourselves once the server responds. The result goes into a sandboxed iframe
+// so dashboard CSS cannot leak in and flatter the preview.
+function newsletterPreviewRender(plainText, preview) {
+    fetch(API + '/newsletter/preview', {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({ body_md: plainText }),
+    })
+        .then(async resp => {
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status));
+            preview.innerHTML = '';
+            const frame = document.createElement('iframe');
+            frame.setAttribute('sandbox', '');
+            frame.setAttribute('title', 'Email preview');
+            preview.appendChild(frame);
+            frame.srcdoc = '<!doctype html><html><head><meta charset="utf-8"></head>'
+                + '<body style="margin:0;padding:20px;background:#ffffff;">' + data.html + '</body></html>';
+        })
+        .catch(e => {
+            preview.innerHTML = '<div style="padding:14px;color:#b91c1c;font-size:13px;">'
+                + 'Preview failed: ' + escHtml(e.message) + '</div>';
+        });
+    // Shown until the server responds; the pane is white, so fixed colours.
+    return '<div style="padding:14px;color:#6b7280;font-size:13px;">Rendering email…</div>';
+}
+
+// Uploads land in the website asset store, which is served publicly at
+// /api/v1/website/assets/{file}. That matters: an inbox fetches images with no
+// Authorization header, so an auth-gated store would render every image broken.
+// The bare filename is inserted (not a URL) and the email renderer absolutizes
+// it at send time.
+async function newsletterImageUpload(file, onSuccess, onError) {
+    try {
+        const stamp = Date.now().toString(36);
+        const clean = (file.name || 'image').replace(/[^A-Za-z0-9._-]/g, '_');
+        const name = 'nl-' + stamp + '-' + clean;
+        const fd = new FormData();
+        fd.append('file', file, name);
+        const resp = await fetch(API + '/website/assets', {
+            method: 'POST',
+            headers: { 'Authorization': 'Bearer ' + authToken },
+            body: fd,
+        });
+        if (!resp.ok) {
+            const d = await resp.json().catch(() => ({}));
+            onError(d.error || ('HTTP ' + resp.status));
+            return;
+        }
+        const data = await resp.json();
+        onSuccess(data.name);
+        toast('Uploaded ' + data.name, 'success');
+    } catch (e) {
+        onError(e.message);
+    }
+}
+
+async function loadNewsletterAudience() {
+    const box = document.getElementById('nlAudience');
+    newsletterAudienceCount = null;
+    box.innerHTML = '<span style="color:var(--text2);">Resolving audience…</span>';
+    try {
+        const resp = await fetch(API + '/newsletter/audience', { headers: authHeaders() });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const a = await resp.json();
+        newsletterAudienceCount = a.recipients;
+
+        box.innerHTML = '<div style="font-weight:600;margin-bottom:6px;">'
+            + a.recipients + (a.recipients === 1 ? ' subscriber' : ' subscribers')
+            + ' will receive this</div>'
+            + '<div style="color:var(--text2);">'
+            + a.opted_out + ' not subscribed · ' + a.no_email + ' subscribed without an email'
+            + '</div>';
+    } catch (e) {
+        box.innerHTML = '<span style="color:var(--red);">Failed to resolve audience: ' + escHtml(e.message) + '</span>';
+    }
+}
+
+function newsletterFormBody() {
+    return {
+        subject: document.getElementById('nlSubject').value.trim(),
+        body_md: nlBodyValue(),
+    };
+}
+
+function nlShowError(msg) {
+    const el = document.getElementById('nlError');
+    el.textContent = msg;
+    el.style.display = '';
+}
+
+function nlClearError() {
+    document.getElementById('nlError').style.display = 'none';
+}
+
+// Same pane the toolbar eye toggles. This button exists because the
+// website/docs editors have a visible Preview button and the glyph alone
+// was not discoverable.
+function toggleNewsletterPreview() {
+    if (!nlEditor) { toast('Editor is not ready', 'error'); return; }
+    // No sync call here on purpose: EasyMDE adds the active class inside a
+    // setTimeout(...,1), so reading the state now returns the OLD value when
+    // turning preview on. nlWatchPreviewState observes the class instead.
+    EasyMDE.togglePreview(nlEditor);
+}
+
+// Preview replaces the editing surface wholesale, so the way back has to be
+// obvious: the bottom button flips to "Back to editor" while active (the
+// toolbar eye also highlights, but a lone glyph is easy to miss).
+function nlSyncPreviewButton() {
+    const btn = document.getElementById('nlPreviewBtn');
+    if (!btn || !nlEditor) return;
+    let active = false;
+    try { active = nlEditor.isPreviewActive(); } catch (e) { return; }
+    // CodeMirror rewrites classes constantly (active line, cursor), so the
+    // observer fires often - only touch the DOM when the state really changed.
+    const label = active ? '✕ Back to editor' : 'Preview';
+    if (btn.textContent === label) return;
+    btn.textContent = label;
+    btn.title = active ? 'Leave the email preview' : 'Preview exactly what subscribers receive';
+}
+
+async function saveNewsletter() {
+    nlClearError();
+    const body = newsletterFormBody();
+    if (!body.subject) { nlShowError('Subject is required'); return; }
+    try {
+        const editing = newsletterModalId !== null;
+        const resp = await fetch(
+            API + '/newsletter/issues' + (editing ? '/' + newsletterModalId : ''),
+            { method: editing ? 'PUT' : 'POST', headers: authHeaders(), body: JSON.stringify(body) },
+        );
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) { nlShowError(data.error || ('HTTP ' + resp.status)); return; }
+        if (!editing) newsletterModalId = data.id;
+        toast('Draft saved', 'success');
+        document.getElementById('nlEditHeading').textContent = 'Edit Issue';
+        document.getElementById('nlSavedHint').textContent = 'Saved';
+        setTimeout(() => { const h = document.getElementById('nlSavedHint'); if (h) h.textContent = ''; }, 2500);
+        document.getElementById('nlTestBtn').style.display = '';
+        document.getElementById('nlSendBtn').style.display = '';
+    } catch (e) {
+        nlShowError('Save failed: ' + e.message);
+    }
+}
+
+async function sendNewsletterTest() {
+    nlClearError();
+    if (newsletterModalId === null) { nlShowError('Save the draft first'); return; }
+    try {
+        const resp = await fetch(API + '/newsletter/issues/' + newsletterModalId + '/test', {
+            method: 'POST', headers: authHeaders(), body: JSON.stringify({}),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) { nlShowError(data.error || ('HTTP ' + resp.status)); return; }
+        document.getElementById('nlError').style.display = 'none';
+        toast('Test sent to ' + data.sent_to, 'success');
+    } catch (e) {
+        nlShowError('Test send failed: ' + e.message);
+    }
+}
+
+async function sendNewsletter() {
+    nlClearError();
+    if (newsletterModalId === null) { nlShowError('Save the draft first'); return; }
+    if (newsletterAudienceCount === null) { nlShowError('Audience is still resolving'); return; }
+    if (!newsletterAudienceCount) { nlShowError('Nobody is subscribed - nothing would be sent'); return; }
+    const subject = document.getElementById('nlSubject').value.trim();
+    if (!confirm(
+        'Send "' + subject + '" to ' + newsletterAudienceCount +
+        (newsletterAudienceCount === 1 ? ' subscriber' : ' subscribers') + '?\n\n' +
+        'This cannot be undone and the issue becomes read-only.'
+    )) return;
+    try {
+        // The count the operator just confirmed is sent back; the server
+        // refuses if the audience moved in the meantime.
+        const resp = await fetch(API + '/newsletter/issues/' + newsletterModalId + '/send', {
+            method: 'POST',
+            headers: authHeaders(),
+            body: JSON.stringify({ expect_recipients: newsletterAudienceCount }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) { nlShowError(data.error || ('HTTP ' + resp.status)); return; }
+        toast('Queued for ' + data.queued + ' recipients', 'success');
+        closeNewsletterEditor();
+    } catch (e) {
+        nlShowError('Send failed: ' + e.message);
+    }
+}
+
+async function deleteNewsletterIssue(id) {
+    if (!confirm('Delete this draft?')) return;
+    try {
+        const resp = await fetch(API + '/newsletter/issues/' + id, {
+            method: 'DELETE', headers: authHeaders(),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) { toast('Error: ' + (data.error || resp.status), 'error'); return; }
+        toast('Draft deleted', 'success');
+        await loadNewsletter();
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function showNewsletterDeliveries(id) {
+    const tbody = document.getElementById('nlDeliveriesBody');
+    tbody.innerHTML = '<tr><td colspan="4" class="empty-state"><p>Loading...</p></td></tr>';
+    document.getElementById('newsletterDeliveriesModal').classList.add('visible');
+    try {
+        const resp = await fetch(API + '/newsletter/issues/' + id + '/deliveries', { headers: authHeaders() });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const rows = await resp.json();
+        if (!rows.length) {
+            tbody.innerHTML = '<tr><td colspan="4" class="empty-state"><p>No deliveries recorded.</p></td></tr>';
+            return;
+        }
+        tbody.innerHTML = rows.map(d => {
+            let badge = '<span class="badge">pending</span>';
+            if (d.status === 'sent') badge = '<span class="badge active">sent</span>';
+            if (d.status === 'failed') badge = '<span class="badge revoked">failed</span>';
+            const err = d.error ? '<div style="color:var(--red);font-size:12px;">' + escHtml(d.error) + '</div>' : '';
+            return '<tr>'
+                + '<td>' + badge + '</td>'
+                + '<td>' + escHtml(d.email) + '<div style="color:var(--text2);font-size:12px;">' + escHtml(d.username) + '</div>' + err + '</td>'
+                + '<td>' + d.attempts + '</td>'
+                + '<td style="white-space:nowrap;color:var(--text2);">' + (d.sent_at ? formatDateTime(d.sent_at) : '-') + '</td>'
+                + '</tr>';
+        }).join('');
+    } catch (e) {
+        tbody.innerHTML = '<tr><td colspan="4" class="empty-state"><p>Failed to load: ' + escHtml(e.message) + '</p></td></tr>';
+    }
+}
+
+function closeNewsletterDeliveries() {
+    document.getElementById('newsletterDeliveriesModal').classList.remove('visible');
+}
 // ---------------------------------------------------------------------------
 // Backups (Dropbox)
 // ---------------------------------------------------------------------------

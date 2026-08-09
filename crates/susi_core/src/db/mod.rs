@@ -19,6 +19,7 @@ pub struct UserInfo {
     pub must_change_password: bool,
     pub created_at: String,
     pub email: Option<String>,
+    pub newsletter_opt_in: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -384,7 +385,12 @@ impl LicenseDb {
                 totp_enabled INTEGER NOT NULL DEFAULT 0,
                 token_version INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                -- Product-newsletter consent. Opt-in by default off: a user
+                -- only receives campaign mail after they (account page) or an
+                -- admin (users page) turns it on. Transactional mail - sign-in
+                -- codes, resets, invitations - ignores this flag entirely.
+                newsletter_opt_in INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS workspaces (
@@ -779,7 +785,55 @@ impl LicenseDb {
                 FOREIGN KEY (ticket_id) REFERENCES workspace_tickets(id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_ws_ticket_comments_ticket
-                ON workspace_ticket_comments(ticket_id, created_at);",
+                ON workspace_ticket_comments(ticket_id, created_at);
+
+            -- The newsletter. A campaign is durable rather than a
+            -- fire-and-forget fan-out: the recipient list is materialized into
+            -- newsletter_deliveries when the send starts, and each row carries
+            -- its own status. That is what makes 'did customer X get it'
+            -- answerable, lets a restart mid-campaign resume instead of
+            -- re-mailing the first half, and bounds retries per recipient.
+            CREATE TABLE IF NOT EXISTS newsletter_issues (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                subject    TEXT    NOT NULL,
+                body_md    TEXT    NOT NULL DEFAULT '',
+                -- draft | sending | sent
+                status     TEXT    NOT NULL DEFAULT 'draft',
+                created_by TEXT    NOT NULL,
+                created_at TEXT    NOT NULL,
+                updated_at TEXT    NOT NULL,
+                sent_at    TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_newsletter_issues_status
+                ON newsletter_issues(status, created_at DESC);
+
+            -- One row per address per issue. UNIQUE(issue_id, email) is the
+            -- double-send guard: re-running a send can only ever be a no-op
+            -- for an address already recorded.
+            CREATE TABLE IF NOT EXISTS newsletter_deliveries (
+                id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                issue_id INTEGER NOT NULL,
+                username TEXT    NOT NULL,
+                email    TEXT    NOT NULL,
+                -- pending | sent | failed
+                status   TEXT    NOT NULL DEFAULT 'pending',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                error    TEXT    NOT NULL DEFAULT '',
+                sent_at  TEXT,
+                FOREIGN KEY (issue_id) REFERENCES newsletter_issues(id) ON DELETE CASCADE,
+                UNIQUE(issue_id, email)
+            );
+            CREATE INDEX IF NOT EXISTS idx_newsletter_deliveries_pending
+                ON newsletter_deliveries(status, issue_id);
+
+            -- Google OAuth state for the newsletter relay. Its own table rather
+            -- than site_settings, because the admin site-settings endpoint
+            -- dumps every row in that table and a stored credential has no
+            -- business appearing there - even sealed.
+            CREATE TABLE IF NOT EXISTS newsletter_oauth (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );",
             )
             .map_err(|e| LicenseError::Other(format!("DB init: {}", e)))?;
         self.migrate()?;
@@ -988,6 +1042,18 @@ impl LicenseDb {
             "ALTER TABLE website_pages ADD COLUMN page_kind TEXT NOT NULL DEFAULT 'page';
              ALTER TABLE website_pages ADD COLUMN published_at TEXT NOT NULL DEFAULT '';",
         );
+
+        // Newsletter consent. Existing users start opted out - the flag is
+        // consent, and a deployed database has never asked for it.
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE users ADD COLUMN newsletter_opt_in INTEGER NOT NULL DEFAULT 0;",
+        );
+
+        // There is one newsletter for everyone, so an issue is no longer bound
+        // to a product.
+        let _ = self
+            .conn
+            .execute_batch("ALTER TABLE newsletter_issues DROP COLUMN product;");
 
         // >> Add new migrations as own execute_batch statements here <<
         Ok(())
@@ -1436,6 +1502,7 @@ mod config_revisions;
 mod recordings;
 mod workspace_files;
 mod tickets;
+mod newsletter;
 mod releases;
 mod products;
 mod license_listing;
@@ -1446,6 +1513,10 @@ mod sessions;
 mod audit;
 mod backup;
 
+pub use newsletter::{
+    DeliveryRow, NewsletterAudience, NewsletterIssue, NewsletterRecipient, PendingDelivery,
+    MAX_DELIVERY_ATTEMPTS,
+};
 pub use tickets::{is_valid_ticket_status, TICKET_STATUSES};
 
 
@@ -3477,5 +3548,274 @@ mod tests {
 
         // Unknown slug reports not-found.
         assert!(!db.set_website_page_hidden("nope", true).unwrap());
+    }
+
+    /// The newsletter migration runs on a database that predates the column.
+    /// `migrate()` discards ALL errors from its ALTER batch, not just
+    /// "duplicate column", so a broken statement would fail silently at every
+    /// boot and only surface as a 500 on the first query. Reopening a
+    /// pre-migration database is the only thing that catches that.
+    #[test]
+    fn test_newsletter_opt_in_migration() {
+        let path = std::env::temp_dir()
+            .join(format!("susi_newsletter_mig_{}.db", std::process::id()));
+        let p = path.to_str().unwrap().to_string();
+        let _ = std::fs::remove_file(&path);
+        {
+            let db = LicenseDb::open(&p).unwrap();
+            // Simulate a deployed database from before the column existed.
+            db.conn
+                .execute_batch("ALTER TABLE users DROP COLUMN newsletter_opt_in;")
+                .unwrap();
+            db.conn
+                .execute_batch(
+                    "INSERT INTO users (username, password_hash, role, created_at, updated_at)
+                     VALUES ('legacy', 'x', 'user', '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z');",
+                )
+                .unwrap();
+        }
+
+        // Reopen - migrate() must add the column and leave the existing user
+        // opted out, because consent was never asked for.
+        let db = LicenseDb::open(&p).unwrap();
+        assert!(
+            !db.get_user_newsletter_opt_in("legacy").unwrap(),
+            "an existing user must not be silently subscribed by the migration"
+        );
+        let users = db.list_users().unwrap();
+        assert_eq!(users.len(), 1);
+        assert!(!users[0].newsletter_opt_in);
+
+        assert!(db.set_user_newsletter_opt_in("legacy", true).unwrap());
+        assert!(db.get_user_newsletter_opt_in("legacy").unwrap());
+        assert!(
+            !db.set_user_newsletter_opt_in("ghost", true).unwrap(),
+            "unknown username must report no row changed"
+        );
+
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Audience resolution. Consent is the only filter - there is one
+    /// newsletter and it goes to whoever subscribed, whatever they own.
+    #[test]
+    fn test_newsletter_audience_is_every_subscriber() {
+        let db = test_db();
+
+        let mk = |user: &str, email: Option<&str>, opt_in: bool| {
+            db.create_user(user, "hash", "user").unwrap();
+            if let Some(e) = email {
+                db.set_user_email(user, Some(e)).unwrap();
+            }
+            db.set_user_newsletter_opt_in(user, opt_in).unwrap();
+        };
+
+        // Subscribed and reachable. One holds a license, one does not - both
+        // are mailed.
+        mk("licensee", Some("licensee@example.com"), true);
+        mk("no_license", Some("NoLicense@Example.com"), true);
+        // Subscribed but unreachable, and reachable but never subscribed.
+        mk("no_address", None, true);
+        mk("no_consent", Some("noconsent@example.com"), false);
+
+        let license = License::new("FusionHub".into(), "Test Corp".into(), None, vec![], 3);
+        db.insert_license(&license).unwrap();
+        db.assign_license_user(&license.id, "licensee").unwrap();
+
+        let a = db.newsletter_audience().unwrap();
+        let mails: Vec<&str> = a.recipients.iter().map(|r| r.email.as_str()).collect();
+        assert_eq!(
+            mails,
+            vec!["licensee@example.com", "nolicense@example.com"],
+            "every subscriber is mailed, and addresses are lowercased"
+        );
+        assert_eq!(a.opted_out, 1);
+        assert_eq!(a.no_email, 1);
+    }
+
+    /// Two accounts sharing one address get one email, not two. `users.email`
+    /// has no UNIQUE constraint, so this is reachable in production data.
+    #[test]
+    fn test_newsletter_audience_dedupes_shared_address() {
+        let db = test_db();
+        for user in ["dup_a", "dup_b"] {
+            db.create_user(user, "hash", "user").unwrap();
+            db.set_user_email(user, Some("Shared@Example.com")).unwrap();
+            db.set_user_newsletter_opt_in(user, true).unwrap();
+        }
+
+        let a = db.newsletter_audience().unwrap();
+        assert_eq!(a.recipients.len(), 1, "the shared address is mailed once");
+        assert_eq!(a.recipients[0].email, "shared@example.com");
+    }
+
+    fn seed_campaign_db() -> LicenseDb {
+        let db = test_db();
+        for user in ["c_alice", "c_bob", "c_carol"] {
+            db.create_user(user, "hash", "user").unwrap();
+            db.set_user_email(user, Some(&format!("{}@example.com", user))).unwrap();
+            db.set_user_newsletter_opt_in(user, true).unwrap();
+        }
+        db
+    }
+
+    /// The campaign state machine. Progress lives in delivery rows rather than
+    /// in memory, which is what makes a restart resume instead of re-mailing
+    /// the half of the list that already received it.
+    #[test]
+    fn test_newsletter_send_lifecycle() {
+        let db = seed_campaign_db();
+        let id = db.create_newsletter_issue("Release 2.0", "# Hi", "admin").unwrap();
+
+        let issue = db.get_newsletter_issue(id).unwrap().unwrap();
+        assert_eq!(issue.status, "draft");
+        assert_eq!((issue.pending, issue.sent, issue.failed), (0, 0, 0));
+
+        let audience = db.newsletter_audience().unwrap();
+        assert_eq!(audience.recipients.len(), 3);
+        assert_eq!(db.start_newsletter_send(id, &audience.recipients).unwrap(), 3);
+
+        let issue = db.get_newsletter_issue(id).unwrap().unwrap();
+        assert_eq!(issue.status, "sending");
+        assert_eq!((issue.pending, issue.sent, issue.failed), (3, 0, 0));
+
+        // A second send attempt must not create a second campaign.
+        assert!(
+            db.start_newsletter_send(id, &audience.recipients).is_err(),
+            "only a draft may start sending"
+        );
+        assert_eq!(db.get_newsletter_issue(id).unwrap().unwrap().pending, 3);
+
+        // Drain in batches, as the sender loop does.
+        let batch = db.claim_pending_deliveries(2).unwrap();
+        assert_eq!(batch.len(), 2, "batch size is respected");
+        for d in &batch {
+            db.mark_delivery_sent(d.id).unwrap();
+        }
+        assert_eq!(db.finalize_newsletter_issues().unwrap(), 0, "work remains, stay sending");
+        let issue = db.get_newsletter_issue(id).unwrap().unwrap();
+        assert_eq!((issue.pending, issue.sent), (1, 2));
+        assert_eq!(issue.status, "sending");
+
+        // An already-sent address is never handed out again - the guard against
+        // double-mailing after a restart.
+        let batch = db.claim_pending_deliveries(10).unwrap();
+        assert_eq!(batch.len(), 1);
+        db.mark_delivery_sent(batch[0].id).unwrap();
+
+        assert_eq!(db.finalize_newsletter_issues().unwrap(), 1);
+        let issue = db.get_newsletter_issue(id).unwrap().unwrap();
+        assert_eq!(issue.status, "sent");
+        assert_eq!((issue.pending, issue.sent, issue.failed), (0, 3, 0));
+        assert!(issue.sent_at.is_some());
+        assert!(!db.has_pending_newsletter_work().unwrap());
+
+        // finalize is idempotent - it runs on every tick and at boot.
+        assert_eq!(db.finalize_newsletter_issues().unwrap(), 0);
+
+        // A sent issue is a delivery record, not an editable document.
+        assert!(!db.update_newsletter_issue(id, "Edited", "x").unwrap());
+        assert!(!db.delete_newsletter_issue(id).unwrap());
+        assert_eq!(db.get_newsletter_issue(id).unwrap().unwrap().subject, "Release 2.0");
+    }
+
+    /// A bad address is retried a bounded number of times and then written off,
+    /// so one permanently undeliverable recipient cannot hold a campaign open.
+    #[test]
+    fn test_newsletter_delivery_retries_then_fails() {
+        let db = seed_campaign_db();
+        let id = db.create_newsletter_issue("Subject", "Body", "admin").unwrap();
+        let audience = db.newsletter_audience().unwrap();
+        db.start_newsletter_send(id, &audience.recipients).unwrap();
+
+        let target = db.claim_pending_deliveries(1).unwrap()[0].clone();
+        for n in 1..MAX_DELIVERY_ATTEMPTS {
+            db.mark_delivery_attempt_failed(target.id, "relay refused").unwrap();
+            let rows = db.list_newsletter_deliveries(id).unwrap();
+            let row = rows.iter().find(|r| r.id == target.id).unwrap();
+            assert_eq!(row.status, "pending", "must stay retryable at attempt {}", n);
+            assert_eq!(row.attempts, n);
+            assert!(
+                db.claim_pending_deliveries(10).unwrap().iter().any(|d| d.id == target.id),
+                "a retryable row must be handed out again"
+            );
+        }
+
+        // The attempt that exhausts the budget flips it to failed.
+        db.mark_delivery_attempt_failed(target.id, "relay refused").unwrap();
+        let rows = db.list_newsletter_deliveries(id).unwrap();
+        let row = rows.iter().find(|r| r.id == target.id).unwrap();
+        assert_eq!(row.status, "failed");
+        assert_eq!(row.attempts, MAX_DELIVERY_ATTEMPTS);
+        assert_eq!(row.error, "relay refused");
+        assert!(
+            !db.claim_pending_deliveries(10).unwrap().iter().any(|d| d.id == target.id),
+            "an exhausted row must not be retried forever"
+        );
+
+        // The other two succeed, and the issue still closes despite the failure.
+        for d in db.claim_pending_deliveries(10).unwrap() {
+            db.mark_delivery_sent(d.id).unwrap();
+        }
+        assert_eq!(db.finalize_newsletter_issues().unwrap(), 1);
+        let issue = db.get_newsletter_issue(id).unwrap().unwrap();
+        assert_eq!(issue.status, "sent");
+        assert_eq!((issue.pending, issue.sent, issue.failed), (0, 2, 1));
+    }
+
+    /// Only subscribed users are snapshotted, and a later consent change cannot
+    /// retroactively alter an in-flight campaign.
+    #[test]
+    fn test_newsletter_send_snapshots_consent() {
+        let db = seed_campaign_db();
+        db.set_user_newsletter_opt_in("c_carol", false).unwrap();
+        let id = db.create_newsletter_issue("Subject", "Body", "admin").unwrap();
+
+        let audience = db.newsletter_audience().unwrap();
+        assert_eq!(db.start_newsletter_send(id, &audience.recipients).unwrap(), 2);
+        let mails: Vec<String> =
+            db.list_newsletter_deliveries(id).unwrap().into_iter().map(|d| d.email).collect();
+        assert_eq!(mails, vec!["c_alice@example.com", "c_bob@example.com"]);
+
+        // Subscribing mid-flight does not inject anyone into a running send.
+        db.set_user_newsletter_opt_in("c_carol", true).unwrap();
+        assert_eq!(db.list_newsletter_deliveries(id).unwrap().len(), 2);
+    }
+
+    /// An address held by two accounts appears once, and re-running the insert
+    /// cannot duplicate it - UNIQUE(issue_id, email) is the last-line guard.
+    #[test]
+    fn test_newsletter_deliveries_are_unique_per_address() {
+        let db = seed_campaign_db();
+        let id = db.create_newsletter_issue("Subject", "Body", "admin").unwrap();
+        let dup = NewsletterRecipient {
+            username: "c_alice".into(),
+            email: "c_alice@example.com".into(),
+        };
+        let recipients = vec![dup.clone(), dup.clone(), dup];
+        assert_eq!(
+            db.start_newsletter_send(id, &recipients).unwrap(),
+            1,
+            "the same address is inserted once"
+        );
+        assert_eq!(db.list_newsletter_deliveries(id).unwrap().len(), 1);
+    }
+
+    /// Deleting a draft takes its delivery rows with it (ON DELETE CASCADE),
+    /// rather than orphaning them into the sender's work queue.
+    #[test]
+    fn test_newsletter_delete_draft_cascades() {
+        let db = seed_campaign_db();
+        let id = db.create_newsletter_issue("Subject", "Body", "admin").unwrap();
+        let audience = db.newsletter_audience().unwrap();
+        db.start_newsletter_send(id, &audience.recipients).unwrap();
+        // Now sending, so it is protected.
+        assert!(!db.delete_newsletter_issue(id).unwrap());
+
+        let draft = db.create_newsletter_issue("Draft", "Body", "admin").unwrap();
+        assert!(db.delete_newsletter_issue(draft).unwrap());
+        assert!(db.get_newsletter_issue(draft).unwrap().is_none());
+        assert!(db.list_newsletter_deliveries(draft).unwrap().is_empty());
     }
 }

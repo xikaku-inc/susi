@@ -21,6 +21,15 @@ services:
       - SUSI_SMTP_FROM_ADDR=${SUSI_SMTP_FROM_ADDR:-}
       # Always staging - don't let the shared .env leak the production URL into password-reset / invitation emails
       - SUSI_MAGIC_LINK_BASE_URL=https://staging.susi.lp-research.com
+      # Newsletter sending is HARD-DISABLED on staging. The .env file is shared
+      # with production, so passing the credentials through would let a staging
+      # test mail the real customer base. Drafts, previews and the audience
+      # panel all still work; only the send path is unavailable.
+      - SUSI_NEWSLETTER_SMTP_HOST=
+      # Same reasoning for the Gmail connector: no OAuth client on staging, so
+      # a staging admin cannot connect an account and start sending.
+      - SUSI_GOOGLE_CLIENT_ID=
+      - SUSI_GOOGLE_CLIENT_SECRET=
       # FusionHub relay URL handed to workspace members on federation fetch.
       # Empty disables the relay (members fall back to FUSIONHUB_RELAY_URL
       # set locally on each member, or direct TCP only).

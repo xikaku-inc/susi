@@ -622,6 +622,44 @@ The server uses JWT-based authentication with multi-user support. Each team memb
 - New users and password resets force a password change on next login
 - Login, shop checkout, Stripe webhook, and the contact form are each rate-limited per source IP (sliding window). When fronted by the on-host nginx proxy, `X-Forwarded-For` is honoured so the limiter sees the real client
 
+#### If email breaks, you can be locked out
+
+The emailed sign-in code is required from any unrecognised device, so a broken
+SMTP relay (revoked app password, expired credential, provider outage) can stop
+every admin logging in from a new browser. Backup codes do **not** help - TOTP
+is checked *after* the sign-in-code step, so login never gets that far.
+
+Two behaviours worth knowing:
+
+- If SMTP is unconfigured **at startup**, the gate is off entirely and
+  new-device logins are accepted on password alone; the device is then trusted
+  permanently. This is deliberate, so a fresh server can be set up before SMTP
+  is, but it is a downgrade to single factor for accounts without TOTP. Every
+  occurrence writes an `auth.unverified_new_device` row to the audit log -
+  **if you see one you did not expect, your mail config is broken.**
+  Note `SUSI_MAGIC_LINK_BASE_URL` also gates this: clearing it disables the
+  sign-in code just as surely as clearing `SUSI_SMTP_HOST`.
+- If SMTP is configured but the relay is *unreachable*, login fails with a 503
+  saying the code could not be sent, and writes `auth.signin_code_send_failed`.
+  It does not pretend to have sent anything.
+
+**Prepare a break-glass credential before you need it.** Mint an admin API
+token (Dashboard -> Actions -> API Tokens) and keep it in a password manager,
+off the server. API tokens skip the trusted-device gate, the password-change
+gate and TOTP, so one turns a lockout into a `curl` call.
+
+**Recovery without a token:** on the host, clear the SMTP host in
+`/opt/susi/.env` and restart. That puts the server back on the bootstrap path
+above, letting you log in with a password, fix the mail configuration, and
+restart again.
+
+```bash
+sudo sed -i 's/^SUSI_SMTP_HOST=.*/SUSI_SMTP_HOST=/' /opt/susi/.env
+cd /opt/susi && docker compose up -d
+# ... log in, repair the real credentials, then restore SUSI_SMTP_HOST and
+# `docker compose up -d` once more.
+```
+
 #### API tokens (`susi_pat_…`) and 2FA
 
 API tokens are long-lived bearers for headless clients (CI, scripts) and **bypass interactive 2FA**. The trade-off is deliberate: requiring a TOTP seed alongside an API token in CI raises attack surface without raising the bar - anyone with access to the bearer would also have access to the seed.
@@ -1044,6 +1082,28 @@ SUSI_SMTP_FROM_NAME=Susi
 SUSI_SMTP_FROM_ADDR=noreply@example.com
 SUSI_MAGIC_LINK_BASE_URL=https://susi.example.com
 
+# Newsletter. Deliberately SEPARATE credentials from the relay above:
+# campaign mail must not be able to trip a sending limit that would then block
+# sign-in codes and password resets. There is no fallback - leave the host
+# empty and the send endpoints respond 503 while drafts and previews still
+# work. Sending is hard-disabled on staging regardless of this file.
+SUSI_NEWSLETTER_SMTP_HOST=smtp.gmail.com
+SUSI_NEWSLETTER_SMTP_PORT=587
+SUSI_NEWSLETTER_SMTP_USER=news@example.com
+SUSI_NEWSLETTER_SMTP_PASSWORD=<google-app-password>
+SUSI_NEWSLETTER_SMTP_FROM_NAME=Susi by LP-Research
+SUSI_NEWSLETTER_SMTP_FROM_ADDR=news@example.com
+# Addresses attempted per minute. Every send is a fresh TCP+STARTTLS+AUTH
+# handshake, and providers cap daily recipients - keep this modest.
+SUSI_NEWSLETTER_RATE_PER_MIN=30
+
+# Gmail connector (optional alternative to SUSI_NEWSLETTER_SMTP_USER/_PASSWORD).
+# With these set, an admin connects a Google Workspace account from the
+# Newsletter page and campaign mail goes out over Gmail with OAuth - no app
+# password on the host. Static credentials above take precedence if both exist.
+SUSI_GOOGLE_CLIENT_ID=<id>.apps.googleusercontent.com
+SUSI_GOOGLE_CLIENT_SECRET=<secret>
+
 # Shop (leave empty to disable checkout - product pages still render)
 STRIPE_SECRET_KEY=sk_live_…
 STRIPE_WEBHOOK_SECRET=whsec_…
@@ -1057,6 +1117,38 @@ SUSI_TURNSTILE_SITE_KEY=…
 ```
 
 Re-run `docker compose -f <file> up -d` after editing `.env` to pick up changes.
+
+### 3b. Gmail connector for newsletters (optional)
+
+Sends campaign mail over Gmail with OAuth instead of an app password. One-time
+setup in the [Google Cloud console](https://console.cloud.google.com/):
+
+1. Create (or pick) a project in the **lp-research.com Workspace org**.
+2. **APIs & Services -> OAuth consent screen**: set User type to **Internal**.
+   This is the step that matters - `gmail.send` is a *restricted* scope, and an
+   External app would need a full Google verification review. Internal apps
+   inside the org are exempt.
+3. **Credentials -> Create credentials -> OAuth client ID**, type **Web
+   application**. Add the authorised redirect URI:
+   `https://susi.lp-research.com/api/v1/newsletter/google/callback`
+   (must match `SUSI_MAGIC_LINK_BASE_URL` exactly - the dashboard shows the
+   expected value on the Newsletter page).
+4. Put the client ID and secret in `/opt/susi/.env` as `SUSI_GOOGLE_CLIENT_ID`
+   and `SUSI_GOOGLE_CLIENT_SECRET`, then redeploy.
+5. In the dashboard: **Newsletter -> Connect Gmail**, approve, done. The refresh
+   token is stored encrypted at rest; only short-lived access tokens are held in
+   memory.
+
+Notes:
+
+- Do **not** leave the consent screen in *Testing* mode - refresh tokens issued
+  there expire after 7 days and the connection would break weekly.
+- OAuth does not raise Gmail's daily recipient cap. For genuinely large lists a
+  dedicated ESP (SES / Postmark / Resend) is the better fit, and needs no code
+  change - just the `SUSI_NEWSLETTER_SMTP_*` variables.
+- If Google returns "no refresh token" on connect, revoke susi's access at
+  [myaccount.google.com/permissions](https://myaccount.google.com/permissions)
+  and connect again; Google only issues one on first consent.
 
 ### 4. Verify
 

@@ -67,6 +67,38 @@ pub(crate) async fn handle_login(
             // Issue a 6-digit sign-in code. Do NOT issue JWT yet - the user
             // has to type the code back, which proves email control.
             let code = random_signin_code();
+            let Some(email_service) = state.email.clone() else {
+                // Unreachable while `code_disabled` is false, but a panic here
+                // would be a self-inflicted outage on the login path.
+                return Err(error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Email is not configured on this server",
+                ));
+            };
+
+            // Await the send rather than detaching it. This used to be a
+            // fire-and-forget task whose response claimed success regardless,
+            // so a dead relay left the user waiting for a code that never left
+            // the building - the failure mode most easily mistaken for being
+            // locked out, and invisible outside the container logs.
+            //
+            // Reporting the failure leaks nothing: the caller has already
+            // proved the password, and the success response hands back a
+            // masked form of the same address anyway.
+            if let Err(e) = email_service
+                .send_signin_code(email_addr, &username, &code, SIGNIN_CODE_TTL_MINUTES)
+                .await
+            {
+                log::error!("Failed to send sign-in code email to {}: {:#}", email_addr, e);
+                audit(&state, &username, "auth.signin_code_send_failed", &username, "");
+                return Err(error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Could not send the sign-in code. Please try again, or contact your administrator if it keeps failing.",
+                ));
+            }
+
+            // Recorded only once the code is genuinely on its way, so a failed
+            // send leaves no orphaned login token behind.
             let token_hash = hash_signin_code(&username, &code);
             {
                 let db = state.db.lock();
@@ -81,27 +113,6 @@ pub(crate) async fn handle_login(
                 .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
             }
 
-            // Fire off the email. We log but don't leak failures back to the
-            // caller - telling an unauthenticated client that an address is
-            // unreachable would be a small info leak.
-            let email_service = state.email.clone().expect("checked above");
-            let to = email_addr.clone();
-            let uname = username.clone();
-            let code_for_email = code.clone();
-            tokio::spawn(async move {
-                if let Err(e) = email_service
-                    .send_signin_code(
-                        &to,
-                        &uname,
-                        &code_for_email,
-                        SIGNIN_CODE_TTL_MINUTES,
-                    )
-                    .await
-                {
-                    log::error!("Failed to send sign-in code email to {}: {:#}", to, e);
-                }
-            });
-
             return Ok(Json(serde_json::json!({
                 "signin_code_sent": true,
                 "email_hint": mask_email(email_addr),
@@ -111,11 +122,31 @@ pub(crate) async fn handle_login(
         }
 
         // Bootstrap path - no email on file or SMTP disabled.
+        //
+        // This is a genuine downgrade: the device below is registered as
+        // trusted permanently, so for an account without TOTP it is a silent
+        // move to single-factor. It exists so a fresh server can be set up
+        // before SMTP is, but it also fires if SMTP config is ever lost or
+        // SUSI_MAGIC_LINK_BASE_URL is cleared - a config slip that weakens
+        // authentication and, before this audit row, showed up nowhere except
+        // a container log line nobody reads.
         log::warn!(
             "New-device login for user '{}' accepted without email verification (email set: {}, smtp enabled: {})",
             username,
             user_email.is_some(),
             !signin_code_disabled(&state),
+        );
+        audit(
+            &state,
+            &username,
+            "auth.unverified_new_device",
+            &username,
+            &format!(
+                "email_set={} signin_code_enabled={} device={}",
+                user_email.is_some(),
+                !signin_code_disabled(&state),
+                device_label,
+            ),
         );
     }
 
@@ -389,6 +420,7 @@ pub(crate) async fn handle_auth_status(
     let role = db.get_user_role(&principal.username).unwrap_or_else(|_| "user".into());
     let email = db.get_user_email(&principal.username).ok().flatten();
     let backup_codes_remaining = db.count_unused_backup_codes(&principal.username).unwrap_or(0);
+    let newsletter_opt_in = db.get_user_newsletter_opt_in(&principal.username).unwrap_or(false);
     let must_enable_totp = role == "admin" && !totp_enabled;
     Ok(Json(serde_json::json!({
         "must_change_password": must_change,
@@ -396,6 +428,7 @@ pub(crate) async fn handle_auth_status(
         "username": principal.username,
         "role": role,
         "email": email,
+        "newsletter_opt_in": newsletter_opt_in,
         "signin_code_enabled": !signin_code_disabled(&state),
         "must_enable_totp": must_enable_totp,
         "backup_codes_remaining": backup_codes_remaining,

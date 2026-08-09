@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use lettre::message::header::{Header, HeaderName, HeaderValue};
 use lettre::message::{header::ContentType, Attachment, Mailbox, MultiPart, SinglePart};
-use lettre::transport::smtp::authentication::Credentials;
+use lettre::transport::smtp::authentication::{Credentials, Mechanism};
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 
 /// One inline image embedded in the HTML body via `cid:<id>`. The `id` must
@@ -59,6 +60,23 @@ impl EmailService {
         let transport = AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&cfg.host)
             .with_context(|| format!("Failed to init SMTP relay for {}", cfg.host))?
             .port(cfg.port)
+            .credentials(creds)
+            .build();
+        Ok(Self { cfg, transport })
+    }
+
+    /// Authenticate with a Google OAuth2 access token instead of a password.
+    ///
+    /// The credential here is the short-lived access token (~1 hour), not the
+    /// refresh token, so unlike `new` this transport cannot be built once at
+    /// startup and reused forever - the caller has to rebuild it when the token
+    /// expires. `cfg.password` is ignored.
+    pub fn new_xoauth2(cfg: EmailConfig, access_token: &str) -> Result<Self> {
+        let creds = Credentials::new(cfg.username.clone(), access_token.to_string());
+        let transport = AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&cfg.host)
+            .with_context(|| format!("Failed to init SMTP relay for {}", cfg.host))?
+            .port(cfg.port)
+            .authentication(vec![Mechanism::Xoauth2])
             .credentials(creds)
             .build();
         Ok(Self { cfg, transport })
@@ -404,6 +422,35 @@ impl EmailService {
     ///       inline image…
     ///   attachment…
     /// ```
+    /// Bulk campaign mail. Identical body handling to `send_html_rich`, plus
+    /// the RFC 8058 one-click unsubscribe headers.
+    ///
+    /// These are not optional for bulk senders: without a header-level
+    /// unsubscribe, mailbox providers treat the traffic as unsolicited and the
+    /// sending domain's reputation degrades. `unsubscribe_url` must be an
+    /// absolute https URL that honours a bare POST.
+    pub async fn send_newsletter(
+        &self,
+        to_addr: &str,
+        subject: &str,
+        text: &str,
+        html: &str,
+        inline_images: &[InlineImage],
+        unsubscribe_url: &str,
+    ) -> Result<()> {
+        self.send_message(
+            to_addr,
+            subject,
+            text,
+            html,
+            inline_images,
+            &[],
+            None,
+            Some(unsubscribe_url),
+        )
+        .await
+    }
+
     pub async fn send_html_rich(
         &self,
         to_addr: &str,
@@ -413,6 +460,31 @@ impl EmailService {
         inline_images: &[InlineImage],
         attachments: &[EmailAttachment],
         from_name_override: Option<&str>,
+    ) -> Result<()> {
+        self.send_message(
+            to_addr,
+            subject,
+            text,
+            html,
+            inline_images,
+            attachments,
+            from_name_override,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn send_message(
+        &self,
+        to_addr: &str,
+        subject: &str,
+        text: &str,
+        html: &str,
+        inline_images: &[InlineImage],
+        attachments: &[EmailAttachment],
+        from_name_override: Option<&str>,
+        unsubscribe_url: Option<&str>,
     ) -> Result<()> {
         let to: Mailbox = to_addr
             .parse()
@@ -448,10 +520,20 @@ impl EmailService {
             Some(name) => Mailbox::new(Some(name.to_string()), self.cfg.from.email.clone()),
             None => self.cfg.from.clone(),
         };
-        let builder = Message::builder()
+        let mut builder = Message::builder()
             .from(from)
             .to(to)
             .subject(subject.to_string());
+
+        // RFC 8058: the URL must accept a bare POST so the client can
+        // unsubscribe without the recipient leaving their inbox. Both headers
+        // are required together - List-Unsubscribe-Post alone is ignored, and
+        // List-Unsubscribe alone gets treated as a plain link.
+        if let Some(url) = unsubscribe_url {
+            builder = builder
+                .header(ListUnsubscribe(format!("<{}>", url)))
+                .header(ListUnsubscribePost("List-Unsubscribe=One-Click".to_string()));
+        }
 
         let email = if attachments.is_empty() {
             builder.multipart(body_part)
@@ -472,6 +554,29 @@ impl EmailService {
         Ok(())
     }
 }
+
+/// lettre exposes no generic custom-header hook, so each one is a small type.
+macro_rules! string_header {
+    ($ty:ident, $name:literal) => {
+        #[derive(Clone)]
+        struct $ty(String);
+
+        impl Header for $ty {
+            fn name() -> HeaderName {
+                HeaderName::new_from_ascii_str($name)
+            }
+            fn parse(s: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+                Ok(Self(s.to_string()))
+            }
+            fn display(&self) -> HeaderValue {
+                HeaderValue::new(Self::name(), self.0.clone())
+            }
+        }
+    };
+}
+
+string_header!(ListUnsubscribe, "List-Unsubscribe");
+string_header!(ListUnsubscribePost, "List-Unsubscribe-Post");
 
 fn html_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());

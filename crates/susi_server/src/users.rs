@@ -30,6 +30,7 @@ pub(crate) async fn handle_list_users(
                 "must_change_password": u.must_change_password,
                 "created_at": u.created_at,
                 "email": u.email,
+                "newsletter_opt_in": u.newsletter_opt_in,
                 "pending_invitation": pending,
                 "licenses": licenses,
             })
@@ -409,6 +410,91 @@ pub(crate) async fn handle_set_my_email(
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
     audit_db(&db, &principal.username, "user.set_my_email", &principal.username, "");
     Ok(Json(serde_json::json!({ "status": "OK", "email": normalized })))
+}
+
+/// Self-serve newsletter consent from the account settings page. Consent is
+/// off until explicitly granted, so this is the only path a user has to
+/// subscribe themselves.
+pub(crate) async fn handle_set_my_newsletter(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<SetNewsletterRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    let db = state.db.lock();
+    db.set_user_newsletter_opt_in(&principal.username, req.opt_in)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    audit_db(
+        &db,
+        &principal.username,
+        "user.set_my_newsletter",
+        &principal.username,
+        &format!("opt_in={}", req.opt_in),
+    );
+    Ok(Json(serde_json::json!({ "status": "OK", "newsletter_opt_in": req.opt_in })))
+}
+
+pub(crate) async fn handle_set_user_newsletter(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(username): Path<String>,
+    Json(req): Json<SetNewsletterRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    require_admin_full(&state, &principal)?;
+
+    let db = state.db.lock();
+    if !db
+        .set_user_newsletter_opt_in(&username, req.opt_in)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+    {
+        return Err(error_response(StatusCode::NOT_FOUND, "User not found"));
+    }
+    audit_db(
+        &db,
+        &principal.username,
+        "user.set_newsletter",
+        &username,
+        &format!("opt_in={}", req.opt_in),
+    );
+    Ok(Json(serde_json::json!({ "status": "OK", "newsletter_opt_in": req.opt_in })))
+}
+
+/// Flip consent for a whole cohort in one call. The admin UI uses this after
+/// selecting rows, so building a list from consent gathered elsewhere (a
+/// contract, a trade show sign-up sheet) doesn't take one request per user.
+pub(crate) async fn handle_set_newsletter_bulk(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<SetNewsletterBulkRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    require_admin_full(&state, &principal)?;
+
+    if req.usernames.is_empty() {
+        return Err(error_response(StatusCode::BAD_REQUEST, "No usernames given"));
+    }
+    if req.usernames.len() > 5000 {
+        return Err(error_response(StatusCode::BAD_REQUEST, "Too many usernames in one call"));
+    }
+
+    let db = state.db.lock();
+    let changed = db
+        .set_newsletter_opt_in_bulk(&req.usernames, req.opt_in)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    audit_db(
+        &db,
+        &principal.username,
+        "user.set_newsletter_bulk",
+        "",
+        &format!("opt_in={} requested={} changed={}", req.opt_in, req.usernames.len(), changed),
+    );
+    Ok(Json(serde_json::json!({
+        "status": "OK",
+        "newsletter_opt_in": req.opt_in,
+        "changed": changed,
+        "requested": req.usernames.len(),
+    })))
 }
 
 /// Self-serve rename from the account settings page. Same cascade as the

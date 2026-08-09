@@ -3925,3 +3925,1055 @@ fn test_contact_form_requires_all_fields() {
     let status = submit(full).status().as_u16();
     assert_ne!(status, 400, "complete submission must pass validation");
 }
+
+/// Newsletter consent: defaults to off, is settable by the user and by an
+/// admin, is visible on both the self-serve and admin read surfaces, and the
+/// bulk endpoint flips a cohort in one call. The two read surfaces are
+/// hand-built json! blocks in separate files, so each is asserted separately -
+/// a field can go missing from one while the other still works.
+#[test]
+fn test_newsletter_opt_in() {
+    let server = TestServer::start();
+    let admin = server.admin_token();
+
+    for name in ["news_bob", "news_carol", "news_dave"] {
+        let resp = server
+            .http()
+            .post(format!("{}/auth/users", server.api_url))
+            .bearer_auth(&admin)
+            .json(&json!({
+                "username": name,
+                "email": format!("{}@example.com", name),
+                "role": "user",
+                "password": "userpw12345",
+            }))
+            .send()
+            .expect("create user");
+        assert!(resp.status().is_success(), "create {}: {}", name, resp.text().unwrap_or_default());
+    }
+
+    let list_users = || -> Value {
+        server
+            .http()
+            .get(format!("{}/auth/users", server.api_url))
+            .bearer_auth(&admin)
+            .send()
+            .expect("list users")
+            .json::<Value>()
+            .expect("users json")
+    };
+    let opt_in_of = |users: &Value, name: &str| -> bool {
+        users
+            .as_array()
+            .expect("users array")
+            .iter()
+            .find(|u| u["username"] == json!(name))
+            .unwrap_or_else(|| panic!("{} missing from user list", name))["newsletter_opt_in"]
+            .as_bool()
+            .expect("newsletter_opt_in must be present on the admin user list")
+    };
+
+    // Consent is off for every freshly created user - the whole point of the
+    // opt-in default.
+    let users = list_users();
+    for name in ["admin", "news_bob", "news_carol", "news_dave"] {
+        assert!(!opt_in_of(&users, name), "{} must start opted out", name);
+    }
+
+    let resp = server
+        .http()
+        .post(format!("{}/auth/login", server.api_url))
+        .json(&json!({"username": "news_bob", "password": "userpw12345"}))
+        .send()
+        .expect("login");
+    assert!(resp.status().is_success(), "login: {}", resp.text().unwrap_or_default());
+    let bob = resp.json::<Value>().expect("login json")["token"]
+        .as_str()
+        .expect("token")
+        .to_string();
+
+    let bob_status = || -> Value {
+        server
+            .http()
+            .get(format!("{}/auth/status", server.api_url))
+            .bearer_auth(&bob)
+            .send()
+            .expect("auth status")
+            .json::<Value>()
+            .expect("status json")
+    };
+    assert_eq!(
+        bob_status()["newsletter_opt_in"],
+        json!(false),
+        "newsletter_opt_in must be present and false on /auth/status"
+    );
+
+    // Self-serve opt in, then read back through the user's own surface AND the
+    // admin surface.
+    let resp = server
+        .http()
+        .put(format!("{}/auth/me/newsletter", server.api_url))
+        .bearer_auth(&bob)
+        .json(&json!({"opt_in": true}))
+        .send()
+        .expect("self opt in");
+    assert!(resp.status().is_success(), "self opt in: {}", resp.text().unwrap_or_default());
+    assert_eq!(bob_status()["newsletter_opt_in"], json!(true));
+    assert!(opt_in_of(&list_users(), "news_bob"), "admin list must show bob subscribed");
+
+    // Self-serve opt back out.
+    let resp = server
+        .http()
+        .put(format!("{}/auth/me/newsletter", server.api_url))
+        .bearer_auth(&bob)
+        .json(&json!({"opt_in": false}))
+        .send()
+        .expect("self opt out");
+    assert!(resp.status().is_success());
+    assert_eq!(bob_status()["newsletter_opt_in"], json!(false));
+    assert!(!opt_in_of(&list_users(), "news_bob"));
+
+    // Admin can subscribe another user, and the change is visible to that user.
+    let resp = server
+        .http()
+        .put(format!("{}/auth/users/news_bob/newsletter", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({"opt_in": true}))
+        .send()
+        .expect("admin opt in");
+    assert!(resp.status().is_success(), "admin opt in: {}", resp.text().unwrap_or_default());
+    assert_eq!(bob_status()["newsletter_opt_in"], json!(true));
+
+    // Unknown user is a 404, not a silent no-op.
+    let resp = server
+        .http()
+        .put(format!("{}/auth/users/news_nobody/newsletter", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({"opt_in": true}))
+        .send()
+        .expect("admin opt in unknown");
+    assert_eq!(resp.status().as_u16(), 404, "unknown user must 404");
+
+    // A non-admin cannot flip someone else's consent.
+    let resp = server
+        .http()
+        .put(format!("{}/auth/users/news_carol/newsletter", server.api_url))
+        .bearer_auth(&bob)
+        .json(&json!({"opt_in": true}))
+        .send()
+        .expect("non-admin opt in");
+    assert_eq!(resp.status().as_u16(), 403, "non-admin must not set others' consent");
+    assert!(!opt_in_of(&list_users(), "news_carol"), "carol must be untouched");
+
+    // Bulk: two real users plus one unknown - changed counts only real rows.
+    let resp = server
+        .http()
+        .post(format!("{}/auth/newsletter-bulk", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({"usernames": ["news_carol", "news_dave", "news_nobody"], "opt_in": true}))
+        .send()
+        .expect("bulk opt in");
+    assert!(resp.status().is_success(), "bulk: {}", resp.text().unwrap_or_default());
+    let body = resp.json::<Value>().expect("bulk json");
+    assert_eq!(body["changed"], json!(2), "only existing users count as changed");
+    assert_eq!(body["requested"], json!(3));
+
+    let users = list_users();
+    assert!(opt_in_of(&users, "news_carol"));
+    assert!(opt_in_of(&users, "news_dave"));
+
+    // Bulk is admin-only and rejects an empty list.
+    let resp = server
+        .http()
+        .post(format!("{}/auth/newsletter-bulk", server.api_url))
+        .bearer_auth(&bob)
+        .json(&json!({"usernames": ["news_carol"], "opt_in": false}))
+        .send()
+        .expect("bulk as non-admin");
+    assert_eq!(resp.status().as_u16(), 403, "bulk must be admin-only");
+
+    let resp = server
+        .http()
+        .post(format!("{}/auth/newsletter-bulk", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({"usernames": [], "opt_in": true}))
+        .send()
+        .expect("bulk empty");
+    assert_eq!(resp.status().as_u16(), 400, "empty username list must 400");
+
+    // Consent survives a rename (it rides on the users row, not a side table).
+    let resp = server
+        .http()
+        .post(format!("{}/auth/users/news_dave/rename", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({"new_username": "news_dave_renamed"}))
+        .send()
+        .expect("rename");
+    assert!(resp.status().is_success(), "rename: {}", resp.text().unwrap_or_default());
+    assert!(
+        opt_in_of(&list_users(), "news_dave_renamed"),
+        "consent must survive a rename"
+    );
+}
+
+/// `GET /newsletter/audience` resolves who the newsletter would reach. Consent
+/// is the only filter, so this endpoint is the operator's guard against sending
+/// to a list they never reviewed.
+#[test]
+fn test_newsletter_audience_endpoint() {
+    let server = TestServer::start();
+    let admin = server.admin_token();
+    let client = server.http();
+
+    // Users, all consenting except one.
+    for (name, opt_in) in [("aud_alice", true), ("aud_bob", true), ("aud_carol", false)] {
+        let resp = client
+            .post(format!("{}/auth/users", server.api_url))
+            .bearer_auth(&admin)
+            .json(&json!({
+                "username": name,
+                "email": format!("{}@example.com", name),
+                "role": "user",
+                "password": "userpw12345",
+            }))
+            .send()
+            .expect("create user");
+        assert!(resp.status().is_success(), "create {}: {}", name, resp.text().unwrap_or_default());
+        if opt_in {
+            let resp = client
+                .put(format!("{}/auth/users/{}/newsletter", server.api_url, name))
+                .bearer_auth(&admin)
+                .json(&json!({"opt_in": true}))
+                .send()
+                .expect("opt in");
+            assert!(resp.status().is_success());
+        }
+    }
+
+    // A license on one of them changes nothing: entitlement is not consent.
+    let resp = client
+        .post(format!("{}/licenses", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({
+            "customer": "Aud Corp",
+            "product": "FusionHub",
+            "days": 30,
+            "features": ["imu_optical_fusion"],
+            "assign_to": ["aud_carol"],
+        }))
+        .send()
+        .expect("create license");
+    assert_eq!(resp.status().as_u16(), 201, "{}", resp.text().unwrap_or_default());
+
+    let resp = client
+        .get(format!("{}/newsletter/audience", server.api_url))
+        .bearer_auth(&admin)
+        .send()
+        .expect("audience");
+    assert!(resp.status().is_success(), "audience: {}", resp.text().unwrap_or_default());
+    let a = resp.json::<Value>().expect("audience json");
+    assert_eq!(a["recipients"], json!(2), "alice and bob; carol did not consent");
+    assert_eq!(a["no_email"], json!(0));
+    assert_eq!(
+        a["opted_out"], json!(2),
+        "carol plus the admin account, which was never subscribed"
+    );
+
+    // Sample addresses are capped and lowercased.
+    let sample = a["sample"].as_array().expect("sample array");
+    assert_eq!(sample.len(), 2);
+    assert!(sample.iter().all(|s| s.as_str().unwrap_or_default().contains('@')));
+
+    // Admin-only: a plain user must not be able to enumerate the audience.
+    let resp = client
+        .post(format!("{}/auth/login", server.api_url))
+        .json(&json!({"username": "aud_alice", "password": "userpw12345"}))
+        .send()
+        .expect("login");
+    let alice = resp.json::<Value>().expect("login json")["token"]
+        .as_str()
+        .expect("token")
+        .to_string();
+    let resp = client
+        .get(format!("{}/newsletter/audience", server.api_url))
+        .bearer_auth(&alice)
+        .send()
+        .expect("audience as user");
+    assert_eq!(resp.status().as_u16(), 403, "audience must be admin-only");
+
+    // Unauthenticated is rejected too - there is no auth middleware, so this
+    // asserts the handler actually calls validate_principal.
+    let resp = client
+        .get(format!("{}/newsletter/audience", server.api_url))
+        .send()
+        .expect("audience anon");
+    assert_eq!(resp.status().as_u16(), 401, "audience must require auth");
+}
+
+
+/// `POST /newsletter/preview` renders through the real email pipeline, so the
+/// admin UI never shows a preview that lies about what subscribers receive.
+#[test]
+fn test_newsletter_preview_endpoint() {
+    let server = TestServer::start_with_env(&[("SUSI_MAGIC_LINK_BASE_URL", "https://susi.test")]);
+    let admin = server.admin_token();
+    let client = server.http();
+
+    let resp = client
+        .post(format!("{}/newsletter/preview", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({
+            "body_md": "# Release 2.0\n\nSee the [docs](/docs) - 100--500 ms.\n\n![shot](shot.png)\n"
+        }))
+        .send()
+        .expect("preview");
+    assert!(resp.status().is_success(), "preview: {}", resp.text().unwrap_or_default());
+    let body = resp.json::<Value>().expect("preview json");
+    let html = body["html"].as_str().expect("html field");
+    let text = body["text"].as_str().expect("text field");
+
+    assert!(html.contains("<h1 style=\""), "inline styles required: {}", html);
+    assert!(
+        html.contains("href=\"https://susi.test/docs\""),
+        "root-relative links resolve against the base URL: {}", html
+    );
+    assert!(
+        html.contains("src=\"https://susi.test/api/v1/website/assets/shot.png\""),
+        "bare filenames resolve against the public asset store: {}", html
+    );
+    assert!(!html.contains('\u{2013}'), "no en dash may reach a customer: {}", html);
+    assert!(html.contains("100--500 ms"), "plain hyphens survive: {}", html);
+    assert!(text.starts_with("Release 2.0"), "text alternative: {:?}", text);
+
+    // Admin-only, and authenticated.
+    let resp = client
+        .post(format!("{}/newsletter/preview", server.api_url))
+        .json(&json!({"body_md": "hi"}))
+        .send()
+        .expect("preview anon");
+    assert_eq!(resp.status().as_u16(), 401, "preview must require auth");
+
+    // With no base URL configured every link and image would be dead, so the
+    // server refuses rather than rendering something unsendable.
+    let bare = TestServer::start();
+    let bare_admin = bare.admin_token();
+    let resp = bare
+        .http()
+        .post(format!("{}/newsletter/preview", bare.api_url))
+        .bearer_auth(&bare_admin)
+        .json(&json!({"body_md": "hi"}))
+        .send()
+        .expect("preview without base url");
+    assert_eq!(
+        resp.status().as_u16(), 503,
+        "preview must refuse when SUSI_MAGIC_LINK_BASE_URL is unset"
+    );
+}
+
+/// Full campaign lifecycle over HTTP: draft CRUD with its edit guards, the
+/// audience snapshot on send, and the guards that stop a campaign going out
+/// against a list the operator never reviewed.
+#[test]
+fn test_newsletter_campaign_lifecycle() {
+    // A syntactically valid but dead relay: EmailService builds the transport
+    // without connecting, so queueing works end to end while delivery fails.
+    let server = TestServer::start_with_env(&[
+        ("SUSI_MAGIC_LINK_BASE_URL", "https://susi.test"),
+        ("SUSI_NEWSLETTER_SMTP_HOST", "127.0.0.1"),
+        ("SUSI_NEWSLETTER_SMTP_PORT", "1"),
+        ("SUSI_NEWSLETTER_SMTP_USER", "news"),
+        ("SUSI_NEWSLETTER_SMTP_PASSWORD", "pw"),
+        ("SUSI_NEWSLETTER_SMTP_FROM_ADDR", "news@example.com"),
+    ]);
+    let admin = server.admin_token();
+    let client = server.http();
+
+    for name in ["nl_alice", "nl_bob"] {
+        let resp = client
+            .post(format!("{}/auth/users", server.api_url))
+            .bearer_auth(&admin)
+            .json(&json!({
+                "username": name,
+                "email": format!("{}@example.com", name),
+                "role": "user",
+                "password": "userpw12345",
+            }))
+            .send()
+            .expect("create user");
+        assert!(resp.status().is_success(), "{}", resp.text().unwrap_or_default());
+        let resp = client
+            .put(format!("{}/auth/users/{}/newsletter", server.api_url, name))
+            .bearer_auth(&admin)
+            .json(&json!({"opt_in": true}))
+            .send()
+            .expect("opt in");
+        assert!(resp.status().is_success());
+    }
+
+    let resp = client
+        .post(format!("{}/newsletter/issues", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({
+            "subject": "FusionHub 2.0 is out",
+            "body_md": "# FusionHub 2.0\n\nFaster fusion - 100--500 ms.\n",
+        }))
+        .send()
+        .expect("create issue");
+    assert!(resp.status().is_success(), "create: {}", resp.text().unwrap_or_default());
+    let id = resp.json::<Value>().expect("json")["id"].as_i64().expect("id");
+
+    let get_issue = |id: i64| -> Value {
+        client
+            .get(format!("{}/newsletter/issues/{}", server.api_url, id))
+            .bearer_auth(&admin)
+            .send()
+            .expect("get issue")
+            .json::<Value>()
+            .expect("issue json")
+    };
+    let issue = get_issue(id);
+    assert_eq!(issue["status"], json!("draft"));
+    assert_eq!(issue["created_by"], json!("admin"));
+    assert_eq!(issue["pending"], json!(0));
+
+    // Subject is validated.
+    let resp = client
+        .post(format!("{}/newsletter/issues", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({"subject": "   ", "body_md": "x"}))
+        .send()
+        .expect("blank subject");
+    assert_eq!(resp.status().as_u16(), 400);
+
+    // A draft can be edited.
+    let resp = client
+        .put(format!("{}/newsletter/issues/{}", server.api_url, id))
+        .bearer_auth(&admin)
+        .json(&json!({
+            "subject": "FusionHub 2.0 is here",
+            "body_md": "# FusionHub 2.0\n\nEdited.\n",
+        }))
+        .send()
+        .expect("update issue");
+    assert!(resp.status().is_success(), "update: {}", resp.text().unwrap_or_default());
+    assert_eq!(get_issue(id)["subject"], json!("FusionHub 2.0 is here"));
+
+    // A stale recipient count blocks the send rather than mailing a list the
+    // operator never reviewed.
+    let resp = client
+        .post(format!("{}/newsletter/issues/{}/send", server.api_url, id))
+        .bearer_auth(&admin)
+        .json(&json!({"expect_recipients": 99}))
+        .send()
+        .expect("send with stale count");
+    assert_eq!(resp.status().as_u16(), 409, "stale audience count must block the send");
+    assert_eq!(get_issue(id)["status"], json!("draft"), "a blocked send must not start");
+
+    // Send for real.
+    let resp = client
+        .post(format!("{}/newsletter/issues/{}/send", server.api_url, id))
+        .bearer_auth(&admin)
+        .json(&json!({"expect_recipients": 2}))
+        .send()
+        .expect("send");
+    assert!(resp.status().is_success(), "send: {}", resp.text().unwrap_or_default());
+    assert_eq!(resp.json::<Value>().expect("json")["queued"], json!(2));
+
+    let issue = get_issue(id);
+    assert_eq!(issue["status"], json!("sending"));
+    assert_eq!(issue["pending"], json!(2));
+
+    // The snapshot is visible per address.
+    let deliveries = client
+        .get(format!("{}/newsletter/issues/{}/deliveries", server.api_url, id))
+        .bearer_auth(&admin)
+        .send()
+        .expect("deliveries")
+        .json::<Value>()
+        .expect("deliveries json");
+    let mails: Vec<String> = deliveries
+        .as_array()
+        .expect("array")
+        .iter()
+        .map(|d| d["email"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert_eq!(mails, vec!["nl_alice@example.com", "nl_bob@example.com"]);
+
+    // A sending issue is frozen: no second campaign, no edits, no deletion.
+    let resp = client
+        .post(format!("{}/newsletter/issues/{}/send", server.api_url, id))
+        .bearer_auth(&admin)
+        .json(&json!({}))
+        .send()
+        .expect("double send");
+    assert_eq!(resp.status().as_u16(), 409, "a second send must be refused");
+    assert_eq!(get_issue(id)["pending"], json!(2), "and must not duplicate deliveries");
+
+    let resp = client
+        .put(format!("{}/newsletter/issues/{}", server.api_url, id))
+        .bearer_auth(&admin)
+        .json(&json!({"subject": "Rewritten", "body_md": "x"}))
+        .send()
+        .expect("edit sending");
+    assert_eq!(resp.status().as_u16(), 409, "what was sent must stay what was sent");
+
+    let resp = client
+        .delete(format!("{}/newsletter/issues/{}", server.api_url, id))
+        .bearer_auth(&admin)
+        .send()
+        .expect("delete sending");
+    assert_eq!(resp.status().as_u16(), 409);
+
+    // With nobody subscribed, a send is refused up front.
+    let resp = client
+        .post(format!("{}/newsletter/issues", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({"subject": "Nobody", "body_md": "x"}))
+        .send()
+        .expect("create empty-audience issue");
+    let empty_id = resp.json::<Value>().expect("json")["id"].as_i64().expect("id");
+    let resp = client
+        .post(format!("{}/auth/newsletter-bulk", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({"usernames": ["nl_alice", "nl_bob"], "opt_in": false}))
+        .send()
+        .expect("unsubscribe everyone");
+    assert!(resp.status().is_success());
+    let resp = client
+        .post(format!("{}/newsletter/issues/{}/send", server.api_url, empty_id))
+        .bearer_auth(&admin)
+        .json(&json!({}))
+        .send()
+        .expect("send empty");
+    assert_eq!(resp.status().as_u16(), 400, "an empty audience must not look like a success");
+
+    // Drafts delete cleanly.
+    let resp = client
+        .delete(format!("{}/newsletter/issues/{}", server.api_url, empty_id))
+        .bearer_auth(&admin)
+        .send()
+        .expect("delete draft");
+    assert!(resp.status().is_success());
+    let resp = client
+        .get(format!("{}/newsletter/issues/{}", server.api_url, empty_id))
+        .bearer_auth(&admin)
+        .send()
+        .expect("get deleted");
+    assert_eq!(resp.status().as_u16(), 404);
+
+    // Every issue route is admin-only.
+    let resp = client
+        .post(format!("{}/auth/login", server.api_url))
+        .json(&json!({"username": "nl_alice", "password": "userpw12345"}))
+        .send()
+        .expect("login");
+    let alice = resp.json::<Value>().expect("json")["token"].as_str().expect("token").to_string();
+    for path in [
+        "/newsletter/issues".to_string(),
+        format!("/newsletter/issues/{}", id),
+        format!("/newsletter/issues/{}/deliveries", id),
+    ] {
+        let resp = client
+            .get(format!("{}{}", server.api_url, path))
+            .bearer_auth(&alice)
+            .send()
+            .expect("as user");
+        assert_eq!(resp.status().as_u16(), 403, "GET {} must be admin-only", path);
+    }
+    let resp = client
+        .post(format!("{}/newsletter/issues/{}/send", server.api_url, id))
+        .bearer_auth(&alice)
+        .json(&json!({}))
+        .send()
+        .expect("send as user");
+    assert_eq!(
+        resp.status().as_u16(), 403,
+        "a non-admin must not be able to mail the customer base"
+    );
+}
+
+/// Newsletter sending never falls back to the account-email relay. With the
+/// dedicated credentials unset, send and test-send must refuse - silently
+/// borrowing the sign-in-code relay is exactly the blast radius this avoids.
+#[test]
+fn test_newsletter_send_requires_dedicated_smtp() {
+    let server = TestServer::start_with_env(&[
+        ("SUSI_MAGIC_LINK_BASE_URL", "https://susi.test"),
+        // The ACCOUNT relay is configured; the newsletter one deliberately is not.
+        ("SUSI_SMTP_HOST", "127.0.0.1"),
+        ("SUSI_SMTP_USER", "acct"),
+        ("SUSI_SMTP_PASSWORD", "pw"),
+        ("SUSI_SMTP_FROM_ADDR", "acct@example.com"),
+    ]);
+    let admin = server.admin_token();
+    let client = server.http();
+
+    let resp = client
+        .post(format!("{}/newsletter/issues", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({"subject": "Hi", "body_md": "x"}))
+        .send()
+        .expect("create issue");
+    let id = resp.json::<Value>().expect("json")["id"].as_i64().expect("id");
+
+    for path in ["send", "test"] {
+        let resp = client
+            .post(format!("{}/newsletter/issues/{}/{}", server.api_url, id, path))
+            .bearer_auth(&admin)
+            .json(&json!({}))
+            .send()
+            .expect("send without newsletter smtp");
+        assert_eq!(
+            resp.status().as_u16(), 503,
+            "{} must refuse without SUSI_NEWSLETTER_SMTP_*", path
+        );
+        let body = resp.text().unwrap_or_default();
+        assert!(
+            body.contains("SUSI_NEWSLETTER_SMTP"),
+            "the error must name the missing config: {}", body
+        );
+    }
+
+    // Nothing was queued behind the refusal.
+    let issue = client
+        .get(format!("{}/newsletter/issues/{}", server.api_url, id))
+        .bearer_auth(&admin)
+        .send()
+        .expect("get")
+        .json::<Value>()
+        .expect("json");
+    assert_eq!(issue["status"], json!("draft"));
+}
+
+/// The unsubscribe route is public because a mail-client click carries no auth
+/// header, so its token validation is the only thing between a stranger and
+/// someone else's consent flag.
+#[test]
+fn test_newsletter_unsubscribe_rejects_bad_tokens() {
+    let server = TestServer::start_with_env(&[("SUSI_MAGIC_LINK_BASE_URL", "https://susi.test")]);
+    let client = server.http();
+
+    for token in ["", "garbage", "a.b.c"] {
+        let resp = client
+            .get(format!("{}/newsletter/unsubscribe", server.api_url))
+            .query(&[("token", token)])
+            .send()
+            .expect("unsubscribe");
+        assert_eq!(resp.status().as_u16(), 400, "token {:?} must be rejected", token);
+    }
+
+    // A missing token is a request-shape error, not a silent success.
+    let resp = client
+        .get(format!("{}/newsletter/unsubscribe", server.api_url))
+        .send()
+        .expect("no token");
+    assert!(
+        resp.status().is_client_error(),
+        "a missing token must not unsubscribe anyone: {}",
+        resp.status()
+    );
+}
+
+/// The background sender must actually run. This is a wiring test, not a logic
+/// test: the drain loop was once spawned inside the `if backup.configured()`
+/// block, so on any deployment without Dropbox backups a campaign queued
+/// cleanly, reported success and then sat in `sending` forever with nothing
+/// attempted. Nothing in the DB-level tests could see that.
+///
+/// The relay points at a closed port, so every attempt fails fast - what is
+/// being asserted is that attempts happen at all.
+#[test]
+fn test_newsletter_sender_loop_runs() {
+    let server = TestServer::start_with_env(&[
+        ("SUSI_MAGIC_LINK_BASE_URL", "https://susi.test"),
+        ("SUSI_NEWSLETTER_SMTP_HOST", "127.0.0.1"),
+        ("SUSI_NEWSLETTER_SMTP_PORT", "1"),
+        ("SUSI_NEWSLETTER_SMTP_USER", "news"),
+        ("SUSI_NEWSLETTER_SMTP_PASSWORD", "pw"),
+        ("SUSI_NEWSLETTER_SMTP_FROM_ADDR", "news@example.com"),
+        // Deliberately NO Dropbox backup config.
+    ]);
+    let admin = server.admin_token();
+    let client = server.http();
+
+    let resp = client
+        .post(format!("{}/auth/users", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({
+            "username": "send_alice",
+            "email": "send_alice@example.com",
+            "role": "user",
+            "password": "userpw12345",
+        }))
+        .send()
+        .expect("create user");
+    assert!(resp.status().is_success(), "{}", resp.text().unwrap_or_default());
+    let resp = client
+        .put(format!("{}/auth/users/send_alice/newsletter", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({"opt_in": true}))
+        .send()
+        .expect("opt in");
+    assert!(resp.status().is_success());
+
+    let resp = client
+        .post(format!("{}/newsletter/issues", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({"subject": "Ping", "body_md": "Hello."}))
+        .send()
+        .expect("create issue");
+    let id = resp.json::<Value>().expect("json")["id"].as_i64().expect("id");
+
+    let resp = client
+        .post(format!("{}/newsletter/issues/{}/send", server.api_url, id))
+        .bearer_auth(&admin)
+        .json(&json!({"expect_recipients": 1}))
+        .send()
+        .expect("send");
+    assert!(resp.status().is_success(), "send: {}", resp.text().unwrap_or_default());
+
+    // Queueing notifies the loop, so the first attempt should land in seconds
+    // rather than at the next tick boundary.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut attempts = 0;
+    while Instant::now() < deadline {
+        let rows = client
+            .get(format!("{}/newsletter/issues/{}/deliveries", server.api_url, id))
+            .bearer_auth(&admin)
+            .send()
+            .expect("deliveries")
+            .json::<Value>()
+            .expect("json");
+        attempts = rows.as_array().expect("array")[0]["attempts"].as_i64().unwrap_or(0);
+        if attempts > 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    assert!(
+        attempts > 0,
+        "the newsletter sender never attempted a delivery - the drain loop is not running"
+    );
+}
+
+/// The Gmail connector's OAuth handshake. The callback is a public route, so
+/// its `state` validation is the only thing stopping a stranger from binding
+/// their own Google account to this server's newsletter relay.
+#[test]
+fn test_newsletter_google_oauth_flow() {
+    let server = TestServer::start_with_env(&[
+        ("SUSI_MAGIC_LINK_BASE_URL", "https://susi.test"),
+        ("SUSI_GOOGLE_CLIENT_ID", "test-client-id.apps.googleusercontent.com"),
+        ("SUSI_GOOGLE_CLIENT_SECRET", "test-client-secret"),
+    ]);
+    let admin = server.admin_token();
+    let client = server.http();
+
+    // With an OAuth client but no connection yet, sending is still unavailable.
+    let cfg = client
+        .get(format!("{}/newsletter/config", server.api_url))
+        .bearer_auth(&admin)
+        .send()
+        .expect("config")
+        .json::<Value>()
+        .expect("config json");
+    assert_eq!(cfg["google_oauth_available"], json!(true));
+    assert_eq!(cfg["static_smtp_configured"], json!(false));
+    assert_eq!(cfg["sending_configured"], json!(false), "no account connected yet");
+    assert_eq!(cfg["google_account"], json!(null));
+
+    // The consent URL must carry the parameters that make Google return a
+    // refresh token; without access_type=offline + prompt=consent the
+    // connection silently dies an hour after it is made.
+    let resp = client
+        .get(format!("{}/newsletter/google/authorize", server.api_url))
+        .bearer_auth(&admin)
+        .send()
+        .expect("authorize");
+    assert!(resp.status().is_success(), "authorize: {}", resp.text().unwrap_or_default());
+    let body = resp.json::<Value>().expect("authorize json");
+    let url = body["url"].as_str().expect("url");
+    for needle in [
+        "accounts.google.com",
+        "access_type=offline",
+        "prompt=consent",
+        "response_type=code",
+        "gmail.send",
+        "client_id=test-client-id",
+        "state=",
+    ] {
+        assert!(url.contains(needle), "authorize URL missing {:?}: {}", needle, url);
+    }
+    assert_eq!(
+        body["redirect_uri"],
+        json!("https://susi.test/api/v1/newsletter/google/callback"),
+        "the redirect URI is what must be registered in the Google console"
+    );
+
+    // Extract the signed state so the callback assertions below are realistic.
+    let state_param = url
+        .split("state=")
+        .nth(1)
+        .expect("state in url")
+        .split('&')
+        .next()
+        .expect("state value")
+        .to_string();
+    assert!(!state_param.is_empty());
+
+    // A callback with a forged or missing state must be refused outright.
+    for bad in ["", "garbage", "a.b.c"] {
+        let resp = client
+            .get(format!("{}/newsletter/google/callback", server.api_url))
+            .query(&[("code", "4/whatever"), ("state", bad)])
+            .send()
+            .expect("callback");
+        assert_eq!(
+            resp.status().as_u16(), 400,
+            "state {:?} must be rejected - this route is public", bad
+        );
+    }
+
+    // A valid state with no code is still a bad request, not a partial connect.
+    let resp = client
+        .get(format!("{}/newsletter/google/callback", server.api_url))
+        .query(&[("state", state_param.as_str())])
+        .send()
+        .expect("callback no code");
+    assert_eq!(resp.status().as_u16(), 400);
+
+    // Google reporting a denial renders a page rather than erroring out.
+    let resp = client
+        .get(format!("{}/newsletter/google/callback", server.api_url))
+        .query(&[("error", "access_denied"), ("state", state_param.as_str())])
+        .send()
+        .expect("callback denied");
+    assert!(resp.status().is_success());
+    assert!(resp.text().unwrap_or_default().contains("cancelled"));
+
+    // Nothing above may have connected an account.
+    let cfg = client
+        .get(format!("{}/newsletter/config", server.api_url))
+        .bearer_auth(&admin)
+        .send()
+        .expect("config")
+        .json::<Value>()
+        .expect("json");
+    assert_eq!(cfg["google_account"], json!(null), "no failed path may connect an account");
+
+    // Authorize and disconnect are admin-only.
+    let resp = client
+        .post(format!("{}/auth/users", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({"username": "goog_bob", "email": "goog_bob@example.com",
+                      "role": "user", "password": "userpw12345"}))
+        .send()
+        .expect("create user");
+    assert!(resp.status().is_success());
+    let bob = client
+        .post(format!("{}/auth/login", server.api_url))
+        .json(&json!({"username": "goog_bob", "password": "userpw12345"}))
+        .send()
+        .expect("login")
+        .json::<Value>()
+        .expect("json")["token"]
+        .as_str()
+        .expect("token")
+        .to_string();
+    let resp = client
+        .get(format!("{}/newsletter/google/authorize", server.api_url))
+        .bearer_auth(&bob)
+        .send()
+        .expect("authorize as user");
+    assert_eq!(resp.status().as_u16(), 403);
+    let resp = client
+        .post(format!("{}/newsletter/google/disconnect", server.api_url))
+        .bearer_auth(&bob)
+        .json(&json!({}))
+        .send()
+        .expect("disconnect as user");
+    assert_eq!(resp.status().as_u16(), 403);
+}
+
+/// Without an OAuth client configured the connector must not advertise itself,
+/// and the authorize endpoint must say so rather than emitting a broken URL.
+#[test]
+fn test_newsletter_google_requires_client_config() {
+    let server = TestServer::start_with_env(&[("SUSI_MAGIC_LINK_BASE_URL", "https://susi.test")]);
+    let admin = server.admin_token();
+    let client = server.http();
+
+    let cfg = client
+        .get(format!("{}/newsletter/config", server.api_url))
+        .bearer_auth(&admin)
+        .send()
+        .expect("config")
+        .json::<Value>()
+        .expect("json");
+    assert_eq!(cfg["google_oauth_available"], json!(false));
+
+    let resp = client
+        .get(format!("{}/newsletter/google/authorize", server.api_url))
+        .bearer_auth(&admin)
+        .send()
+        .expect("authorize");
+    assert_eq!(resp.status().as_u16(), 503);
+    assert!(resp.text().unwrap_or_default().contains("SUSI_GOOGLE_CLIENT_ID"));
+}
+
+/// Static SMTP credentials take precedence over any Google connection, so an
+/// existing app-password deployment is unaffected by this feature and the
+/// dashboard knows to hide the connection card.
+#[test]
+fn test_newsletter_static_smtp_wins_over_google() {
+    let server = TestServer::start_with_env(&[
+        ("SUSI_MAGIC_LINK_BASE_URL", "https://susi.test"),
+        ("SUSI_NEWSLETTER_SMTP_HOST", "127.0.0.1"),
+        ("SUSI_NEWSLETTER_SMTP_PORT", "1"),
+        ("SUSI_NEWSLETTER_SMTP_USER", "news"),
+        ("SUSI_NEWSLETTER_SMTP_PASSWORD", "pw"),
+        ("SUSI_NEWSLETTER_SMTP_FROM_ADDR", "news@example.com"),
+        ("SUSI_GOOGLE_CLIENT_ID", "test-client-id.apps.googleusercontent.com"),
+        ("SUSI_GOOGLE_CLIENT_SECRET", "test-client-secret"),
+    ]);
+    let admin = server.admin_token();
+
+    let cfg = server
+        .http()
+        .get(format!("{}/newsletter/config", server.api_url))
+        .bearer_auth(&admin)
+        .send()
+        .expect("config")
+        .json::<Value>()
+        .expect("json");
+    assert_eq!(cfg["static_smtp_configured"], json!(true));
+    assert_eq!(
+        cfg["sending_configured"], json!(true),
+        "static credentials alone must be enough to send"
+    );
+    assert_eq!(cfg["google_account"], json!(null), "and no Google connection is needed");
+}
+
+/// A new-device login that skips email verification is a real downgrade: the
+/// device is trusted permanently afterwards, so for an account without TOTP it
+/// is a silent move to single-factor. It exists for first-run bootstrap, but it
+/// also fires if SMTP config is ever lost - so it has to leave a trace an
+/// operator can actually find, not just a container log line.
+#[test]
+fn test_unverified_new_device_is_audited() {
+    // No SMTP configured, which is exactly the condition that opens the gate.
+    let server = TestServer::start();
+    let admin = server.admin_token();
+
+    let audit = server
+        .http()
+        .get(format!("{}/audit", server.api_url))
+        .bearer_auth(&admin)
+        .send()
+        .expect("audit")
+        .json::<Value>()
+        .expect("audit json");
+    let rows = audit
+        .as_array()
+        .cloned()
+        .or_else(|| audit["entries"].as_array().cloned())
+        .expect("audit rows");
+
+    let hit = rows
+        .iter()
+        .find(|e| e["action"] == json!("auth.unverified_new_device"))
+        .unwrap_or_else(|| panic!("no auth.unverified_new_device row in {:?}", rows));
+    assert_eq!(hit["target"], json!("admin"));
+    let details = hit["details"].as_str().unwrap_or_default();
+    assert!(
+        details.contains("signin_code_enabled=false"),
+        "details must record why the gate was open, got {:?}",
+        details
+    );
+}
+
+/// When the sign-in-code gate IS armed but the relay is dead, login must say so
+/// rather than reporting success. It used to spawn the send detached and return
+/// `signin_code_sent: true` regardless, which left the user waiting forever for
+/// a code that never left the building - the failure most easily mistaken for a
+/// lockout, and visible nowhere but the logs.
+#[test]
+fn test_signin_code_send_failure_is_reported() {
+    // SMTP "configured" but pointed at a closed port. EmailService::new never
+    // contacts the relay, so this is precisely the revoked-credential shape:
+    // configured has never meant working.
+    let server = TestServer::start_with_env(&[
+        ("SUSI_MAGIC_LINK_BASE_URL", "https://susi.test"),
+        ("SUSI_SMTP_HOST", "127.0.0.1"),
+        ("SUSI_SMTP_PORT", "1"),
+        ("SUSI_SMTP_USER", "acct"),
+        ("SUSI_SMTP_PASSWORD", "pw"),
+        ("SUSI_SMTP_FROM_ADDR", "acct@example.com"),
+    ]);
+    // The admin has no email on file, so admin_token() still takes the
+    // bootstrap path and works.
+    let admin = server.admin_token();
+    let client = server.http();
+
+    let resp = client
+        .post(format!("{}/auth/users", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({
+            "username": "gated_bob",
+            "email": "gated_bob@example.com",
+            "role": "user",
+            "password": "userpw12345",
+        }))
+        .send()
+        .expect("create user");
+    assert!(resp.status().is_success(), "{}", resp.text().unwrap_or_default());
+
+    // New device + email on file + SMTP armed => the code path runs, and the
+    // send fails against the closed port.
+    let resp = client
+        .post(format!("{}/auth/login", server.api_url))
+        .json(&json!({
+            "username": "gated_bob",
+            "password": "userpw12345",
+            "device_fp": "11111111-2222-3333-4444-555555555555",
+        }))
+        .send()
+        .expect("login");
+    let status = resp.status().as_u16();
+    let body = resp.json::<Value>().expect("login json");
+
+    assert_eq!(status, 503, "a failed send must not look like success: {:?}", body);
+    assert!(
+        body.get("signin_code_sent").is_none(),
+        "must not claim a code was sent: {:?}",
+        body
+    );
+    assert!(
+        body["error"].as_str().unwrap_or_default().contains("sign-in code"),
+        "error should name the problem, got {:?}",
+        body
+    );
+    assert!(
+        body.get("token").is_none(),
+        "a failed gate must never hand out a session: {:?}",
+        body
+    );
+
+    // The failure is auditable too.
+    let audit = client
+        .get(format!("{}/audit", server.api_url))
+        .bearer_auth(&admin)
+        .send()
+        .expect("audit")
+        .json::<Value>()
+        .expect("audit json");
+    let rows = audit
+        .as_array()
+        .cloned()
+        .or_else(|| audit["entries"].as_array().cloned())
+        .expect("audit rows");
+    assert!(
+        rows.iter().any(|e| e["action"] == json!("auth.signin_code_send_failed")),
+        "send failure must be audited"
+    );
+}
