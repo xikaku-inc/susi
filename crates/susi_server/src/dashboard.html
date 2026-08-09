@@ -779,6 +779,9 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
     .header-actions span#currentUser { display: none !important; }
 }
 
+/* Newsletter list - the Actions button sets the row height, so center the cells. */
+#newsletterTable td { vertical-align: middle; }
+
 /* Newsletter composer - same EasyMDE skin as the docs/website editors
    (copied from docs.html, variables mapped), so all three markdown surfaces
    feel identical. Scoped to the composer wrapper. */
@@ -878,7 +881,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
         <span class="dropdown" id="headerActions" style="display:none;">
             <button onclick="toggleDropdown(event,'headerActionsMenu')">Actions &#9662;</button>
             <div id="headerActionsMenu" class="dropdown-menu" style="display:none;">
-                <button id="btnAccount" onclick="location.hash='#/account'" style="display:none;">Account settings</button>
+                <button id="btnAccount" onclick="showAccountModal()" style="display:none;">Account settings</button>
                 <button id="btn2FA" onclick="show2FAModal()" style="display:none;">2FA</button>
                 <button id="btnSessions" onclick="showSessionsModal()" style="display:none;">Sessions</button>
                 <button id="btnApiTokens" onclick="showApiTokensModal()" style="display:none;">API Tokens</button>
@@ -897,7 +900,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
     <div id="navDrawerLinks"></div>
     <div id="navDrawerAccount" class="drawer-actions" style="display:none;">
         <div class="drawer-divider"></div>
-        <button onclick="location.hash='#/account'">Account settings</button>
+        <button onclick="showAccountModal()">Account settings</button>
         <button onclick="show2FAModal()">2FA</button>
         <button onclick="showSessionsModal()">Sessions</button>
         <button onclick="showApiTokensModal()">API Tokens</button>
@@ -1276,56 +1279,6 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
     <h2 style="font-size:16px;font-weight:600;margin-top:32px;margin-bottom:16px;">My Licenses</h2>
     <div id="myLicensesList"></div>
 </div><!-- /page-mylicenses -->
-
-<!-- Account settings page (self-serve: username, email, password) -->
-<div id="page-account" class="dash-page">
-    <h2 style="font-size:16px;font-weight:600;margin-top:32px;margin-bottom:16px;">Account Settings</h2>
-    <div class="card" style="max-width:520px;padding:20px;margin-bottom:16px;">
-        <h3 style="font-size:14px;font-weight:600;margin-bottom:12px;">Username</h3>
-        <div class="form-row">
-            <input type="text" id="accUsername">
-        </div>
-        <button class="secondary" onclick="saveAccountUsername()">Save username</button>
-    </div>
-    <div class="card" style="max-width:520px;padding:20px;margin-bottom:16px;">
-        <h3 style="font-size:14px;font-weight:600;margin-bottom:12px;">Email</h3>
-        <div class="form-row">
-            <input type="email" id="accEmail">
-        </div>
-        <button class="secondary" onclick="saveAccountEmail()">Save email</button>
-    </div>
-    <div class="card" style="max-width:520px;padding:20px;margin-bottom:16px;">
-        <h3 style="font-size:14px;font-weight:600;margin-bottom:12px;">Password</h3>
-        <div class="form-row">
-            <label>Current password</label>
-            <input type="password" id="accPwCurrent" autocomplete="current-password">
-        </div>
-        <div class="form-row">
-            <label>New password (min 8 chars)</label>
-            <input type="password" id="accPwNew" autocomplete="new-password">
-        </div>
-        <div class="form-row">
-            <label>Confirm new password</label>
-            <input type="password" id="accPwConfirm" autocomplete="new-password">
-        </div>
-        <button class="secondary" onclick="saveAccountPassword()">Change password</button>
-        <p style="font-size:12px;margin:12px 0 0;">
-            <a href="#" onclick="event.preventDefault();sendAccountResetLink()" style="color:var(--text2);">Don't know your current password? Email me a reset link</a>
-        </p>
-    </div>
-    <div class="card" style="max-width:520px;padding:20px;margin-bottom:16px;">
-        <h3 style="font-size:14px;font-weight:600;margin-bottom:12px;">Newsletter</h3>
-        <div style="display:flex;align-items:flex-start;gap:9px;">
-            <input type="checkbox" id="accNewsletter" style="width:auto;margin:2px 0 0;cursor:pointer;accent-color:var(--accent);" onchange="saveAccountNewsletter()">
-            <label for="accNewsletter" style="margin:0;cursor:pointer;text-transform:none;letter-spacing:0;font-size:13px;font-weight:400;">
-                Email me about new features and releases
-            </label>
-        </div>
-        <p style="font-size:12px;margin:12px 0 0;color:var(--text2);">
-            Sign-in codes, password resets and other account email are sent regardless of this setting.
-        </p>
-    </div>
-</div><!-- /page-account -->
 
 <!-- Shop page -->
 <div id="page-shop" class="dash-page">
@@ -2480,6 +2433,71 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
     </div>
 </div>
 
+<!-- Account Settings Modal (self-serve: username, email, password, newsletter) -->
+<div id="accountModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeAccountModal()">
+    <div class="modal">
+        <style>
+            #accountModal .acc-inline { display: flex; gap: 8px; align-items: center; }
+            #accountModal .acc-inline input { flex: 1; min-width: 0; }
+            #accountModal .acc-inline button { width: auto; flex-shrink: 0; }
+            #accountModal .acc-section { border-top: 1px solid var(--border); padding-top: 16px; margin-top: 16px; }
+            #accountModal .acc-section h3 { font-size: 14px; margin-bottom: 12px; }
+            #accountModal .acc-note { font-size: 12px; color: var(--text2); margin: 12px 0 0; }
+        </style>
+        <h2>Account Settings</h2>
+        <div class="modal-body">
+            <div class="form-row">
+                <label>Username</label>
+                <div class="acc-inline">
+                    <input type="text" id="accUsername">
+                    <button class="secondary" onclick="saveAccountUsername()">Save</button>
+                </div>
+            </div>
+            <div class="form-row">
+                <label>Email</label>
+                <div class="acc-inline">
+                    <input type="email" id="accEmail">
+                    <button class="secondary" onclick="saveAccountEmail()">Save</button>
+                </div>
+            </div>
+            <div class="acc-section">
+                <h3>Password</h3>
+                <div class="form-row">
+                    <label>Current password</label>
+                    <input type="password" id="accPwCurrent" autocomplete="current-password">
+                </div>
+                <div class="form-row">
+                    <label>New password (min 8 chars)</label>
+                    <input type="password" id="accPwNew" autocomplete="new-password">
+                </div>
+                <div class="form-row">
+                    <label>Confirm new password</label>
+                    <input type="password" id="accPwConfirm" autocomplete="new-password">
+                </div>
+                <button class="secondary" onclick="saveAccountPassword()" style="width:auto;">Change password</button>
+                <p class="acc-note">
+                    <a href="#" onclick="event.preventDefault();sendAccountResetLink()" style="color:var(--text2);">Don't know your current password? Email me a reset link</a>
+                </p>
+            </div>
+            <div class="acc-section">
+                <h3>Newsletter</h3>
+                <div style="display:flex;align-items:flex-start;gap:9px;">
+                    <input type="checkbox" id="accNewsletter" style="width:auto;margin:2px 0 0;cursor:pointer;accent-color:var(--accent);" onchange="saveAccountNewsletter()">
+                    <label for="accNewsletter" style="margin:0;cursor:pointer;text-transform:none;letter-spacing:0;font-size:13px;font-weight:400;color:var(--text);">
+                        Email me about new features and releases
+                    </label>
+                </div>
+                <p class="acc-note">
+                    Sign-in codes, password resets and other account email are sent regardless of this setting.
+                </p>
+            </div>
+        </div>
+        <div class="form-actions">
+            <button class="secondary" onclick="closeAccountModal()">Close</button>
+        </div>
+    </div>
+</div>
+
 <script>
 let _overlayMouseDownOnSelf = false;
 document.addEventListener('mousedown', e => {
@@ -2707,6 +2725,13 @@ function route() {
         target = roleIsAdmin(userRole) ? 'releases' : 'mylicenses';
         if (location.hash !== '#/' + target) location.hash = '#/' + target;
     }
+    if (authToken && target === 'account') {
+        // Account settings is a modal now - honour the old hash by redirecting
+        // to a real page and opening the modal on top of it.
+        target = roleIsAdmin(userRole) ? 'releases' : 'mylicenses';
+        location.hash = '#/' + target;
+        showAccountModal();
+    }
     if (authToken && target === 'users' && segs[1]) {
         document.getElementById('userSearch').value = segs[1];
     }
@@ -2722,7 +2747,6 @@ function showPage(name) {
     const page = document.getElementById('page-' + name);
     if (page) page.classList.add('active');
     if (name === 'mylicenses' && authToken) loadMyLicenses();
-    if (name === 'account' && authToken) loadAccountPage();
     if (name === 'audit' && authToken) loadAudit();
     if (name === 'tickets' && authToken) loadTickets();
     if (name === 'newsletter' && authToken) loadNewsletter();
@@ -3120,8 +3144,17 @@ async function submitResetPassword() {
     }
 }
 
-// -- Account settings page (self-serve username / email / password) --
-async function loadAccountPage() {
+// -- Account settings modal (self-serve username / email / password) --
+function showAccountModal() {
+    document.getElementById('accountModal').classList.add('visible');
+    loadAccountSettings();
+}
+
+function closeAccountModal() {
+    document.getElementById('accountModal').classList.remove('visible');
+}
+
+async function loadAccountSettings() {
     document.getElementById('accUsername').value = currentUsername;
     ['accPwCurrent', 'accPwNew', 'accPwConfirm'].forEach(id => document.getElementById(id).value = '');
     try {
@@ -6132,6 +6165,7 @@ document.addEventListener('keydown', e => {
         closeCreateModal();
         closeExportModal();
         closeTFAModal();
+        closeAccountModal();
         closeAddUserModal();
         closeUploadReleaseModal();
         closeCreateWorkspaceModal();
