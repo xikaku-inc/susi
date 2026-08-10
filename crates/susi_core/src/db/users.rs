@@ -155,7 +155,7 @@ impl LicenseDb {
     pub fn list_users(&self) -> Result<Vec<UserInfo>, LicenseError> {
         let mut stmt = self
             .conn
-            .prepare("SELECT username, role, totp_enabled, must_change_password, created_at, email, newsletter_opt_in FROM users ORDER BY created_at")
+            .prepare("SELECT username, role, totp_enabled, must_change_password, created_at, email, newsletter_opt_in, first_name, last_name FROM users ORDER BY created_at")
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
         let users = stmt
             .query_map([], |r| {
@@ -167,6 +167,8 @@ impl LicenseDb {
                     created_at: r.get(4)?,
                     email: r.get(5)?,
                     newsletter_opt_in: r.get::<_, i32>(6)? != 0,
+                    first_name: r.get(7)?,
+                    last_name: r.get(8)?,
                 })
             })
             .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
@@ -316,6 +318,51 @@ impl LicenseDb {
         tx.commit()
             .map_err(|e| LicenseError::Other(format!("DB commit: {}", e)))?;
         Ok(changed)
+    }
+
+    pub fn set_user_name(
+        &self,
+        username: &str,
+        first_name: &str,
+        last_name: &str,
+    ) -> Result<bool, LicenseError> {
+        let now = Utc::now().to_rfc3339();
+        let n = self
+            .conn
+            .execute(
+                "UPDATE users SET first_name = ?1, last_name = ?2, updated_at = ?3 WHERE username = ?4",
+                params![first_name.trim(), last_name.trim(), now, username],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))?;
+        Ok(n > 0)
+    }
+
+    pub fn get_user_name(&self, username: &str) -> Result<(String, String), LicenseError> {
+        self.conn
+            .query_row(
+                "SELECT first_name, last_name FROM users WHERE username = ?1",
+                params![username],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))
+            .map(|o| o.unwrap_or_default())
+    }
+
+    /// "First Last" for display, or None when the user has no name on file.
+    /// Never falls back to the username - a byline showing an account name is
+    /// worse than no byline at all.
+    pub fn get_user_display_name(&self, username: &str) -> Result<Option<String>, LicenseError> {
+        let name: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT TRIM(TRIM(first_name) || ' ' || TRIM(last_name)) FROM users WHERE username = ?1",
+                params![username],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?;
+        Ok(name.filter(|n| !n.is_empty()))
     }
 
     pub fn set_user_email(&self, username: &str, email: Option<&str>) -> Result<(), LicenseError> {

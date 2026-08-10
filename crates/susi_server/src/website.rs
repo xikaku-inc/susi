@@ -61,8 +61,8 @@ fn safe_slug(slug: &str) -> Result<&str, (StatusCode, Json<ErrorResponse>)> {
 
 /// Row shape returned by `list_website_pages`:
 /// (slug, title, parent_slug, ord, updated_at, meta_description, hidden,
-///  page_kind, published_at).
-type PageRow = (String, String, Option<String>, i64, String, String, bool, String, String);
+///  page_kind, published_at, author_username).
+type PageRow = (String, String, Option<String>, i64, String, String, bool, String, String, String);
 
 /// True for blog-post rows (`page_kind == 'post'`).
 fn is_post(p: &PageRow) -> bool {
@@ -99,8 +99,8 @@ pub async fn handle_list_pages(
     let assets = db.list_website_assets().map_err(db_err)?;
     let pages_json: Vec<_> = pages
         .into_iter()
-        .map(|(slug, title, parent_slug, ord, updated_at, meta_description, hidden, page_kind, published_at)| {
-            json!({
+        .map(|(slug, title, parent_slug, ord, updated_at, meta_description, hidden, page_kind, published_at, author_username)| {
+            let mut row = json!({
                 "slug": slug,
                 "title": title,
                 "parent_slug": parent_slug,
@@ -110,7 +110,13 @@ pub async fn handle_list_pages(
                 "hidden": hidden,
                 "page_kind": page_kind,
                 "published_at": published_at,
-            })
+                "author_name": display_name(&db, &author_username),
+            });
+            // The account name behind a byline is only the editor's business.
+            if is_admin {
+                row["author_username"] = json!(author_username);
+            }
+            row
         })
         .collect();
     let assets_json: Vec<_> = assets
@@ -136,11 +142,11 @@ pub async fn handle_get_page(
         .get_website_page(&slug)
         .map_err(db_err)?
         .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Page not found"))?;
-    let (title, body_md, parent_slug, ord, updated_at, meta_description, hidden, page_kind, published_at) = page;
+    let (title, body_md, parent_slug, ord, updated_at, meta_description, hidden, page_kind, published_at, author_username) = page;
     if hidden && !is_admin {
         return Err(error_response(StatusCode::NOT_FOUND, "Page not found"));
     }
-    Ok(Json(json!({
+    let mut out = json!({
         "slug": slug,
         "title": title,
         "body_md": body_md,
@@ -151,7 +157,46 @@ pub async fn handle_get_page(
         "hidden": hidden,
         "page_kind": page_kind,
         "published_at": published_at,
-    })))
+        "author_name": display_name(&db, &author_username),
+    });
+    if is_admin {
+        out["author_username"] = json!(author_username);
+    }
+    Ok(Json(out))
+}
+
+/// Byline name for a page's author, or None when the page has no author, the
+/// account is gone, or nobody filled in a real name.
+fn display_name(db: &susi_core::db::LicenseDb, author_username: &str) -> Option<String> {
+    if author_username.is_empty() {
+        return None;
+    }
+    db.get_user_display_name(author_username).ok().flatten()
+}
+
+/// Wrap the first `<h1>` of a rendered post body in a link to its permalink,
+/// so the headline on the blog index is the obvious thing to click and to copy
+/// a shareable link from. Attributes on the tag are preserved; a body without
+/// an h1 is returned untouched.
+fn link_first_heading(html: &str, href: &str) -> String {
+    let Some(open) = html.find("<h1") else { return html.to_string() };
+    let Some(gt) = html[open..].find('>').map(|i| open + i) else { return html.to_string() };
+    let Some(close) = html[gt..].find("</h1>").map(|i| gt + i) else { return html.to_string() };
+    format!(
+        "{}<a href=\"{}\">{}</a>{}",
+        &html[..=gt],
+        html_escape(href),
+        &html[gt + 1..close],
+        &html[close..],
+    )
+}
+
+/// Byline appended to a post's date line; empty without a known author.
+fn byline_suffix(author: Option<&str>) -> String {
+    match author {
+        Some(name) => format!(" &middot; by {}", html_escape(name)),
+        None => String::new(),
+    }
 }
 
 pub async fn handle_get_asset(
@@ -194,6 +239,9 @@ pub struct UpsertPageRequest {
     pub page_kind: Option<String>,
     #[serde(default)]
     pub published_at: Option<String>,
+    // Omitted -> preserve the existing author (new posts: the editing user).
+    #[serde(default)]
+    pub author_username: Option<String>,
 }
 
 pub async fn handle_upsert_page(
@@ -233,6 +281,24 @@ pub async fn handle_upsert_page(
         } else {
             published_at.clear();
         }
+        // A post without an explicit author is credited to whoever wrote it;
+        // pages never carry a byline, so they stay unattributed.
+        let mut author_username = req
+            .author_username
+            .clone()
+            .or_else(|| existing.as_ref().map(|r| r.9.clone()))
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if page_kind == "post" {
+            if author_username.is_empty() {
+                author_username = principal.username.clone();
+            } else if !db.user_exists(&author_username).unwrap_or(false) {
+                return Err(error_response(StatusCode::BAD_REQUEST, "Unknown author"));
+            }
+        } else {
+            author_username.clear();
+        }
         let id = db.upsert_website_page(
             &slug,
             &req.title,
@@ -242,6 +308,7 @@ pub async fn handle_upsert_page(
             &req.meta_description,
             &page_kind,
             &published_at,
+            &author_username,
             Some(&principal.username),
         )
         .map_err(db_err)?;
@@ -321,18 +388,19 @@ pub async fn handle_restore_page_revision(
         .map_err(db_err)?
         .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Revision not found"))?;
     let (title, body_md, parent_slug, ord, _captured_at, _author) = rev;
-    // Preserve the current meta_description, kind, and publish date when
-    // restoring prior body/title.
-    let (existing_meta, existing_kind, existing_pub) = db
+    // Preserve the current meta_description, kind, publish date and author
+    // when restoring prior body/title.
+    let (existing_meta, existing_kind, existing_pub, existing_author) = db
         .get_website_page(&slug)
         .map_err(db_err)?
-        .map(|(_t, _b, _p, _o, _u, m, _h, k, pd)| (m, k, pd))
-        .unwrap_or_else(|| (String::new(), "page".to_string(), String::new()));
+        .map(|(_t, _b, _p, _o, _u, m, _h, k, pd, au)| (m, k, pd, au))
+        .unwrap_or_else(|| (String::new(), "page".to_string(), String::new(), String::new()));
     let new_id = db.upsert_website_page(
         &slug, &title, &body_md, parent_slug.as_deref(), ord,
         &existing_meta,
         &existing_kind,
         &existing_pub,
+        &existing_author,
         Some(&principal.username),
     ).map_err(db_err)?;
     let url = if existing_kind == "post" {
@@ -1145,6 +1213,7 @@ fn render_seo_head(
     pages: &[PageRow],
     products: &[(String, String, String, i64, String, Option<String>, String, bool, i64, String)],
     post_published: Option<&str>,
+    post_author: Option<&str>,
 ) -> String {
     let home_slug = first_default_slug(pages);
     let is_home = home_slug == Some(slug);
@@ -1169,13 +1238,27 @@ fn render_seo_head(
     // results.
     let date_modified = iso8601_z(updated_at);
     let page_jsonld = if let Some(published) = post_published {
+        // A named author is a Person; without one the site itself takes the
+        // credit, which is what Google expects an author field to hold.
+        let author_ld = match post_author {
+            Some(name) => format!(
+                r#"{{"@type":"Person","name":"{}"}}"#,
+                html_escape(name),
+            ),
+            None => format!(
+                r#"{{"@type":"Organization","name":"{}","url":"{}"}}"#,
+                html_escape(SITE_NAME),
+                html_escape(PUBLIC_BASE),
+            ),
+        };
         format!(
-            r#"{{"@context":"https://schema.org","@type":"BlogPosting","headline":"{title}","description":"{desc}","url":"{url}","mainEntityOfPage":{{"@type":"WebPage","@id":"{url}"}},"datePublished":"{published}","dateModified":"{date}","author":{{"@type":"Organization","name":"{site}","url":"{base}"}},"publisher":{{"@type":"Organization","name":"{site}","url":"{base}","logo":{{"@type":"ImageObject","url":"{logo}"}}}}}}"#,
+            r#"{{"@context":"https://schema.org","@type":"BlogPosting","headline":"{title}","description":"{desc}","url":"{url}","mainEntityOfPage":{{"@type":"WebPage","@id":"{url}"}},"datePublished":"{published}","dateModified":"{date}","author":{author_ld},"publisher":{{"@type":"Organization","name":"{site}","url":"{base}","logo":{{"@type":"ImageObject","url":"{logo}"}}}}}}"#,
             title = html_escape(page_title),
             desc = html_escape(description),
             url = html_escape(&canonical),
             published = html_escape(published),
             date = html_escape(&date_modified),
+            author_ld = author_ld,
             site = html_escape(SITE_NAME),
             base = html_escape(PUBLIC_BASE),
             logo = html_escape(LOGO_URL),
@@ -1374,18 +1457,20 @@ fn render_website(
     });
     // If the requested slug is unknown, render the shell anyway (SPA shows "Page not found")
     // but omit the SEO head - better than 500'ing.
-    let (title, description, updated_at, valid_slug, body_md, post_published):
-        (String, String, String, Option<String>, String, Option<String>) =
+    let (title, description, updated_at, valid_slug, body_md, post_published, post_author):
+        (String, String, String, Option<String>, String, Option<String>, Option<String>) =
         if let Some(s) = slug_owned.as_deref() {
-            let row = {
+            let (row, author) = {
                 let db = state.db.lock();
-                db.get_website_page(s).unwrap_or(None)
+                let row = db.get_website_page(s).unwrap_or(None);
+                let author = row.as_ref().and_then(|r| display_name(&db, &r.9));
+                (row, author)
             };
             // A hidden page renders like an unknown slug: bare shell, no SEO
             // head, no body - the SPA shows "Page not found" to visitors.
             // The /blog/ path only serves posts.
             match row {
-                Some((t, body, _p, _o, upd, meta, false, kind, published))
+                Some((t, body, _p, _o, upd, meta, false, kind, published, _au))
                     if !post_path || kind == "post" =>
                 {
                     let desc = if !meta.trim().is_empty() {
@@ -1394,20 +1479,22 @@ fn render_website(
                         let d = derive_description(&body);
                         if d.is_empty() { SITE_TAGLINE.to_string() } else { d }
                     };
-                    let published = (kind == "post").then_some(published);
-                    (t, desc, upd, Some(s.to_string()), body, published)
+                    let is_post_kind = kind == "post";
+                    (t, desc, upd, Some(s.to_string()), body,
+                     is_post_kind.then_some(published),
+                     if is_post_kind { author } else { None })
                 }
-                _ => (SITE_NAME.to_string(), SITE_TAGLINE.to_string(), String::new(), None, String::new(), None),
+                _ => (SITE_NAME.to_string(), SITE_TAGLINE.to_string(), String::new(), None, String::new(), None, None),
             }
         } else {
-            (SITE_NAME.to_string(), SITE_TAGLINE.to_string(), String::new(), None, String::new(), None)
+            (SITE_NAME.to_string(), SITE_TAGLINE.to_string(), String::new(), None, String::new(), None, None)
         };
 
     let og_image = first_image_url(&body_md);
     let injected = match valid_slug.as_deref() {
         Some(s) => render_seo_head(
             s, &title, &description, &updated_at, og_image.as_deref(), &pages, &products,
-            post_published.as_deref(),
+            post_published.as_deref(), post_author.as_deref(),
         ),
         None => format!(
             "<title>{}</title>\n<meta name=\"description\" content=\"{}\">\n",
@@ -1422,8 +1509,9 @@ fn render_website(
         let mut h = String::new();
         if let Some(published) = post_published.as_deref() {
             h.push_str(&format!(
-                "<div class=\"meta\">{}</div>",
+                "<div class=\"meta\">{}{}</div>",
                 html_escape(&format_post_date(published)),
+                byline_suffix(post_author.as_deref()),
             ));
         }
         h.push_str(&render_body_html(&body_md));
@@ -1452,7 +1540,7 @@ fn render_blog_index(
         db.get_website_page("blog").unwrap_or(None)
     };
     let (title, intro_md, updated_at, meta) = match row {
-        Some((t, body, _p, _o, upd, m, false, _k, _pd)) => (t, body, upd, m),
+        Some((t, body, _p, _o, upd, m, false, _k, _pd, _au)) => (t, body, upd, m),
         _ => ("Blog".to_string(), String::new(), String::new(), String::new()),
     };
     let posts = sorted_posts(pages);
@@ -1475,20 +1563,24 @@ fn render_blog_index(
         // Full posts inline, newest first - the date links to the permalink.
         body_html.push_str("<div class=\"blog-index\">");
         for p in &posts {
-            let post_body = {
+            let (post_body, author) = {
                 let db = state.db.lock();
-                db.get_website_page(&p.0)
+                let body = db
+                    .get_website_page(&p.0)
                     .ok()
                     .flatten()
                     .map(|(_t, body, ..)| body)
-                    .unwrap_or_default()
+                    .unwrap_or_default();
+                (body, display_name(&db, &p.9))
             };
+            let permalink = format!("/blog/{}", p.0);
             body_html.push_str(&format!(
                 "<article class=\"blog-index-item\"><div class=\"meta\">\
-                 <a href=\"/blog/{slug}\">{date}</a></div>{body}</article>",
-                slug = html_escape(&p.0),
+                 <a href=\"{link}\">{date}</a>{byline}</div>{body}</article>",
+                link = html_escape(&permalink),
                 date = html_escape(&format_post_date(&p.8)),
-                body = render_body_html(&post_body),
+                byline = byline_suffix(author.as_deref()),
+                body = link_first_heading(&render_body_html(&post_body), &permalink),
             ));
         }
         body_html.push_str("</div>");
@@ -1496,7 +1588,7 @@ fn render_blog_index(
 
     // dateModified for the index: the newest post, else the intro page edit.
     let updated = posts.first().map(|p| p.4.clone()).unwrap_or(updated_at);
-    let injected = render_seo_head("blog", &title, &description, &updated, None, pages, products, None);
+    let injected = render_seo_head("blog", &title, &description, &updated, None, pages, products, None, None);
     let analytics = analytics_head(state);
     WEBSITE_HTML
         .replacen("<!--SEO_HEAD-->", &injected, 1)
@@ -1760,7 +1852,7 @@ pub async fn handle_sitemap_xml(
             visible_pages(db.list_website_pages().unwrap_or_default())
         };
         let home_slug = first_default_slug(&pages).map(|s| s.to_string());
-        for (slug, _title, _parent, _ord, updated_at, _meta, _hidden, kind, _published) in &pages {
+        for (slug, _title, _parent, _ord, updated_at, _meta, _hidden, kind, _published, _author) in &pages {
             let is_home = home_slug.as_deref() == Some(slug.as_str());
             let loc = if kind == "post" {
                 canonical_post_url(slug)
@@ -1813,7 +1905,7 @@ pub async fn handle_llms_txt(
     ));
 
     body.push_str("## Pages\n");
-    for (slug, title, parent, _ord, _upd, meta, _hidden, kind, _published) in &pages {
+    for (slug, title, parent, _ord, _upd, meta, _hidden, kind, _published, _author) in &pages {
         if kind == "post" {
             continue;
         }
@@ -2086,6 +2178,27 @@ mod tests {
         assert!(h.contains("Title"));
         assert!(h.contains("<p>"));
         assert!(h.contains("A paragraph"));
+    }
+
+    #[test]
+    fn link_first_heading_wraps_only_the_first_h1() {
+        let html = link_first_heading(
+            "<h1>First post</h1>\n<p>Body.</p>\n<h1>Later heading</h1>",
+            "/blog/first-post",
+        );
+        assert_eq!(
+            html,
+            "<h1><a href=\"/blog/first-post\">First post</a></h1>\n<p>Body.</p>\n<h1>Later heading</h1>"
+        );
+
+        // Attributes on the tag survive, and inline markup inside stays intact.
+        let html = link_first_heading("<h1 id=\"t\">A <em>b</em></h1>", "/blog/x");
+        assert_eq!(html, "<h1 id=\"t\"><a href=\"/blog/x\">A <em>b</em></a></h1>");
+
+        // A body with no h1 is left exactly as it was.
+        let plain = "<p>No heading here.</p>";
+        assert_eq!(link_first_heading(plain, "/blog/x"), plain);
+        assert_eq!(link_first_heading("<h1>unclosed", "/blog/x"), "<h1>unclosed");
     }
 
     #[test]

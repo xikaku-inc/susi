@@ -53,6 +53,8 @@ pub struct UserInfo {
     pub created_at: String,
     pub email: Option<String>,
     pub newsletter_opt_in: bool,
+    pub first_name: String,
+    pub last_name: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -423,7 +425,11 @@ impl LicenseDb {
                 -- only receives campaign mail after they (account page) or an
                 -- admin (users page) turns it on. Transactional mail - sign-in
                 -- codes, resets, invitations - ignores this flag entirely.
-                newsletter_opt_in INTEGER NOT NULL DEFAULT 0
+                newsletter_opt_in INTEGER NOT NULL DEFAULT 0,
+                -- Real name, used wherever a person is shown rather than
+                -- identified: blog bylines today. Empty when never filled in.
+                first_name TEXT NOT NULL DEFAULT '',
+                last_name TEXT NOT NULL DEFAULT ''
             );
 
             CREATE TABLE IF NOT EXISTS workspaces (
@@ -546,7 +552,8 @@ impl LicenseDb {
                 meta_description TEXT NOT NULL DEFAULT '',
                 hidden INTEGER NOT NULL DEFAULT 0,
                 page_kind TEXT NOT NULL DEFAULT 'page',
-                published_at TEXT NOT NULL DEFAULT ''
+                published_at TEXT NOT NULL DEFAULT '',
+                author_username TEXT NOT NULL DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS idx_website_pages_parent ON website_pages(parent_slug);
 
@@ -1087,6 +1094,20 @@ impl LicenseDb {
         let _ = self
             .conn
             .execute_batch("ALTER TABLE newsletter_issues DROP COLUMN product;");
+
+        // Real names, so a person can be shown by name instead of by account.
+        // Both stay empty on existing rows until someone fills them in.
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE users ADD COLUMN first_name TEXT NOT NULL DEFAULT '';
+             ALTER TABLE users ADD COLUMN last_name TEXT NOT NULL DEFAULT '';",
+        );
+
+        // Blog byline author, by username - resolved to a real name at render
+        // time so renaming a person updates every post. Empty on existing
+        // posts: they render without a byline until an author is picked.
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE website_pages ADD COLUMN author_username TEXT NOT NULL DEFAULT '';",
+        );
 
         // >> Add new migrations as own execute_batch statements here <<
         Ok(())
@@ -1716,6 +1737,53 @@ mod tests {
         );
         db.set_user_email("admin", None).unwrap();
         assert_eq!(db.get_user_email("admin").unwrap(), None);
+    }
+
+    #[test]
+    fn test_user_name_roundtrip() {
+        let db = test_db();
+        db.seed_admin("hash").unwrap();
+        assert_eq!(db.get_user_name("admin").unwrap(), (String::new(), String::new()));
+        assert_eq!(db.get_user_display_name("admin").unwrap(), None);
+
+        assert!(db.set_user_name("admin", " Klaus ", " Petersen ").unwrap());
+        assert_eq!(
+            db.get_user_name("admin").unwrap(),
+            ("Klaus".to_string(), "Petersen".to_string())
+        );
+        assert_eq!(
+            db.get_user_display_name("admin").unwrap().as_deref(),
+            Some("Klaus Petersen")
+        );
+        assert_eq!(db.list_users().unwrap()[0].first_name, "Klaus");
+
+        // A half-filled name still yields a usable byline.
+        db.set_user_name("admin", "Klaus", "").unwrap();
+        assert_eq!(db.get_user_display_name("admin").unwrap().as_deref(), Some("Klaus"));
+
+        // Cleared entirely means no byline, never a fallback to the username.
+        db.set_user_name("admin", "", "").unwrap();
+        assert_eq!(db.get_user_display_name("admin").unwrap(), None);
+        assert!(!db.set_user_name("ghost", "A", "B").unwrap());
+        assert_eq!(db.get_user_display_name("ghost").unwrap(), None);
+    }
+
+    #[test]
+    fn test_post_author_survives_rename() {
+        let mut db = test_db();
+        db.seed_admin("hash").unwrap();
+        db.create_user("writer", "hash", "user").unwrap();
+        db.set_user_name("writer", "Klaus", "Petersen").unwrap();
+        db.upsert_website_page("post-1", "Post", "# Post", None, 0, "", "post", "2026-08-05", "writer", None)
+            .unwrap();
+        assert_eq!(db.get_website_page("post-1").unwrap().unwrap().9, "writer");
+
+        db.rename_user("writer", "klaus").unwrap();
+        assert_eq!(db.get_website_page("post-1").unwrap().unwrap().9, "klaus");
+        assert_eq!(
+            db.get_user_display_name("klaus").unwrap().as_deref(),
+            Some("Klaus Petersen")
+        );
     }
 
     #[test]
@@ -3526,7 +3594,7 @@ mod tests {
     fn test_asset_usage_and_rename_covers_shop_products() {
         let mut db = test_db();
         db.upsert_website_asset("sensor.png", 123).unwrap();
-        db.upsert_website_page("intro", "Intro", "![img](sensor.png)", None, 0, "", "page", "", None)
+        db.upsert_website_page("intro", "Intro", "![img](sensor.png)", None, 0, "", "page", "", "", None)
             .unwrap();
         db.upsert_product("lpms-b2", "LPMS-B2", "", 34900, "usd", Some("sensor.png"), "txcd", true, 0)
             .unwrap();
@@ -3556,7 +3624,7 @@ mod tests {
     #[test]
     fn test_website_page_hidden_flag() {
         let mut db = test_db();
-        db.upsert_website_page("about", "About", "# About", None, 0, "", "page", "", None)
+        db.upsert_website_page("about", "About", "# About", None, 0, "", "page", "", "", None)
             .unwrap();
 
         // New pages default to visible.
@@ -3568,7 +3636,7 @@ mod tests {
         // Hide, verify, and check that editing the page keeps it hidden.
         assert!(db.set_website_page_hidden("about", true).unwrap());
         assert!(db.get_website_page("about").unwrap().unwrap().6);
-        db.upsert_website_page("about", "About v2", "# About v2", None, 0, "", "page", "", None)
+        db.upsert_website_page("about", "About v2", "# About v2", None, 0, "", "page", "", "", None)
             .unwrap();
         assert!(
             db.get_website_page("about").unwrap().unwrap().6,
@@ -3581,6 +3649,51 @@ mod tests {
 
         // Unknown slug reports not-found.
         assert!(!db.set_website_page_hidden("nope", true).unwrap());
+    }
+
+    /// Same check for the name / post-author columns: a deployed database has
+    /// neither, and `migrate()` swallows every ALTER error, so only reopening a
+    /// pre-migration file proves the statements are valid.
+    #[test]
+    fn test_author_name_migration() {
+        let path = std::env::temp_dir()
+            .join(format!("susi_author_mig_{}.db", std::process::id()));
+        let p = path.to_str().unwrap().to_string();
+        let _ = std::fs::remove_file(&path);
+        {
+            let db = LicenseDb::open(&p).unwrap();
+            db.conn
+                .execute_batch(
+                    "ALTER TABLE users DROP COLUMN first_name;
+                     ALTER TABLE users DROP COLUMN last_name;
+                     ALTER TABLE website_pages DROP COLUMN author_username;",
+                )
+                .unwrap();
+            db.conn
+                .execute_batch(
+                    "INSERT INTO users (username, password_hash, role, created_at, updated_at)
+                     VALUES ('legacy', 'x', 'user', '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z');
+                     INSERT INTO website_pages (slug, title, body_md, ord, updated_at, page_kind, published_at)
+                     VALUES ('old-post', 'Old', '# Old', 0, '2020-01-01T00:00:00Z', 'post', '2020-01-01');",
+                )
+                .unwrap();
+        }
+
+        // Reopen: both columns appear, an existing post carries no byline, and
+        // an existing user has no name until someone fills one in.
+        let mut db = LicenseDb::open(&p).unwrap();
+        assert_eq!(db.get_user_name("legacy").unwrap(), (String::new(), String::new()));
+        assert_eq!(db.get_user_display_name("legacy").unwrap(), None);
+        assert_eq!(db.get_website_page("old-post").unwrap().unwrap().9, "");
+
+        db.set_user_name("legacy", "Klaus", "Petersen").unwrap();
+        db.upsert_website_page("old-post", "Old", "# Old", None, 0, "", "post", "2020-01-01", "legacy", None)
+            .unwrap();
+        assert_eq!(db.get_website_page("old-post").unwrap().unwrap().9, "legacy");
+        assert_eq!(db.list_users().unwrap()[0].last_name, "Petersen");
+
+        drop(db);
+        let _ = std::fs::remove_file(&path);
     }
 
     /// The newsletter migration runs on a database that predates the column.

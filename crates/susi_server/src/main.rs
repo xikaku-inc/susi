@@ -1976,6 +1976,10 @@ struct CreateUserRequest {
     #[serde(default = "default_user_role")]
     role: String,
     email: String,
+    #[serde(default)]
+    first_name: String,
+    #[serde(default)]
+    last_name: String,
 }
 
 fn default_user_role() -> String {
@@ -2084,6 +2088,29 @@ struct SetEmailRequest {
 #[derive(Deserialize)]
 struct SetNewsletterRequest {
     opt_in: bool,
+}
+
+/// Real name, used for blog bylines. Both halves are optional so clearing one
+/// is a normal edit rather than a delete.
+#[derive(Deserialize)]
+struct SetNameRequest {
+    #[serde(default)]
+    first_name: String,
+    #[serde(default)]
+    last_name: String,
+}
+
+/// Everything the admin Edit User dialog can change, applied together so a
+/// rejected email doesn't leave a half-saved row.
+#[derive(Deserialize)]
+struct SetProfileRequest {
+    #[serde(default)]
+    first_name: String,
+    #[serde(default)]
+    last_name: String,
+    /// Omit to leave the address untouched; pass an empty string to clear it.
+    #[serde(default)]
+    email: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -2952,6 +2979,7 @@ async fn main() -> Result<()> {
         .route("/api/v1/auth/disable-2fa", post(auth::handle_disable_2fa))
         .route("/api/v1/auth/regenerate-backup-codes", post(auth::handle_regenerate_backup_codes))
         .route("/api/v1/auth/me/email", axum::routing::put(users::handle_set_my_email))
+        .route("/api/v1/auth/me/name", axum::routing::put(users::handle_set_my_name))
         .route("/api/v1/auth/me/newsletter", axum::routing::put(users::handle_set_my_newsletter))
         .route("/api/v1/auth/me/username", axum::routing::put(users::handle_rename_self))
         .route("/api/v1/auth/me/devices", get(users::handle_list_my_devices))
@@ -2970,6 +2998,7 @@ async fn main() -> Result<()> {
         .route("/api/v1/auth/users", post(users::handle_create_user))
         .route("/api/v1/auth/users/{username}", axum::routing::delete(users::handle_delete_user))
         .route("/api/v1/auth/users/{username}/email", axum::routing::put(users::handle_set_user_email))
+        .route("/api/v1/auth/users/{username}/profile", axum::routing::put(users::handle_set_user_profile))
         .route("/api/v1/auth/users/{username}/rename", post(users::handle_rename_user))
         .route("/api/v1/auth/users/{username}/role", axum::routing::put(users::handle_set_user_role))
         .route("/api/v1/auth/users/{username}/reset-password", post(users::handle_reset_user_password))

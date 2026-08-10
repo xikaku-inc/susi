@@ -278,6 +278,11 @@ body {
 }
 .blog-index-item .meta a { color: inherit; text-decoration: none; }
 .blog-index-item .meta a:hover { text-decoration: underline; }
+.blog-index-item .meta a.edit-post { color: var(--accent); }
+/* The headline is the primary link to the post - style it like the heading
+   it replaces, not like body copy. */
+.blog-index-item h1 a { color: inherit; text-decoration: none; }
+.blog-index-item h1 a:hover { color: var(--accent); }
 
 /* EasyMDE theme overrides - match the surrounding dark UI. */
 .EasyMDEContainer { background: var(--bg); }
@@ -784,6 +789,22 @@ function formatPostDate(s) {
     if (isNaN(d.getTime())) return s;
     return d.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
 }
+// Byline appended to a post's date line; empty without a known author.
+function bylineSuffix(name) {
+    return name ? ' &middot; by ' + escHtml(name) : '';
+}
+// Wrap the first <h1> of a post body in a link to its permalink, so the
+// headline on the blog index leads to the post's own page.
+function linkFirstHeading(html, href) {
+    const open = html.indexOf('<h1');
+    if (open < 0) return html;
+    const gt = html.indexOf('>', open);
+    if (gt < 0) return html;
+    const close = html.indexOf('</h1>', gt);
+    if (close < 0) return html;
+    return html.slice(0, gt + 1) + '<a href="' + escHtml(href) + '">'
+        + html.slice(gt + 1, close) + '</a>' + html.slice(close);
+}
 // Top-level paths that must NOT be intercepted as website slugs on xikaku.com.
 const RESERVED_TOP_PATHS = new Set(['site', 'shop', 'api', 'static', 'docs', 'robots.txt', 'sitemap.xml', 'llms.txt', 'favicon.ico', 'health', '.well-known']);
 
@@ -796,6 +817,8 @@ let currentPage = null;
 let editMode = false;
 let previewMode = false;
 let editDraft = null;
+// Slug whose editor should open as soon as that page finishes loading.
+let pendingEdit = null;
 let isAdmin = false;
 
 function authToken() { return localStorage.getItem('auth_token') || ''; }
@@ -1058,6 +1081,10 @@ async function loadPage(slug) {
     previewMode = false;
     editDraft = null;
     if (easymde) { try { easymde.toTextArea(); } catch (e) {} easymde = null; }
+    // An "Edit" click on the blog index parks its intent here; honour it now
+    // that the post is loaded, and clear it so a later visit renders normally.
+    if (pendingEdit === slug && currentPage && isPotentialAdmin()) editMode = true;
+    pendingEdit = null;
     renderSidebar();
     renderPage();
 }
@@ -1188,11 +1215,19 @@ async function renderBlogIndexView() {
         }));
         html += '<div class="blog-index">';
         posts.forEach((p, i) => {
+            const permalink = pageHref(p.slug);
+            // Admins edit a post straight from the index - otherwise the only
+            // way in is the dashboard page list.
+            const edit = isAdmin
+                ? ' &middot; <a href="#" class="edit-post" onclick="event.preventDefault();editPost('
+                  + escHtml(JSON.stringify(p.slug)) + ')">Edit</a>'
+                : '';
             html += '<article class="blog-index-item">'
-                + '<div class="meta"><a href="' + pageHref(p.slug) + '">'
+                + '<div class="meta"><a href="' + permalink + '">'
                 + escHtml(formatPostDate(p.published_at)) + '</a>'
-                + (p.hidden ? ' (hidden)' : '') + '</div>'
-                + renderMarkdown(bodies[i])
+                + bylineSuffix(p.author_name)
+                + (p.hidden ? ' (hidden)' : '') + edit + '</div>'
+                + linkFirstHeading(renderMarkdown(bodies[i]), permalink)
                 + '</article>';
         });
         html += '</div>';
@@ -1245,7 +1280,8 @@ function renderPage() {
     }
     const meta = currentPage.page_kind === 'post'
         ? (currentPage.published_at
-            ? '<div class="meta">' + escHtml(formatPostDate(currentPage.published_at)) + '</div>'
+            ? '<div class="meta">' + escHtml(formatPostDate(currentPage.published_at))
+              + bylineSuffix(currentPage.author_name) + '</div>'
             : '')
         : (currentPage.updated_at
             ? '<div class="meta">Updated ' + escHtml(formatDate(currentPage.updated_at)) + '</div>'
@@ -1375,9 +1411,11 @@ function renderEditor() {
     const slugVal = d ? d.slug : currentSlug;
     const isPost = (d ? d.page_kind : currentPage.page_kind) === 'post';
     const published = d ? (d.published_at || '') : (currentPage.published_at || '');
-    // Posts have a publish date instead of nav placement (parent/order).
+    const author = d ? (d.author_username || '') : (currentPage.author_username || '');
+    // Posts have a publish date and a byline author instead of nav placement.
     const placementFields = isPost
-        ? '<label>Published</label><input id="editPublished" type="date" style="width:150px;">'
+        ? '<label>Published</label><input id="editPublished" type="date" style="width:150px;">' +
+          '<label>Author</label><select id="editAuthor" style="min-width:160px;">' + buildAuthorOptions(author) + '</select>'
         : '<label>Parent</label><select id="editParent" style="min-width:200px;">' + buildParentOptions(parent, currentSlug) + '</select>' +
           '<label>Order</label><input id="editOrd" type="number" style="width:80px;">';
     c.innerHTML =
@@ -1405,11 +1443,49 @@ function renderEditor() {
     document.getElementById('editSlug').value = slugVal;
     if (isPost) {
         document.getElementById('editPublished').value = published;
+        // The user list arrives after the first paint - refill the select once
+        // it does, keeping whatever the post already had selected.
+        loadAuthors().then(() => {
+            const sel = document.getElementById('editAuthor');
+            if (sel) sel.innerHTML = buildAuthorOptions(sel.value || author);
+        });
     } else {
         document.getElementById('editOrd').value = ord;
     }
     document.getElementById('editMetaDesc').value = metaDesc;
     initEasyMDE(body);
+}
+
+// Authors are loaded lazily on first edit of a post - the list is admin-only,
+// so a visitor never triggers this fetch.
+let authorUsers = null;
+
+async function loadAuthors() {
+    if (authorUsers || !authToken()) return;
+    try {
+        const r = await fetch(API + '/auth/users', {
+            headers: { 'Authorization': 'Bearer ' + authToken() },
+        });
+        authorUsers = r.ok ? await r.json() : [];
+    } catch (e) {
+        authorUsers = [];
+    }
+}
+
+function buildAuthorOptions(selected) {
+    const opts = ['<option value="">(no byline)</option>'];
+    (authorUsers || []).forEach(u => {
+        const name = ((u.first_name || '') + ' ' + (u.last_name || '')).trim();
+        const sel = u.username === selected ? ' selected' : '';
+        opts.push('<option value="' + escHtml(u.username) + '"' + sel + '>'
+            + escHtml(name || u.username + ' (no name set)') + '</option>');
+    });
+    // The list may not have arrived yet, or the author's account is gone -
+    // either way, keep the current value instead of silently dropping it.
+    if (selected && !(authorUsers || []).some(u => u.username === selected)) {
+        opts.push('<option value="' + escHtml(selected) + '" selected>' + escHtml(selected) + '</option>');
+    }
+    return opts.join('');
 }
 
 function buildParentOptions(selected, excludeSlug) {
@@ -1538,6 +1614,15 @@ function enterEditMode() {
     renderPage();
 }
 
+// Open a post's editor from somewhere the post isn't loaded yet (the blog
+// index). The page load is async, so the intent is parked here and picked up
+// by loadPage once the post has arrived.
+function editPost(slug) {
+    if (!isPotentialAdmin()) { toast('Login required', 'error'); return; }
+    pendingEdit = slug;
+    navigateTo(slug);
+}
+
 function cancelEdit() {
     if (easymde) { try { easymde.toTextArea(); } catch (e) {} easymde = null; }
     editMode = false;
@@ -1554,6 +1639,7 @@ function editorValues() {
     const parentEl = document.getElementById('editParent');
     const ordEl = document.getElementById('editOrd');
     const publishedEl = document.getElementById('editPublished');
+    const authorEl = document.getElementById('editAuthor');
     return {
         title: document.getElementById('editTitle').value.trim(),
         parent: parentEl ? parentEl.value.trim() : '',
@@ -1563,6 +1649,7 @@ function editorValues() {
         slug: document.getElementById('editSlug').value.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '-'),
         page_kind: (currentPage && currentPage.page_kind) || 'page',
         published_at: publishedEl ? publishedEl.value : ((currentPage && currentPage.published_at) || ''),
+        author_username: authorEl ? authorEl.value : ((currentPage && currentPage.author_username) || ''),
     };
 }
 
@@ -1635,6 +1722,7 @@ async function savePage() {
         body: JSON.stringify({
             title, body_md, parent_slug: parent || null, ord, meta_description,
             page_kind: v.page_kind, published_at: v.published_at,
+            author_username: v.author_username,
         }),
     });
     if (resp.status === 401) { handleSessionExpired(body_md); return; }

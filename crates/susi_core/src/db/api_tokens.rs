@@ -343,6 +343,7 @@ impl LicenseDb {
         run("UPDATE workspace_tickets SET author = ?1 WHERE author = ?2")?;
         run("UPDATE workspace_ticket_comments SET author = ?1 WHERE author = ?2")?;
         run("UPDATE website_page_revisions SET author = ?1 WHERE author = ?2")?;
+        run("UPDATE website_pages SET author_username = ?1 WHERE author_username = ?2")?;
         Ok(())
     }
 

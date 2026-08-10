@@ -421,6 +421,7 @@ pub(crate) async fn handle_auth_status(
     let email = db.get_user_email(&principal.username).ok().flatten();
     let backup_codes_remaining = db.count_unused_backup_codes(&principal.username).unwrap_or(0);
     let newsletter_opt_in = db.get_user_newsletter_opt_in(&principal.username).unwrap_or(false);
+    let (first_name, last_name) = db.get_user_name(&principal.username).unwrap_or_default();
     let must_enable_totp = is_admin_role(&role) && !totp_enabled;
     Ok(Json(serde_json::json!({
         "must_change_password": must_change,
@@ -428,6 +429,8 @@ pub(crate) async fn handle_auth_status(
         "username": principal.username,
         "role": role,
         "email": email,
+        "first_name": first_name,
+        "last_name": last_name,
         "newsletter_opt_in": newsletter_opt_in,
         "signin_code_enabled": !signin_code_disabled(&state),
         "must_enable_totp": must_enable_totp,

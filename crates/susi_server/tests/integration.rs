@@ -3899,6 +3899,12 @@ fn test_blog_posts() {
     let pos_second = index.find(r#"href="/blog/second-post""#).expect("second-post link");
     let pos_first = index.find(r#"href="/blog/first-post""#).expect("first-post link");
     assert!(pos_second < pos_first, "index must be newest-first");
+    // The headline is a permalink too - that is the link a reader copies to
+    // send someone a post.
+    assert!(
+        index.contains(r#"<h1><a href="/blog/first-post">First post</a></h1>"#),
+        "post headline must link to its own page: {}", index
+    );
     assert!(!index.contains("draft-post"), "draft must not appear on the index");
     assert!(index.contains("July 20, 2026"));
     assert!(index.contains("Hello from the first post body."), "index must render full bodies");
@@ -3968,6 +3974,185 @@ fn test_blog_posts() {
         .send().expect("get").json::<Value>().unwrap();
     let published = body["published_at"].as_str().unwrap();
     assert_eq!(published.len(), 10, "published_at must default to a YYYY-MM-DD date, got {:?}", published);
+}
+
+/// Blog bylines: a post credits a user account, the public site shows that
+/// user's real name (never their username), and a name change reaches every
+/// post the author wrote.
+#[test]
+fn test_blog_post_byline() {
+    let server = TestServer::start();
+    let token = server.admin_token();
+    let http = server.http();
+
+    // An author with a real name, and one who never filled theirs in.
+    for (username, email) in [
+        ("byline_klaus", "byline_klaus@example.com"),
+        ("byline_anon", "byline_anon@example.com"),
+    ] {
+        let resp = http
+            .post(format!("{}/auth/users", server.api_url))
+            .bearer_auth(&token)
+            .json(&json!({
+                "username": username, "email": email,
+                "role": "user", "password": "bylinepw123",
+            }))
+            .send()
+            .expect("create author");
+        assert!(resp.status().is_success(), "create {}: {}", username, resp.text().unwrap_or_default());
+    }
+    let resp = http
+        .put(format!("{}/auth/users/byline_klaus/profile", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "first_name": " Klaus ", "last_name": "Petersen" }))
+        .send()
+        .expect("set name");
+    assert_eq!(resp.status().as_u16(), 200, "set name: {}", resp.text().unwrap_or_default());
+    let body = http.get(format!("{}/auth/users", server.api_url))
+        .bearer_auth(&token).send().expect("list users").json::<Value>().unwrap();
+    let klaus = body.as_array().unwrap().iter()
+        .find(|u| u["username"] == "byline_klaus").expect("author listed");
+    assert_eq!(klaus["first_name"], json!("Klaus"), "name must be stored trimmed");
+    assert_eq!(klaus["email"], json!("byline_klaus@example.com"), "profile must keep the email");
+
+    for (slug, title, published, author) in [
+        ("byline-post", "Byline post", "2026-07-01", "byline_klaus"),
+        ("nameless-post", "Nameless post", "2026-07-02", "byline_anon"),
+    ] {
+        let resp = http
+            .put(format!("{}/website/pages/{}", server.api_url, slug))
+            .bearer_auth(&token)
+            .json(&json!({
+                "title": title, "body_md": format!("# {}\n\nBody of {}.", title, slug),
+                "page_kind": "post", "published_at": published,
+                "author_username": author,
+            }))
+            .send()
+            .expect("create post");
+        assert_eq!(resp.status().as_u16(), 200, "create {}: {}", slug, resp.text().unwrap_or_default());
+    }
+
+    // Public reads expose the byline name but never the account behind it.
+    let body = http.get(format!("{}/website/pages/byline-post", server.api_url))
+        .send().expect("public get").json::<Value>().unwrap();
+    assert_eq!(body["author_name"], json!("Klaus Petersen"));
+    assert!(body.get("author_username").is_none(), "public read must not leak the username");
+    let body = http.get(format!("{}/website/pages/byline-post", server.api_url))
+        .bearer_auth(&token).send().expect("admin get").json::<Value>().unwrap();
+    assert_eq!(body["author_username"], json!("byline_klaus"), "the editor needs the account");
+
+    // An author with no name set renders no byline at all - never a username.
+    let body = http.get(format!("{}/website/pages", server.api_url))
+        .send().expect("list").json::<Value>().unwrap();
+    let nameless = body["pages"].as_array().unwrap().iter()
+        .find(|p| p["slug"] == "nameless-post").unwrap();
+    assert_eq!(nameless["author_name"], json!(null));
+
+    // SSR: byline on the date line, and a Person author in the JSON-LD.
+    let ssr = http.get(format!("{}/site/blog/byline-post", server.url))
+        .send().expect("post ssr").text().unwrap();
+    assert!(ssr.contains("July 1, 2026 &middot; by Klaus Petersen"), "byline missing from post");
+    assert!(ssr.contains(r#""author":{"@type":"Person","name":"Klaus Petersen"}"#), "Person JSON-LD missing");
+    let ssr = http.get(format!("{}/site/blog/nameless-post", server.url))
+        .send().expect("nameless ssr").text().unwrap();
+    assert!(!ssr.contains("byline_anon"), "a username must never reach the public page");
+    assert!(!ssr.contains("July 2, 2026 &middot; by"), "no byline without a name");
+    assert!(ssr.contains(r#""author":{"@type":"Organization""#), "site takes credit when nobody is named");
+
+    // The index carries the same byline.
+    let index = http.get(format!("{}/site/blog", server.url))
+        .send().expect("blog index").text().unwrap();
+    assert!(index.contains("by Klaus Petersen"), "byline missing from the index");
+
+    // Renaming the person updates every post they wrote.
+    let resp = http
+        .put(format!("{}/auth/users/byline_klaus/profile", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "first_name": "Klaus", "last_name": "P. Petersen" }))
+        .send()
+        .expect("rename person");
+    assert_eq!(resp.status().as_u16(), 200);
+    let ssr = http.get(format!("{}/site/blog/byline-post", server.url))
+        .send().expect("post ssr after rename").text().unwrap();
+    assert!(ssr.contains("by Klaus P. Petersen"), "byline must follow the name change");
+
+    // The Edit User dialog saves as rename -> profile -> role -> newsletter,
+    // each against the new username. The byline follows the account.
+    let resp = http
+        .post(format!("{}/auth/users/byline_klaus/rename", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "new_username": "klaus" }))
+        .send()
+        .expect("rename account");
+    assert_eq!(resp.status().as_u16(), 200, "rename: {}", resp.text().unwrap_or_default());
+    for (path, body) in [
+        ("profile", json!({ "first_name": "Klaus", "last_name": "Petersen" })),
+        ("role", json!({ "role": "admin" })),
+        ("newsletter", json!({ "opt_in": true })),
+    ] {
+        let resp = http
+            .put(format!("{}/auth/users/klaus/{}", server.api_url, path))
+            .bearer_auth(&token)
+            .json(&body)
+            .send()
+            .expect("dialog save step");
+        assert_eq!(resp.status().as_u16(), 200, "{} on renamed account: {}", path, resp.text().unwrap_or_default());
+    }
+    let body = http.get(format!("{}/website/pages/byline-post", server.api_url))
+        .bearer_auth(&token).send().expect("get").json::<Value>().unwrap();
+    assert_eq!(body["author_username"], json!("klaus"), "rename must move the byline");
+    assert_eq!(body["author_name"], json!("Klaus Petersen"));
+    // A name-only profile save must not drop the address behind it.
+    let users = http.get(format!("{}/auth/users", server.api_url))
+        .bearer_auth(&token).send().expect("list").json::<Value>().unwrap();
+    let klaus = users.as_array().unwrap().iter()
+        .find(|u| u["username"] == "klaus").expect("renamed account listed");
+    assert_eq!(klaus["email"], json!("byline_klaus@example.com"), "email must survive the sequence");
+    assert_eq!(klaus["role"], json!("admin"));
+    assert_eq!(klaus["newsletter_opt_in"], json!(true));
+
+    // An update that omits the author keeps it; an unknown author is refused.
+    let resp = http
+        .put(format!("{}/website/pages/byline-post", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "title": "Byline post", "body_md": "# Byline post\n\nEdited." }))
+        .send()
+        .expect("authorless update");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = http.get(format!("{}/website/pages/byline-post", server.api_url))
+        .bearer_auth(&token).send().expect("get").json::<Value>().unwrap();
+    assert_eq!(body["author_username"], json!("klaus"), "author must survive authorless updates");
+    let resp = http
+        .put(format!("{}/website/pages/byline-post", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "title": "X", "body_md": "x", "author_username": "nobody" }))
+        .send()
+        .expect("unknown author");
+    assert_eq!(resp.status().as_u16(), 400, "unknown author must be rejected");
+
+    // A post created without an author is credited to whoever wrote it.
+    let resp = http
+        .put(format!("{}/website/pages/self-post", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "title": "Self", "body_md": "x", "page_kind": "post" }))
+        .send()
+        .expect("authorless create");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = http.get(format!("{}/website/pages/self-post", server.api_url))
+        .bearer_auth(&token).send().expect("get").json::<Value>().unwrap();
+    assert_eq!(body["author_username"], json!("admin"));
+
+    // Regular pages never carry a byline.
+    let resp = http
+        .put(format!("{}/website/pages/plain", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "title": "Plain", "body_md": "x", "author_username": "klaus" }))
+        .send()
+        .expect("page with author");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = http.get(format!("{}/website/pages/plain", server.api_url))
+        .bearer_auth(&token).send().expect("get").json::<Value>().unwrap();
+    assert_eq!(body["author_username"], json!(""), "pages must stay unattributed");
 }
 
 /// Every contact-form field is mandatory - blank company or subject is

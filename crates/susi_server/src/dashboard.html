@@ -1649,6 +1649,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
         #page-users tr.user-row { cursor: pointer; }
         #page-users td.col-chev { width: 24px; color: var(--text2); font-size: 11px; }
         #page-users .user-name { font-weight: 500; }
+        #page-users .user-realname { color: var(--text2); }
         #page-users .user-email {
             font-size: 12px;
             color: var(--text2);
@@ -2188,6 +2189,16 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                 <label>Email</label>
                 <input type="email" id="newUserEmail">
             </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+                <div class="form-row">
+                    <label>First name</label>
+                    <input type="text" id="newUserFirstName">
+                </div>
+                <div class="form-row">
+                    <label>Last name</label>
+                    <input type="text" id="newUserLastName">
+                </div>
+            </div>
             <div class="form-row">
                 <label>Role</label>
                 <select id="newUserRole">
@@ -2207,6 +2218,50 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
         <div class="form-actions">
             <button class="secondary" onclick="closeAddUserModal()">Cancel</button>
             <button onclick="createUser()">Send invitation</button>
+        </div>
+    </div>
+</div>
+
+<div id="editUserModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeEditUserModal()">
+    <div class="modal">
+        <h2>Edit User</h2>
+        <div class="modal-body">
+            <div class="form-row">
+                <label>Username</label>
+                <input type="text" id="editUserUsername">
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+                <div class="form-row">
+                    <label>First name</label>
+                    <input type="text" id="editUserFirstName">
+                </div>
+                <div class="form-row">
+                    <label>Last name</label>
+                    <input type="text" id="editUserLastName">
+                </div>
+            </div>
+            <div class="form-row">
+                <label>Email</label>
+                <input type="email" id="editUserEmail">
+            </div>
+            <div class="form-row" id="editUserRoleRow">
+                <label>Role</label>
+                <select id="editUserRole">
+                    <option value="user">User</option>
+                    <option value="admin">Admin</option>
+                    <option value="owner" id="editUserRoleOwner">Owner</option>
+                </select>
+            </div>
+            <div id="editUserNewsletterRow" style="display:flex;align-items:center;gap:9px;">
+                <input type="checkbox" id="editUserNewsletter" style="width:auto;margin:0;cursor:pointer;accent-color:var(--accent);">
+                <label for="editUserNewsletter" style="margin:0;cursor:pointer;text-transform:none;letter-spacing:0;font-size:13px;font-weight:400;color:var(--text);">
+                    Subscribed to the newsletter
+                </label>
+            </div>
+        </div>
+        <div class="form-actions">
+            <button class="secondary" onclick="closeEditUserModal()">Cancel</button>
+            <button onclick="saveUserProfile()">Save</button>
         </div>
     </div>
 </div>
@@ -2458,6 +2513,14 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                 <div class="acc-inline">
                     <input type="email" id="accEmail">
                     <button class="secondary" onclick="saveAccountEmail()">Save</button>
+                </div>
+            </div>
+            <div class="form-row">
+                <label>Name</label>
+                <div class="acc-inline">
+                    <input type="text" id="accFirstName">
+                    <input type="text" id="accLastName">
+                    <button class="secondary" onclick="saveAccountName()">Save</button>
                 </div>
             </div>
             <div class="acc-section">
@@ -3162,6 +3225,8 @@ async function loadAccountSettings() {
         if (resp.ok) {
             const data = await resp.json();
             document.getElementById('accEmail').value = data.email || '';
+            document.getElementById('accFirstName').value = data.first_name || '';
+            document.getElementById('accLastName').value = data.last_name || '';
             document.getElementById('accNewsletter').checked = !!data.newsletter_opt_in;
         }
     } catch (e) {}
@@ -3207,6 +3272,25 @@ async function saveAccountUsername() {
         currentUsername = data.username;
         document.getElementById('currentUser').textContent = currentUsername;
         toast('Username changed to ' + currentUsername, 'success');
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function saveAccountName() {
+    const body = {
+        first_name: document.getElementById('accFirstName').value.trim(),
+        last_name: document.getElementById('accLastName').value.trim(),
+    };
+    try {
+        const resp = await fetch(API + '/auth/me/name', {
+            method: 'PUT',
+            headers: authHeaders(),
+            body: JSON.stringify(body),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) { toast('Error: ' + (data.error || resp.status), 'error'); return; }
+        toast('Name updated', 'success');
     } catch (e) {
         toast('Failed: ' + e.message, 'error');
     }
@@ -4327,6 +4411,8 @@ async function loadUsers() {
 function showAddUserModal() {
     document.getElementById('newUsername').value = '';
     document.getElementById('newUserEmail').value = '';
+    document.getElementById('newUserFirstName').value = '';
+    document.getElementById('newUserLastName').value = '';
     document.getElementById('newPassword').value = '';
     document.getElementById('newUserRole').value = 'user';
     // Only an owner may create another owner.
@@ -4356,11 +4442,15 @@ function toggleUserRow(username) {
     renderUsers();
 }
 
+function fullNameOf(u) {
+    return ((u.first_name || '') + ' ' + (u.last_name || '')).trim();
+}
+
 function filteredUsers() {
     const q = (document.getElementById('userSearch').value || '').trim().toLowerCase();
     if (!q) return allUsers;
     return allUsers.filter(u => {
-        const hay = u.username + ' ' + (u.email || '') + ' ' + u.role + ' ' +
+        const hay = u.username + ' ' + fullNameOf(u) + ' ' + (u.email || '') + ' ' + u.role + ' ' +
             (u.licenses || []).map(l => l.product + ' ' + l.license_key).join(' ');
         return hay.toLowerCase().includes(q);
     });
@@ -4380,7 +4470,6 @@ function renderUsers() {
         tbody.innerHTML = '<tr><td colspan="6" style="color:var(--text2);">No matching users.</td></tr>';
         return;
     }
-    const isOwner = roleIsOwner(userRole);
     tbody.innerHTML = shown.map(u => {
         const isSelf = u.username === currentUsername;
         let status;
@@ -4396,11 +4485,6 @@ function renderUsers() {
             ? '<span style="color:var(--green);">Subscribed</span>'
             : '<span style="color:var(--text2);">Not subscribed</span>';
         const roleBadge = '<span class="badge">' + esc(u.role || 'user') + '</span>';
-        // esc(JSON.stringify(x)) is HTML-safe for both the " and ' in the
-        // inline onclick attribute. A bare JSON.stringify would break the
-        // attribute quoting, which silently stopped the Edit action from
-        // firing when dispatched from the dropdown.
-        const emailArg = u.email ? esc(JSON.stringify(u.email)) : "''";
         // Resend appears for any user still on must_change_password=1 and
         // with an email on file - covers both pending and expired-invite cases.
         const canResend = !isSelf && u.must_change_password && u.email;
@@ -4410,49 +4494,25 @@ function renderUsers() {
             ? '<button onclick="resendInvitation(\'' + uname + '\')">' +
               (u.pending_invitation ? 'Resend invite' : 'Send invite') + '</button>'
             : '';
-        const targetIsOwner = u.role === 'owner';
-        // Administering an owner is owner-only server-side; offering these to
-        // an admin would only produce a 403.
-        const roleItem = (targetIsOwner && !isOwner) ? ''
-            : (roleIsAdmin(u.role)
-                ? '<button onclick="setUserRole(\'' + uname + '\',\'user\')">Revoke admin</button>'
-                : '<button onclick="setUserRole(\'' + uname + '\',\'admin\')">Make admin</button>');
-        const ownerItem = !isOwner ? ''
-            : (targetIsOwner
-                ? '<button onclick="setUserRole(\'' + uname + '\',\'admin\')">Revoke owner</button>'
-                : '<button onclick="setUserRole(\'' + uname + '\',\'owner\')">Make owner</button>');
-        const emailItem = '<button onclick="setUserEmail(\'' + uname + '\',' + emailArg + ')">' +
-                          (u.email ? 'Edit email' : 'Set email') + '</button>';
-        // Newsletter consent defaults to off, so this is how a list gets built
-        // for users who gave consent outside the portal.
-        const newsletterItem = !isOwner ? ''
-            : '<button onclick="setUserNewsletter(\'' + uname + '\',' +
-              (u.newsletter_opt_in ? 'false' : 'true') + ')">' +
-              (u.newsletter_opt_in ? 'Unsubscribe from newsletter' : 'Subscribe to newsletter') +
-              '</button>';
-        // Self row keeps a reduced Actions menu (rename + email) so admins
-        // can manage their own account without exposing the destructive
-        // items that would lock them out. Self-rename forces a re-login
-        // (the session token is bound to the old name).
+        const editItem = '<button onclick="showEditUserModal(\'' + uname + '\')">Edit user</button>';
+        // Username, name, email, role and newsletter consent are attributes of
+        // the account, so they all live in the Edit dialog. What stays here are
+        // the one-shot operations: sending mail, resetting a password,
+        // deleting. The self row drops the destructive ones - an admin should
+        // not be able to lock themselves out from their own row.
         const actions = isSelf
             ? '<span class="dropdown" onclick="event.stopPropagation();">' +
                 '<button onclick="toggleDropdown(event,\'' + menuId + '\')">Actions &#9662;</button>' +
                 '<div id="' + menuId + '" class="dropdown-menu" style="display:none;">' +
-                  '<button onclick="renameUser(\'' + uname + '\')">Rename</button>' +
-                  emailItem +
-                  newsletterItem +
+                  editItem +
                 '</div>' +
               '</span>'
             : '<span class="dropdown" onclick="event.stopPropagation();">' +
                 '<button onclick="toggleDropdown(event,\'' + menuId + '\')">Actions &#9662;</button>' +
                 '<div id="' + menuId + '" class="dropdown-menu" style="display:none;">' +
-                  '<button onclick="renameUser(\'' + uname + '\')">Rename</button>' +
-                  emailItem +
-                  newsletterItem +
+                  editItem +
                   resendItem +
                   '<button onclick="resetUserPassword(\'' + uname + '\')">Reset password</button>' +
-                  roleItem +
-                  ownerItem +
                   '<div class="divider"></div>' +
                   '<button class="danger" onclick="deleteUser(\'' + uname + '\')">Delete</button>' +
                 '</div>' +
@@ -4462,9 +4522,13 @@ function renderUsers() {
         const emailLine = u.email
             ? '<div class="user-email">' + esc(u.email) + '</div>'
             : '<div class="user-email">(no email)</div>';
+        const fullName = fullNameOf(u);
+        const nameSuffix = fullName
+            ? '<span class="user-realname"> ' + esc(fullName) + '</span>'
+            : '';
         let rows = '<tr class="user-row' + (expanded ? ' expanded' : '') + '" onclick="toggleUserRow(\'' + uname + '\')">' +
             '<td class="col-chev">' + chev + '</td>' +
-            '<td><span class="user-name">' + esc(u.username) + '</span>' + emailLine + '</td>' +
+            '<td><span class="user-name">' + esc(u.username) + '</span>' + nameSuffix + emailLine + '</td>' +
             '<td>' + roleBadge + '</td>' +
             '<td>' + status + '</td>' +
             '<td>' + newsletter + '</td>' +
@@ -4475,6 +4539,7 @@ function renderUsers() {
                 : '<span style="color:var(--text2);">(none)</span>';
             rows += '<tr class="user-detail"><td></td><td colspan="5">' +
                 '<div class="peek-body"><div class="peek-grid">' +
+                    '<div><span class="label">Name</span>' + (fullName ? esc(fullName) : '<span style="color:var(--text2);">(none)</span>') + '</div>' +
                     '<div><span class="label">Email</span>' + (u.email ? esc(u.email) : '<span style="color:var(--text2);">(none)</span>') + '</div>' +
                     '<div><span class="label">Licenses</span>' + licDetail + '</div>' +
                     '<div><span class="label">2FA</span>' + tfa + '</div>' +
@@ -4501,7 +4566,11 @@ async function createUser() {
         return;
     }
 
-    const body = { username, email, role };
+    const body = {
+        username, email, role,
+        first_name: document.getElementById('newUserFirstName').value.trim(),
+        last_name: document.getElementById('newUserLastName').value.trim(),
+    };
     if (password) body.password = password;
     try {
         const resp = await fetch(API + '/auth/users', {
@@ -4517,6 +4586,8 @@ async function createUser() {
         const data = await resp.json();
         document.getElementById('newUsername').value = '';
         document.getElementById('newUserEmail').value = '';
+        document.getElementById('newUserFirstName').value = '';
+        document.getElementById('newUserLastName').value = '';
         document.getElementById('newPassword').value = '';
         document.getElementById('newUserRole').value = 'user';
         closeAddUserModal();
@@ -4543,33 +4614,6 @@ async function resendInvitation(username) {
             return;
         }
         toast('Invitation sent to ' + username, 'success');
-        await loadUsers();
-    } catch (e) {
-        toast('Failed: ' + e.message, 'error');
-    }
-}
-
-async function renameUser(username) {
-    const newName = prompt('New username for "' + username + '":');
-    if (!newName || !newName.trim()) return;
-    try {
-        const resp = await fetch(API + '/auth/users/' + encodeURIComponent(username) + '/rename', {
-            method: 'POST',
-            headers: authHeaders(),
-            body: JSON.stringify({ new_username: newName.trim() }),
-        });
-        const data = await resp.json();
-        if (!resp.ok) {
-            toast('Error: ' + data.error, 'error');
-            return;
-        }
-        if (data.self_renamed) {
-            // The session token is bound to the old username - start over.
-            toast('Username changed to "' + newName.trim() + '" - sign in again', 'success');
-            logout();
-            return;
-        }
-        toast('User renamed to "' + newName.trim() + '"', 'success');
         await loadUsers();
     } catch (e) {
         toast('Failed: ' + e.message, 'error');
@@ -4618,64 +4662,106 @@ async function resetUserPassword(username) {
     }
 }
 
-async function setUserRole(username, role) {
-    const verb = role === 'admin' ? 'Grant admin rights to' : 'Revoke admin rights from';
-    if (!confirm(verb + ' ' + username + '?')) return;
-    try {
-        const resp = await fetch(API + '/auth/users/' + encodeURIComponent(username) + '/role', {
-            method: 'PUT',
-            headers: authHeaders(),
-            body: JSON.stringify({ role }),
-        });
-        if (!resp.ok) {
-            const data = await resp.json();
-            toast('Error: ' + data.error, 'error');
-            return;
-        }
-        toast(role === 'admin' ? username + ' is now an admin' : username + ' is now a user', 'success');
-        await loadUsers();
-    } catch (e) {
-        toast('Failed: ' + e.message, 'error');
-    }
+let editUserOriginal = null;
+
+function showEditUserModal(username) {
+    const u = allUsers.find(x => x.username === username);
+    if (!u) return;
+    editUserOriginal = u;
+    document.getElementById('editUserUsername').value = u.username;
+    document.getElementById('editUserFirstName').value = u.first_name || '';
+    document.getElementById('editUserLastName').value = u.last_name || '';
+    document.getElementById('editUserEmail').value = u.email || '';
+    document.getElementById('editUserRole').value = u.role || 'user';
+    document.getElementById('editUserNewsletter').checked = !!u.newsletter_opt_in;
+    // Role and newsletter carry gates the server enforces anyway; hiding the
+    // controls that would only ever 403 keeps the dialog honest. Nobody
+    // changes their own role, and administering an owner is owner-only.
+    const isOwner = roleIsOwner(userRole);
+    const isSelf = u.username === currentUsername;
+    document.getElementById('editUserRoleOwner').style.display = isOwner ? '' : 'none';
+    document.getElementById('editUserRoleRow').style.display =
+        (isSelf || (u.role === 'owner' && !isOwner)) ? 'none' : '';
+    // Restore 'flex' rather than '' - blanking it drops the inline layout and
+    // the label falls onto its own line.
+    document.getElementById('editUserNewsletterRow').style.display = isOwner ? 'flex' : 'none';
+    document.getElementById('editUserModal').classList.add('visible');
+    setTimeout(() => document.getElementById('editUserFirstName').focus(), 50);
 }
 
-async function setUserNewsletter(username, optIn) {
-    try {
-        const resp = await fetch(API + '/auth/users/' + encodeURIComponent(username) + '/newsletter', {
+function closeEditUserModal() {
+    document.getElementById('editUserModal').classList.remove('visible');
+    editUserOriginal = null;
+}
+
+// Each edited attribute has its own endpoint, so a save is a short sequence of
+// calls. The rename goes first - everything after it addresses the new name.
+async function saveUserProfile() {
+    const before = editUserOriginal;
+    if (!before) return;
+    const newName = document.getElementById('editUserUsername').value.trim();
+    if (!newName) { toast('Username cannot be empty', 'error'); return; }
+
+    // Encode the username only - encoding "name/profile" as one unit escapes
+    // the slash and the request lands on the wrong route.
+    const put = async (user, suffix, body) => {
+        const resp = await fetch(API + '/auth/users/' + encodeURIComponent(user) + '/' + suffix, {
             method: 'PUT',
             headers: authHeaders(),
-            body: JSON.stringify({ opt_in: optIn }),
+            body: JSON.stringify(body),
         });
         if (!resp.ok) {
             const data = await resp.json().catch(() => ({}));
-            toast('Error: ' + (data.error || resp.status), 'error');
-            return;
+            throw new Error(data.error || resp.status);
         }
-        toast(optIn ? username + ' subscribed to the newsletter' : username + ' unsubscribed', 'success');
-        await loadUsers();
-    } catch (e) {
-        toast('Failed: ' + e.message, 'error');
-    }
-}
+        return resp.json().catch(() => ({}));
+    };
 
-async function setUserEmail(username, current) {
-    const val = prompt('Email for "' + username + '" (empty to clear):', current || '');
-    if (val === null) return;
     try {
-        const resp = await fetch(API + '/auth/users/' + encodeURIComponent(username) + '/email', {
-            method: 'PUT',
-            headers: authHeaders(),
-            body: JSON.stringify({ email: val.trim() }),
+        let target = before.username;
+        let selfRenamed = false;
+        if (newName !== before.username) {
+            const resp = await fetch(API + '/auth/users/' + encodeURIComponent(target) + '/rename', {
+                method: 'POST',
+                headers: authHeaders(),
+                body: JSON.stringify({ new_username: newName }),
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok) { toast('Error: ' + (data.error || resp.status), 'error'); return; }
+            target = newName;
+            selfRenamed = !!data.self_renamed;
+        }
+
+        await put(target, 'profile', {
+            first_name: document.getElementById('editUserFirstName').value.trim(),
+            last_name: document.getElementById('editUserLastName').value.trim(),
+            email: document.getElementById('editUserEmail').value.trim(),
         });
-        if (!resp.ok) {
-            const data = await resp.json();
-            toast('Error: ' + data.error, 'error');
+
+        const roleRow = document.getElementById('editUserRoleRow');
+        const role = document.getElementById('editUserRole').value;
+        if (roleRow.style.display !== 'none' && role !== before.role) {
+            await put(target, 'role', { role });
+        }
+
+        const newsRow = document.getElementById('editUserNewsletterRow');
+        const optIn = document.getElementById('editUserNewsletter').checked;
+        if (newsRow.style.display !== 'none' && optIn !== !!before.newsletter_opt_in) {
+            await put(target, 'newsletter', { opt_in: optIn });
+        }
+
+        closeEditUserModal();
+        if (selfRenamed) {
+            // The session token is bound to the old username - start over.
+            toast('Username changed to "' + newName + '" - sign in again', 'success');
+            logout();
             return;
         }
-        toast('Email updated for "' + username + '"', 'success');
+        toast('User updated', 'success');
         await loadUsers();
     } catch (e) {
-        toast('Failed: ' + e.message, 'error');
+        toast('Error: ' + e.message, 'error');
+        await loadUsers();
     }
 }
 
@@ -5458,9 +5544,15 @@ function toggleDropdown(event, id) {
     m.style.top = top + 'px';
     m.style.visibility = '';
 }
-document.addEventListener('click', () => {
+function closeAllDropdowns() {
     document.querySelectorAll('.dropdown-menu').forEach(el => { el.style.display = 'none'; });
-});
+}
+document.addEventListener('click', closeAllDropdowns);
+// A menu item that navigates (the editor link) leaves its dropdown open, and
+// the back/forward cache restores the DOM verbatim - so Back would land on a
+// still-open menu. Close on the way out, and again on a restore.
+window.addEventListener('pagehide', closeAllDropdowns);
+window.addEventListener('pageshow', (e) => { if (e.persisted) closeAllDropdowns(); });
 
 // ---------------------------------------------------------------------------
 // Workspace files: flat member-writable file share
@@ -7471,7 +7563,7 @@ function renderWebsitePagesTable() {
             +   '<span class="dropdown" onclick="event.stopPropagation();">'
             +     '<button onclick="toggleDropdown(event,\'' + menuId + '\')">Actions &#9662;</button>'
             +     '<div id="' + menuId + '" class="dropdown-menu" style="display:none;">'
-            +       '<a href="' + escHtml(editUrl) + '" target="_blank" rel="noopener">Open editor ↗</a>'
+            +       '<a href="' + escHtml(editUrl) + '">Open editor</a>'
             +       '<button onclick="toggleWebsitePageHidden(' + slugArg + ', ' + (p.hidden ? 'false' : 'true') + ')">' + (p.hidden ? 'Show on site' : 'Hide from site') + '</button>'
             +       '<div class="divider"></div>'
             +       '<button class="danger" onclick="deleteWebsitePage(' + slugArg + ')">Delete</button>'
@@ -7557,9 +7649,8 @@ async function createWebsitePage() {
             return;
         }
         closeWebsitePageModal();
-        await loadWebsitePages();
-        // Open the inline editor in a new tab so the user can write content.
-        window.open('/site/' + encodeURIComponent(slug), '_blank', 'noopener');
+        // Straight into the inline editor to write the content.
+        location.href = '/site/' + encodeURIComponent(slug);
     } catch (e) {
         errEl.textContent = e.message || 'Failed to create page';
         errEl.style.display = '';

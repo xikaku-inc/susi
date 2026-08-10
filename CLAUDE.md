@@ -82,6 +82,10 @@ For multi-step tasks, state a brief plan:
 
 Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
 
+# UI copy (dashboard and public site)
+- No explanatory text in the UI. Don't add a sentence under a form, a dialog, or a setting explaining what it does or where the value shows up. Only add one when I explicitly ask for it.
+- No placeholder hint text inside form inputs. The label already says what the field is. An edit dialog still loads the record's current values - that is the value, not a hint.
+
 # Customer-facing email style (all transactional email from susi)
 - Sign emails with "Xikaku / LP-Research", not "Susi".
 - Refer to the product as "Susi by LP-Research" where the context could otherwise leave a customer thinking Susi is a separate company.

@@ -31,6 +31,8 @@ pub(crate) async fn handle_list_users(
                 "created_at": u.created_at,
                 "email": u.email,
                 "newsletter_opt_in": u.newsletter_opt_in,
+                "first_name": u.first_name,
+                "last_name": u.last_name,
                 "pending_invitation": pending,
                 "licenses": licenses,
             })
@@ -109,6 +111,8 @@ pub(crate) async fn handle_create_user(
         db.create_user(username, &pw_hash, &req.role)
             .map_err(|e| error_response(StatusCode::CONFLICT, &e.to_string()))?;
         db.set_user_email(username, Some(&email))
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+        db.set_user_name(username, &req.first_name, &req.last_name)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
     }
 
@@ -556,6 +560,96 @@ pub(crate) async fn handle_rename_self(
     );
     let token = create_session_jwt(&state, &new, &device_label, client_ip(peer, &headers))?;
     Ok(Json(serde_json::json!({ "status": "OK", "username": new, "token": token })))
+}
+
+/// Self-serve name from the account settings page - the byline a user's own
+/// blog posts carry, so they shouldn't need an admin to fix a typo in it.
+pub(crate) async fn handle_set_my_name(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<SetNameRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    let (first, last) = validate_name(&req.first_name, &req.last_name)?;
+    {
+        let db = state.db.lock();
+        db.set_user_name(&principal.username, &first, &last)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+        audit_db(&db, &principal.username, "user.set_my_name", &principal.username, "");
+    }
+    // Bylines are rendered from the name, so cached post HTML is now stale.
+    crate::website::invalidate_page_cache();
+    Ok(Json(serde_json::json!({
+        "status": "OK", "first_name": first, "last_name": last,
+    })))
+}
+
+/// Name + email in one call, backing the admin Edit User dialog.
+pub(crate) async fn handle_set_user_profile(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(username): Path<String>,
+    Json(req): Json<SetProfileRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    require_admin_full(&state, &principal)?;
+    require_owner_for_owner_target(&state, &principal, &username)?;
+
+    let (first, last) = validate_name(&req.first_name, &req.last_name)?;
+    // An absent email means "not editing it" - a name-only update must never
+    // wipe the address the account signs in and receives mail with.
+    let email_edit = match req.email.as_deref() {
+        Some(s) => Some(normalize_email(s)?),
+        None => None,
+    };
+
+    let db = state.db.lock();
+    if !db.user_exists(&username).unwrap_or(false) {
+        return Err(error_response(StatusCode::NOT_FOUND, "User not found"));
+    }
+    // Same one-account-per-address rule as user creation.
+    if let Some(Some(ref email)) = email_edit {
+        if let Some(existing) = db
+            .any_username_by_email(email)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        {
+            if existing != username {
+                return Err(error_response(
+                    StatusCode::CONFLICT,
+                    &format!("A user with this email already exists: {}", existing),
+                ));
+            }
+        }
+    }
+    db.set_user_name(&username, &first, &last)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    if let Some(ref normalized) = email_edit {
+        db.set_user_email(&username, normalized.as_deref())
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    }
+    audit_db(&db, &principal.username, "user.set_profile", &username, "");
+    let email = match email_edit {
+        Some(normalized) => normalized,
+        None => db.get_user_email(&username).ok().flatten(),
+    };
+    drop(db);
+    // Bylines are rendered from the name, so cached post HTML is now stale.
+    crate::website::invalidate_page_cache();
+    Ok(Json(serde_json::json!({
+        "status": "OK", "first_name": first, "last_name": last, "email": email,
+    })))
+}
+
+fn validate_name(
+    first: &str,
+    last: &str,
+) -> Result<(String, String), (StatusCode, Json<ErrorResponse>)> {
+    let first = first.trim().to_string();
+    let last = last.trim().to_string();
+    if first.chars().count() > 64 || last.chars().count() > 64 {
+        return Err(error_response(StatusCode::BAD_REQUEST, "Name must be at most 64 characters"));
+    }
+    Ok((first, last))
 }
 
 pub(crate) async fn handle_set_user_email(
