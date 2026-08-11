@@ -11,13 +11,15 @@ impl LicenseDb {
         name: &str,
         token_hash: &str,
         token_prefix: &str,
+        ttl_days: i64,
     ) -> Result<i64, LicenseError> {
         let now = Utc::now().to_rfc3339();
+        let expires = (Utc::now() + Duration::days(ttl_days)).to_rfc3339();
         self.conn
             .execute(
-                "INSERT INTO api_tokens (username, name, token_hash, token_prefix, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![username, name, token_hash, token_prefix, now],
+                "INSERT INTO api_tokens (username, name, token_hash, token_prefix, created_at, expires_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![username, name, token_hash, token_prefix, now, expires],
             )
             .map_err(|e| LicenseError::Other(format!("DB insert: {}", e)))?;
         Ok(self.conn.last_insert_rowid())
@@ -29,15 +31,17 @@ impl LicenseDb {
         &self,
         token_hash: &str,
     ) -> Result<Option<ApiTokenAuthRow>, LicenseError> {
+        let now = Utc::now().to_rfc3339();
         self.conn
             .query_row(
-                "SELECT id, username, revoked_at FROM api_tokens WHERE token_hash = ?1",
+                "SELECT id, username, revoked_at, expires_at FROM api_tokens WHERE token_hash = ?1",
                 params![token_hash],
                 |r| {
                     Ok(ApiTokenAuthRow {
                         id: r.get(0)?,
                         username: r.get(1)?,
-                        revoked: r.get::<_, Option<String>>(2)?.is_some(),
+                        revoked: r.get::<_, Option<String>>(2)?.is_some()
+                            || r.get::<_, Option<String>>(3)?.is_some_and(|e| e < now),
                     })
                 },
             )
@@ -58,13 +62,14 @@ impl LicenseDb {
             .query_row(
                 "UPDATE api_tokens SET last_used_at = ?1
                  WHERE token_hash = ?2
-                 RETURNING id, username, revoked_at",
+                 RETURNING id, username, revoked_at, expires_at",
                 params![now, token_hash],
                 |r| {
                     Ok(ApiTokenAuthRow {
                         id: r.get(0)?,
                         username: r.get(1)?,
-                        revoked: r.get::<_, Option<String>>(2)?.is_some(),
+                        revoked: r.get::<_, Option<String>>(2)?.is_some()
+                            || r.get::<_, Option<String>>(3)?.is_some_and(|e| e < now),
                     })
                 },
             )
@@ -92,7 +97,7 @@ impl LicenseDb {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, username, name, token_prefix, created_at, last_used_at, revoked_at
+                "SELECT id, username, name, token_prefix, created_at, last_used_at, revoked_at, expires_at
                  FROM api_tokens WHERE username = ?1 ORDER BY created_at DESC",
             )
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
@@ -108,7 +113,7 @@ impl LicenseDb {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, username, name, token_prefix, created_at, last_used_at, revoked_at
+                "SELECT id, username, name, token_prefix, created_at, last_used_at, revoked_at, expires_at
                  FROM api_tokens ORDER BY username, created_at DESC",
             )
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
@@ -132,6 +137,21 @@ impl LicenseDb {
             )
             .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))?;
         Ok(n > 0)
+    }
+
+    /// Revoke every live API token of a user. Called on password change and
+    /// reset: those events must invalidate everything the old credential ever
+    /// minted, not only the session JWTs.
+    pub fn revoke_api_tokens_for_user(&self, username: &str) -> Result<usize, LicenseError> {
+        let now = Utc::now().to_rfc3339();
+        let n = self
+            .conn
+            .execute(
+                "UPDATE api_tokens SET revoked_at = ?1 WHERE username = ?2 AND revoked_at IS NULL",
+                params![now, username],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))?;
+        Ok(n)
     }
 
     /// Look up just the owning username - used for permission checks (e.g.
@@ -205,9 +225,7 @@ impl LicenseDb {
                 .map(|_| ())
                 .map_err(|e| LicenseError::Other(format!("DB delete: {}", e)))
         };
-        // Per-user rows go with the account. Attribution columns (revision
-        // authors, recording uploaders, page editors) deliberately stay as
-        // historical record.
+        // Per-user rows go with the account.
         run("DELETE FROM users WHERE username = ?1")?;
         run("DELETE FROM license_users WHERE username = ?1")?;
         run("DELETE FROM workspace_members WHERE username = ?1")?;
@@ -216,6 +234,24 @@ impl LicenseDb {
         run("DELETE FROM login_tokens WHERE username = ?1")?;
         run("DELETE FROM totp_backup_codes WHERE username = ?1")?;
         run("DELETE FROM api_tokens WHERE username = ?1")?;
+        // Erasure (GDPR Art 17): usernames can be email addresses, so every
+        // column still holding one is scrubbed rather than kept as history.
+        // Newsletter delivery rows keep their per-issue counts but lose the
+        // address; the unique(issue_id, email) key needs a distinct filler.
+        run("UPDATE newsletter_deliveries SET email = 'deleted-' || id, username = '' WHERE username = ?1")?;
+        run("UPDATE audit_log SET actor = '[deleted]' WHERE actor = ?1")?;
+        run("UPDATE audit_log SET target = '[deleted]' WHERE target = ?1")?;
+        run("UPDATE workspace_tickets SET author = '[deleted]' WHERE author = ?1")?;
+        run("UPDATE workspace_ticket_comments SET author = '[deleted]' WHERE author = ?1")?;
+        run("UPDATE website_pages SET author_username = '' WHERE author_username = ?1")?;
+        run("UPDATE website_page_revisions SET author = '[deleted]' WHERE author = ?1")?;
+        run("UPDATE config_revisions SET author = '[deleted]' WHERE author = ?1")?;
+        run("UPDATE workspace_graphs SET updated_by = '[deleted]' WHERE updated_by = ?1")?;
+        run("UPDATE workspace_peers SET registered_by = '[deleted]' WHERE registered_by = ?1")?;
+        run("UPDATE workspace_recordings SET author = '[deleted]' WHERE author = ?1")?;
+        run("UPDATE workspace_files SET author = '[deleted]' WHERE author = ?1")?;
+        run("UPDATE workspaces SET created_by = '' WHERE created_by = ?1")?;
+        run("UPDATE newsletter_issues SET created_by = '[deleted]' WHERE created_by = ?1")?;
         Ok(())
     }
 
@@ -360,6 +396,7 @@ impl LicenseDb {
         let _ = self
             .conn
             .execute("DELETE FROM sessions WHERE username = ?1", params![username]);
+        let _ = self.revoke_api_tokens_for_user(username);
         Ok(())
     }
 

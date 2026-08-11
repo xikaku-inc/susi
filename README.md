@@ -551,7 +551,7 @@ susi-server \
   --listen 0.0.0.0:3100
 ```
 
-On first run, the server creates an `admin` user with password `changeme`. Open the dashboard in your browser to log in and manage users.
+On first run, the server creates an `admin` user with a random one-time password printed once to the server log. Open the dashboard in your browser to log in and manage users.
 
 The remainder of this section documents the licensing API specifically. See [Workspaces](#workspaces--config-revisions), [Releases](#releases), [Documentation Knowledge Base](#documentation-knowledge-base), [Public Website](#public-website), [Shop](#shop), and [Public Contact Form](#public-contact-form) for the other modules.
 
@@ -583,7 +583,7 @@ The server includes a built-in web dashboard at the root URL (`http://localhost:
 
 The server uses JWT-based authentication with multi-user support. Each team member gets their own account with independent credentials and optional 2FA.
 
-**Default credentials** - on first run, the server seeds an `admin` user with password `changeme`. This must be changed on first login.
+**Default credentials** - on first run, the server seeds an `admin` user with a random one-time password printed once to the server log. This must be changed on first login.
 
 #### Auth Endpoints
 
@@ -1070,7 +1070,7 @@ The script will:
 2. Generate a **4096-bit RSA keypair** if none exists in the data volume
 3. Build the Docker image and start the container
 
-On first run, the server creates an `admin` user with password `changeme`. Log in at `http://<YOUR_INSTANCE_IP>:3100/` and change the password immediately.
+On first run, the server creates an `admin` user with a random one-time password printed once to the server log (`docker compose logs`). Log in at `http://<YOUR_INSTANCE_IP>:3100/` and change the password immediately.
 
 ### 3a. Configure environment variables
 
@@ -1312,7 +1312,7 @@ becomes a per-box limit.
 | Public website | `http://<IP>:3100/site` |
 | Documentation | `http://<IP>:3100/docs` |
 | Shop | `http://<IP>:3100/shop` |
-| Default login | `admin` / `changeme` (must change on first login) |
+| Default login | `admin` / random one-time password from the server log (must change on first login) |
 | Logs | `docker compose logs -f` in `/opt/susi` |
 | Health check | `GET http://<IP>:3100/health` |
 

@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::{
-    extract::{Multipart, Path, Query, State},
+    extract::{Multipart, Path, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
     Json,
@@ -367,28 +367,19 @@ pub async fn handle_get_doc_page_p(
     get_doc_page_impl(&state, &product, &tag, &slug).await
 }
 
-#[derive(Deserialize)]
-pub struct AssetAuthQuery {
-    /// Bearer token passed via query string. Browser <img> and <a href>
-    /// requests can't set an Authorization header, so workspace-scoped doc
-    /// images and file downloads need this fallback. Identical validation
-    /// path as the header form.
-    #[serde(default)]
-    auth: Option<String>,
-}
-
-/// Clone the request headers, promoting a `?auth=` query token into an
-/// Authorization header when none is present.
-pub(crate) fn headers_with_query_auth(headers: &HeaderMap, q: &AssetAuthQuery) -> HeaderMap {
-    let mut auth_headers = headers.clone();
-    if !auth_headers.contains_key("authorization") {
-        if let Some(tok) = q.auth.as_deref().filter(|s| !s.is_empty()) {
-            if let Ok(v) = HeaderValue::from_str(&format!("Bearer {}", tok)) {
-                auth_headers.insert("authorization", v);
-            }
-        }
-    }
-    auth_headers
+/// Build an `attachment` Content-Disposition for `file_name` that can never
+/// panic or smuggle header syntax: quotes and backslashes are escaped, control
+/// bytes dropped, and a non-ASCII name falls back to a generic filename (the
+/// upload validators only admit ASCII names anyway).
+pub(crate) fn content_disposition_attachment(file_name: &str) -> HeaderValue {
+    let cleaned: String = file_name
+        .chars()
+        .filter(|c| c.is_ascii() && !c.is_ascii_control())
+        .map(|c| if c == '"' || c == '\\' { '_' } else { c })
+        .collect();
+    let name = if cleaned.is_empty() { "download" } else { &cleaned };
+    HeaderValue::from_str(&format!("attachment; filename=\"{}\"", name))
+        .unwrap_or_else(|_| HeaderValue::from_static("attachment; filename=\"download\""))
 }
 
 async fn get_doc_asset_impl(
@@ -1082,12 +1073,11 @@ pub async fn handle_ws_upload_doc_asset(
 pub async fn handle_ws_get_doc_asset(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Query(q): Query<AssetAuthQuery>,
     Path((workspace_id, file_name)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    // Browser <img> loads can't set an Authorization header; accept ?auth=.
-    let auth_headers = headers_with_query_auth(&headers, &q);
-    ws_member_check(&state, &auth_headers, &workspace_id)?;
+    // Header auth only. The docs shell fetches these with the Authorization
+    // header and swaps in blob URLs - no JWT in the query string.
+    ws_member_check(&state, &headers, &workspace_id)?;
     safe_workspace_id(&workspace_id)?;
     safe_filename(&file_name)?;
 

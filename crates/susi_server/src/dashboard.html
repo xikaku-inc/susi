@@ -2554,6 +2554,13 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                     Sign-in codes, password resets and other account email are sent regardless of this setting.
                 </p>
             </div>
+            <div class="acc-section">
+                <h3>Your data</h3>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                    <button class="secondary" style="width:auto;" onclick="downloadAccountData()">Download my data</button>
+                    <button class="secondary" style="width:auto;color:#e2615e;" onclick="deleteAccount()">Delete account</button>
+                </div>
+            </div>
         </div>
         <div class="form-actions">
             <button class="secondary" onclick="closeAccountModal()">Close</button>
@@ -3254,6 +3261,37 @@ async function saveAccountNewsletter() {
     }
 }
 
+async function downloadAccountData() {
+    try {
+        const resp = await fetch(API + '/auth/me/export', { headers: authHeaders() });
+        if (!resp.ok) { const d = await resp.json().catch(() => ({})); toast('Error: ' + (d.error || resp.status), 'error'); return; }
+        const blob = await resp.blob();
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'susi-data-export.json';
+        a.click();
+        URL.revokeObjectURL(a.href);
+    } catch (e) { toast('Failed: ' + e.message, 'error'); }
+}
+
+async function deleteAccount() {
+    if (!confirm('Delete your account and all associated data? This cannot be undone.')) return;
+    const pw = prompt('Enter your password to confirm deletion:');
+    if (!pw) return;
+    try {
+        const resp = await fetch(API + '/auth/me', {
+            method: 'DELETE',
+            headers: authHeaders(),
+            body: JSON.stringify({ password: pw }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) { toast('Error: ' + (data.error || resp.status), 'error'); return; }
+        closeAccountModal();
+        toast('Account deleted', 'success');
+        logout();
+    } catch (e) { toast('Failed: ' + e.message, 'error'); }
+}
+
 async function saveAccountUsername() {
     const name = document.getElementById('accUsername').value.trim();
     if (!name) { toast('Username cannot be empty', 'error'); return; }
@@ -3416,6 +3454,10 @@ function enterDashboard() {
 }
 
 function logout() {
+    // Revoke the session server-side so the JWT dies now, not at expiry.
+    if (authToken) {
+        fetch(API + '/auth/logout', { method: 'POST', headers: { 'Authorization': 'Bearer ' + authToken } }).catch(() => {});
+    }
     authToken = '';
     currentUsername = '';
     userRole = '';
@@ -4785,6 +4827,7 @@ function closeApiTokensModal() {
 
 function fmtTokenStatus(t) {
     if (t.revoked_at) return '<span class="pat-revoked">Revoked</span>';
+    if (t.expires_at && new Date(t.expires_at) < new Date()) return '<span class="pat-revoked">Expired</span>';
     return '<span class="pat-active">Active</span>';
 }
 function fmtTokenDate(s) {
@@ -5643,13 +5686,17 @@ function uploadWsFiles(fileList) {
     xhr.send(formData);
 }
 
-function downloadWsFile(name) {
+async function downloadWsFile(name) {
     if (!selectedWsId) return;
-    // <a>-style navigation can't carry the Authorization header; pass the JWT
-    // via ?auth= (same fallback the doc asset endpoint uses).
-    const url = API + '/workspaces/' + encodeURIComponent(selectedWsId) + '/files/' + encodeURIComponent(name)
-        + '?auth=' + encodeURIComponent(authToken);
-    window.open(url, '_blank');
+    // <a>-style navigation can't carry the Authorization header; mint a
+    // short-lived single-file ticket instead of putting the JWT in the URL.
+    const base = API + '/workspaces/' + encodeURIComponent(selectedWsId) + '/files/' + encodeURIComponent(name);
+    try {
+        const resp = await fetch(base + '/ticket', { method: 'POST', headers: authHeaders() });
+        if (!resp.ok) { toast('Download failed', 'error'); return; }
+        const d = await resp.json();
+        window.open(base + '?ticket=' + encodeURIComponent(d.ticket), '_blank');
+    } catch (e) { toast('Download failed: ' + e.message, 'error'); }
 }
 
 async function deleteWsFile(name) {

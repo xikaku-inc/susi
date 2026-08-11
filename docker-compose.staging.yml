@@ -59,8 +59,15 @@ services:
       - SUSI_DROPBOX_APP_SECRET=${SUSI_DROPBOX_APP_SECRET:-}
       - SUSI_BACKUP_KEY=${SUSI_BACKUP_KEY:-}
       - SUSI_BACKUP_PREFIX=staging
+      - SUSI_TRUSTED_PROXIES=${SUSI_TRUSTED_PROXIES:-}
     volumes:
       - susi-data-staging:/data
+    # Same log cap as production - stdout must not accumulate indefinitely.
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3100/health"]
       interval: 30s

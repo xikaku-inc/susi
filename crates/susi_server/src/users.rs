@@ -293,6 +293,32 @@ pub(crate) async fn handle_create_api_token(
         return Err(error_response(StatusCode::FORBIDDEN, "API tokens can only be managed from a browser session"));
     }
 
+    // A PAT carries the account's full authority while bypassing the
+    // interactive gates, so it may only be minted once the account itself
+    // satisfies them: password changed, and 2FA enabled for admin accounts.
+    // Without this, the seeded must-change-password owner could mint a PAT
+    // and reach every admin endpoint past both gates.
+    let row = {
+        let db = state.db.lock();
+        db.get_user_admin_check(&principal.username)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+    };
+    let Some((role, must_change, totp_enabled)) = row else {
+        return Err(error_response(StatusCode::UNAUTHORIZED, "Unknown user"));
+    };
+    if must_change {
+        return Err(error_response(
+            StatusCode::FORBIDDEN,
+            "Password change required before creating API tokens",
+        ));
+    }
+    if is_admin_role(&role) && !totp_enabled {
+        return Err(error_response(
+            StatusCode::FORBIDDEN,
+            "Admin accounts must enable two-factor authentication before creating API tokens",
+        ));
+    }
+
     let name = req.name.trim();
     if name.is_empty() || name.len() > 80 {
         return Err(error_response(StatusCode::BAD_REQUEST, "Name must be 1-80 characters"));
@@ -306,7 +332,7 @@ pub(crate) async fn handle_create_api_token(
 
     let id = {
         let db = state.db.lock();
-        db.insert_api_token(&principal.username, name, &token_hash, &prefix)
+        db.insert_api_token(&principal.username, name, &token_hash, &prefix, API_TOKEN_TTL_DAYS)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
     };
 
@@ -761,4 +787,143 @@ pub(crate) async fn handle_revoke_other_sessions(
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
     };
     Ok(Json(serde_json::json!({ "status": "OK", "revoked": revoked })))
+}
+
+/// Subject-access export (GDPR Art 15 / Art 20): every row the account can
+/// be tied to, as one JSON document.
+pub(crate) async fn handle_export_my_data(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<impl axum::response::IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    let u = &principal.username;
+
+    let db = state.db.lock();
+    let email = db.get_user_email(u).ok().flatten();
+    let (first_name, last_name) = db.get_user_name(u).unwrap_or_default();
+    let role = db.get_user_role(u).unwrap_or_default();
+    let totp_enabled = db.user_totp_enabled(u).unwrap_or(false);
+    let newsletter_opt_in = db.get_user_newsletter_opt_in(u).unwrap_or(false);
+    let devices = db.list_devices(u).unwrap_or_default();
+    let sessions = db.list_sessions(u, SESSION_JWT_TTL_DAYS).unwrap_or_default();
+    let api_tokens = db.list_api_tokens_for_user(u).unwrap_or_default();
+    let licenses: Vec<serde_json::Value> = db
+        .list_licenses_for_user(u)
+        .unwrap_or_default()
+        .iter()
+        .map(|l| {
+            serde_json::json!({
+                "license_key": l.license_key,
+                "product": l.product,
+                "customer": l.customer,
+                "created": l.created.to_rfc3339(),
+            })
+        })
+        .collect();
+    let newsletter_deliveries: Vec<serde_json::Value> = db
+        .list_newsletter_deliveries_for_user(u)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(issue_id, status, sent_at)| {
+            serde_json::json!({ "issue_id": issue_id, "status": status, "sent_at": sent_at })
+        })
+        .collect();
+    let audit = db.list_audit_for_user(u).unwrap_or_default();
+    let orders: Vec<serde_json::Value> = email
+        .as_deref()
+        .map(|e| db.list_order_summaries_by_email(e).unwrap_or_default())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(id, created_at, o_email, o_name, cents, currency, status)| {
+            serde_json::json!({
+                "id": id, "created_at": created_at, "customer_email": o_email,
+                "customer_name": o_name, "amount_total_cents": cents,
+                "currency": currency, "status": status,
+            })
+        })
+        .collect();
+    drop(db);
+
+    let body = serde_json::json!({
+        "exported_at": Utc::now().to_rfc3339(),
+        "account": {
+            "username": u,
+            "email": email,
+            "first_name": first_name,
+            "last_name": last_name,
+            "role": role,
+            "totp_enabled": totp_enabled,
+            "newsletter_opt_in": newsletter_opt_in,
+        },
+        "known_devices": devices,
+        "active_sessions": sessions,
+        "api_tokens": api_tokens,
+        "licenses": licenses,
+        "newsletter_deliveries": newsletter_deliveries,
+        "audit_log_entries": audit,
+        "shop_orders": orders,
+    });
+    let json = serde_json::to_string_pretty(&body)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (header::CONTENT_DISPOSITION, "attachment; filename=\"susi-data-export.json\""),
+        ],
+        json,
+    ))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct DeleteMeRequest {
+    #[serde(default)]
+    password: String,
+}
+
+/// Self-serve account deletion (GDPR Art 17). Password-confirmed so a stolen
+/// session alone cannot erase the account. Runs the same cascade + scrub as
+/// the admin delete.
+pub(crate) async fn handle_delete_me(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<DeleteMeRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    if principal.source != AuthSource::Jwt {
+        return Err(error_response(
+            StatusCode::FORBIDDEN,
+            "Account deletion requires a browser session",
+        ));
+    }
+
+    let (hash, role) = {
+        let db = state.db.lock();
+        let hash = db
+            .get_user_password_hash(&principal.username)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+        let role = db.get_user_role(&principal.username).unwrap_or_default();
+        (hash, role)
+    };
+    if !verify_password(&req.password, &hash).await? {
+        return Err(error_response(StatusCode::UNAUTHORIZED, "Password is incorrect"));
+    }
+    // The last owner deleting themselves would orphan the instance.
+    if is_owner_role(&role) {
+        let owners = { state.db.lock().count_owners().unwrap_or(0) };
+        if owners <= 1 {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                "The last owner account cannot delete itself",
+            ));
+        }
+    }
+
+    {
+        let db = state.db.lock();
+        db.delete_user(&principal.username)
+            .map_err(|e| error_response(StatusCode::BAD_REQUEST, &e.to_string()))?;
+        audit_db(&db, "[deleted]", "user.delete_self", "[deleted]", "");
+    }
+    api_token_cache_clear();
+    Ok(Json(serde_json::json!({ "status": "OK" })))
 }

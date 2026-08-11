@@ -84,10 +84,12 @@ impl LicenseDb {
             )
             .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))?;
         // The token_version bump just revoked every outstanding JWT - drop
-        // their now-dead session rows.
+        // their now-dead session rows. API tokens go too: a password change
+        // must invalidate everything the old credential minted.
         let _ = self
             .conn
             .execute("DELETE FROM sessions WHERE username = ?1", params![username]);
+        let _ = self.revoke_api_tokens_for_user(username);
         Ok(())
     }
 
@@ -363,6 +365,21 @@ impl LicenseDb {
             .optional()
             .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?;
         Ok(name.filter(|n| !n.is_empty()))
+    }
+
+    /// TOTP replay protection: accept `step` only when it is strictly newer
+    /// than the last accepted timestep. Returns false when the step was
+    /// already used (replay) or the user doesn't exist.
+    pub fn try_advance_totp_step(&self, username: &str, step: i64) -> Result<bool, LicenseError> {
+        let n = self
+            .conn
+            .execute(
+                "UPDATE users SET totp_last_step = ?1
+                 WHERE username = ?2 AND totp_last_step < ?1",
+                params![step, username],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))?;
+        Ok(n > 0)
     }
 
     pub fn set_user_email(&self, username: &str, email: Option<&str>) -> Result<(), LicenseError> {

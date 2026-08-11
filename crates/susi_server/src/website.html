@@ -138,6 +138,16 @@ body {
 .layout.no-toc { grid-template-columns: var(--sidebar-width) 1fr; }
 .layout.no-toc .toc-rail { display: none; }
 .layout.no-sidebar.no-toc { grid-template-columns: 1fr; }
+.site-footer {
+    display: flex;
+    gap: 20px;
+    justify-content: center;
+    padding: 18px 16px;
+    border-top: 1px solid var(--border);
+    font-size: 13px;
+}
+.site-footer a { color: var(--text2); text-decoration: none; }
+.site-footer a:hover { color: var(--text1); }
 .sidebar {
     border-right: 1px solid var(--border);
     background: var(--bg);
@@ -696,6 +706,11 @@ body {
     <aside class="toc-rail" id="tocRail" aria-label="On this page"></aside>
 </div>
 
+<footer class="site-footer">
+    <a href="/privacy" data-site-link="/privacy">Privacy Policy</a>
+    <a href="/imprint" data-site-link="/imprint">Imprint</a>
+</footer>
+
 <div id="navOverlay" class="nav-overlay" onclick="closeSidebar()"></div>
 
 <div id="toast" class="toast"></div>
@@ -783,6 +798,10 @@ function pageHref(slug) {
     return SITE_PATH_PREFIX + prefix + encodeURIComponent(slug);
 }
 function siteRootHref() { return SITE_PATH_PREFIX || '/'; }
+// Footer links carry clean paths; prefix them on non-canonical hosts.
+document.querySelectorAll('.site-footer a[data-site-link]').forEach(a => {
+    a.href = SITE_PATH_PREFIX + a.getAttribute('data-site-link');
+});
 // Send a visitor to a retired page's replacement. Mirrors the server's 301
 // target rules: full URL, site-root path, or a bare slug.
 function followRedirect(target) {
@@ -856,6 +875,10 @@ function updateAdminChrome() {
 }
 
 function logoutFromSite() {
+    const t = localStorage.getItem('auth_token');
+    if (t) {
+        fetch(API + '/auth/logout', { method: 'POST', headers: { 'Authorization': 'Bearer ' + t } }).catch(() => {});
+    }
     localStorage.removeItem('auth_token');
     isAdmin = false;
     location.reload();

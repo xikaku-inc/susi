@@ -173,7 +173,9 @@ pub async fn handle_submit(
         ));
     }
 
-    log::info!("Contact form delivered from {} / {} <{}> (ip {})", name, company, email, ip);
+    // No PII in the log line - name/company/email live in the delivered mail,
+    // and container logs have no retention story for personal data.
+    log::info!("Contact form submission delivered");
     Ok(Json(json!({ "status": "ok" })))
 }
 

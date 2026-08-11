@@ -54,4 +54,38 @@ impl LicenseDb {
             .collect();
         Ok(rows)
     }
+
+    /// Retention: drop audit entries older than `max_age_days`.
+    pub fn purge_audit_log(&self, max_age_days: i64) -> Result<usize, LicenseError> {
+        let cutoff = (Utc::now() - Duration::days(max_age_days)).to_rfc3339();
+        self.conn
+            .execute("DELETE FROM audit_log WHERE at < ?1", params![cutoff])
+            .map_err(|e| LicenseError::Other(format!("DB delete: {}", e)))
+    }
+
+    /// Every audit entry a user appears in, for the subject-access export.
+    pub fn list_audit_for_user(&self, username: &str) -> Result<Vec<AuditRow>, LicenseError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, at, actor, action, target, details FROM audit_log
+                 WHERE actor = ?1 OR target = ?1 ORDER BY id",
+            )
+            .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
+        let rows: Vec<AuditRow> = stmt
+            .query_map(params![username], |r| {
+                Ok(AuditRow {
+                    id: r.get(0)?,
+                    at: r.get(1)?,
+                    actor: r.get(2)?,
+                    action: r.get(3)?,
+                    target: r.get(4)?,
+                    details: r.get(5)?,
+                })
+            })
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
 }

@@ -41,7 +41,9 @@ pub(crate) async fn handle_login(
         let totp_enabled = db.user_totp_enabled(&username).unwrap_or(false);
         let email = db.get_user_email(&username).ok().flatten();
         let device_known = !req.device_fp.is_empty()
-            && db.is_device_known(&username, &req.device_fp).unwrap_or(false);
+            && db
+                .is_device_known(&username, &req.device_fp, DEVICE_TRUST_DAYS)
+                .unwrap_or(false);
         (username, hash, must_change, role, totp_enabled, email, device_known)
     };
     // Per-account lockout, checked before the (expensive) password verify so
@@ -99,7 +101,7 @@ pub(crate) async fn handle_login(
 
             // Recorded only once the code is genuinely on its way, so a failed
             // send leaves no orphaned login token behind.
-            let token_hash = hash_signin_code(&username, &code);
+            let token_hash = hash_signin_code(&state.jwt_secret, &username, &code);
             {
                 let db = state.db.lock();
                 let _ = db.purge_old_login_tokens();
@@ -150,8 +152,11 @@ pub(crate) async fn handle_login(
         );
     }
 
-    // Phase 3 - TOTP. Only enforced on new devices when enabled.
-    if totp_enabled && !device_known {
+    // Phase 3 - TOTP. Always enforced when enabled: a known device only skips
+    // the emailed sign-in code, never the second factor. Without this, the
+    // client-supplied device fingerprint (a localStorage UUID) would reduce
+    // an admin login to password-only.
+    if totp_enabled {
         match &req.totp_code {
             None => {
                 return Ok(Json(serde_json::json!({
@@ -218,7 +223,7 @@ pub(crate) async fn handle_signin_code_exchange(
     };
     check_signin_guess_limit(&state, &username)?;
     check_account_lockout(&state, &username)?;
-    let token_hash = hash_signin_code(&username, &code);
+    let token_hash = hash_signin_code(&state.jwt_secret, &username, &code);
 
     // Peek first so we can surface a TOTP prompt without consuming the
     // code. Consuming on the first call would leave a TOTP-enabled user
@@ -327,7 +332,7 @@ pub(crate) async fn handle_request_signin_code(
     };
 
     let code = random_signin_code();
-    let token_hash = hash_signin_code(&username, &code);
+    let token_hash = hash_signin_code(&state.jwt_secret, &username, &code);
     {
         let db = state.db.lock();
         let _ = db.purge_old_login_tokens();
@@ -409,6 +414,21 @@ pub(crate) async fn handle_magic_login(
     })))
 }
 
+/// Server-side logout: revoke the session row so the JWT dies now, not at
+/// its 30-day expiry. Only needs a structurally valid JWT - revoking an
+/// already-revoked session is a no-op, not an error.
+pub(crate) async fn handle_logout(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let claims = validate_jwt(&headers, &state.jwt_secret)?;
+    {
+        let db = state.db.lock();
+        let _ = db.revoke_session_by_jti(&claims.sub, &claims.jti);
+    }
+    Ok(Json(serde_json::json!({ "status": "OK" })))
+}
+
 pub(crate) async fn handle_auth_status(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -466,6 +486,9 @@ pub(crate) async fn handle_change_password(
         db.update_user_password(&principal.username, &new_hash)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
     }
+    // The change also revoked the account's API tokens - flush the auth
+    // cache so they stop working now, not after the cache TTL.
+    api_token_cache_clear();
 
     // The password change bumped token_version, revoking every outstanding
     // session (including this one) - hand back a fresh token so the caller
@@ -560,6 +583,7 @@ pub(crate) async fn handle_reset_password_submit(
     headers: HeaderMap,
     Json(req): Json<ResetPasswordSubmitRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    check_login_rate_limit(&state, client_ip(peer, &headers))?;
     if req.new_password.len() < 8 {
         return Err(error_response(StatusCode::BAD_REQUEST, "Password must be at least 8 characters"));
     }
@@ -610,6 +634,20 @@ pub(crate) async fn handle_setup_2fa(
     let principal = validate_principal(&headers, &state)?;
     require_password_changed(&state, &principal)?;
 
+    // Starting setup replaces the stored secret, so on an account with 2FA
+    // already active this would be a session-level downgrade: a stolen JWT
+    // could silently swap the authenticator. Require an explicit disable
+    // (which demands a current TOTP code) first.
+    {
+        let db = state.db.lock();
+        if db.user_totp_enabled(&principal.username).unwrap_or(false) {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                "Two-factor authentication is already enabled - disable it first",
+            ));
+        }
+    }
+
     let secret_bytes: [u8; 20] = rand::thread_rng().gen();
     let secret = Secret::Raw(secret_bytes.to_vec());
     let secret_b32 = secret.to_encoded().to_string();
@@ -657,6 +695,7 @@ pub(crate) async fn handle_verify_2fa(
     if !totp.check_current(&req.totp_code).unwrap_or(false) {
         return Err(error_response(StatusCode::BAD_REQUEST, "Invalid TOTP code"));
     }
+    consume_totp_step(&db, &principal.username)?;
 
     db.enable_user_totp(&principal.username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
@@ -709,6 +748,7 @@ pub(crate) async fn handle_disable_2fa(
     if !totp.check_current(&req.totp_code).unwrap_or(false) {
         return Err(error_response(StatusCode::UNAUTHORIZED, "Invalid TOTP code"));
     }
+    consume_totp_step(&db, &principal.username)?;
 
     db.disable_user_totp(&principal.username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;

@@ -137,6 +137,9 @@ impl TestServer {
             .arg("--db").arg(&db_path)
             .arg("--listen").arg(format!("127.0.0.1:{}", port))
             .arg("--data-dir").arg(dir.path());
+        // Production seeds a random one-time admin password; pin it so the
+        // harness can log in deterministically.
+        cmd.env("SUSI_SEED_ADMIN_PASSWORD", "changeme");
         for (k, v) in envs {
             cmd.env(k, v);
         }
@@ -558,6 +561,7 @@ fn test_fallback_to_cached_file() {
         .arg("--db").arg(&db_path)
         .arg("--listen").arg(format!("127.0.0.1:{}", port))
         .arg("--data-dir").arg(dir.path())
+        .env("SUSI_SEED_ADMIN_PASSWORD", "changeme")
         .spawn()
         .unwrap();
 
@@ -636,16 +640,43 @@ fn test_fallback_to_cached_file() {
 /// - **macOS**: `codesign -s "Susi Test Code Signing" --force <test-binary>`
 #[test]
 fn test_require_signed_binary_enforcement() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use cert_helpers::{make_ca_and_leaf, CaAndLeaf};
+
+    let machine_code = TEST_MACHINE_CODE;
+
+    // Fail closed: a server with no trusted CA configured must refuse to
+    // activate a license that demands a signed binary - never skip the check.
     let server = TestServer::start();
     let token = server.admin_token();
     let license_key = server.create_license(&token, true);
-
-    // Activate manually to inspect the raw SignedLicense.
-    let machine_code = TEST_MACHINE_CODE;
     let resp = server
         .http()
         .post(format!("{}/activate", server.api_url))
         .json(&json!({"license_key": license_key, "machine_code": machine_code}))
+        .send()
+        .expect("activate without CA");
+    assert_eq!(
+        resp.status().as_u16(),
+        503,
+        "activation without a trusted CA must fail closed: {}",
+        resp.text().unwrap_or_default()
+    );
+
+    // With a trusted CA and a chain that terminates at it, activation
+    // succeeds and the signed payload carries the flag.
+    let CaAndLeaf { ca_pem, leaf_der } = make_ca_and_leaf();
+    let server = TestServer::start_with_trusted_ca(&ca_pem);
+    let token = server.admin_token();
+    let license_key = server.create_license(&token, true);
+    let resp = server
+        .http()
+        .post(format!("{}/activate", server.api_url))
+        .json(&json!({
+            "license_key": license_key,
+            "machine_code": machine_code,
+            "signing_cert_chain": [STANDARD.encode(&leaf_der)],
+        }))
         .send()
         .expect("activate");
     assert!(
@@ -826,6 +857,7 @@ impl TestServer {
             .arg("--listen").arg(format!("127.0.0.1:{}", port))
             .arg("--data-dir").arg(dir.path())
             .arg("--trusted-signing-ca").arg(&ca_path)
+            .env("SUSI_SEED_ADMIN_PASSWORD", "changeme")
             .spawn()
             .expect("spawn susi-server");
 
@@ -2256,6 +2288,29 @@ fn test_rename_user_migrates_everything() {
         .as_str()
         .expect("token")
         .to_string();
+    // Minting a PAT is gated on the forced password change being done.
+    let resp = client
+        .post(format!("{}/auth/api-tokens", server.api_url))
+        .bearer_auth(&user_jwt)
+        .json(&json!({"name": "ci"}))
+        .send()
+        .expect("mint token before password change");
+    assert_eq!(
+        resp.status().as_u16(),
+        403,
+        "must-change-password account cannot mint API tokens"
+    );
+    let user_jwt = client
+        .post(format!("{}/auth/change-password", server.api_url))
+        .bearer_auth(&user_jwt)
+        .json(&json!({"current_password": "oldpass123", "new_password": "oldpass123x"}))
+        .send()
+        .expect("change password")
+        .json::<Value>()
+        .expect("json")["token"]
+        .as_str()
+        .expect("fresh token")
+        .to_string();
     let api_token = client
         .post(format!("{}/auth/api-tokens", server.api_url))
         .bearer_auth(&user_jwt)
@@ -2301,7 +2356,7 @@ fn test_rename_user_migrates_everything() {
     // Fresh login under the new name sees the license.
     let new_jwt = client
         .post(format!("{}/auth/login", server.api_url))
-        .json(&json!({"username": "new_name", "password": "oldpass123"}))
+        .json(&json!({"username": "new_name", "password": "oldpass123x"}))
         .send()
         .expect("relogin")
         .json::<Value>()
@@ -2978,8 +3033,16 @@ fn test_backup_end_to_end() {
         }
         entries.push(path);
     }
-    for expected in ["licenses.db", "private.pem", "db_secret.bin", "jwt_secret.bin"] {
-        assert!(entries.iter().any(|e| e == expected), "missing {} in {:?}", expected, entries);
+    assert!(entries.iter().any(|e| e == "licenses.db"), "missing licenses.db in {:?}", entries);
+    // Key material must NOT ride along with the personal-data DB: one leaked
+    // backup key would otherwise collapse every layer of key separation.
+    for forbidden in ["private.pem", "db_secret.bin", "jwt_secret.bin"] {
+        assert!(
+            !entries.iter().any(|e| e == forbidden),
+            "{} must not be in the archive: {:?}",
+            forbidden,
+            entries
+        );
     }
     assert_eq!(&db_head, b"SQLite format 3\0", "snapshot is not a SQLite db");
 
@@ -3284,7 +3347,8 @@ fn test_workspace_member_docs_and_files() {
     assert_eq!(zip["author"], json!("doc_member"), "author recorded: {}", zip);
 
     // Download returns the exact bytes - both with a bearer header and with
-    // the ?auth= query fallback browsers use for <a href> downloads.
+    // the short-lived ticket browsers use for <a href> downloads. A session
+    // JWT in the query string is no longer accepted (it would leak to logs).
     let dl = client
         .get(format!("{}/workspaces/{}/files/Cube-Test.zip", server.api_url, ws_id))
         .bearer_auth(&member)
@@ -3292,11 +3356,35 @@ fn test_workspace_member_docs_and_files() {
         .expect("download file");
     assert_eq!(dl.status().as_u16(), 200);
     assert_eq!(dl.bytes().expect("bytes").as_ref(), payload.as_slice());
+    let ticket = client
+        .post(format!("{}/workspaces/{}/files/Cube-Test.zip/ticket", server.api_url, ws_id))
+        .bearer_auth(&member)
+        .send()
+        .expect("mint ticket")
+        .json::<Value>()
+        .expect("ticket json")["ticket"]
+        .as_str()
+        .expect("ticket string")
+        .to_string();
+    let dl = client
+        .get(format!("{}/workspaces/{}/files/Cube-Test.zip?ticket={}", server.api_url, ws_id, ticket))
+        .send()
+        .expect("download file via ticket");
+    assert_eq!(dl.status().as_u16(), 200, "ticket download works");
+    // The ticket is bound to its file - it must not open any other one.
+    let resp = client
+        .get(format!("{}/workspaces/{}/files/notes.txt?ticket={}", server.api_url, ws_id, ticket))
+        .send()
+        .expect("ticket for wrong file");
+    assert!(
+        resp.status().is_client_error(),
+        "ticket must not authorize another file"
+    );
     let dl = client
         .get(format!("{}/workspaces/{}/files/Cube-Test.zip?auth={}", server.api_url, ws_id, member))
         .send()
         .expect("download file via query auth");
-    assert_eq!(dl.status().as_u16(), 200, "query-auth download works");
+    assert_eq!(dl.status().as_u16(), 401, "JWT in the query string is rejected");
 
     // Non-members and anonymous callers are denied.
     let resp = client
@@ -3737,9 +3825,12 @@ fn test_website_page_hide_show() {
         assert_eq!(resp.status().as_u16(), 200, "create {}: {}", slug, resp.text().unwrap_or_default());
     }
 
+    // The server seeds the legal pages (privacy, imprint) on first boot;
+    // exclude them so the assertions stay about the pages this test creates.
     let public_slugs = |body: &Value| -> Vec<String> {
         body["pages"].as_array().unwrap().iter()
             .map(|p| p["slug"].as_str().unwrap().to_string())
+            .filter(|s| s != "privacy" && s != "imprint")
             .collect()
     };
 
@@ -3747,7 +3838,12 @@ fn test_website_page_hide_show() {
     let body = http.get(format!("{}/website/pages", server.api_url))
         .send().expect("list").json::<Value>().unwrap();
     assert_eq!(public_slugs(&body), vec!["home", "secret"]);
-    assert!(body["pages"].as_array().unwrap().iter().all(|p| p["hidden"] == json!(false)));
+    assert!(body["pages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|p| p["slug"] != "privacy" && p["slug"] != "imprint")
+        .all(|p| p["hidden"] == json!(false)));
 
     // Hide "secret".
     let resp = http

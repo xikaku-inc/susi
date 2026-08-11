@@ -72,8 +72,18 @@ services:
       - SUSI_DROPBOX_APP_SECRET=${SUSI_DROPBOX_APP_SECRET:-}
       - SUSI_BACKUP_KEY=${SUSI_BACKUP_KEY:-}
       - SUSI_BACKUP_PREFIX=${SUSI_BACKUP_PREFIX:-prod}
+      # CIDRs whose forwarded-IP headers are trusted. Empty = loopback +
+      # private IPv4 (covers the Docker bridge nginx proxies through).
+      - SUSI_TRUSTED_PROXIES=${SUSI_TRUSTED_PROXIES:-}
     volumes:
       - susi-data:/data
+    # Cap container log growth: stdout may carry personal data (request
+    # errors, addresses) and must not accumulate indefinitely.
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3100/health"]
       interval: 30s

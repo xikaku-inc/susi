@@ -270,7 +270,7 @@ pub(crate) fn cli_decrypt(input: &str, output: Option<&str>, hex_key: &str) -> R
 
 fn build_archive(
     data_dir: &Path,
-    private_key_path: &Path,
+    _private_key_path: &Path,
     snapshot: &Path,
     include_releases: bool,
     out: &Path,
@@ -282,16 +282,12 @@ fn build_archive(
     let mut tar = tar::Builder::new(gz);
     tar.append_path_with_name(snapshot, "licenses.db")
         .context("tar: db snapshot")?;
-    if private_key_path.is_file() {
-        tar.append_path_with_name(private_key_path, "private.pem")
-            .context("tar: private key")?;
-    }
-    for name in ["db_secret.bin", "jwt_secret.bin"] {
-        let p = data_dir.join(name);
-        if p.is_file() {
-            tar.append_path_with_name(&p, name).with_context(|| format!("tar: {}", name))?;
-        }
-    }
+    // Deliberately NOT archived: private.pem, db_secret.bin, jwt_secret.bin.
+    // Bundling the at-rest key (which decrypts the TOTP seeds in the DB), the
+    // signing key and the JWT secret next to the personal-data DB would let
+    // one leaked SUSI_BACKUP_KEY collapse every layer of key separation. Keep
+    // an offline copy of those three files when provisioning the host; a
+    // restore needs them from that copy.
     let mut dirs = vec!["docs"];
     if include_releases {
         dirs.push("releases");
@@ -1200,9 +1196,10 @@ mod tests {
             .map(|e| e.unwrap().path().unwrap().to_string_lossy().replace('\\', "/"))
             .collect();
         assert!(names.contains("licenses.db"));
-        assert!(names.contains("private.pem"));
-        assert!(names.contains("db_secret.bin"));
-        assert!(names.contains("jwt_secret.bin"));
+        // Key material must not ride along with the personal-data DB.
+        assert!(!names.contains("private.pem"));
+        assert!(!names.contains("db_secret.bin"));
+        assert!(!names.contains("jwt_secret.bin"));
         assert!(names.contains("docs/page.md"));
         assert!(!names.iter().any(|n| n.starts_with("releases")));
 

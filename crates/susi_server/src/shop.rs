@@ -1414,6 +1414,28 @@ pub async fn handle_delete_shipping_rate(
 // Orders admin (JWT)
 // ---------------------------------------------------------------------------
 
+/// Erasure (GDPR Art 17): delete an order row, e.g. on a customer request.
+pub async fn handle_admin_delete_order(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
+    let p = validate_principal(&headers, &state)?;
+    require_admin_full(&state, &p)?;
+    let removed = {
+        let db = state.db.lock();
+        let removed = db.delete_order(id).map_err(db_err)?;
+        if removed {
+            crate::audit_db(&db, &p.username, "shop.order_delete", &id.to_string(), "");
+        }
+        removed
+    };
+    if !removed {
+        return Err(error_response(StatusCode::NOT_FOUND, "Order not found"));
+    }
+    Ok(Json(json!({ "status": "OK" })))
+}
+
 #[allow(clippy::type_complexity)]
 fn order_to_json(
     row: (i64, String, String, String, String, i64, String, String, String, String, String, String, Option<String>, String),

@@ -641,8 +641,25 @@ pub(crate) async fn handle_register_workspace_peer(
     if req.host_id.trim().is_empty() {
         return Err(error_response(StatusCode::BAD_REQUEST, "host_id is required"));
     }
-    if req.url.trim().is_empty() {
+    // The URL is redistributed to every member's FusionHub, and would become
+    // an SSRF vector the moment anything server-side ever fetches it. Accept
+    // only a parseable ws/wss/http/https URL with a host and no credentials.
+    // Private-range hosts stay allowed - LAN federation is a supported setup.
+    let peer_url = req.url.trim();
+    if peer_url.is_empty() || peer_url.len() > 512 {
         return Err(error_response(StatusCode::BAD_REQUEST, "url is required"));
+    }
+    match url::Url::parse(peer_url) {
+        Ok(u) => {
+            let scheme_ok = matches!(u.scheme(), "ws" | "wss" | "http" | "https");
+            if !scheme_ok || u.host_str().is_none() || !u.username().is_empty() || u.password().is_some() {
+                return Err(error_response(
+                    StatusCode::BAD_REQUEST,
+                    "url must be a ws(s):// or http(s):// URL without credentials",
+                ));
+            }
+        }
+        Err(_) => return Err(error_response(StatusCode::BAD_REQUEST, "url is not a valid URL")),
     }
 
     let db = state.db.lock();
@@ -819,18 +836,46 @@ pub(crate) async fn handle_upload_workspace_files(
     Ok(Json(serde_json::json!({ "status": "OK", "files": names })))
 }
 
+#[derive(serde::Deserialize)]
+pub(crate) struct FileTicketQuery {
+    #[serde(default)]
+    ticket: Option<String>,
+}
+
+/// Mint a short-lived single-file download ticket. Browser `<a href>` clicks
+/// can't attach an Authorization header, and a session JWT in the URL would
+/// leak to access logs, history, and Referer - the 60-second ticket carries
+/// only the right to fetch this one file.
+pub(crate) async fn handle_mint_workspace_file_ticket(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((workspace_id, file_name)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    require_password_changed(&state, &principal)?;
+    assert_workspace_member(&state, &workspace_id, &principal)?;
+    safe_workspace_id(&workspace_id)?;
+    docs::safe_filename(&file_name)?;
+    let ticket = mint_workspace_file_ticket(&state.jwt_secret, &principal.username, &workspace_id, &file_name)?;
+    Ok(Json(serde_json::json!({
+        "ticket": ticket,
+        "expires_in": DOWNLOAD_TICKET_TTL_SECS,
+    })))
+}
+
 pub(crate) async fn handle_download_workspace_file(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path((workspace_id, file_name)): Path<(String, String)>,
-    Query(q): Query<docs::AssetAuthQuery>,
+    Query(q): Query<FileTicketQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    // Browser <a href> downloads can't set an Authorization header, so accept
-    // the JWT via ?auth= as well - same fallback the doc asset endpoint uses.
-    let auth_headers = docs::headers_with_query_auth(&headers, &q);
-    let principal = validate_principal(&auth_headers, &state)?;
-    require_password_changed(&state, &principal)?;
-    assert_workspace_member(&state, &workspace_id, &principal)?;
+    if let Some(ref ticket) = q.ticket {
+        validate_workspace_file_ticket(&state.jwt_secret, ticket, &workspace_id, &file_name)?;
+    } else {
+        let principal = validate_principal(&headers, &state)?;
+        require_password_changed(&state, &principal)?;
+        assert_workspace_member(&state, &workspace_id, &principal)?;
+    }
     safe_workspace_id(&workspace_id)?;
     docs::safe_filename(&file_name)?;
 
@@ -847,7 +892,7 @@ pub(crate) async fn handle_download_workspace_file(
     resp_headers.insert(header::CONTENT_TYPE, "application/octet-stream".parse().unwrap());
     resp_headers.insert(
         header::CONTENT_DISPOSITION,
-        format!("attachment; filename=\"{}\"", file_name).parse().unwrap(),
+        docs::content_disposition_attachment(&file_name),
     );
     resp_headers.insert(header::CONTENT_LENGTH, metadata.len().into());
     let stream = tokio_util::io::ReaderStream::new(file);

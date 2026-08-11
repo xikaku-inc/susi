@@ -209,7 +209,7 @@ pub(crate) async fn handle_download_asset(
     resp_headers.insert(header::CONTENT_TYPE, "application/octet-stream".parse().unwrap());
     resp_headers.insert(
         header::CONTENT_DISPOSITION,
-        format!("attachment; filename=\"{}\"", asset_name).parse().unwrap(),
+        docs::content_disposition_attachment(safe_asset),
     );
     resp_headers.insert(header::CONTENT_LENGTH, metadata.len().into());
 
@@ -483,6 +483,8 @@ pub(crate) async fn handle_update_release(
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
     let product = pq.slug();
+    docs::safe_tag(&tag)?;
+    docs::safe_product(product)?;
 
     let db = state.db.lock();
     let release_id = db
@@ -505,6 +507,8 @@ pub(crate) async fn handle_delete_release(
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
     let product = pq.slug();
+    docs::safe_tag(&tag)?;
+    docs::safe_product(product)?;
 
     let db = state.db.lock();
     if !db.delete_release(product, &tag)
@@ -536,6 +540,7 @@ pub(crate) async fn handle_delete_release_asset(
     docs::safe_tag(&tag)?;
     docs::safe_filename(&file_name)?;
     let product = pq.slug();
+    docs::safe_product(product)?;
 
     let release_id = {
         let db = state.db.lock();
@@ -571,6 +576,7 @@ pub(crate) async fn handle_replace_release_asset(
     docs::safe_tag(&tag)?;
     docs::safe_filename(&old_file_name)?;
     let product = pq.slug();
+    docs::safe_product(product)?;
 
     let mut new_file_name = String::new();
     let mut bytes: Vec<u8> = Vec::new();

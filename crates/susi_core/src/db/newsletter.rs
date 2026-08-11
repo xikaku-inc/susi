@@ -305,6 +305,43 @@ impl LicenseDb {
         Ok(rows)
     }
 
+    /// Retention: scrub address + username off delivery rows of issues sent
+    /// before the cutoff. Row counts stay for campaign history; the unique
+    /// (issue_id, email) key needs a distinct filler.
+    pub fn purge_newsletter_deliveries(&self, max_age_days: i64) -> Result<usize, LicenseError> {
+        let cutoff = (Utc::now() - Duration::days(max_age_days)).to_rfc3339();
+        self.conn
+            .execute(
+                "UPDATE newsletter_deliveries SET email = 'deleted-' || id, username = ''
+                 WHERE email NOT LIKE 'deleted-%'
+                   AND issue_id IN (SELECT id FROM newsletter_issues
+                                    WHERE status = 'sent' AND COALESCE(sent_at, '') != ''
+                                      AND sent_at < ?1)",
+                params![cutoff],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))
+    }
+
+    /// Delivery rows still holding a user's name, for the subject-access export.
+    pub fn list_newsletter_deliveries_for_user(
+        &self,
+        username: &str,
+    ) -> Result<Vec<(i64, String, Option<String>)>, LicenseError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT issue_id, status, sent_at FROM newsletter_deliveries
+                 WHERE username = ?1 ORDER BY issue_id",
+            )
+            .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
+        let rows = stmt
+            .query_map(params![username], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
     /// Materialize the recipient list and flip the issue to `sending`, in one
     /// transaction. Returns the number of delivery rows created.
     ///

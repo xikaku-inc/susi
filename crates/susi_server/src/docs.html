@@ -1026,6 +1026,10 @@ docsMobileMq.addEventListener('change', relocateHeaderControls);
 docsMidMq.addEventListener('change', relocateHeaderControls);
 
 function logoutFromDocs() {
+    const t = localStorage.getItem('auth_token');
+    if (t) {
+        fetch(API + '/auth/logout', { method: 'POST', headers: { 'Authorization': 'Bearer ' + t } }).catch(() => {});
+    }
     localStorage.removeItem('auth_token');
     location.href = '/';
 }
@@ -1123,7 +1127,13 @@ function renderInline(s) {
             if (w) extra += ' width="' + w[1] + '"';
             if (h) extra += ' height="' + h[1] + '"';
         }
-        return '<img alt="' + alt + '" src="' + resolveAssetUrl(url) + '"' + extra + '>';
+        const resolved = resolveAssetUrl(url);
+        // Workspace-gated assets render as a placeholder and are hydrated
+        // with an authenticated fetch after insertion (see hydrateWsImages).
+        if (currentWorkspaceId && !/^(https?:|\/|data:)/.test(url)) {
+            return '<img alt="' + alt + '" src="' + BLANK_GIF + '" data-ws-asset="' + resolved + '"' + extra + '>';
+        }
+        return '<img alt="' + alt + '" src="' + resolved + '"' + extra + '>';
     });
     // Links [text](url)
     out = out.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, text, url) => {
@@ -1136,16 +1146,28 @@ function renderInline(s) {
     return out;
 }
 
+const BLANK_GIF = 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==';
+
 function resolveAssetUrl(url) {
     if (url.startsWith('http') || url.startsWith('/') || url.startsWith('data:')) return url;
     if (!currentWorkspaceId && !currentTag) return url;
-    let assetUrl = assetsBaseUrl() + '/' + encodeURIComponent(url);
-    // Workspace-scoped doc reads require auth, but browser <img> requests don't
-    // send the Authorization header. Pass the JWT via query string for these.
-    if (currentWorkspaceId && authToken()) {
-        assetUrl += '?auth=' + encodeURIComponent(authToken());
-    }
-    return assetUrl;
+    return assetsBaseUrl() + '/' + encodeURIComponent(url);
+}
+
+// Workspace-scoped doc reads require auth, but browser <img> requests can't
+// send the Authorization header and a JWT in the URL would leak to logs and
+// history. Fetch the bytes with the header and swap in a blob URL instead.
+function hydrateWsImages(container) {
+    if (!currentWorkspaceId || !authToken()) return;
+    container.querySelectorAll('img[data-ws-asset]').forEach(async (img) => {
+        try {
+            const r = await fetch(img.getAttribute('data-ws-asset'), {
+                headers: { 'Authorization': 'Bearer ' + authToken() },
+            });
+            if (!r.ok) return;
+            img.src = URL.createObjectURL(await r.blob());
+        } catch (e) {}
+    });
 }
 
 function renderMarkdown(src) {
@@ -1469,6 +1491,7 @@ function renderPage() {
     let html = meta + renderMarkdown(currentPage.body_md || '');
     const { html: withIds, headings } = injectHeadingIds(html);
     c.innerHTML = withIds;
+    hydrateWsImages(c);
     populateInlineToc(c, headings);
     wireContentAnchors(c);
     renderToc(headings);
@@ -1728,8 +1751,12 @@ function initEasyMDE(initialBody) {
 
 /// Render preview using the same renderer as the published view so previews
 /// match exactly (including {width=N height=M} image attributes).
-function easymdePreviewRender(plainText) {
-    return renderMarkdown(plainText);
+function easymdePreviewRender(plainText, preview) {
+    const html = renderMarkdown(plainText);
+    // Workspace-gated images need their authenticated blob fetch; the
+    // preview element is populated asynchronously after this returns.
+    if (preview) setTimeout(() => hydrateWsImages(preview), 0);
+    return html;
 }
 
 /// EasyMDE-compatible image uploader.

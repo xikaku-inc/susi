@@ -23,32 +23,57 @@ impl LicenseDb {
         Ok(())
     }
 
-    /// True when the session exists, belongs to `username`, and isn't
-    /// revoked. Refreshes last_seen as a side effect, throttled to once a
-    /// minute so the auth hot path isn't a write per request.
-    pub fn session_valid(&self, jti: &str, username: &str) -> Result<bool, LicenseError> {
-        let row: Option<(String, Option<String>)> = self
+    /// True when the session exists, belongs to `username`, isn't revoked,
+    /// and has been active within `idle_timeout_days` (inactivity timeout on
+    /// top of the JWT's absolute lifetime). Refreshes last_seen as a side
+    /// effect, throttled to once a minute so the auth hot path isn't a write
+    /// per request.
+    pub fn session_valid(
+        &self,
+        jti: &str,
+        username: &str,
+        idle_timeout_days: i64,
+    ) -> Result<bool, LicenseError> {
+        let row: Option<(String, Option<String>, String)> = self
             .conn
             .query_row(
-                "SELECT username, revoked_at FROM sessions WHERE jti = ?1",
+                "SELECT username, revoked_at, last_seen FROM sessions WHERE jti = ?1",
                 params![jti],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()
             .map_err(|e| LicenseError::Other(format!("DB query session: {}", e)))?;
-        let Some((owner, revoked_at)) = row else {
+        let Some((owner, revoked_at, last_seen)) = row else {
             return Ok(false);
         };
         if owner != username || revoked_at.is_some() {
             return Ok(false);
         }
         let now = Utc::now();
+        let idle_cutoff = (now - Duration::days(idle_timeout_days)).to_rfc3339();
+        if last_seen < idle_cutoff {
+            return Ok(false);
+        }
         let cutoff = (now - Duration::seconds(60)).to_rfc3339();
         let _ = self.conn.execute(
             "UPDATE sessions SET last_seen = ?1 WHERE jti = ?2 AND last_seen < ?3",
             params![now.to_rfc3339(), jti, cutoff],
         );
         Ok(true)
+    }
+
+    /// Server-side logout: revoke the caller's own session by its jti.
+    pub fn revoke_session_by_jti(&self, username: &str, jti: &str) -> Result<bool, LicenseError> {
+        let now = Utc::now().to_rfc3339();
+        let n = self
+            .conn
+            .execute(
+                "UPDATE sessions SET revoked_at = ?1
+                 WHERE jti = ?2 AND username = ?3 AND revoked_at IS NULL",
+                params![now, jti, username],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB update session: {}", e)))?;
+        Ok(n > 0)
     }
 
     /// Active (non-revoked, non-expired) sessions for a user, newest first.

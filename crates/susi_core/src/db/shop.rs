@@ -544,6 +544,60 @@ impl LicenseDb {
         }
     }
 
+    /// Erasure (GDPR Art 17): delete an order row entirely.
+    pub fn delete_order(&self, id: i64) -> Result<bool, LicenseError> {
+        let n = self
+            .conn
+            .execute("DELETE FROM shop_orders WHERE id = ?1", params![id])
+            .map_err(|e| LicenseError::Other(format!("DB delete order: {}", e)))?;
+        Ok(n > 0)
+    }
+
+    /// Retention: strip customer PII (name, email, shipping address) off
+    /// orders older than the cutoff. Amounts and line items stay for
+    /// accounting.
+    pub fn scrub_old_orders(&self, max_age_days: i64) -> Result<usize, LicenseError> {
+        let cutoff = (Utc::now() - Duration::days(max_age_days)).to_rfc3339();
+        self.conn
+            .execute(
+                "UPDATE shop_orders SET customer_email = '', customer_name = '', ship_to_json = '{}'
+                 WHERE created_at < ?1
+                   AND (customer_email != '' OR customer_name != '' OR ship_to_json != '{}')",
+                params![cutoff],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB scrub orders: {}", e)))
+    }
+
+    /// Orders placed with `email`, for the subject-access export.
+    pub fn list_order_summaries_by_email(
+        &self,
+        email: &str,
+    ) -> Result<Vec<(i64, String, String, String, i64, String, String)>, LicenseError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, created_at, customer_email, customer_name, amount_total_cents, currency, status
+                 FROM shop_orders WHERE LOWER(customer_email) = LOWER(?1) ORDER BY id",
+            )
+            .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
+        let rows = stmt
+            .query_map(params![email], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                ))
+            })
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
     /// Mark an order as shipped, recording carrier + tracking number.
     /// Sets shipped_at to the provided RFC3339 timestamp.
     pub fn mark_order_shipped(

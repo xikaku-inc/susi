@@ -91,6 +91,7 @@ pub struct ApiTokenInfo {
     pub created_at: String,
     pub last_used_at: Option<String>,
     pub revoked_at: Option<String>,
+    pub expires_at: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1116,6 +1117,26 @@ impl LicenseDb {
             "ALTER TABLE website_pages ADD COLUMN redirect_to TEXT NOT NULL DEFAULT '';",
         );
 
+        // API tokens expire. Existing rows get a expiry one year from the
+        // migration so long-forgotten bearers age out instead of living forever.
+        if self
+            .conn
+            .execute_batch("ALTER TABLE api_tokens ADD COLUMN expires_at TEXT;")
+            .is_ok()
+        {
+            let backfill = (Utc::now() + Duration::days(365)).to_rfc3339();
+            let _ = self.conn.execute(
+                "UPDATE api_tokens SET expires_at = ?1 WHERE expires_at IS NULL",
+                params![backfill],
+            );
+        }
+
+        // TOTP replay protection: the last accepted 30-second timestep per
+        // user. A code is only accepted for a timestep newer than this.
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE users ADD COLUMN totp_last_step INTEGER NOT NULL DEFAULT 0;",
+        );
+
         // >> Add new migrations as own execute_batch statements here <<
         Ok(())
     }
@@ -1590,6 +1611,7 @@ fn row_to_api_token_info(r: &rusqlite::Row<'_>) -> rusqlite::Result<ApiTokenInfo
         created_at: r.get(4)?,
         last_used_at: r.get(5)?,
         revoked_at: r.get(6)?,
+        expires_at: r.get(7)?,
     })
 }
 
@@ -1797,10 +1819,12 @@ mod tests {
     fn test_known_device_lifecycle() {
         let db = test_db();
         db.seed_admin("hash").unwrap();
-        assert!(!db.is_device_known("admin", "fp1").unwrap());
+        assert!(!db.is_device_known("admin", "fp1", 30).unwrap());
         db.register_device("admin", "fp1", "Chrome / Linux")
             .unwrap();
-        assert!(db.is_device_known("admin", "fp1").unwrap());
+        assert!(db.is_device_known("admin", "fp1", 30).unwrap());
+        // Trust expires: a zero-day window means nothing is fresh enough.
+        assert!(!db.is_device_known("admin", "fp1", 0).unwrap());
 
         // Upsert on repeat - last_seen should update but no duplicate row.
         db.register_device("admin", "fp1", "").unwrap();
@@ -1810,7 +1834,7 @@ mod tests {
 
         // Revoke
         assert!(db.revoke_device("admin", "fp1").unwrap());
-        assert!(!db.is_device_known("admin", "fp1").unwrap());
+        assert!(!db.is_device_known("admin", "fp1", 30).unwrap());
         assert!(!db.revoke_device("admin", "fp1").unwrap());
     }
 
@@ -1864,7 +1888,7 @@ mod tests {
         db.seed_admin("hash").unwrap();
 
         let id = db
-            .insert_api_token("admin", "ci-bot", "h-abcdef", "susi_pat_ab")
+            .insert_api_token("admin", "ci-bot", "h-abcdef", "susi_pat_ab", 365)
             .unwrap();
         let row = db
             .find_api_token_by_hash("h-abcdef")
@@ -1907,7 +1931,7 @@ mod tests {
     fn test_api_token_get_owner() {
         let db = test_db();
         db.seed_admin("hash").unwrap();
-        let id = db.insert_api_token("admin", "x", "h-x", "p-x").unwrap();
+        let id = db.insert_api_token("admin", "x", "h-x", "p-x", 365).unwrap();
         assert_eq!(
             db.get_api_token_owner(id).unwrap().as_deref(),
             Some("admin")

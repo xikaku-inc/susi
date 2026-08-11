@@ -5,16 +5,33 @@ impl LicenseDb {
     // Known devices (trusted-device gate for login)
     // -----------------------------------------------------------------------
 
-    pub fn is_device_known(&self, username: &str, fingerprint: &str) -> Result<bool, LicenseError> {
+    /// Device trust is not permanent: a fingerprint only counts as known when
+    /// it was last seen within `max_age_days`.
+    pub fn is_device_known(
+        &self,
+        username: &str,
+        fingerprint: &str,
+        max_age_days: i64,
+    ) -> Result<bool, LicenseError> {
+        let cutoff = (Utc::now() - Duration::days(max_age_days)).to_rfc3339();
         let count: i64 = self
             .conn
             .query_row(
-                "SELECT COUNT(*) FROM known_devices WHERE username = ?1 AND fingerprint = ?2",
-                params![username, fingerprint],
+                "SELECT COUNT(*) FROM known_devices
+                 WHERE username = ?1 AND fingerprint = ?2 AND last_seen >= ?3",
+                params![username, fingerprint, cutoff],
                 |r| r.get(0),
             )
             .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?;
         Ok(count > 0)
+    }
+
+    /// Retention: drop trusted-device rows not seen within `max_age_days`.
+    pub fn purge_stale_devices(&self, max_age_days: i64) -> Result<usize, LicenseError> {
+        let cutoff = (Utc::now() - Duration::days(max_age_days)).to_rfc3339();
+        self.conn
+            .execute("DELETE FROM known_devices WHERE last_seen < ?1", params![cutoff])
+            .map_err(|e| LicenseError::Other(format!("DB delete: {}", e)))
     }
 
     /// Insert a new trusted-device row, or refresh last_seen + label if it already exists.

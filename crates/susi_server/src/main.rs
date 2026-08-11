@@ -29,7 +29,7 @@ use argon2::{self, Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use argon2::password_hash::SaltString;
 use axum::{
     extract::{ConnectInfo, DefaultBodyLimit, Multipart, Path, Query, State},
-    http::{header, HeaderMap, HeaderValue, StatusCode},
+    http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode},
     response::{Html, IntoResponse},
     routing::{get, post},
     Json, Router,
@@ -255,6 +255,12 @@ struct Cli {
     #[arg(long, env = "SUSI_BACKUP_PREFIX", default_value = "susi")]
     backup_prefix: String,
 
+    /// Comma-separated CIDRs of reverse proxies whose X-Forwarded-For /
+    /// X-Real-IP headers are trusted (e.g. `172.28.0.0/24`). Empty keeps the
+    /// default: loopback plus all IPv4 private ranges.
+    #[arg(long, env = "SUSI_TRUSTED_PROXIES", default_value = "")]
+    trusted_proxies: String,
+
     /// Override Dropbox endpoints (integration tests only).
     #[arg(long, env = "SUSI_DROPBOX_API_BASE", default_value = "https://api.dropboxapi.com", hide = true)]
     dropbox_api_base: String,
@@ -287,6 +293,9 @@ struct AppState {
     /// DER bytes of the trusted code-signing CA cert, if configured.
     trusted_signing_ca: Option<Vec<u8>>,
     login_attempts: Mutex<HashMap<IpAddr, Vec<Instant>>>,
+    /// Per-IP limiter for the unauthenticated license client API
+    /// (activate / verify / deactivate / status).
+    license_attempts: Mutex<HashMap<IpAddr, Vec<Instant>>>,
     /// Per-account wrong-guess timestamps for the emailed sign-in code,
     /// keyed by resolved username (or the raw identifier when unresolvable).
     signin_guesses: Mutex<HashMap<String, Vec<Instant>>>,
@@ -338,9 +347,9 @@ const SIGNIN_CODE_TTL_MINUTES: i64 = 15;
 // (site authors may hotlink), fetches only to self + analytics.
 const SECURITY_CSP: &str = "default-src 'self'; \
     script-src 'self' 'unsafe-inline' https://www.googletagmanager.com https://tagassistant.google.com https://www.googleadservices.com https://googleads.g.doubleclick.net https://www.redditstatic.com https://challenges.cloudflare.com; \
-    style-src 'self' 'unsafe-inline' https://www.googletagmanager.com https://fonts.googleapis.com; \
+    style-src 'self' 'unsafe-inline' https://www.googletagmanager.com; \
     img-src 'self' data: blob: https:; \
-    font-src 'self' data: https://fonts.gstatic.com; \
+    font-src 'self' data:; \
     connect-src 'self' https://*.google-analytics.com https://*.analytics.google.com https://www.googletagmanager.com https://www.googleadservices.com https://*.doubleclick.net https://*.google.com https://*.reddit.com; \
     frame-src 'self' https://www.googletagmanager.com https://www.youtube.com https://player.vimeo.com https://challenges.cloudflare.com https://*.doubleclick.net; \
     object-src 'none'; \
@@ -353,6 +362,34 @@ const SECURITY_CSP: &str = "default-src 'self'; \
 // against weak passwords and caps credential-stuffing throughput.
 const LOGIN_WINDOW: StdDuration = StdDuration::from_secs(60);
 const LOGIN_MAX_ATTEMPTS: usize = 10;
+
+// License client API (activate/verify/deactivate/status): unauthenticated,
+// so cap per-IP throughput. Verify doubles as the lease heartbeat; a whole
+// lab powering on behind one NAT bursts many verifies at once, so the cap is
+// generous - it exists to stop scripted abuse, not legitimate fleets.
+const LICENSE_API_WINDOW: StdDuration = StdDuration::from_secs(60);
+const LICENSE_API_MAX_ATTEMPTS: usize = 60;
+
+// Data-retention windows (GDPR Art 5(1)(e) storage limitation). Enforced by
+// the periodic cleanup task.
+const AUDIT_LOG_RETENTION_DAYS: i64 = 365;
+const KNOWN_DEVICE_RETENTION_DAYS: i64 = 180;
+const NEWSLETTER_DELIVERY_RETENTION_DAYS: i64 = 365;
+// Orders keep amounts and line items for accounting; customer name, email
+// and shipping address are scrubbed once fulfillment disputes are long over.
+const SHOP_ORDER_PII_RETENTION_DAYS: i64 = 3 * 365;
+
+/// Known-device trust window: a fingerprint last seen longer ago than this
+/// counts as a new device again (fresh sign-in code required).
+const DEVICE_TRUST_DAYS: i64 = 30;
+
+/// Sessions idle longer than this are dead even before the JWT's absolute
+/// 30-day expiry (ASVS V3.3 inactivity timeout).
+const SESSION_IDLE_TIMEOUT_DAYS: i64 = 7;
+
+/// API tokens expire after a year; the dashboard shows the date so owners
+/// can rotate in time.
+const API_TOKEN_TTL_DAYS: i64 = 365;
 
 // Per-account cap on sign-in-code guesses. The per-IP login limit alone
 // can't stop a distributed IP pool from brute-forcing a live 6-digit code
@@ -613,6 +650,20 @@ fn check_webhook_rate_limit(
     )
 }
 
+pub(crate) fn check_license_api_rate_limit(
+    state: &AppState,
+    ip: IpAddr,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    check_ip_rate_limit(
+        &state.license_attempts,
+        ip,
+        LICENSE_API_WINDOW,
+        LICENSE_API_MAX_ATTEMPTS,
+        "License API",
+        "Too many requests, try again later",
+    )
+}
+
 // Extract the originating client IP. When the Rust server is fronted by a
 // trusted reverse proxy (nginx on the host, or Docker's bridge gateway) the
 // TCP peer is loopback or RFC1918-private; in that case we consult
@@ -638,9 +689,58 @@ fn client_ip(peer: SocketAddr, headers: &HeaderMap) -> IpAddr {
     peer_ip
 }
 
+/// Trusted reverse-proxy peers, from SUSI_TRUSTED_PROXIES (comma-separated
+/// CIDRs). When set, only loopback + these ranges may supply forwarded-IP
+/// headers - any other RFC1918 peer can no longer forge rate-limit keys.
+/// Unset keeps the historical default (loopback + all IPv4 private ranges,
+/// which covers the Docker bridge).
+static TRUSTED_PROXY_CIDRS: std::sync::OnceLock<Vec<(IpAddr, u8)>> = std::sync::OnceLock::new();
+
+fn parse_cidr_list(raw: &str) -> Vec<(IpAddr, u8)> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| {
+            let (addr, bits) = match s.split_once('/') {
+                Some((a, b)) => (a, b.parse::<u8>().ok()?),
+                None => (s, if s.contains(':') { 128 } else { 32 }),
+            };
+            let ip = addr.parse::<IpAddr>().ok()?;
+            Some((ip, bits))
+        })
+        .collect()
+}
+
+fn cidr_contains(net: IpAddr, prefix: u8, ip: IpAddr) -> bool {
+    match (net, ip) {
+        (IpAddr::V4(n), IpAddr::V4(i)) => {
+            let p = prefix.min(32) as u32;
+            if p == 0 {
+                return true;
+            }
+            let mask = u32::MAX << (32 - p);
+            (u32::from(n) & mask) == (u32::from(i) & mask)
+        }
+        (IpAddr::V6(n), IpAddr::V6(i)) => {
+            let p = prefix.min(128) as u32;
+            if p == 0 {
+                return true;
+            }
+            let mask = u128::MAX << (128 - p);
+            (u128::from(n) & mask) == (u128::from(i) & mask)
+        }
+        _ => false,
+    }
+}
+
 fn is_trusted_proxy_peer(ip: IpAddr) -> bool {
     if ip.is_loopback() {
         return true;
+    }
+    if let Some(cidrs) = TRUSTED_PROXY_CIDRS.get() {
+        if !cidrs.is_empty() {
+            return cidrs.iter().any(|(net, bits)| cidr_contains(*net, *bits, ip));
+        }
     }
     match ip {
         IpAddr::V4(v4) => v4.is_private(),
@@ -977,6 +1077,55 @@ fn validate_download_ticket(
     Ok(claims)
 }
 
+/// Short-lived single-file ticket for workspace file downloads - same idea as
+/// the release download ticket: lets `<a href>` navigation work without a
+/// session JWT in the URL.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct WorkspaceFileTicketClaims {
+    pub(crate) sub: String,
+    pub(crate) workspace_id: String,
+    pub(crate) file: String,
+    pub(crate) aud: String,
+    pub(crate) exp: i64,
+}
+
+pub(crate) const WORKSPACE_FILE_TICKET_AUDIENCE: &str = "workspace-file-download";
+
+pub(crate) fn mint_workspace_file_ticket(
+    secret: &[u8; 32],
+    sub: &str,
+    workspace_id: &str,
+    file: &str,
+) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
+    let claims = WorkspaceFileTicketClaims {
+        sub: sub.into(),
+        workspace_id: workspace_id.into(),
+        file: file.into(),
+        aud: WORKSPACE_FILE_TICKET_AUDIENCE.into(),
+        exp: Utc::now().timestamp() + DOWNLOAD_TICKET_TTL_SECS,
+    };
+    encode(&Header::default(), &claims, &EncodingKey::from_secret(secret))
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))
+}
+
+pub(crate) fn validate_workspace_file_ticket(
+    secret: &[u8; 32],
+    token: &str,
+    expected_workspace: &str,
+    expected_file: &str,
+) -> Result<WorkspaceFileTicketClaims, (StatusCode, Json<ErrorResponse>)> {
+    let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
+    validation.set_audience(&[WORKSPACE_FILE_TICKET_AUDIENCE]);
+    let claims =
+        decode::<WorkspaceFileTicketClaims>(token, &DecodingKey::from_secret(secret), &validation)
+            .map(|d| d.claims)
+            .map_err(|_| error_response(StatusCode::UNAUTHORIZED, "Invalid or expired download ticket"))?;
+    if claims.workspace_id != expected_workspace || claims.file != expected_file {
+        return Err(error_response(StatusCode::FORBIDDEN, "Ticket does not match requested file"));
+    }
+    Ok(claims)
+}
+
 fn validate_jwt(
     headers: &HeaderMap,
     jwt_secret: &[u8; 32],
@@ -1134,13 +1283,80 @@ pub(crate) fn validate_principal(
             return Err(error_response(StatusCode::UNAUTHORIZED, "Session revoked"));
         }
         if !db
-            .session_valid(&claims.jti, &claims.sub)
+            .session_valid(&claims.jti, &claims.sub, SESSION_IDLE_TIMEOUT_DAYS)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         {
             return Err(error_response(StatusCode::UNAUTHORIZED, "Session revoked"));
         }
     }
     Ok(Principal { username: claims.sub, source: AuthSource::Jwt })
+}
+
+/// The explicit public surface of /api/v1: everything else requires a valid
+/// principal at the middleware layer, before any handler runs. GET-only
+/// entries stay GET-only - a write verb on the same path is not public.
+fn is_public_api_route(method: &Method, path: &str) -> bool {
+    let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    // All API routes start with ["api", "v1"].
+    if segs.len() < 3 || segs[0] != "api" || segs[1] != "v1" {
+        // Non-API paths (site shells, static assets, health) are public.
+        return true;
+    }
+    let get = *method == Method::GET;
+    let post = *method == Method::POST;
+    match &segs[2..] {
+        ["features"] => get,
+        ["auth", ep] => {
+            post && matches!(
+                *ep,
+                "login" | "signin-code" | "request-code" | "magic-login"
+                    | "forgot-password" | "reset-password"
+            )
+        }
+        ["activate"] | ["verify"] | ["deactivate"] => post,
+        // License-key / ticket authenticated or intentionally public reads;
+        // each handler enforces its own credential.
+        ["licenses", _, "status"] => get,
+        ["updates", "releases"] => get,
+        ["updates", "download", _, _] => get,
+        ["updates", "download-ticket"] => post,
+        ["indexnow", _] => get,
+        ["newsletter", "unsubscribe"] => get || post,
+        ["newsletter", "google", "callback"] => get,
+        ["website", "pages"] => get,
+        ["website", "pages", _] => get,
+        ["website", "assets", _] => get,
+        ["shop", "products"] | ["shop", "products", _] => get,
+        ["shop", "checkout"] | ["shop", "webhook"] => post,
+        ["contact"] => post,
+        ["contact", "config"] => get,
+        // Public docs viewer (global product docs only - workspace docs are
+        // behind membership).
+        ["products"] => get,
+        ["docs", "releases"] | ["docs", "releases", "latest"] => get,
+        ["docs", _, "pages"] | ["docs", _, "pages", _] => get,
+        ["docs", _, "assets", _] => get,
+        ["products", _, "docs", "releases"] | ["products", _, "docs", "releases", "latest"] => get,
+        ["products", _, "docs", _, "pages"] | ["products", _, "docs", _, "pages", _] => get,
+        ["products", _, "docs", _, "assets", _] => get,
+        // Ticket-authenticated download (the ticket in the query string is
+        // the credential; minting it required a session).
+        ["workspaces", _, "files", _] => get,
+        _ => false,
+    }
+}
+
+async fn enforce_api_auth(
+    State(state): State<Arc<AppState>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    if !is_public_api_route(req.method(), req.uri().path()) {
+        if let Err(e) = validate_principal(req.headers(), &state) {
+            return e.into_response();
+        }
+    }
+    next.run(req).await
 }
 
 /// Combined password-changed + admin-role + admin-2FA gate. Uses one DB
@@ -1356,15 +1572,19 @@ fn random_signin_code() -> String {
 }
 
 // Scope the stored token hash by username so two concurrent users picking
-// the same 6-digit code don't collide in `login_tokens`. The prefix is a
-// domain tag so this can't be confused with `hash_token` digests.
-fn hash_signin_code(username: &str, code: &str) -> String {
-    let mut h = Sha256::new();
-    h.update(b"susi-signin:");
-    h.update(username.as_bytes());
-    h.update(b":");
-    h.update(code.as_bytes());
-    hex::encode(h.finalize())
+// the same 6-digit code don't collide in `login_tokens`. Keyed with the
+// server secret (HMAC): a 6-digit code has only 20 bits of entropy, so an
+// unkeyed digest would let anyone reading the DB or a backup recover a live
+// code in ~10^6 hashes. The prefix is a domain tag so this can't be confused
+// with `hash_token` digests.
+fn hash_signin_code(secret: &[u8; 32], username: &str, code: &str) -> String {
+    use hmac::Mac;
+    let mut mac = hmac::Hmac::<Sha256>::new_from_slice(secret).expect("any key length is valid");
+    mac.update(b"susi-signin:");
+    mac.update(username.as_bytes());
+    mac.update(b":");
+    mac.update(code.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
 }
 
 fn mask_email(addr: &str) -> String {
@@ -1444,6 +1664,27 @@ fn signin_code_disabled(state: &AppState) -> bool {
 }
 
 
+/// Replay protection: a verified TOTP code is only accepted once. The current
+/// 30-second timestep is recorded per user and codes for an already-consumed
+/// timestep are rejected, so a shoulder-surfed or intercepted code is dead
+/// the moment its owner used it. Call ONLY after the code itself verified.
+pub(crate) fn consume_totp_step(
+    db: &LicenseDb,
+    username: &str,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    let step = Utc::now().timestamp() / 30;
+    let fresh = db
+        .try_advance_totp_step(username, step)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    if !fresh {
+        return Err(error_response(
+            StatusCode::UNAUTHORIZED,
+            "This code was already used - wait for the next one",
+        ));
+    }
+    Ok(())
+}
+
 // Check a 6-digit TOTP code only (used by 2FA enable/disable paths where
 // backup codes are not accepted).
 fn verify_totp_code(
@@ -1472,6 +1713,7 @@ fn verify_totp_code(
     if !totp.check_current(code).unwrap_or(false) {
         return Err(error_response(StatusCode::UNAUTHORIZED, "Invalid TOTP code"));
     }
+    consume_totp_step(&db, username)?;
     Ok(())
 }
 
@@ -2638,18 +2880,45 @@ async fn main() -> Result<()> {
     }
     let db = db;
 
-    let default_hash = hash_password("changeme")
-        .await
-        .map_err(|_| anyhow::anyhow!("Failed to hash default password"))?;
-    if db.seed_admin(&default_hash).context("Failed to seed admin")? {
-        log::info!("Default admin user created (password: changeme)");
-    }
-    if db.user_must_change_password("admin").unwrap_or(false) {
-        log::warn!("=== Default admin password is active. Change it at the dashboard! ===");
+    // First boot seeds the initial owner with a RANDOM one-time password,
+    // printed to the log exactly once - there is no static default credential.
+    // SUSI_SEED_ADMIN_PASSWORD overrides the random value (integration tests).
+    {
+        let (seed_password, from_env) = match std::env::var("SUSI_SEED_ADMIN_PASSWORD") {
+            Ok(p) if !p.is_empty() => (p, true),
+            _ => {
+                let mut bytes = [0u8; 12];
+                rand::thread_rng().fill_bytes(&mut bytes);
+                (hex::encode(bytes), false)
+            }
+        };
+        let seed_hash = hash_password(&seed_password)
+            .await
+            .map_err(|_| anyhow::anyhow!("Failed to hash seed password"))?;
+        if db.seed_admin(&seed_hash).context("Failed to seed admin")? {
+            if from_env {
+                log::warn!("=== First boot: created 'admin' owner account with the password from SUSI_SEED_ADMIN_PASSWORD ===");
+            } else {
+                log::warn!(
+                    "=== First boot: created 'admin' owner account with one-time password: {} ===",
+                    seed_password
+                );
+                log::warn!("=== Sign in and change it now - it is stored only as a hash and will not be shown again. ===");
+            }
+        }
     }
 
     let jwt_secret = load_or_create_secret(&cli.data_dir, "jwt_secret.bin", "JWT secret")
         .context("Failed to load or create JWT secret")?;
+
+    // Trusted reverse-proxy ranges for forwarded-IP headers.
+    {
+        let cidrs = parse_cidr_list(&cli.trusted_proxies);
+        if !cidrs.is_empty() {
+            log::info!("Trusting forwarded-IP headers only from: {}", cli.trusted_proxies);
+        }
+        let _ = TRUSTED_PROXY_CIDRS.set(cidrs);
+    }
 
     // Ensure releases asset directory exists
     let releases_dir = std::path::Path::new(&cli.data_dir).join("releases");
@@ -2832,6 +3101,7 @@ async fn main() -> Result<()> {
         data_dir: cli.data_dir,
         trusted_signing_ca,
         login_attempts: Mutex::new(HashMap::new()),
+        license_attempts: Mutex::new(HashMap::new()),
         signin_guesses: Mutex::new(HashMap::new()),
         auth_failures: Mutex::new(HashMap::new()),
         checkout_attempts: Mutex::new(HashMap::new()),
@@ -2904,9 +3174,14 @@ async fn main() -> Result<()> {
     // newsletter SMTP is unconfigured.
     newsletter::spawn_sender(Arc::clone(&state));
 
-    // Periodic session cleanup. Lease-expired machine activations are NOT
-    // deleted anymore - they persist as "seen but stale" history for the
-    // dashboard and simply stop counting toward the seat limit.
+    // Seed the legal pages (privacy policy + imprint) on first boot so the
+    // public site always carries them; an admin can edit the content later.
+    website::seed_legal_pages(&state);
+
+    // Periodic session cleanup + data-retention enforcement (GDPR Art
+    // 5(1)(e)). Lease-expired machine activations are NOT deleted - they
+    // persist as "seen but stale" history for the dashboard and simply stop
+    // counting toward the seat limit.
     {
         let state_bg = Arc::clone(&state);
         tokio::spawn(async move {
@@ -2914,12 +3189,25 @@ async fn main() -> Result<()> {
             tick.tick().await; // skip immediate fire
             loop {
                 tick.tick().await;
-                let stale_sessions = {
+                let (stale_sessions, old_audit, stale_devices, old_deliveries, scrubbed_orders) = {
                     let db = state_bg.db.lock();
-                    db.purge_stale_sessions(SESSION_JWT_TTL_DAYS + 1).unwrap_or(0)
+                    (
+                        db.purge_stale_sessions(SESSION_JWT_TTL_DAYS + 1).unwrap_or(0),
+                        db.purge_audit_log(AUDIT_LOG_RETENTION_DAYS).unwrap_or(0),
+                        db.purge_stale_devices(KNOWN_DEVICE_RETENTION_DAYS).unwrap_or(0),
+                        db.purge_newsletter_deliveries(NEWSLETTER_DELIVERY_RETENTION_DAYS)
+                            .unwrap_or(0),
+                        db.scrub_old_orders(SHOP_ORDER_PII_RETENTION_DAYS).unwrap_or(0),
+                    )
                 };
                 if stale_sessions > 0 {
                     log::info!("Session cleanup: purged {} stale sessions", stale_sessions);
+                }
+                if old_audit + stale_devices + old_deliveries + scrubbed_orders > 0 {
+                    log::info!(
+                        "Retention cleanup: {} audit entries, {} stale devices, {} newsletter deliveries, {} order PII scrubs",
+                        old_audit, stale_devices, old_deliveries, scrubbed_orders
+                    );
                 }
             }
         });
@@ -2973,6 +3261,7 @@ async fn main() -> Result<()> {
         .route("/api/v1/auth/forgot-password", post(auth::handle_forgot_password))
         .route("/api/v1/auth/reset-password", post(auth::handle_reset_password_submit))
         .route("/api/v1/auth/status", get(auth::handle_auth_status))
+        .route("/api/v1/auth/logout", post(auth::handle_logout))
         .route("/api/v1/auth/change-password", post(auth::handle_change_password))
         .route("/api/v1/auth/setup-2fa", post(auth::handle_setup_2fa))
         .route("/api/v1/auth/verify-2fa", post(auth::handle_verify_2fa))
@@ -2982,6 +3271,10 @@ async fn main() -> Result<()> {
         .route("/api/v1/auth/me/name", axum::routing::put(users::handle_set_my_name))
         .route("/api/v1/auth/me/newsletter", axum::routing::put(users::handle_set_my_newsletter))
         .route("/api/v1/auth/me/username", axum::routing::put(users::handle_rename_self))
+        // Data-subject rights: JSON export (Art 15/20) + self-serve account
+        // deletion (Art 17).
+        .route("/api/v1/auth/me/export", get(users::handle_export_my_data))
+        .route("/api/v1/auth/me", axum::routing::delete(users::handle_delete_me))
         .route("/api/v1/auth/me/devices", get(users::handle_list_my_devices))
         .route("/api/v1/auth/me/devices/{fingerprint}", axum::routing::delete(users::handle_revoke_my_device))
         // Active sessions (list / revoke)
@@ -3110,6 +3403,12 @@ async fn main() -> Result<()> {
         .route(
             "/api/v1/workspaces/{id}/files/{file}",
             get(workspaces::handle_download_workspace_file).delete(workspaces::handle_delete_workspace_file),
+        )
+        // Short-lived download ticket so the dashboard can hand the file URL
+        // to the browser's native download UI without a JWT in the URL.
+        .route(
+            "/api/v1/workspaces/{id}/files/{file}/ticket",
+            post(workspaces::handle_mint_workspace_file_ticket),
         )
         // Workspace docs: one flat page tree per workspace, member-writable.
         .route("/api/v1/workspaces/{id}/docs/pages", get(docs::handle_ws_list_doc_pages))
@@ -3289,7 +3588,10 @@ async fn main() -> Result<()> {
         // Orders (JWT) - Stripe is the source of truth for payment, susi
         // tracks fulfillment state on top of it.
         .route("/api/v1/shop/admin/orders", get(shop::handle_admin_list_orders))
-        .route("/api/v1/shop/admin/orders/{id}", get(shop::handle_admin_get_order))
+        .route(
+            "/api/v1/shop/admin/orders/{id}",
+            get(shop::handle_admin_get_order).delete(shop::handle_admin_delete_order),
+        )
         .route("/api/v1/shop/admin/orders/{id}/ship", post(shop::handle_admin_mark_shipped))
         .route("/api/v1/shop/admin/orders/{id}/notes", axum::routing::put(shop::handle_admin_update_order_notes))
         // Shop settings (JWT) - admin notification recipients, customer email
@@ -3319,6 +3621,15 @@ async fn main() -> Result<()> {
         .route("/api/v1/audit", get(handle_list_audit))
         // Cross-workspace ticket list (JWT, admin-only)
         .route("/api/v1/admin/tickets", get(tickets::handle_admin_list_tickets))
+        // Default-deny auth gate for the API surface (ASVS V4.1 single
+        // enforcement point): every /api request needs a valid principal
+        // unless the (method, path) is on the explicit public allow-list.
+        // Handlers keep their own fine-grained checks - this layer only
+        // guarantees a forgotten one fails closed.
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            enforce_api_auth,
+        ))
         // Output security headers on every response. Inline script/style stay
         // allowed (the dashboard/docs/site/shop shells are inline-heavy SPAs);
         // the external allow-list covers Google Analytics, Cloudflare
@@ -3339,6 +3650,16 @@ async fn main() -> Result<()> {
         .layer(SetResponseHeaderLayer::if_not_present(
             header::REFERRER_POLICY,
             HeaderValue::from_static("strict-origin-when-cross-origin"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            HeaderName::from_static("permissions-policy"),
+            HeaderValue::from_static(
+                "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()",
+            ),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            HeaderName::from_static("cross-origin-opener-policy"),
+            HeaderValue::from_static("same-origin"),
         ))
         .with_state(state);
 

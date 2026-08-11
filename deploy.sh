@@ -56,11 +56,15 @@ IMAGE_TAR="/tmp/susi-image.tar.gz"
 
 if $STAGING; then
     COMPOSE_FILE="docker-compose.staging.yml"
+    # Staging holds its own credentials: the lower-trust box must not carry
+    # prod SMTP creds, live Stripe keys, or the prod backup key.
+    ENV_FILE=".env.staging"
     LABEL="staging"
     PORT=3101
     VOLUME_NAME="susi-data-staging"
 else
     COMPOSE_FILE="docker-compose.yml"
+    ENV_FILE=".env"
     LABEL="production"
     PORT=3100
     VOLUME_NAME="susi-data"
@@ -104,14 +108,14 @@ else
         ssh_cmd "cd $REMOTE_DIR && tar xzf -"
 fi
 
-echo "==> Setting up .env file"
+echo "==> Setting up $ENV_FILE file"
 ssh_cmd "
-    if [ ! -f $REMOTE_DIR/.env ]; then
-        touch $REMOTE_DIR/.env
-        chmod 600 $REMOTE_DIR/.env
-        echo 'Created empty .env - add SMTP / Stripe / S3 settings as needed.'
+    if [ ! -f $REMOTE_DIR/$ENV_FILE ]; then
+        touch $REMOTE_DIR/$ENV_FILE
+        chmod 600 $REMOTE_DIR/$ENV_FILE
+        echo 'Created empty $ENV_FILE - add SMTP / Stripe / S3 settings as needed.'
     else
-        echo '.env already exists, keeping it.'
+        echo '$ENV_FILE already exists, keeping it.'
     fi
 "
 
@@ -136,7 +140,7 @@ ssh_cmd "
     gunzip -c /tmp/susi-image.tar.gz | docker load
     rm -f /tmp/susi-image.tar.gz
 
-    docker compose -f $COMPOSE_FILE up -d
+    docker compose --env-file $ENV_FILE -f $COMPOSE_FILE up -d
 
     if [ -f $REMOTE_DIR/_private.pem ]; then
         VOLUME_DIR=\$(docker volume inspect $VOLUME_NAME --format '{{.Mountpoint}}')
@@ -145,7 +149,7 @@ ssh_cmd "
         sudo chown 1000:1000 \$VOLUME_DIR/private.pem \$VOLUME_DIR/public.pem
         rm $REMOTE_DIR/_private.pem $REMOTE_DIR/_public.pem
 
-        docker compose -f $COMPOSE_FILE restart
+        docker compose --env-file $ENV_FILE -f $COMPOSE_FILE restart
         echo 'Keys copied into volume and server restarted.'
     fi
 "

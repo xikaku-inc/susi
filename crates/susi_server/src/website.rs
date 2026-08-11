@@ -737,6 +737,29 @@ pub async fn handle_delete_asset(
 // ---------------------------------------------------------------------------
 
 pub(crate) const WEBSITE_HTML: &str = include_str!("website.html");
+
+/// Seed content for the legal pages (GDPR Art 13/14 transparency + imprint
+/// duty). Inserted once on a database that lacks them; edits via the website
+/// admin stick - the seed never overwrites an existing page.
+const PRIVACY_MD: &str = include_str!("../../../content/privacy.md");
+const IMPRINT_MD: &str = include_str!("../../../content/imprint.md");
+
+pub(crate) fn seed_legal_pages(state: &Arc<AppState>) {
+    for (slug, title, body) in [
+        ("privacy", "Privacy Policy", PRIVACY_MD),
+        ("imprint", "Imprint", IMPRINT_MD),
+    ] {
+        let mut db = state.db.lock();
+        let exists = db.get_website_page(slug).ok().flatten().is_some();
+        if !exists {
+            match db.upsert_website_page(slug, title, body, None, 900, "", "page", "", "", "", None) {
+                Ok(_) => log::info!("Seeded website page '{}'", slug),
+                Err(e) => log::error!("Failed to seed website page '{}': {}", slug, e),
+            }
+        }
+    }
+    invalidate_page_cache();
+}
 const SITE_NAME: &str = "Xikaku";
 const SITE_TAGLINE: &str = "Sight beyond Sight";
 const ORG_LEGAL_NAME: &str = "LP-Research Inc.";
@@ -999,13 +1022,119 @@ fn first_image_url(body_md: &str) -> Option<String> {
     None
 }
 
-/// Rewrite pandoc-style image attribute spans (`![alt](url){width=Npx .class}`)
-/// into raw HTML `<img>` tags so the attributes survive into the SSR body.
+/// A video that the site embeds as a player, recognized from the URL an
+/// author wrote in image syntax. The page renders an iframe; mail clients
+/// strip those, so the newsletter uses the same recognition to fall back to a
+/// poster frame and a link.
+pub(crate) struct VideoRef {
+    /// Canonical watch page, safe to open in any browser.
+    pub(crate) page_url: String,
+    /// oEmbed endpoint that yields the poster frame and title.
+    pub(crate) oembed_url: String,
+}
+
+/// Recognize the URL shapes `videoEmbedSrc` in website.html accepts.
+pub(crate) fn video_ref(url: &str) -> Option<VideoRef> {
+    let u = url.trim();
+    let rest = u.strip_prefix("https://").or_else(|| u.strip_prefix("http://"))?;
+    let rest = rest.strip_prefix("www.").unwrap_or(rest);
+
+    let leading = |s: &str, f: fn(&char) -> bool| -> String { s.chars().take_while(f).collect() };
+    let yt_id = |s: &str| {
+        let id = leading(s, |c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-');
+        (!id.is_empty()).then_some(id)
+    };
+
+    let page = if let Some(p) = rest.strip_prefix("vimeo.com/") {
+        let (path, query) = p.split_once('?').unwrap_or((p, ""));
+        let mut segs = path.split('/');
+        let id = leading(segs.next().unwrap_or(""), |c| c.is_ascii_digit());
+        if id.is_empty() {
+            return None;
+        }
+        // An unlisted video only plays with its hash, given either as a path
+        // segment or as `?h=`.
+        let hash = segs
+            .next()
+            .map(|s| leading(s, |c| c.is_ascii_hexdigit()))
+            .or_else(|| query.split('&').find_map(|kv| kv.strip_prefix("h=")).map(str::to_string))
+            .filter(|h| !h.is_empty());
+        match hash {
+            Some(h) => format!("https://vimeo.com/{}/{}", id, h),
+            None => format!("https://vimeo.com/{}", id),
+        }
+    } else if let Some(p) = rest.strip_prefix("player.vimeo.com/video/") {
+        let id = leading(p, |c| c.is_ascii_digit());
+        if id.is_empty() {
+            return None;
+        }
+        format!("https://vimeo.com/{}", id)
+    } else if let Some(p) = rest.strip_prefix("youtube.com/watch?v=") {
+        format!("https://www.youtube.com/watch?v={}", yt_id(p)?)
+    } else if let Some(p) = rest.strip_prefix("youtu.be/") {
+        format!("https://www.youtube.com/watch?v={}", yt_id(p)?)
+    } else if let Some(p) = rest.strip_prefix("youtube.com/embed/") {
+        format!("https://www.youtube.com/watch?v={}", yt_id(p)?)
+    } else {
+        return None;
+    };
+
+    let oembed = if page.starts_with("https://vimeo.com/") {
+        // `width` sizes the poster; the play-badge variant comes with it.
+        format!("https://vimeo.com/api/oembed.json?url={}&width=1280", query_escape(&page))
+    } else {
+        format!("https://www.youtube.com/oembed?url={}&format=json", query_escape(&page))
+    };
+    Some(VideoRef { page_url: page, oembed_url: oembed })
+}
+
+/// Percent-encode a URL so it can ride inside another URL's query string.
+fn query_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
+}
+
+/// One `![alt](url){attrs}` occurrence parsed out of markdown source.
+pub(crate) struct PandocImage<'a> {
+    pub(crate) alt: &'a str,
+    pub(crate) url: &'a str,
+    pub(crate) width: Option<&'a str>,
+    pub(crate) height: Option<&'a str>,
+    pub(crate) classes: Vec<&'a str>,
+    /// Byte length of the whole occurrence, attribute span included.
+    consumed: usize,
+}
+
+impl PandocImage<'_> {
+    /// No attribute was recognized, so the image is best left as markdown.
+    pub(crate) fn is_plain(&self) -> bool {
+        self.width.is_none() && self.height.is_none() && self.classes.is_empty()
+    }
+
+    /// The image as plain markdown, attribute span dropped.
+    pub(crate) fn markdown(&self) -> String {
+        format!("![{}]({})", self.alt, self.url)
+    }
+}
+
+/// Replace every pandoc-style image attribute span (`![alt](url){width=Npx .class}`)
+/// with whatever `f` returns for it, copying the rest of the source verbatim.
 /// pulldown-cmark doesn't understand pandoc syntax; without this the `{...}`
 /// either rendered as literal text or (when only stripped) dropped classes
 /// like `.logo-light`/`.logo-dark` that the page CSS uses to pick the right
 /// asset for the active theme - causing both logos to flash on load.
-fn rewrite_pandoc_image_attrs(body_md: &str) -> String {
+/// The email renderer shares this so an author sizes an image the same way in
+/// a newsletter as on a page.
+pub(crate) fn rewrite_pandoc_images(
+    body_md: &str,
+    f: &mut dyn FnMut(&PandocImage) -> String,
+) -> String {
     let bytes = body_md.as_bytes();
     let mut out = String::with_capacity(body_md.len());
     let mut i = 0;
@@ -1015,24 +1144,53 @@ fn rewrite_pandoc_image_attrs(body_md: &str) -> String {
             && bytes[i + 1] == b'['
             && (i == 0 || bytes[i - 1] != b'\\')
         {
-            if let Some((consumed, replacement)) = try_rewrite_image_at(&body_md[i..]) {
-                out.push_str(&replacement);
-                i += consumed;
+            if let Some(img) = scan_pandoc_image(&body_md[i..]) {
+                out.push_str(&f(&img));
+                i += img.consumed;
                 continue;
             }
         }
-        out.push(bytes[i] as char);
-        i += 1;
+        // Step by characters, not bytes: `push(byte as char)` would re-encode
+        // every non-ASCII byte as its Latin-1 code point and mangle the text.
+        let ch = body_md[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
     }
     out
 }
 
-/// Try to parse `![alt](url){attrs}?` starting at the beginning of `s`.
-/// Returns (bytes consumed, replacement string) when matched, else None.
-/// When no `{attrs}` follows (or no recognized attrs are present) the
-/// original markdown image syntax is preserved so pulldown-cmark renders
-/// it normally.
-fn try_rewrite_image_at(s: &str) -> Option<(usize, String)> {
+/// Rewrite attribute spans into raw HTML `<img>` tags so the attributes
+/// survive into the SSR body.
+fn rewrite_pandoc_image_attrs(body_md: &str) -> String {
+    rewrite_pandoc_images(body_md, &mut |img| {
+        if img.is_plain() {
+            return img.markdown();
+        }
+        let mut html = format!(
+            r#"<img alt="{}" src="{}""#,
+            html_escape(img.alt),
+            html_escape(img.url),
+        );
+        if let Some(w) = img.width {
+            html.push_str(&format!(r#" width="{}""#, html_escape(w)));
+        }
+        if let Some(h) = img.height {
+            html.push_str(&format!(r#" height="{}""#, html_escape(h)));
+        }
+        if !img.classes.is_empty() {
+            html.push_str(&format!(r#" class="{}""#, html_escape(&img.classes.join(" "))));
+        }
+        html.push('>');
+        html
+    })
+}
+
+/// Try to parse `![alt](url)` with an optional `{attrs}` span at the
+/// beginning of `s`. An image without a span still parses - the newsletter
+/// has to recognize a video target whether or not it was given a size - and
+/// callers that have nothing to change put back `markdown()`, which is
+/// byte-identical to what they matched.
+fn scan_pandoc_image(s: &str) -> Option<PandocImage<'_>> {
     let bytes = s.as_bytes();
     if bytes.len() < 5 || bytes[0] != b'!' || bytes[1] != b'[' {
         return None;
@@ -1056,17 +1214,15 @@ fn try_rewrite_image_at(s: &str) -> Option<(usize, String)> {
     let url = &s[url_start..url_start + url_end_off];
     let mut consumed = url_start + url_end_off + 1;
 
-    if consumed >= bytes.len() || bytes[consumed] != b'{' {
-        return None;
+    let mut attrs = "";
+    if consumed < bytes.len() && bytes[consumed] == b'{' {
+        if let Some(off) = bytes[consumed + 1..].iter().position(|&b| b == b'}' || b == b'\n') {
+            if bytes[consumed + 1 + off] == b'}' {
+                attrs = &s[consumed + 1..consumed + 1 + off];
+                consumed += 1 + off + 1;
+            }
+        }
     }
-    let attrs_off = bytes[consumed + 1..]
-        .iter()
-        .position(|&b| b == b'}' || b == b'\n')?;
-    if bytes[consumed + 1 + attrs_off] != b'}' {
-        return None;
-    }
-    let attrs = &s[consumed + 1..consumed + 1 + attrs_off];
-    consumed += 1 + attrs_off + 1;
 
     let mut classes: Vec<&str> = Vec::new();
     let mut width: Option<&str> = None;
@@ -1086,26 +1242,7 @@ fn try_rewrite_image_at(s: &str) -> Option<(usize, String)> {
         }
     }
 
-    if classes.is_empty() && width.is_none() && height.is_none() {
-        return Some((consumed, format!("![{}]({})", alt, url)));
-    }
-
-    let mut html = format!(
-        r#"<img alt="{}" src="{}""#,
-        html_escape(alt),
-        html_escape(url),
-    );
-    if let Some(w) = width {
-        html.push_str(&format!(r#" width="{}""#, html_escape(w)));
-    }
-    if let Some(h) = height {
-        html.push_str(&format!(r#" height="{}""#, html_escape(h)));
-    }
-    if !classes.is_empty() {
-        html.push_str(&format!(r#" class="{}""#, html_escape(&classes.join(" "))));
-    }
-    html.push('>');
-    Some((consumed, html))
+    Some(PandocImage { alt, url, width, height, classes, consumed })
 }
 
 /// Render markdown body into HTML for SSR injection, with tables, footnotes,
@@ -1800,11 +1937,13 @@ pub fn analytics_head(state: &Arc<AppState>) -> String {
     )
 }
 
-/// Pure renderer behind `analytics_head`. Google mandates a single gtag.js
-/// loader per page, so GA and Google Ads share one loader with one
-/// `gtag('config', ...)` line each. Conversion labels (contact form, shop
-/// purchase) are exposed as `window.__adsConv` for the site JS to fire
-/// `gtag('event', 'conversion', ...)` at the right moments.
+/// Pure renderer behind `analytics_head`. Nothing third-party loads at parse
+/// time: the configured tag IDs are embedded as data and the vendors (gtag.js
+/// for GA + Google Ads, the Reddit pixel) are only injected after the visitor
+/// grants consent via the cookie banner (ePrivacy Art 5(3)). The choice is
+/// stored in localStorage; "decline" keeps the page free of any third-party
+/// request. Conversion labels surface as `window.__adsConv` post-consent, so
+/// the existing conversion-firing site JS needs no changes.
 fn render_analytics_head(
     ga_id: Option<&str>,
     ads_id: Option<&str>,
@@ -1814,47 +1953,88 @@ fn render_analytics_head(
 ) -> String {
     let ga_id = ga_id.filter(|s| is_valid_analytics_id(s));
     let ads_id = ads_id.filter(|s| is_valid_analytics_id(s));
-    let mut out = String::new();
-    if let Some(loader_id) = ga_id.or(ads_id) {
-        out.push_str(&format!(
-            "<link rel=\"preconnect\" href=\"https://www.googletagmanager.com\" crossorigin>\n\
-             <!-- Google tag (gtag.js) -->\n\
-             <script async src=\"https://www.googletagmanager.com/gtag/js?id={loader_id}\"></script>\n\
-             <script>\n\
-             window.dataLayer = window.dataLayer || [];\n\
-             function gtag(){{dataLayer.push(arguments);}}\n\
-             gtag('js', new Date());\n",
-        ));
-        if let Some(id) = ga_id {
-            out.push_str(&format!("gtag('config', '{id}');\n"));
-        }
-        if let Some(id) = ads_id {
-            out.push_str(&format!("gtag('config', '{id}');\n"));
-            let mut conv = Vec::new();
-            if let Some(l) = ads_contact.filter(|s| is_valid_analytics_id(s)) {
-                conv.push(format!("contact:'{id}/{l}'"));
-            }
-            if let Some(l) = ads_purchase.filter(|s| is_valid_analytics_id(s)) {
-                conv.push(format!("purchase:'{id}/{l}'"));
-            }
-            if !conv.is_empty() {
-                out.push_str(&format!("window.__adsConv = {{{}}};\n", conv.join(",")));
-            }
-        }
-        out.push_str("</script>\n");
+    let reddit_id = reddit_id.filter(|s| is_valid_analytics_id(s));
+    if ga_id.is_none() && ads_id.is_none() && reddit_id.is_none() {
+        // No trackers configured - no third-party requests, no banner needed.
+        return String::new();
     }
-    if let Some(id) = reddit_id.filter(|s| is_valid_analytics_id(s)) {
-        out.push_str(&format!(
-            "<!-- Reddit Pixel -->\n\
-             <script>\n\
-             !function(w,d){{if(!w.rdt){{var p=w.rdt=function(){{p.sendEvent?p.sendEvent.apply(p,arguments):p.callQueue.push(arguments)}};p.callQueue=[];var t=d.createElement(\"script\");t.src=\"https://www.redditstatic.com/ads/pixel.js\",t.async=!0;var s=d.getElementsByTagName(\"script\")[0];s.parentNode.insertBefore(t,s)}}}}(window,document);\n\
-             rdt('init','{id}');\n\
-             rdt('track','PageVisit');\n\
-             </script>\n",
-            id = id,
-        ));
+
+    let mut cfg = Vec::new();
+    if let Some(id) = ga_id {
+        cfg.push(format!("ga:'{id}'"));
     }
-    out
+    if let Some(id) = ads_id {
+        cfg.push(format!("ads:'{id}'"));
+        let mut conv = Vec::new();
+        if let Some(l) = ads_contact.filter(|s| is_valid_analytics_id(s)) {
+            conv.push(format!("contact:'{id}/{l}'"));
+        }
+        if let Some(l) = ads_purchase.filter(|s| is_valid_analytics_id(s)) {
+            conv.push(format!("purchase:'{id}/{l}'"));
+        }
+        if !conv.is_empty() {
+            cfg.push(format!("conv:{{{}}}", conv.join(",")));
+        }
+    }
+    if let Some(id) = reddit_id {
+        cfg.push(format!("reddit:'{id}'"));
+    }
+
+    format!(
+        "<!-- Analytics: consent-gated, loads nothing until accepted -->\n\
+<script>\n\
+(function() {{\n\
+var cfg = {{{cfg}}};\n\
+function loadVendors() {{\n\
+  if (cfg.ga || cfg.ads) {{\n\
+    var s = document.createElement('script');\n\
+    s.async = true;\n\
+    s.src = 'https://www.googletagmanager.com/gtag/js?id=' + (cfg.ga || cfg.ads);\n\
+    document.head.appendChild(s);\n\
+    window.dataLayer = window.dataLayer || [];\n\
+    window.gtag = function() {{ dataLayer.push(arguments); }};\n\
+    gtag('js', new Date());\n\
+    if (cfg.ga) gtag('config', cfg.ga);\n\
+    if (cfg.ads) {{ gtag('config', cfg.ads); if (cfg.conv) window.__adsConv = cfg.conv; }}\n\
+  }}\n\
+  if (cfg.reddit) {{\n\
+    !function(w,d){{if(!w.rdt){{var p=w.rdt=function(){{p.sendEvent?p.sendEvent.apply(p,arguments):p.callQueue.push(arguments)}};p.callQueue=[];var t=d.createElement(\"script\");t.src=\"https://www.redditstatic.com/ads/pixel.js\",t.async=!0;var s=d.getElementsByTagName(\"script\")[0];s.parentNode.insertBefore(t,s)}}}}(window,document);\n\
+    rdt('init', cfg.reddit);\n\
+    rdt('track', 'PageVisit');\n\
+  }}\n\
+}}\n\
+window.__applyConsent = function(granted) {{\n\
+  try {{ localStorage.setItem('cookie_consent', granted ? 'accepted' : 'declined'); }} catch (e) {{}}\n\
+  var b = document.getElementById('cookieConsent');\n\
+  if (b) b.remove();\n\
+  if (granted) loadVendors();\n\
+}};\n\
+function showBanner() {{\n\
+  if (document.getElementById('cookieConsent')) return;\n\
+  var prefix = (location.host === 'xikaku.com' || location.host === 'www.xikaku.com') ? '' : '/site';\n\
+  var b = document.createElement('div');\n\
+  b.id = 'cookieConsent';\n\
+  b.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:9999;display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:center;padding:14px 16px;background:var(--bg2,#161922);border-top:1px solid var(--border,#262b38);color:var(--text1,#e6e8ec);font-size:14px;';\n\
+  b.innerHTML = '<span>We use cookies for analytics and advertising. See our <a href=\"' + prefix + '/privacy\" style=\"color:var(--accent,#6aa9ff)\">privacy policy</a>.</span>'\n\
+    + '<span style=\"display:flex;gap:8px\">'\n\
+    + '<button id=\"ccDecline\" style=\"padding:6px 14px;border-radius:6px;border:1px solid var(--border,#262b38);background:transparent;color:inherit;cursor:pointer\">Decline</button>'\n\
+    + '<button id=\"ccAccept\" style=\"padding:6px 14px;border-radius:6px;border:0;background:var(--accent,#6aa9ff);color:#0b1020;cursor:pointer\">Accept</button>'\n\
+    + '</span>';\n\
+  document.body.appendChild(b);\n\
+  document.getElementById('ccAccept').onclick = function() {{ window.__applyConsent(true); }};\n\
+  document.getElementById('ccDecline').onclick = function() {{ window.__applyConsent(false); }};\n\
+}}\n\
+var choice = null;\n\
+try {{ choice = localStorage.getItem('cookie_consent'); }} catch (e) {{}}\n\
+if (choice === 'accepted') {{ loadVendors(); }}\n\
+else if (choice !== 'declined') {{\n\
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', showBanner);\n\
+  else showBanner();\n\
+}}\n\
+}})();\n\
+</script>\n",
+        cfg = cfg.join(","),
+    )
 }
 
 /// The sitemap differs per host: the marketing site lives on xikaku.com, the
@@ -2354,6 +2534,76 @@ mod tests {
         assert_eq!(rewrite_pandoc_image_attrs(md), md);
     }
 
+    /// Every shape videoEmbedSrc() accepts on the page has to resolve to the
+    /// same video here, or a newsletter silently ships a broken image.
+    #[test]
+    fn video_ref_matches_the_shapes_the_site_embeds() {
+        let page = |u: &str| video_ref(u).map(|v| v.page_url);
+        assert_eq!(page("https://vimeo.com/76979871").as_deref(), Some("https://vimeo.com/76979871"));
+        assert_eq!(page("http://www.vimeo.com/76979871").as_deref(), Some("https://vimeo.com/76979871"));
+        assert_eq!(
+            page("https://vimeo.com/76979871/a1b2c3d4e5").as_deref(),
+            Some("https://vimeo.com/76979871/a1b2c3d4e5"),
+            "an unlisted video only plays with its hash"
+        );
+        assert_eq!(
+            page("https://vimeo.com/76979871?h=a1b2c3d4e5").as_deref(),
+            Some("https://vimeo.com/76979871/a1b2c3d4e5")
+        );
+        assert_eq!(
+            page("https://player.vimeo.com/video/76979871").as_deref(),
+            Some("https://vimeo.com/76979871")
+        );
+        for yt in [
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "https://youtu.be/dQw4w9WgXcQ",
+            "https://www.youtube.com/embed/dQw4w9WgXcQ",
+        ] {
+            assert_eq!(
+                page(yt).as_deref(),
+                Some("https://www.youtube.com/watch?v=dQw4w9WgXcQ"),
+                "{}",
+                yt
+            );
+        }
+    }
+
+    /// Anything else stays an image; a false positive would replace a picture
+    /// with a "watch the video" link.
+    #[test]
+    fn video_ref_ignores_plain_images() {
+        for u in [
+            "logo.png",
+            "/static/logo.png",
+            "https://example.org/vimeo.com/x.png",
+            "https://vimeo.com/staffpicks",
+            "https://youtu.be/",
+        ] {
+            assert!(video_ref(u).is_none(), "{} is not a video", u);
+        }
+    }
+
+    #[test]
+    fn video_ref_builds_an_oembed_endpoint() {
+        let v = video_ref("https://vimeo.com/76979871").expect("vimeo");
+        assert_eq!(
+            v.oembed_url,
+            "https://vimeo.com/api/oembed.json?url=https%3A%2F%2Fvimeo.com%2F76979871&width=1280"
+        );
+        let y = video_ref("https://youtu.be/dQw4w9WgXcQ").expect("youtube");
+        assert!(y.oembed_url.starts_with("https://www.youtube.com/oembed?url=https%3A%2F%2F"), "got: {}", y.oembed_url);
+    }
+
+    /// The rewrite walks the source byte by byte, so multi-byte characters
+    /// around an image must come through untouched.
+    #[test]
+    fn rewrite_pandoc_image_attrs_keeps_non_ascii() {
+        let md = "Grüße ![logo](/l.png){width=50%} aus München … ✅";
+        let cleaned = rewrite_pandoc_image_attrs(md);
+        assert!(cleaned.starts_with("Grüße "), "got: {}", cleaned);
+        assert!(cleaned.ends_with(" aus München … ✅"), "got: {}", cleaned);
+    }
+
     #[test]
     fn iso8601_z_handles_naive_sqlite_format() {
         assert_eq!(iso8601_z("2026-04-26 23:21:37"), "2026-04-26T23:21:37Z");
@@ -2381,27 +2631,27 @@ mod tests {
             Some("buyLabel_2"),
             None,
         );
-        assert_eq!(out.matches("gtag/js?id=").count(), 1, "got: {}", out);
-        assert!(out.contains("gtag/js?id=G-XSW6TEN1CZ"));
-        assert!(out.contains("gtag('config', 'G-XSW6TEN1CZ');"));
-        assert!(out.contains("gtag('config', 'AW-18330845601');"));
-        assert!(out.contains(
-            "window.__adsConv = {contact:'AW-18330845601/ctLabel-1',purchase:'AW-18330845601/buyLabel_2'};"
-        ));
+        // Consent-gated: no direct third-party <script src>; both IDs are
+        // embedded as config for the post-consent loader.
+        assert!(!out.contains("<script async src="), "got: {}", out);
+        assert!(out.contains("ga:'G-XSW6TEN1CZ'"));
+        assert!(out.contains("ads:'AW-18330845601'"));
+        assert!(out.contains("conv:{contact:'AW-18330845601/ctLabel-1',purchase:'AW-18330845601/buyLabel_2'}"));
+        assert!(out.contains("cookie_consent"));
     }
 
     #[test]
     fn analytics_head_ads_only() {
         let out = render_analytics_head(None, Some("AW-18330845601"), None, None, None);
-        assert!(out.contains("gtag/js?id=AW-18330845601"));
-        assert!(out.contains("gtag('config', 'AW-18330845601');"));
-        assert!(!out.contains("__adsConv"));
+        assert!(out.contains("ads:'AW-18330845601'"));
+        assert!(!out.contains("conv:{"));
+        assert!(!out.contains("ga:'"));
     }
 
     #[test]
     fn analytics_head_labels_ignored_without_ads_id() {
         let out = render_analytics_head(Some("G-XSW6TEN1CZ"), None, Some("ctLabel-1"), None, None);
-        assert!(!out.contains("__adsConv"));
+        assert!(!out.contains("conv:{"));
     }
 
     #[test]

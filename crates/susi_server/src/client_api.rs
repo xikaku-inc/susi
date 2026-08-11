@@ -4,8 +4,11 @@ use crate::*;
 
 pub(crate) async fn handle_activate(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(req): Json<ActivateRequest>,
 ) -> Result<Json<susi_core::SignedLicense>, (StatusCode, Json<ErrorResponse>)> {
+    check_license_api_rate_limit(&state, client_ip(peer, &headers))?;
     // Hold the lock only for the DB-bound section; release before the RSA
     // sign so the heartbeat path doesn't serialise every other request.
     let license = {
@@ -25,14 +28,20 @@ pub(crate) async fn handle_activate(
         }
 
         if license.require_signed_binary {
-            if let Some(ca_der) = &state.trusted_signing_ca {
-                let chain = decode_cert_chain(req.signing_cert_chain.as_deref())?;
-                if !verify_chain_to_ca(&chain, ca_der) {
-                    return Err(error_response(
-                        StatusCode::FORBIDDEN,
-                        "Binary signing certificate chain does not terminate at the trusted CA",
-                    ));
-                }
+            // Fail closed: a license that demands a signed binary must never
+            // pass because the server happens to lack a pinned CA.
+            let Some(ca_der) = &state.trusted_signing_ca else {
+                return Err(error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "This license requires binary signature verification, but the server has no trusted signing CA configured",
+                ));
+            };
+            let chain = decode_cert_chain(req.signing_cert_chain.as_deref())?;
+            if !verify_chain_to_ca(&chain, ca_der) {
+                return Err(error_response(
+                    StatusCode::FORBIDDEN,
+                    "Binary signing certificate chain does not terminate at the trusted CA",
+                ));
             }
         }
 
@@ -84,8 +93,11 @@ pub(crate) async fn handle_activate(
 
 pub(crate) async fn handle_verify(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(req): Json<VerifyRequest>,
 ) -> Result<Json<susi_core::SignedLicense>, (StatusCode, Json<ErrorResponse>)> {
+    check_license_api_rate_limit(&state, client_ip(peer, &headers))?;
     let license = {
         let db = state.db.lock();
 
@@ -103,14 +115,20 @@ pub(crate) async fn handle_verify(
         }
 
         if license.require_signed_binary {
-            if let Some(ca_der) = &state.trusted_signing_ca {
-                let chain = decode_cert_chain(req.signing_cert_chain.as_deref())?;
-                if !verify_chain_to_ca(&chain, ca_der) {
-                    return Err(error_response(
-                        StatusCode::FORBIDDEN,
-                        "Binary signing certificate chain does not terminate at the trusted CA",
-                    ));
-                }
+            // Fail closed: a license that demands a signed binary must never
+            // pass because the server happens to lack a pinned CA.
+            let Some(ca_der) = &state.trusted_signing_ca else {
+                return Err(error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "This license requires binary signature verification, but the server has no trusted signing CA configured",
+                ));
+            };
+            let chain = decode_cert_chain(req.signing_cert_chain.as_deref())?;
+            if !verify_chain_to_ca(&chain, ca_der) {
+                return Err(error_response(
+                    StatusCode::FORBIDDEN,
+                    "Binary signing certificate chain does not terminate at the trusted CA",
+                ));
             }
         }
 
@@ -145,8 +163,11 @@ pub(crate) async fn handle_verify(
 
 pub(crate) async fn handle_deactivate(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(req): Json<DeactivateRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    check_license_api_rate_limit(&state, client_ip(peer, &headers))?;
     let db = state.db.lock();
 
     let license = db
@@ -162,8 +183,16 @@ pub(crate) async fn handle_deactivate(
 
 pub(crate) async fn handle_license_status(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Path(key): Path<String>,
 ) -> Result<Json<PublicLicenseStatus>, (StatusCode, Json<ErrorResponse>)> {
+    // The license key in the path is the credential: 100 bits of entropy,
+    // same bearer semantics as activate/verify. The per-IP rate limit above
+    // is what makes enumeration impractical. (Deployed FusionHub clients
+    // call this with the bare URL, so no extra header can be demanded.)
+    check_license_api_rate_limit(&state, client_ip(peer, &headers))?;
+
     let db = state.db.lock();
 
     let license = db
