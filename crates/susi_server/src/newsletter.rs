@@ -100,8 +100,12 @@ fn inject_styles(html: &str) -> String {
     let mut in_pre = false;
     while i < bytes.len() {
         if bytes[i] != b'<' || i + 1 >= bytes.len() || !bytes[i + 1].is_ascii_alphabetic() {
-            out.push(bytes[i] as char);
-            i += 1;
+            // Step by characters, not bytes: `push(byte as char)` would
+            // re-encode every non-ASCII byte as its Latin-1 code point, turning
+            // an umlaut or a dash in the body into mojibake.
+            let ch = html[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
             continue;
         }
         let start = i + 1;
@@ -131,6 +135,14 @@ fn inject_styles(html: &str) -> String {
         if let Some(s) = style {
             out.push_str(" style=\"");
             out.push_str(s);
+            // A width/height attribute has to be mirrored into the style: the
+            // img rule ends in `height:auto`, which would otherwise beat the
+            // attribute, and web clients honour CSS more consistently than
+            // presentational attributes. The attribute stays for Outlook.
+            if name.eq_ignore_ascii_case("img") {
+                let tag_end = html[end..].find('>').map_or(html.len(), |o| end + o);
+                out.push_str(&img_size_style(&html[end..tag_end]));
+            }
             out.push('"');
         }
         // pulldown-cmark emits <pre><code> adjacently, so a one-tag memory is
@@ -139,6 +151,48 @@ fn inject_styles(html: &str) -> String {
         i = end;
     }
     out
+}
+
+/// CSS for the width/height attributes of one opening `<img>` tag, read from
+/// its already-sanitized attribute text.
+fn img_size_style(attrs: &str) -> String {
+    let mut css = String::new();
+    for name in ["width", "height"] {
+        if let Some(v) = attr_value(attrs, name).and_then(css_length) {
+            css.push_str(&format!("{}:{};", name, v));
+        }
+    }
+    css
+}
+
+/// Read `name="value"` out of an opening tag; ammonia always double-quotes.
+fn attr_value<'a>(attrs: &'a str, name: &str) -> Option<&'a str> {
+    let mut at = 0;
+    while let Some(off) = attrs[at..].find(name) {
+        let start = at + off;
+        let preceded_by_space = start == 0 || attrs.as_bytes()[start - 1].is_ascii_whitespace();
+        if preceded_by_space {
+            if let Some(v) = attrs[start + name.len()..].strip_prefix("=\"") {
+                return v.split('"').next();
+            }
+        }
+        at = start + name.len();
+    }
+    None
+}
+
+/// The value goes into a style attribute, so only the shapes the composer
+/// writes - `400`, `400px`, `30%` - are accepted; anything else is dropped.
+fn css_length(v: &str) -> Option<String> {
+    let v = v.trim();
+    let (num, unit) = match v.strip_suffix('%') {
+        Some(n) => (n, "%"),
+        None => (v.strip_suffix("px").unwrap_or(v), "px"),
+    };
+    if !num.chars().all(|c| c.is_ascii_digit() || c == '.') || num.parse::<f64>().is_err() {
+        return None;
+    }
+    Some(format!("{}{}", num, unit))
 }
 
 fn markdown_options() -> pulldown_cmark::Options {
@@ -158,37 +212,53 @@ fn markdown_options() -> pulldown_cmark::Options {
 /// sanitize with the strict default allowlist, and only then inject inline
 /// styles. Sanitizing last would strip the styles; allowing `style` through the
 /// sanitizer would trust author CSS.
-pub(crate) fn render_email_html(
-    body_md: &str,
-    base_url: &str,
-    asset_base: &str,
-    footer_html: &str,
-) -> String {
-    render_email_html_with_images(body_md, base_url, asset_base, footer_html, None).0
-}
-
-/// As `render_email_html`, but when `assets_dir` is given, local images are
-/// rewritten to `cid:` references and returned alongside the bytes to attach.
 ///
-/// Remote images are blocked by default in Gmail and Outlook, so a URL-only
-/// mail shows blank boxes until the recipient opts in - and a private or
-/// not-yet-public host (a laptop, a staging box) can never serve them at all,
-/// since Gmail fetches images through its own proxy rather than from the
+/// When `assets_dir` is given, local images (and any video poster in `videos`)
+/// are rewritten to `cid:` references and returned alongside the bytes to
+/// attach. Remote images are blocked by default in Gmail and Outlook, so a
+/// URL-only mail shows blank boxes until the recipient opts in - and a private
+/// or not-yet-public host (a laptop, a staging box) can never serve them at
+/// all, since Gmail fetches images through its own proxy rather than from the
 /// reader's machine. Embedding sidesteps both. Only assets that resolve inside
-/// `assets_dir` are embedded; anything else stays a plain URL.
+/// `assets_dir` are embedded; anything else stays a plain URL, which is also
+/// what the preview wants - a browser cannot resolve `cid:`.
 pub(crate) fn render_email_html_with_images(
     body_md: &str,
     base_url: &str,
     asset_base: &str,
     footer_html: &str,
     assets_dir: Option<&std::path::Path>,
+    videos: &VideoPosters,
 ) -> (String, Vec<InlineImage>) {
     use pulldown_cmark::{html, Event, Parser, Tag};
 
     let mut inline: Vec<InlineImage> = Vec::new();
     let mut seen: HashMap<String, String> = HashMap::new();
 
-    let parser = Parser::new_ext(body_md, markdown_options()).map(|ev| match ev {
+    // `{width=...}` is how an image is sized everywhere else on the site, so it
+    // has to work here too, and a video URL in image syntax must become a
+    // poster rather than a broken <img>. pulldown-cmark parses neither, and the
+    // raw HTML this emits never reaches the event stream below - hence
+    // resolving the src (and embedding it) up front.
+    let prepared = crate::website::rewrite_pandoc_images(body_md, &mut |img| {
+        let size = (img.width.and_then(css_length), img.height.and_then(css_length));
+        if let Some(video) = crate::website::video_ref(img.url) {
+            let poster = videos.get(img.url.trim());
+            return video_block(&video, img.alt, poster, &size, assets_dir, &mut inline, &mut seen);
+        }
+        if size.0.is_none() && size.1.is_none() {
+            return img.markdown();
+        }
+        let src = resolve_image(img.url, base_url, asset_base, assets_dir, &mut inline, &mut seen);
+        format!(
+            r#"<img alt="{}" src="{}"{}>"#,
+            html_escape(img.alt),
+            html_escape(&src),
+            size_attrs(&size),
+        )
+    });
+
+    let parser = Parser::new_ext(&prepared, markdown_options()).map(|ev| match ev {
         Event::Start(Tag::Link { link_type, dest_url, title, id }) => {
             Event::Start(Tag::Link {
                 link_type,
@@ -198,17 +268,14 @@ pub(crate) fn render_email_html_with_images(
             })
         }
         Event::Start(Tag::Image { link_type, dest_url, title, id }) => {
-            let resolved = match assets_dir {
-                Some(dir) => embed_local_image(&dest_url, dir, &mut inline, &mut seen)
-                    .unwrap_or_else(|| absolutize(&dest_url, base_url, asset_base)),
-                None => absolutize(&dest_url, base_url, asset_base),
-            };
+            let resolved =
+                resolve_image(&dest_url, base_url, asset_base, assets_dir, &mut inline, &mut seen);
             Event::Start(Tag::Image { link_type, dest_url: resolved.into(), title, id })
         }
         other => other,
     });
 
-    let mut raw = String::with_capacity(body_md.len() * 2);
+    let mut raw = String::with_capacity(prepared.len() * 2);
     html::push_html(&mut raw, parser);
     // `cid` is not in ammonia's default scheme allowlist, so without this the
     // sanitizer silently strips the src of every embedded image. Safe to add:
@@ -241,6 +308,23 @@ pub(crate) fn render_email_html_with_images(
 /// a few megabytes the per-recipient cost outweighs guaranteed display, and
 /// some providers reject oversized messages outright.
 const MAX_INLINE_IMAGE_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Resolve one image target to what the message should carry: a `cid:` part
+/// when the asset is embeddable, an absolute URL otherwise.
+fn resolve_image(
+    dest: &str,
+    base_url: &str,
+    asset_base: &str,
+    assets_dir: Option<&std::path::Path>,
+    inline: &mut Vec<InlineImage>,
+    seen: &mut HashMap<String, String>,
+) -> String {
+    match assets_dir {
+        Some(dir) => embed_local_image(dest, dir, inline, seen)
+            .unwrap_or_else(|| absolutize(dest, base_url, asset_base)),
+        None => absolutize(dest, base_url, asset_base),
+    }
+}
 
 /// Turn one markdown image target into a `cid:` reference, reading the bytes
 /// from the website asset store. Returns None when the target isn't a local
@@ -313,14 +397,192 @@ fn image_mime(lower_name: &str) -> Option<&'static str> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Video
+// ---------------------------------------------------------------------------
+
+/// Poster frames for the videos an issue links to, keyed by the URL exactly as
+/// the author wrote it.
+pub(crate) type VideoPosters = HashMap<String, VideoPoster>;
+
+pub(crate) struct VideoPoster {
+    /// Where the frame was fetched from; also the src used in the preview,
+    /// where a browser can load it and `cid:` would not resolve.
+    url: String,
+    title: String,
+    mime: &'static str,
+    /// Arc so handing the same poster to every recipient is a refcount bump.
+    bytes: Arc<[u8]>,
+}
+
+/// How long one provider is given before the block degrades to a plain link.
+const POSTER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// Look up the poster frame of every video an issue links to.
+///
+/// No mail client renders the player iframe the website uses, so a video
+/// becomes its poster frame plus a link out - and Vimeo's oEmbed hands back a
+/// thumbnail with the play badge already drawn on it. One round trip per
+/// distinct video, done once per issue and never per recipient; every failure
+/// degrades to the link alone rather than holding up the send.
+pub(crate) async fn resolve_video_posters(http: &reqwest::Client, body_md: &str) -> VideoPosters {
+    use pulldown_cmark::{Event, Parser, Tag};
+
+    let mut targets: Vec<String> = Vec::new();
+    for ev in Parser::new_ext(body_md, markdown_options()) {
+        if let Event::Start(Tag::Image { dest_url, .. }) = ev {
+            let url = dest_url.trim().to_string();
+            if crate::website::video_ref(&url).is_some() && !targets.contains(&url) {
+                targets.push(url);
+            }
+        }
+    }
+
+    let mut out = VideoPosters::new();
+    for url in targets {
+        match fetch_video_poster(http, &url).await {
+            Some(p) => {
+                out.insert(url, p);
+            }
+            None => log::warn!("Newsletter: no poster frame for {} - sending a link instead", url),
+        }
+    }
+    out
+}
+
+async fn fetch_video_poster(http: &reqwest::Client, url: &str) -> Option<VideoPoster> {
+    let video = crate::website::video_ref(url)?;
+    let meta: serde_json::Value = http
+        .get(&video.oembed_url)
+        .timeout(POSTER_TIMEOUT)
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    // Vimeo composites the play badge for us; YouTube offers no such variant.
+    // The URL comes from the provider's response, so the fetch below is only
+    // ever aimed where a `https://` poster lives.
+    let thumb = ["thumbnail_url_with_play_button", "thumbnail_url"]
+        .iter()
+        .find_map(|k| meta.get(*k).and_then(|v| v.as_str()))
+        .filter(|t| t.starts_with("https://"))?;
+
+    let resp = http.get(thumb).timeout(POSTER_TIMEOUT).send().await.ok()?.error_for_status().ok()?;
+    let mime = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(mime_from_content_type)?;
+    let bytes = resp.bytes().await.ok()?;
+    if bytes.is_empty() || bytes.len() as u64 > MAX_INLINE_IMAGE_BYTES {
+        return None;
+    }
+    Some(VideoPoster {
+        url: thumb.to_string(),
+        title: meta.get("title").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+        mime,
+        bytes: bytes.to_vec().into(),
+    })
+}
+
+/// The same raster types `image_mime` allows, matched on a response header.
+fn mime_from_content_type(ct: &str) -> Option<&'static str> {
+    match ct.split(';').next()?.trim().to_ascii_lowercase().as_str() {
+        "image/png" => Some("image/png"),
+        "image/jpeg" | "image/jpg" => Some("image/jpeg"),
+        "image/gif" => Some("image/gif"),
+        "image/webp" => Some("image/webp"),
+        _ => None,
+    }
+}
+
+/// The video as an email can show it: the poster frame linking to the watch
+/// page, and a link under it - which is the only thing left when the poster is
+/// unavailable or the reader has images turned off.
+fn video_block(
+    video: &crate::website::VideoRef,
+    alt: &str,
+    poster: Option<&VideoPoster>,
+    size: &(Option<String>, Option<String>),
+    assets_dir: Option<&std::path::Path>,
+    inline: &mut Vec<InlineImage>,
+    seen: &mut HashMap<String, String>,
+) -> String {
+    let href = html_escape(&video.page_url);
+    let mut out = String::new();
+    if let Some(p) = poster {
+        // Preview renders in a browser, which can fetch the poster but cannot
+        // resolve cid:; a send is the other way round.
+        let src = match assets_dir {
+            Some(_) => embed_poster(p, inline, seen),
+            None => p.url.clone(),
+        };
+        let alt = if alt.is_empty() { p.title.as_str() } else { alt };
+        out.push_str(&format!(
+            r#"<a href="{}"><img alt="{}" src="{}"{}></a><br>"#,
+            href,
+            html_escape(alt),
+            html_escape(&src),
+            size_attrs(size),
+        ));
+    }
+    out.push_str(&format!(r#"<a href="{}">▶ Watch the video</a>"#, href));
+    out
+}
+
+/// Attach poster bytes as a `cid:` part, once per distinct poster.
+fn embed_poster(
+    p: &VideoPoster,
+    inline: &mut Vec<InlineImage>,
+    seen: &mut HashMap<String, String>,
+) -> String {
+    if let Some(cid) = seen.get(&p.url) {
+        return format!("cid:{}", cid);
+    }
+    let cid = format!("nl{}@susi", uuid::Uuid::new_v4().simple());
+    inline.push(InlineImage {
+        content_id: cid.clone(),
+        mime_type: p.mime.to_string(),
+        bytes: p.bytes.clone(),
+    });
+    seen.insert(p.url.clone(), cid.clone());
+    format!("cid:{}", cid)
+}
+
+/// Width/height attributes for an `<img>`. The attribute takes a bare number;
+/// only a percentage carries a unit.
+fn size_attrs(size: &(Option<String>, Option<String>)) -> String {
+    let mut out = String::new();
+    for (name, len) in [("width", &size.0), ("height", &size.1)] {
+        if let Some(v) = len {
+            out.push_str(&format!(r#" {}="{}""#, name, v.strip_suffix("px").unwrap_or(v)));
+        }
+    }
+    out
+}
+
 /// Plain-text alternative. Every send is multipart/alternative, and a text part
 /// that is just the raw markdown reads badly and hurts deliverability.
 pub(crate) fn render_email_text(body_md: &str, base_url: &str, asset_base: &str) -> String {
     use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 
+    // Sizing is markup, not prose: drop the attribute span so the text part
+    // does not read `[image: logo.png]{width=30%}`. A video has no poster to
+    // announce here, only somewhere to watch it.
+    let prepared = crate::website::rewrite_pandoc_images(body_md, &mut |img| {
+        match crate::website::video_ref(img.url) {
+            Some(v) => format!("Watch the video: {}", v.page_url),
+            None => img.markdown(),
+        }
+    });
+
     let mut out = String::with_capacity(body_md.len());
     let mut link_dest: Option<String> = None;
-    for ev in Parser::new_ext(body_md, markdown_options()) {
+    for ev in Parser::new_ext(&prepared, markdown_options()) {
         match ev {
             Event::Text(t) | Event::Code(t) => out.push_str(&t),
             Event::SoftBreak => out.push(' '),
@@ -948,19 +1210,29 @@ async fn drain_once(state: &Arc<AppState>) -> usize {
     let assets = format!("{}/api/v1/website/assets", base);
     let asset_dir = newsletter_assets_dir(state);
     let mut attempted = 0;
-    // Render once per issue, not once per recipient.
-    let mut cache: HashMap<i64, Option<(String, String)>> = HashMap::new();
+    // Looked up once per issue, not once per recipient - the poster fetches in
+    // particular are network round trips.
+    let mut cache: HashMap<i64, Option<PreparedIssue>> = HashMap::new();
 
     for item in batch {
-        let rendered = cache
-            .entry(item.issue_id)
-            .or_insert_with(|| {
+        if !cache.contains_key(&item.issue_id) {
+            let row = {
                 let db = state.db.lock();
-                let issue = db.get_newsletter_issue(item.issue_id).ok().flatten()?;
-                Some((issue.subject, issue.body_md))
-            })
-            .clone();
-        let Some((subject, body_md)) = rendered else {
+                db.get_newsletter_issue(item.issue_id).ok().flatten()
+            };
+            let prepared = match row {
+                Some(issue) => Some(PreparedIssue {
+                    posters: resolve_video_posters(&state.http, &issue.body_md).await,
+                    subject: issue.subject,
+                    body_md: issue.body_md,
+                }),
+                None => None,
+            };
+            cache.insert(item.issue_id, prepared);
+        }
+        let Some(PreparedIssue { subject, body_md, posters }) =
+            cache.get(&item.issue_id).and_then(|c| c.as_ref())
+        else {
             let db = state.db.lock();
             let _ = db.mark_delivery_attempt_failed(item.id, "Issue disappeared");
             continue;
@@ -971,18 +1243,17 @@ async fn drain_once(state: &Arc<AppState>) -> usize {
             let _ = db.mark_delivery_attempt_failed(item.id, "Could not mint unsubscribe token");
             continue;
         };
-        // Images are read from disk once per issue, not per recipient; the
-        // Arc<[u8]> in InlineImage makes each clone a refcount bump.
         let (html, images) = render_email_html_with_images(
-            &body_md,
+            body_md,
             &base,
             &assets,
             &unsubscribe_footer(&url),
             Some(&asset_dir),
+            posters,
         );
         let text = format!(
             "{}{}",
-            render_email_text(&body_md, &base, &assets),
+            render_email_text(body_md, &base, &assets),
             unsubscribe_footer_text(&url)
         );
 
@@ -991,7 +1262,7 @@ async fn drain_once(state: &Arc<AppState>) -> usize {
         // reentrant and holding it across an SMTP round-trip would wedge every
         // other request for the duration.
         let result = mailer
-            .send_newsletter(&item.email, &subject, &text, &html, &images, &url)
+            .send_newsletter(&item.email, subject, &text, &html, &images, &url)
             .await;
         let db = state.db.lock();
         match result {
@@ -1010,6 +1281,13 @@ async fn drain_once(state: &Arc<AppState>) -> usize {
         let _ = db.finalize_newsletter_issues();
     }
     attempted
+}
+
+/// An issue with everything a render needs, resolved once for the whole batch.
+struct PreparedIssue {
+    subject: String,
+    body_md: String,
+    posters: VideoPosters,
 }
 
 #[derive(Deserialize)]
@@ -1031,8 +1309,10 @@ pub(crate) async fn handle_newsletter_preview(
     require_owner(&state, &principal)?;
 
     let (base, assets) = email_base_urls(&state)?;
+    // No assets dir: a browser cannot resolve cid:, so the preview keeps URLs.
+    let posters = resolve_video_posters(&state.http, &req.body_md).await;
     Ok(Json(serde_json::json!({
-        "html": render_email_html(&req.body_md, &base, &assets, ""),
+        "html": render_email_html_with_images(&req.body_md, &base, &assets, "", None, &posters).0,
         "text": render_email_text(&req.body_md, &base, &assets),
     })))
 }
@@ -1233,12 +1513,14 @@ pub(crate) async fn handle_test_send(
 
     let url = unsubscribe_url(&state, &base, &principal.username)
         .ok_or_else(|| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Token mint failed"))?;
+    let posters = resolve_video_posters(&state.http, &issue.body_md).await;
     let (html, images) = render_email_html_with_images(
         &issue.body_md,
         &base,
         &assets,
         &unsubscribe_footer(&url),
         Some(&newsletter_assets_dir(&state)),
+        &posters,
     );
     let text = format!(
         "{}{}",
@@ -1334,6 +1616,11 @@ mod tests {
 
     const BASE: &str = "https://susi.example.com";
     const ASSETS: &str = "https://susi.example.com/api/v1/website/assets";
+
+    /// Render the way the preview does: URLs, no attachments, no posters.
+    fn render_email_html(md: &str, base: &str, assets: &str, footer: &str) -> String {
+        render_email_html_with_images(md, base, assets, footer, None, &VideoPosters::new()).0
+    }
 
     fn html(md: &str) -> String {
         render_email_html(md, BASE, ASSETS, "")
@@ -1499,7 +1786,7 @@ mod tests {
     }
 
     fn render_with_dir(md: &str, dir: &std::path::Path) -> (String, Vec<InlineImage>) {
-        render_email_html_with_images(md, BASE, ASSETS, "", Some(dir))
+        render_email_html_with_images(md, BASE, ASSETS, "", Some(dir), &VideoPosters::new())
     }
 
     /// The composer inserts a bare filename. It must become a cid: reference
@@ -1630,11 +1917,183 @@ mod tests {
     /// using URLs - the rendered result is visually identical either way.
     #[test]
     fn preview_path_keeps_urls() {
-        let (html, images) = render_email_html_with_images("![x](shot.png)", BASE, ASSETS, "", None);
+        let (html, images) =
+            render_email_html_with_images("![x](shot.png)", BASE, ASSETS, "", None, &VideoPosters::new());
         assert!(images.is_empty());
         assert!(html.contains("/api/v1/website/assets/shot.png"));
-        // And the public wrapper still behaves exactly as before.
-        assert_eq!(html, render_email_html("![x](shot.png)", BASE, ASSETS, ""));
+    }
+
+    // ---- Image sizing ------------------------------------------------------
+
+    /// The inline style of the first <img> in a rendered body.
+    fn img_style(html: &str) -> &str {
+        let tag = html.split("<img").nth(1).expect("an img tag");
+        let style = tag.split("style=\"").nth(1).expect("a style attribute");
+        style.split('"').next().expect("closing quote")
+    }
+
+    /// `{width=...}` is the site-wide sizing syntax, and a sized image must
+    /// still embed: the span must not cost the attachment.
+    #[test]
+    fn image_width_sizes_the_tag_and_still_embeds() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_asset(tmp.path(), "logo.png", 48);
+        let (html, images) = render_with_dir("![logo](logo.png){width=30%}", tmp.path());
+
+        assert_eq!(images.len(), 1, "sized image must still be attached: {}", html);
+        assert!(html.contains(&format!("cid:{}", images[0].content_id)), "got: {}", html);
+        assert!(html.contains(r#"width="30%""#), "attribute for Outlook: {}", html);
+        assert!(img_style(&html).contains("width:30%;"), "CSS for the rest: {}", html);
+        assert!(!html.contains("{width"), "the span must never render as text: {}", html);
+    }
+
+    /// A bare number and `px` mean the same thing, and height has to beat the
+    /// base rule's `height:auto` - the whole point of mirroring it into CSS.
+    #[test]
+    fn image_height_and_bare_pixel_width_apply() {
+        let html = render_email_html("![x](a.png){width=400 height=200px}", BASE, ASSETS, "");
+        // The attribute itself carries no unit; the CSS does.
+        assert!(html.contains(r#"width="400" height="200""#), "got: {}", html);
+        let style = img_style(&html);
+        assert!(style.contains("width:400px;"), "got: {}", style);
+        assert!(
+            style.find("height:200px") > style.find("height:auto"),
+            "the explicit height must come last: {}",
+            style
+        );
+    }
+
+    /// The value lands inside a style attribute, so anything that is not a
+    /// plain length leaves the image unsized rather than being passed through.
+    #[test]
+    fn malformed_size_is_dropped() {
+        let html = render_email_html("![x](a.png){width=30%;background:url(evil)}", BASE, ASSETS, "");
+        assert!(!html.contains("background"), "no CSS injection: {}", html);
+        assert!(!html.contains(r#"width=""#), "no size attribute: {}", html);
+        assert!(!img_style(&html).contains("30%"), "no size CSS: {}", html);
+        assert!(html.contains("<img"), "the image itself survives: {}", html);
+    }
+
+    /// Sizing is markup, not prose.
+    #[test]
+    fn text_part_drops_the_size_span() {
+        let text = render_email_text("![logo](a.png){width=30%}", BASE, ASSETS);
+        assert!(!text.contains("{width"), "got: {:?}", text);
+        assert!(text.contains("[image: "), "the image is still announced: {:?}", text);
+    }
+
+    // ---- Video -------------------------------------------------------------
+
+    fn fake_poster() -> VideoPosters {
+        let mut m = VideoPosters::new();
+        m.insert(
+            "https://vimeo.com/76979871".to_string(),
+            VideoPoster {
+                url: "https://i.vimeocdn.com/video/1_1280x720?play=1".to_string(),
+                title: "The New Vimeo Player".to_string(),
+                mime: "image/jpeg",
+                bytes: vec![0u8; 128].into(),
+            },
+        );
+        m
+    }
+
+    /// A mail client strips iframes, so the site's embed becomes a poster that
+    /// links out - and the poster travels as an attachment, like every other
+    /// image, because remote ones are blocked by default.
+    #[test]
+    fn video_becomes_a_linked_poster_on_send() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (html, images) = render_email_html_with_images(
+            "![Demo](https://vimeo.com/76979871)",
+            BASE,
+            ASSETS,
+            "",
+            Some(tmp.path()),
+            &fake_poster(),
+        );
+
+        assert!(!html.contains("<iframe"), "no client renders it: {}", html);
+        assert_eq!(images.len(), 1, "the poster is attached: {}", html);
+        assert_eq!(images[0].mime_type, "image/jpeg");
+        assert!(html.contains(&format!("src=\"cid:{}\"", images[0].content_id)), "got: {}", html);
+        assert!(html.contains(r#"href="https://vimeo.com/76979871""#), "got: {}", html);
+        assert!(html.contains("Watch the video"), "images-off readers need this: {}", html);
+        assert!(!html.contains("src=\"https://vimeo.com"), "the page is never an img src: {}", html);
+    }
+
+    /// The preview renders in a browser, which cannot resolve cid: but can
+    /// fetch the poster over the network.
+    #[test]
+    fn preview_keeps_the_poster_url() {
+        let html = render_email_html_with_images(
+            "![Demo](https://vimeo.com/76979871)",
+            BASE,
+            ASSETS,
+            "",
+            None,
+            &fake_poster(),
+        )
+        .0;
+        assert!(html.contains("https://i.vimeocdn.com/video/1_1280x720?play=1"), "got: {}", html);
+        assert!(!html.contains("cid:"), "got: {}", html);
+    }
+
+    /// Offline, rate-limited, or an unlisted video the provider will not
+    /// describe: the send still has to carry something that works.
+    #[test]
+    fn video_without_a_poster_degrades_to_a_link() {
+        let html = render_email_html("![Demo](https://youtu.be/dQw4w9WgXcQ)", BASE, ASSETS, "");
+        assert!(!html.contains("<img"), "no broken image: {}", html);
+        assert!(
+            html.contains(r#"href="https://www.youtube.com/watch?v=dQw4w9WgXcQ""#),
+            "got: {}",
+            html
+        );
+        assert!(html.contains("Watch the video"), "got: {}", html);
+    }
+
+    /// A video is sized like any other image.
+    #[test]
+    fn video_poster_honours_width() {
+        let html = render_email_html_with_images(
+            "![Demo](https://vimeo.com/76979871){width=60%}",
+            BASE,
+            ASSETS,
+            "",
+            None,
+            &fake_poster(),
+        )
+        .0;
+        assert!(html.contains(r#"width="60%""#), "got: {}", html);
+        assert!(img_style(&html).contains("width:60%;"), "got: {}", html);
+    }
+
+    /// The alt text wins when the author wrote one; the provider's title is
+    /// the fallback so an images-off reader still sees what it was.
+    #[test]
+    fn poster_alt_falls_back_to_the_video_title() {
+        let with_alt =
+            render_email_html_with_images("![Demo](https://vimeo.com/76979871)", BASE, ASSETS, "", None, &fake_poster()).0;
+        assert!(with_alt.contains(r#"alt="Demo""#), "got: {}", with_alt);
+        let no_alt =
+            render_email_html_with_images("![](https://vimeo.com/76979871)", BASE, ASSETS, "", None, &fake_poster()).0;
+        assert!(no_alt.contains(r#"alt="The New Vimeo Player""#), "got: {}", no_alt);
+    }
+
+    #[test]
+    fn text_part_points_at_the_watch_page() {
+        let text = render_email_text("![Demo](https://player.vimeo.com/video/76979871)", BASE, ASSETS);
+        assert_eq!(text, "Watch the video: https://vimeo.com/76979871");
+    }
+
+    /// Style injection walks the HTML byte by byte; it must not re-encode the
+    /// multi-byte characters an author writes.
+    #[test]
+    fn non_ascii_body_survives_style_injection() {
+        let html = render_email_html("Grüße aus München - 100-500 ms … ✅", BASE, ASSETS, "");
+        assert!(html.contains("Grüße aus München"), "got: {}", html);
+        assert!(html.contains('…') && html.contains('✅'), "got: {}", html);
     }
 
     #[test]
