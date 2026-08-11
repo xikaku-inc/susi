@@ -61,19 +61,44 @@ fn safe_slug(slug: &str) -> Result<&str, (StatusCode, Json<ErrorResponse>)> {
 
 /// Row shape returned by `list_website_pages`:
 /// (slug, title, parent_slug, ord, updated_at, meta_description, hidden,
-///  page_kind, published_at, author_username).
-type PageRow = (String, String, Option<String>, i64, String, String, bool, String, String, String);
+///  page_kind, published_at, author_username, redirect_to).
+type PageRow = (String, String, Option<String>, i64, String, String, bool, String, String, String, String);
+
+/// True for a retired page: it 301s to `redirect_to` instead of rendering, and
+/// stays out of nav, sitemap, llms.txt, the blog index and the feed.
+fn is_retired(p: &PageRow) -> bool {
+    !p.10.trim().is_empty()
+}
 
 /// True for blog-post rows (`page_kind == 'post'`).
 fn is_post(p: &PageRow) -> bool {
     p.7 == "post"
 }
 
-/// Drop hidden pages - applied before any public-facing use of the page list
-/// (nav, SSR head, sitemap, llms.txt).
+/// Drop hidden and retired pages - applied before any public-facing use of the
+/// page list (nav, SSR head, sitemap, llms.txt).
 fn visible_pages(mut pages: Vec<PageRow>) -> Vec<PageRow> {
-    pages.retain(|p| !p.6);
+    pages.retain(|p| !p.6 && !is_retired(p));
     pages
+}
+
+/// Where a retired page sends visitors. Accepts an absolute URL, a site-root
+/// path, or a bare slug (resolved to its own canonical path, so retiring onto
+/// a post lands on /blog/...). Relative targets keep the `/site` prefix when
+/// the request did not come in on the marketing host.
+fn redirect_location(target: &str, pages: &[PageRow], marketing_host: bool) -> String {
+    let target = target.trim();
+    if target.starts_with("http://") || target.starts_with("https://") {
+        return target.to_string();
+    }
+    let path = if let Some(rest) = target.strip_prefix('/') {
+        format!("/{}", rest)
+    } else if pages.iter().any(|p| p.0 == target && is_post(p)) {
+        format!("/blog/{}", target)
+    } else {
+        format!("/{}", target)
+    };
+    if marketing_host { path } else { format!("/site{}", path) }
 }
 
 /// True when the request carries a valid full-admin principal. The public
@@ -99,7 +124,7 @@ pub async fn handle_list_pages(
     let assets = db.list_website_assets().map_err(db_err)?;
     let pages_json: Vec<_> = pages
         .into_iter()
-        .map(|(slug, title, parent_slug, ord, updated_at, meta_description, hidden, page_kind, published_at, author_username)| {
+        .map(|(slug, title, parent_slug, ord, updated_at, meta_description, hidden, page_kind, published_at, author_username, redirect_to)| {
             let mut row = json!({
                 "slug": slug,
                 "title": title,
@@ -111,6 +136,7 @@ pub async fn handle_list_pages(
                 "page_kind": page_kind,
                 "published_at": published_at,
                 "author_name": display_name(&db, &author_username),
+                "redirect_to": redirect_to,
             });
             // The account name behind a byline is only the editor's business.
             if is_admin {
@@ -142,7 +168,7 @@ pub async fn handle_get_page(
         .get_website_page(&slug)
         .map_err(db_err)?
         .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Page not found"))?;
-    let (title, body_md, parent_slug, ord, updated_at, meta_description, hidden, page_kind, published_at, author_username) = page;
+    let (title, body_md, parent_slug, ord, updated_at, meta_description, hidden, page_kind, published_at, author_username, redirect_to) = page;
     if hidden && !is_admin {
         return Err(error_response(StatusCode::NOT_FOUND, "Page not found"));
     }
@@ -158,6 +184,7 @@ pub async fn handle_get_page(
         "page_kind": page_kind,
         "published_at": published_at,
         "author_name": display_name(&db, &author_username),
+        "redirect_to": redirect_to,
     });
     if is_admin {
         out["author_username"] = json!(author_username);
@@ -242,6 +269,10 @@ pub struct UpsertPageRequest {
     // Omitted -> preserve the existing author (new posts: the editing user).
     #[serde(default)]
     pub author_username: Option<String>,
+    // Retire the page: a non-empty target makes the slug 301 there. Omitted
+    // preserves the current setting; an empty string un-retires the page.
+    #[serde(default)]
+    pub redirect_to: Option<String>,
 }
 
 pub async fn handle_upsert_page(
@@ -299,6 +330,21 @@ pub async fn handle_upsert_page(
         } else {
             author_username.clear();
         }
+        let redirect_to = req
+            .redirect_to
+            .clone()
+            .or_else(|| existing.as_ref().map(|r| r.10.clone()))
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        // A page pointing at itself would 301 forever.
+        if !redirect_to.is_empty()
+            && (redirect_to == slug
+                || redirect_to.trim_start_matches('/') == slug
+                || redirect_to.trim_start_matches('/') == format!("blog/{}", slug))
+        {
+            return Err(error_response(StatusCode::BAD_REQUEST, "A page cannot redirect to itself"));
+        }
         let id = db.upsert_website_page(
             &slug,
             &req.title,
@@ -309,6 +355,7 @@ pub async fn handle_upsert_page(
             &page_kind,
             &published_at,
             &author_username,
+            &redirect_to,
             Some(&principal.username),
         )
         .map_err(db_err)?;
@@ -390,17 +437,18 @@ pub async fn handle_restore_page_revision(
     let (title, body_md, parent_slug, ord, _captured_at, _author) = rev;
     // Preserve the current meta_description, kind, publish date and author
     // when restoring prior body/title.
-    let (existing_meta, existing_kind, existing_pub, existing_author) = db
+    let (existing_meta, existing_kind, existing_pub, existing_author, existing_redirect) = db
         .get_website_page(&slug)
         .map_err(db_err)?
-        .map(|(_t, _b, _p, _o, _u, m, _h, k, pd, au)| (m, k, pd, au))
-        .unwrap_or_else(|| (String::new(), "page".to_string(), String::new(), String::new()));
+        .map(|(_t, _b, _p, _o, _u, m, _h, k, pd, au, rd)| (m, k, pd, au, rd))
+        .unwrap_or_else(|| (String::new(), "page".to_string(), String::new(), String::new(), String::new()));
     let new_id = db.upsert_website_page(
         &slug, &title, &body_md, parent_slug.as_deref(), ord,
         &existing_meta,
         &existing_kind,
         &existing_pub,
         &existing_author,
+        &existing_redirect,
         Some(&principal.username),
     ).map_err(db_err)?;
     let url = if existing_kind == "post" {
@@ -1397,7 +1445,7 @@ pub async fn handle_website_render_root(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> axum::response::Response {
-    render_website(&state, &headers, None, false).into_response()
+    render_website(&state, &headers, None, false)
 }
 
 pub async fn handle_website_render_slug(
@@ -1405,7 +1453,7 @@ pub async fn handle_website_render_slug(
     headers: HeaderMap,
     Path(slug): Path<String>,
 ) -> axum::response::Response {
-    render_website(&state, &headers, Some(slug), false).into_response()
+    render_website(&state, &headers, Some(slug), false)
 }
 
 /// `/site/blog/{slug}` - blog posts under the /blog/ URL prefix.
@@ -1414,15 +1462,15 @@ pub async fn handle_website_render_post(
     headers: HeaderMap,
     Path(slug): Path<String>,
 ) -> axum::response::Response {
-    render_website(&state, &headers, Some(slug), true).into_response()
+    render_website(&state, &headers, Some(slug), true)
 }
 
 fn render_website(
     state: &Arc<AppState>,
-    _headers: &HeaderMap,
+    headers: &HeaderMap,
     requested_slug: Option<String>,
     post_path: bool,
-) -> (HeaderMap, Bytes) {
+) -> axum::response::Response {
     // Build the cache key first so we can short-circuit on a hit. Use the raw
     // requested slug (None → "" for the home shell). When the slug resolves to
     // home via `first_default_slug`, the cache still keys on what the client
@@ -1433,7 +1481,7 @@ fn render_website(
         requested_slug.clone().unwrap_or_default()
     };
     if let Some(cached) = page_cache_get(&cache_key) {
-        return (build_html_headers(), cached);
+        return (build_html_headers(), cached).into_response();
     }
 
     let (pages, products) = {
@@ -1444,12 +1492,30 @@ fn render_website(
         )
     };
 
+    // A retired page 301s to its replacement. Checked before rendering and
+    // never cached - retired slugs see little traffic, and a stale 301 is the
+    // one redirect a browser will not re-ask about.
+    if let Some(s) = requested_slug.as_deref() {
+        let target = {
+            let db = state.db.lock();
+            db.get_website_page(s)
+                .ok()
+                .flatten()
+                .map(|r| r.10)
+                .filter(|t| !t.trim().is_empty())
+        };
+        if let Some(t) = target {
+            let to = redirect_location(&t, &pages, is_marketing_host(headers));
+            return (StatusCode::MOVED_PERMANENTLY, [(header::LOCATION, to)]).into_response();
+        }
+    }
+
     // /blog renders the reverse-chron post index; an optional "blog" page row
     // supplies the title/intro when present.
     if !post_path && requested_slug.as_deref() == Some("blog") {
         let html = render_blog_index(state, &pages, &products);
         page_cache_put(cache_key, html.clone());
-        return (build_html_headers(), html);
+        return (build_html_headers(), html).into_response();
     }
 
     let slug_owned: Option<String> = requested_slug.or_else(|| {
@@ -1470,7 +1536,7 @@ fn render_website(
             // head, no body - the SPA shows "Page not found" to visitors.
             // The /blog/ path only serves posts.
             match row {
-                Some((t, body, _p, _o, upd, meta, false, kind, published, _au))
+                Some((t, body, _p, _o, upd, meta, false, kind, published, _au, _rd))
                     if !post_path || kind == "post" =>
                 {
                     let desc = if !meta.trim().is_empty() {
@@ -1525,7 +1591,7 @@ fn render_website(
         .replacen("<!--BODY_CONTENT-->", &body_html, 1)
         .into();
     page_cache_put(cache_key, html.clone());
-    (build_html_headers(), html)
+    (build_html_headers(), html).into_response()
 }
 
 /// SSR body + head for the /blog index: intro from the optional "blog" page
@@ -1540,7 +1606,7 @@ fn render_blog_index(
         db.get_website_page("blog").unwrap_or(None)
     };
     let (title, intro_md, updated_at, meta) = match row {
-        Some((t, body, _p, _o, upd, m, false, _k, _pd, _au)) => (t, body, upd, m),
+        Some((t, body, _p, _o, upd, m, false, _k, _pd, _au, _rd)) => (t, body, upd, m),
         _ => ("Blog".to_string(), String::new(), String::new(), String::new()),
     };
     let posts = sorted_posts(pages);
@@ -1852,7 +1918,7 @@ pub async fn handle_sitemap_xml(
             visible_pages(db.list_website_pages().unwrap_or_default())
         };
         let home_slug = first_default_slug(&pages).map(|s| s.to_string());
-        for (slug, _title, _parent, _ord, updated_at, _meta, _hidden, kind, _published, _author) in &pages {
+        for (slug, _title, _parent, _ord, updated_at, _meta, _hidden, kind, _published, _author, _rd) in &pages {
             let is_home = home_slug.as_deref() == Some(slug.as_str());
             let loc = if kind == "post" {
                 canonical_post_url(slug)
@@ -1905,7 +1971,7 @@ pub async fn handle_llms_txt(
     ));
 
     body.push_str("## Pages\n");
-    for (slug, title, parent, _ord, _upd, meta, _hidden, kind, _published, _author) in &pages {
+    for (slug, title, parent, _ord, _upd, meta, _hidden, kind, _published, _author, _rd) in &pages {
         if kind == "post" {
             continue;
         }
@@ -2178,6 +2244,32 @@ mod tests {
         assert!(h.contains("Title"));
         assert!(h.contains("<p>"));
         assert!(h.contains("A paragraph"));
+    }
+
+    #[test]
+    fn redirect_location_resolves_every_target_form() {
+        let page = |slug: &str, kind: &str| (
+            slug.to_string(), "T".to_string(), None, 0, String::new(), String::new(),
+            false, kind.to_string(), String::new(), String::new(), String::new(),
+        );
+        let pages = vec![page("lpms-curs3", "page"), page("my-post", "post")];
+
+        // A bare slug resolves through its own kind, so a post lands on /blog.
+        assert_eq!(redirect_location("lpms-curs3", &pages, true), "/lpms-curs3");
+        assert_eq!(redirect_location("my-post", &pages, true), "/blog/my-post");
+        // An unknown slug is still treated as a page rather than dropped.
+        assert_eq!(redirect_location("gone", &pages, true), "/gone");
+        // Explicit paths are taken as given.
+        assert_eq!(redirect_location("/blog/my-post", &pages, true), "/blog/my-post");
+        // Off the marketing host the app lives under /site.
+        assert_eq!(redirect_location("lpms-curs3", &pages, false), "/site/lpms-curs3");
+        assert_eq!(redirect_location("my-post", &pages, false), "/site/blog/my-post");
+        // Absolute URLs pass through untouched, prefix included.
+        assert_eq!(
+            redirect_location("https://lp-research.com/x", &pages, false),
+            "https://lp-research.com/x"
+        );
+        assert_eq!(redirect_location("  lpms-curs3  ", &pages, true), "/lpms-curs3");
     }
 
     #[test]

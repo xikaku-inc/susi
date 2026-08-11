@@ -553,7 +553,8 @@ impl LicenseDb {
                 hidden INTEGER NOT NULL DEFAULT 0,
                 page_kind TEXT NOT NULL DEFAULT 'page',
                 published_at TEXT NOT NULL DEFAULT '',
-                author_username TEXT NOT NULL DEFAULT ''
+                author_username TEXT NOT NULL DEFAULT '',
+                redirect_to TEXT NOT NULL DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS idx_website_pages_parent ON website_pages(parent_slug);
 
@@ -1107,6 +1108,12 @@ impl LicenseDb {
         // posts: they render without a byline until an author is picked.
         let _ = self.conn.execute_batch(
             "ALTER TABLE website_pages ADD COLUMN author_username TEXT NOT NULL DEFAULT '';",
+        );
+
+        // Retiring a page: set a redirect target and the slug 301s there
+        // instead of rendering, keeping inbound links and search results alive.
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE website_pages ADD COLUMN redirect_to TEXT NOT NULL DEFAULT '';",
         );
 
         // >> Add new migrations as own execute_batch statements here <<
@@ -1774,7 +1781,7 @@ mod tests {
         db.seed_admin("hash").unwrap();
         db.create_user("writer", "hash", "user").unwrap();
         db.set_user_name("writer", "Klaus", "Petersen").unwrap();
-        db.upsert_website_page("post-1", "Post", "# Post", None, 0, "", "post", "2026-08-05", "writer", None)
+        db.upsert_website_page("post-1", "Post", "# Post", None, 0, "", "post", "2026-08-05", "writer", "", None)
             .unwrap();
         assert_eq!(db.get_website_page("post-1").unwrap().unwrap().9, "writer");
 
@@ -3594,7 +3601,7 @@ mod tests {
     fn test_asset_usage_and_rename_covers_shop_products() {
         let mut db = test_db();
         db.upsert_website_asset("sensor.png", 123).unwrap();
-        db.upsert_website_page("intro", "Intro", "![img](sensor.png)", None, 0, "", "page", "", "", None)
+        db.upsert_website_page("intro", "Intro", "![img](sensor.png)", None, 0, "", "page", "", "", "", None)
             .unwrap();
         db.upsert_product("lpms-b2", "LPMS-B2", "", 34900, "usd", Some("sensor.png"), "txcd", true, 0)
             .unwrap();
@@ -3624,7 +3631,7 @@ mod tests {
     #[test]
     fn test_website_page_hidden_flag() {
         let mut db = test_db();
-        db.upsert_website_page("about", "About", "# About", None, 0, "", "page", "", "", None)
+        db.upsert_website_page("about", "About", "# About", None, 0, "", "page", "", "", "", None)
             .unwrap();
 
         // New pages default to visible.
@@ -3636,7 +3643,7 @@ mod tests {
         // Hide, verify, and check that editing the page keeps it hidden.
         assert!(db.set_website_page_hidden("about", true).unwrap());
         assert!(db.get_website_page("about").unwrap().unwrap().6);
-        db.upsert_website_page("about", "About v2", "# About v2", None, 0, "", "page", "", "", None)
+        db.upsert_website_page("about", "About v2", "# About v2", None, 0, "", "page", "", "", "", None)
             .unwrap();
         assert!(
             db.get_website_page("about").unwrap().unwrap().6,
@@ -3687,7 +3694,7 @@ mod tests {
         assert_eq!(db.get_website_page("old-post").unwrap().unwrap().9, "");
 
         db.set_user_name("legacy", "Klaus", "Petersen").unwrap();
-        db.upsert_website_page("old-post", "Old", "# Old", None, 0, "", "post", "2020-01-01", "legacy", None)
+        db.upsert_website_page("old-post", "Old", "# Old", None, 0, "", "post", "2020-01-01", "legacy", "", None)
             .unwrap();
         assert_eq!(db.get_website_page("old-post").unwrap().unwrap().9, "legacy");
         assert_eq!(db.list_users().unwrap()[0].last_name, "Petersen");

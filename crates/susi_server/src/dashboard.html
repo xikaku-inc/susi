@@ -7547,11 +7547,14 @@ function renderWebsitePagesTable() {
         const slugArg = JSON.stringify(p.slug).replace(/"/g, '&quot;');
         const hiddenBadge = p.hidden ? '<span class="badge">hidden</span>' : '';
         const postBadge = p.page_kind === 'post' ? '<span class="badge">post</span>' : '';
-        const tags = postBadge + hiddenBadge;
+        const retiredBadge = p.redirect_to
+            ? '<span class="badge" title="Redirects to ' + escHtml(p.redirect_to) + '">retired</span>'
+            : '';
+        const tags = postBadge + hiddenBadge + retiredBadge;
         // Dim the content cells individually - opacity on the <tr> would
         // create a stacking context that traps the fixed-position dropdown
         // menu below the following rows.
-        const dim = p.hidden ? ' style="opacity:0.6;"' : '';
+        const dim = (p.hidden || p.redirect_to) ? ' style="opacity:0.6;"' : '';
         return '<tr>'
             + '<td' + dim + '><code>' + escHtml(p.slug) + '</code></td>'
             + '<td' + dim + '>' + escHtml(p.title) + '</td>'

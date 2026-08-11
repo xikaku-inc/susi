@@ -19,6 +19,7 @@ impl LicenseDb {
         page_kind: &str,
         published_at: &str,
         author_username: &str,
+        redirect_to: &str,
         author: Option<&str>,
     ) -> Result<i64, LicenseError> {
         let now = Utc::now().to_rfc3339();
@@ -60,8 +61,8 @@ impl LicenseDb {
         }
 
         tx.execute(
-            "INSERT INTO website_pages (slug, title, body_md, parent_slug, ord, updated_at, meta_description, page_kind, published_at, author_username)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            "INSERT INTO website_pages (slug, title, body_md, parent_slug, ord, updated_at, meta_description, page_kind, published_at, author_username, redirect_to)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              ON CONFLICT(slug) DO UPDATE SET
                title = excluded.title,
                body_md = excluded.body_md,
@@ -71,8 +72,9 @@ impl LicenseDb {
                meta_description = excluded.meta_description,
                page_kind = excluded.page_kind,
                published_at = excluded.published_at,
-               author_username = excluded.author_username",
-            params![slug, title, body_md, parent_slug, ord, now, meta_description, page_kind, published_at, author_username],
+               author_username = excluded.author_username,
+               redirect_to = excluded.redirect_to",
+            params![slug, title, body_md, parent_slug, ord, now, meta_description, page_kind, published_at, author_username, redirect_to],
         )
         .map_err(|e| LicenseError::Other(format!("DB upsert website page: {}", e)))?;
         let id = tx
@@ -248,10 +250,10 @@ impl LicenseDb {
 
     pub fn list_website_pages(
         &self,
-    ) -> Result<Vec<(String, String, Option<String>, i64, String, String, bool, String, String, String)>, LicenseError> {
+    ) -> Result<Vec<(String, String, Option<String>, i64, String, String, bool, String, String, String, String)>, LicenseError> {
         let mut stmt = self.conn
             .prepare(
-                "SELECT slug, title, parent_slug, ord, updated_at, meta_description, hidden, page_kind, published_at, author_username FROM website_pages
+                "SELECT slug, title, parent_slug, ord, updated_at, meta_description, hidden, page_kind, published_at, author_username, redirect_to FROM website_pages
                  ORDER BY parent_slug NULLS FIRST, ord, title",
             )
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
@@ -268,6 +270,7 @@ impl LicenseDb {
                     r.get::<_, String>(7)?,
                     r.get::<_, String>(8)?,
                     r.get::<_, String>(9)?,
+                    r.get::<_, String>(10)?,
                 ))
             })
             .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
@@ -279,9 +282,9 @@ impl LicenseDb {
     pub fn get_website_page(
         &self,
         slug: &str,
-    ) -> Result<Option<(String, String, Option<String>, i64, String, String, bool, String, String, String)>, LicenseError> {
+    ) -> Result<Option<(String, String, Option<String>, i64, String, String, bool, String, String, String, String)>, LicenseError> {
         match self.conn.query_row(
-            "SELECT title, body_md, parent_slug, ord, updated_at, meta_description, hidden, page_kind, published_at, author_username FROM website_pages
+            "SELECT title, body_md, parent_slug, ord, updated_at, meta_description, hidden, page_kind, published_at, author_username, redirect_to FROM website_pages
              WHERE slug = ?1",
             params![slug],
             |r| {
@@ -296,6 +299,7 @@ impl LicenseDb {
                     r.get::<_, String>(7)?,
                     r.get::<_, String>(8)?,
                     r.get::<_, String>(9)?,
+                    r.get::<_, String>(10)?,
                 ))
             },
         ) {

@@ -4155,6 +4155,134 @@ fn test_blog_post_byline() {
     assert_eq!(body["author_username"], json!(""), "pages must stay unattributed");
 }
 
+/// Retiring a page: the slug 301s to its replacement and disappears from every
+/// public listing, while staying editable so it can be brought back.
+#[test]
+fn test_retired_page_redirects() {
+    let server = TestServer::start();
+    let token = server.admin_token();
+    let http = server.http();
+    // Redirects must not be followed - the status and Location are the point.
+    let no_follow = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .danger_accept_invalid_certs(true)
+        .build()
+        .expect("client");
+
+    for (slug, title, ord) in [("home", "Home", 0), ("lpms-curs3", "LPMS-CURS3", 1), ("old-sensor", "Old sensor", 2)] {
+        let resp = http
+            .put(format!("{}/website/pages/{}", server.api_url, slug))
+            .bearer_auth(&token)
+            .json(&json!({ "title": title, "body_md": format!("# {}\n\nBody of {}.", title, slug), "ord": ord }))
+            .send()
+            .expect("create page");
+        assert_eq!(resp.status().as_u16(), 200, "create {}", slug);
+    }
+    let resp = http
+        .put(format!("{}/website/pages/gone-post", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "title": "Gone post", "body_md": "# Gone post\n\nRetired.", "page_kind": "post", "published_at": "2026-07-01" }))
+        .send()
+        .expect("create post");
+    assert_eq!(resp.status().as_u16(), 200);
+
+    // Retire the page onto its replacement.
+    let resp = http
+        .put(format!("{}/website/pages/old-sensor", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "title": "Old sensor", "body_md": "# Old sensor\n\nBody of old-sensor.", "redirect_to": "lpms-curs3" }))
+        .send()
+        .expect("retire page");
+    assert_eq!(resp.status().as_u16(), 200, "retire: {}", resp.text().unwrap_or_default());
+
+    // The slug now permanently redirects instead of rendering.
+    let resp = no_follow.get(format!("{}/site/old-sensor", server.url)).send().expect("retired ssr");
+    assert_eq!(resp.status().as_u16(), 301, "a retired page must 301");
+    assert_eq!(resp.headers()["location"], "/site/lpms-curs3", "off the marketing host the /site prefix stays");
+    let resp = no_follow
+        .get(format!("{}/site/old-sensor", server.url))
+        .header("Host", "xikaku.com")
+        .send()
+        .expect("retired ssr on marketing host");
+    assert_eq!(resp.headers()["location"], "/lpms-curs3");
+
+    // It leaves every public surface: nav list, sitemap, llms.txt.
+    let body = http.get(format!("{}/website/pages", server.api_url))
+        .send().expect("public list").json::<Value>().unwrap();
+    let pages = body["pages"].as_array().unwrap();
+    assert!(!pages.iter().any(|p| p["slug"] == "old-sensor"), "retired page must leave the public list");
+    assert!(pages.iter().any(|p| p["slug"] == "lpms-curs3"), "the replacement stays");
+    let sitemap = http.get(format!("{}/sitemap.xml", server.url))
+        .header("Host", "xikaku.com").send().expect("sitemap").text().unwrap();
+    assert!(!sitemap.contains("old-sensor"), "retired page must leave the sitemap: {}", sitemap);
+    assert!(sitemap.contains("lpms-curs3"));
+    let llms = http.get(format!("{}/llms.txt", server.url)).send().expect("llms").text().unwrap();
+    assert!(!llms.contains("old-sensor"), "retired page must leave llms.txt");
+
+    // Admins still get it, so the editor can clear the redirect.
+    let body = http.get(format!("{}/website/pages/old-sensor", server.api_url))
+        .bearer_auth(&token).send().expect("admin get").json::<Value>().unwrap();
+    assert_eq!(body["redirect_to"], json!("lpms-curs3"));
+    assert_eq!(body["body_md"], json!("# Old sensor\n\nBody of old-sensor."), "the body survives retirement");
+
+    // A retired post redirects too, and drops out of the index and the feed.
+    let resp = http
+        .put(format!("{}/website/pages/gone-post", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "title": "Gone post", "body_md": "# Gone post\n\nRetired.", "redirect_to": "/blog/other" }))
+        .send()
+        .expect("retire post");
+    assert_eq!(resp.status().as_u16(), 200);
+    let resp = no_follow.get(format!("{}/site/blog/gone-post", server.url)).send().expect("retired post");
+    assert_eq!(resp.status().as_u16(), 301);
+    assert_eq!(resp.headers()["location"], "/site/blog/other");
+    let index = http.get(format!("{}/site/blog", server.url)).send().expect("index").text().unwrap();
+    assert!(!index.contains("Retired."), "a retired post must leave the blog index");
+    let rss = http.get(format!("{}/site/blog/rss.xml", server.url)).send().expect("rss").text().unwrap();
+    assert!(!rss.contains("gone-post"), "a retired post must leave the feed");
+
+    // A page pointing at itself would loop forever.
+    for target in ["old-sensor", "/old-sensor"] {
+        let resp = http
+            .put(format!("{}/website/pages/old-sensor", server.api_url))
+            .bearer_auth(&token)
+            .json(&json!({ "title": "Old sensor", "body_md": "x", "redirect_to": target }))
+            .send()
+            .expect("self redirect");
+        assert_eq!(resp.status().as_u16(), 400, "self-redirect {} must be rejected", target);
+    }
+
+    // Clearing the target brings the page back.
+    let resp = http
+        .put(format!("{}/website/pages/old-sensor", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "title": "Old sensor", "body_md": "# Old sensor\n\nBack again.", "redirect_to": "" }))
+        .send()
+        .expect("un-retire");
+    assert_eq!(resp.status().as_u16(), 200);
+    let ssr = http.get(format!("{}/site/old-sensor", server.url)).send().expect("live again").text().unwrap();
+    assert!(ssr.contains("Back again."), "clearing the target must un-retire the page");
+
+    // An update that omits the field leaves an existing redirect in place.
+    let resp = http
+        .put(format!("{}/website/pages/old-sensor", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "title": "Old sensor", "body_md": "x", "redirect_to": "lpms-curs3" }))
+        .send()
+        .expect("retire again");
+    assert_eq!(resp.status().as_u16(), 200);
+    let resp = http
+        .put(format!("{}/website/pages/old-sensor", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "title": "Old sensor", "body_md": "y" }))
+        .send()
+        .expect("redirect-less update");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = http.get(format!("{}/website/pages/old-sensor", server.api_url))
+        .bearer_auth(&token).send().expect("get").json::<Value>().unwrap();
+    assert_eq!(body["redirect_to"], json!("lpms-curs3"), "an omitted field must not un-retire");
+}
+
 /// Every contact-form field is mandatory - blank company or subject is
 /// rejected before the message is ever queued for delivery.
 #[test]

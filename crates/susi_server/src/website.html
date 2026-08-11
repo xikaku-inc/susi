@@ -783,6 +783,15 @@ function pageHref(slug) {
     return SITE_PATH_PREFIX + prefix + encodeURIComponent(slug);
 }
 function siteRootHref() { return SITE_PATH_PREFIX || '/'; }
+// Send a visitor to a retired page's replacement. Mirrors the server's 301
+// target rules: full URL, site-root path, or a bare slug.
+function followRedirect(target) {
+    const t = (target || '').trim();
+    if (!t) return;
+    if (/^https?:\/\//i.test(t)) { location.href = t; return; }
+    if (t.startsWith('/')) { location.href = SITE_PATH_PREFIX + t; return; }
+    navigateTo(t);
+}
 function formatPostDate(s) {
     if (!s) return '';
     const d = new Date(s + 'T00:00:00');
@@ -1085,6 +1094,12 @@ async function loadPage(slug) {
     // that the post is loaded, and clear it so a later visit renders normally.
     if (pendingEdit === slug && currentPage && isPotentialAdmin()) editMode = true;
     pendingEdit = null;
+    // A retired page sends visitors on. Admins stay so they can edit it or
+    // clear the redirect - they would otherwise never reach the editor.
+    if (currentPage && currentPage.redirect_to && !isAdmin) {
+        followRedirect(currentPage.redirect_to);
+        return;
+    }
     renderSidebar();
     renderPage();
 }
@@ -1226,7 +1241,8 @@ async function renderBlogIndexView() {
                 + '<div class="meta"><a href="' + permalink + '">'
                 + escHtml(formatPostDate(p.published_at)) + '</a>'
                 + bylineSuffix(p.author_name)
-                + (p.hidden ? ' (hidden)' : '') + edit + '</div>'
+                + (p.hidden ? ' (hidden)' : '')
+                + (p.redirect_to ? ' (retired)' : '') + edit + '</div>'
                 + linkFirstHeading(renderMarkdown(bodies[i]), permalink)
                 + '</article>';
         });
@@ -1292,7 +1308,14 @@ function renderPage() {
           + 'background:rgba(251,191,36,0.15);color:#b45309;font-size:12px;font-weight:600;">'
           + 'Hidden - this page is not visible to the public</div>'
         : '';
-    let html = hiddenNotice + meta + renderMarkdown(currentPage.body_md || '');
+    // Same for a retired page: only an admin ever renders one, everyone else
+    // has already been redirected away.
+    const retiredNotice = currentPage.redirect_to
+        ? '<div style="display:inline-block;margin-bottom:14px;padding:4px 12px;border-radius:999px;'
+          + 'background:rgba(251,191,36,0.15);color:#b45309;font-size:12px;font-weight:600;">'
+          + 'Retired - redirects to ' + escHtml(currentPage.redirect_to) + '</div>'
+        : '';
+    let html = hiddenNotice + retiredNotice + meta + renderMarkdown(currentPage.body_md || '');
     const { html: withIds, headings } = injectHeadingIds(html);
     c.innerHTML = withIds;
     renderToc(headings);
@@ -1408,6 +1431,7 @@ function renderEditor() {
     const ord = d ? d.ord : (currentPage.ord || 0);
     const body = d ? d.body_md : (currentPage.body_md || '');
     const metaDesc = d ? d.meta_description : (currentPage.meta_description || '');
+    const redirect = d ? (d.redirect_to || '') : (currentPage.redirect_to || '');
     const slugVal = d ? d.slug : currentSlug;
     const isPost = (d ? d.page_kind : currentPage.page_kind) === 'post';
     const published = d ? (d.published_at || '') : (currentPage.published_at || '');
@@ -1428,6 +1452,10 @@ function renderEditor() {
             '<label title="Overrides the auto-derived description for SEO / AI crawlers. Leave empty to auto-derive from body.">SEO description</label>' +
             '<input id="editMetaDesc" type="text" maxlength="300" '
                 + 'style="flex:1;min-width:200px;">' +
+        '</div>' +
+        '<div class="edit-meta-row" style="margin-top:8px;">' +
+            '<label title="Retire this page: it stops rendering and permanently redirects here. A slug, a /path, or a full URL. Empty = live.">Redirects to</label>' +
+            '<input id="editRedirect" type="text" style="flex:1;min-width:200px;">' +
         '</div>' +
         '<textarea id="editBody"></textarea>' +
         '<div class="edit-actions">' +
@@ -1453,6 +1481,7 @@ function renderEditor() {
         document.getElementById('editOrd').value = ord;
     }
     document.getElementById('editMetaDesc').value = metaDesc;
+    document.getElementById('editRedirect').value = redirect;
     initEasyMDE(body);
 }
 
@@ -1640,6 +1669,7 @@ function editorValues() {
     const ordEl = document.getElementById('editOrd');
     const publishedEl = document.getElementById('editPublished');
     const authorEl = document.getElementById('editAuthor');
+    const redirectEl = document.getElementById('editRedirect');
     return {
         title: document.getElementById('editTitle').value.trim(),
         parent: parentEl ? parentEl.value.trim() : '',
@@ -1650,6 +1680,7 @@ function editorValues() {
         page_kind: (currentPage && currentPage.page_kind) || 'page',
         published_at: publishedEl ? publishedEl.value : ((currentPage && currentPage.published_at) || ''),
         author_username: authorEl ? authorEl.value : ((currentPage && currentPage.author_username) || ''),
+        redirect_to: redirectEl ? redirectEl.value.trim() : ((currentPage && currentPage.redirect_to) || ''),
     };
 }
 
@@ -1723,6 +1754,7 @@ async function savePage() {
             title, body_md, parent_slug: parent || null, ord, meta_description,
             page_kind: v.page_kind, published_at: v.published_at,
             author_username: v.author_username,
+            redirect_to: v.redirect_to,
         }),
     });
     if (resp.status === 401) { handleSessionExpired(body_md); return; }
