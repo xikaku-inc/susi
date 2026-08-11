@@ -21,8 +21,10 @@ RUN mkdir -p crates/susi_core/src && echo "" > crates/susi_core/src/lib.rs && \
 RUN cargo build --release --package susi_server 2>/dev/null || true
 
 # Copy real source and rebuild. --locked makes the committed Cargo.lock
-# authoritative so image builds are reproducible.
+# authoritative so image builds are reproducible. content/ holds the seed
+# markdown for the legal pages, pulled in via include_str!.
 COPY crates/ crates/
+COPY content/ content/
 RUN touch crates/susi_core/src/lib.rs crates/susi_server/src/main.rs && \
     cargo build --release --locked --package susi_server
 
