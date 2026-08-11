@@ -7019,10 +7019,14 @@ function newsletterPreviewRender(plainText, preview) {
             if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status));
             preview.innerHTML = '';
             const frame = document.createElement('iframe');
-            frame.setAttribute('sandbox', '');
+            // Scripts stay off, but links must work - an author clicks them to
+            // check they go to the right place. <base target="_blank"> routes
+            // every link into a new tab, which allow-popups permits; without
+            // it the sandbox refuses all navigation with "content blocked".
+            frame.setAttribute('sandbox', 'allow-popups allow-popups-to-escape-sandbox');
             frame.setAttribute('title', 'Email preview');
             preview.appendChild(frame);
-            frame.srcdoc = '<!doctype html><html><head><meta charset="utf-8"></head>'
+            frame.srcdoc = '<!doctype html><html><head><meta charset="utf-8"><base target="_blank"></head>'
                 + '<body style="margin:0;padding:20px;background:#ffffff;">' + data.html + '</body></html>';
         })
         .catch(e => {
