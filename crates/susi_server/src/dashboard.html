@@ -6850,10 +6850,14 @@ async function loadNewsletter() {
             const items = [
                 '<button onclick="openNewsletterEditor(' + i.id + ')">' + (isDraft ? 'Edit' : 'View') + '</button>',
                 total ? '<button onclick="showNewsletterDeliveries(' + i.id + ')">Delivery report</button>' : '',
+                i.status === 'sent'
+                    ? '<button onclick="toggleNewsletterPublic(' + i.id + ', ' + (i.public ? 'false' : 'true') + ')">'
+                      + (i.public ? 'Remove from website' : 'Show on website') + '</button>'
+                    : '',
                 isDraft ? '<div class="divider"></div><button class="danger" onclick="deleteNewsletterIssue(' + i.id + ')">Delete</button>' : '',
             ].join('');
             return '<tr>'
-                + '<td>' + nlStatusBadge(i.status) + '</td>'
+                + '<td>' + nlStatusBadge(i.status) + (i.public ? ' <span class="badge">on website</span>' : '') + '</td>'
                 + '<td style="font-weight:500;">' + escHtml(i.subject) + '</td>'
                 + '<td style="white-space:nowrap;">' + delivery + '</td>'
                 + '<td style="white-space:nowrap;color:var(--text2);">' + formatDateTime(i.created_at) + '</td>'
@@ -7209,6 +7213,20 @@ async function deleteNewsletterIssue(id) {
         const data = await resp.json().catch(() => ({}));
         if (!resp.ok) { toast('Error: ' + (data.error || resp.status), 'error'); return; }
         toast('Draft deleted', 'success');
+        await loadNewsletter();
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function toggleNewsletterPublic(id, pub) {
+    try {
+        const resp = await fetch(API + '/newsletter/issues/' + id + '/visibility', {
+            method: 'POST', headers: authHeaders(), body: JSON.stringify({ public: pub }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) { toast('Error: ' + (data.error || resp.status), 'error'); return; }
+        toast(pub ? 'Shown on website' : 'Removed from website', 'success');
         await loadNewsletter();
     } catch (e) {
         toast('Failed: ' + e.message, 'error');

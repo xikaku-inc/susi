@@ -1323,6 +1323,7 @@ fn is_public_api_route(method: &Method, path: &str) -> bool {
         ["indexnow", _] => get,
         ["newsletter", "unsubscribe"] => get || post,
         ["newsletter", "google", "callback"] => get,
+        ["newsletter", "public"] => get,
         ["website", "pages"] => get,
         ["website", "pages", _] => get,
         ["website", "assets", _] => get,
@@ -3315,6 +3316,7 @@ async fn main() -> Result<()> {
                 .put(newsletter::handle_update_issue)
                 .delete(newsletter::handle_delete_issue),
         )
+        .route("/api/v1/newsletter/issues/{id}/visibility", post(newsletter::handle_set_issue_public))
         .route("/api/v1/newsletter/issues/{id}/deliveries", get(newsletter::handle_list_deliveries))
         .route("/api/v1/newsletter/issues/{id}/test", post(newsletter::handle_test_send))
         .route("/api/v1/newsletter/issues/{id}/send", post(newsletter::handle_send_issue))
@@ -3324,6 +3326,8 @@ async fn main() -> Result<()> {
             "/api/v1/newsletter/unsubscribe",
             get(newsletter::handle_unsubscribe).post(newsletter::handle_unsubscribe),
         )
+        // Public: feeds the /newsletter archive page on the website.
+        .route("/api/v1/newsletter/public", get(newsletter::handle_public_issues))
         // Public client endpoints
         .route("/api/v1/activate", post(client_api::handle_activate))
         .route("/api/v1/verify", post(client_api::handle_verify))

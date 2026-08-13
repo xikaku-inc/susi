@@ -4989,6 +4989,177 @@ fn test_newsletter_campaign_lifecycle() {
     );
 }
 
+/// The public newsletter archive: listing is opt-in per sent issue, the
+/// public endpoint and the SSR /newsletter page show exactly the selected
+/// issues, and the visibility toggle is owner-only.
+#[test]
+fn test_newsletter_public_archive_endpoints() {
+    // Sent issues normally arrive via the campaign pipeline; seed them
+    // directly so the test does not depend on a live relay.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let db_path = dir.path().join("licenses.db");
+    {
+        let db = susi_core::db::LicenseDb::open(db_path.to_str().unwrap()).expect("open db");
+        drop(db);
+        let conn = rusqlite::Connection::open(&db_path).expect("raw open");
+        conn.execute_batch(
+            "INSERT INTO newsletter_issues (subject, body_md, status, created_by, created_at, updated_at, sent_at, public) VALUES
+             ('March update', '[TOC]' || char(10) || '# Spring news' || char(10) || char(10) || '![robot](nl-1-robot.png)' || char(10), 'sent', 'admin', '2026-03-01T00:00:00Z', '2026-03-01T00:00:00Z', '2026-03-02T09:00:00+00:00', 1),
+             ('April update', '# April news' || char(10), 'sent', 'admin', '2026-04-01T00:00:00Z', '2026-04-01T00:00:00Z', '2026-04-02T09:00:00+00:00', 0),
+             ('Unsent draft', '# Not yet' || char(10), 'draft', 'admin', '2026-05-01T00:00:00Z', '2026-05-01T00:00:00Z', NULL, 0);",
+        )
+        .expect("seed issues");
+    }
+    let server = TestServer::start_in_dir(dir, &[]);
+    let admin = server.admin_token();
+    let client = server.http();
+
+    let issue_id = |subject: &str| -> i64 {
+        client
+            .get(format!("{}/newsletter/issues", server.api_url))
+            .bearer_auth(&admin)
+            .send()
+            .expect("list issues")
+            .json::<Value>()
+            .expect("issues json")
+            .as_array()
+            .expect("array")
+            .iter()
+            .find(|i| i["subject"] == json!(subject))
+            .unwrap_or_else(|| panic!("{} missing from issue list", subject))["id"]
+            .as_i64()
+            .expect("id")
+    };
+    let (march, april, draft) =
+        (issue_id("March update"), issue_id("April update"), issue_id("Unsent draft"));
+
+    let public_subjects = || -> Vec<String> {
+        client
+            .get(format!("{}/newsletter/public", server.api_url))
+            .send()
+            .expect("public list")
+            .json::<Value>()
+            .expect("public json")["issues"]
+            .as_array()
+            .expect("issues array")
+            .iter()
+            .map(|i| i["subject"].as_str().unwrap_or_default().to_string())
+            .collect()
+    };
+
+    // Anonymous list: only the issue selected for the site, with its content.
+    let resp = client
+        .get(format!("{}/newsletter/public", server.api_url))
+        .send()
+        .expect("public list");
+    assert_eq!(resp.status().as_u16(), 200, "the archive list must be public");
+    let body = resp.json::<Value>().expect("json");
+    let issues = body["issues"].as_array().expect("array");
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0]["subject"], json!("March update"));
+    assert!(issues[0]["body_md"].as_str().expect("body_md").contains("# Spring news"));
+    assert_eq!(issues[0]["sent_at"], json!("2026-03-02T09:00:00+00:00"));
+
+    // SSR /newsletter: selected issue rendered in full, bare image names
+    // resolved against the asset store, the email-only [TOC] marker dropped,
+    // unselected and draft issues absent.
+    let ssr = client
+        .get(format!("{}/site/newsletter", server.url))
+        .send()
+        .expect("ssr")
+        .text()
+        .expect("ssr body");
+    assert!(ssr.contains("March update"), "SSR must show the selected issue");
+    assert!(ssr.contains("Spring news"));
+    assert!(ssr.contains("March 2, 2026"), "the sent date is the issue's date line");
+    assert!(
+        ssr.contains("src=\"/api/v1/website/assets/nl-1-robot.png\""),
+        "bare image filenames must resolve without JS: {}",
+        ssr
+    );
+    assert!(!ssr.contains("<p>[TOC]</p>"), "the email-only TOC marker must not leak");
+    assert!(!ssr.contains("April update"), "an unselected issue must stay off the page");
+    assert!(!ssr.contains("Unsent draft"));
+
+    // Selecting a second issue publishes it and invalidates the SSR cache;
+    // the stream is newest first.
+    let resp = client
+        .post(format!("{}/newsletter/issues/{}/visibility", server.api_url, april))
+        .bearer_auth(&admin)
+        .json(&json!({ "public": true }))
+        .send()
+        .expect("publish april");
+    assert_eq!(resp.status().as_u16(), 200, "publish: {}", resp.text().unwrap_or_default());
+    assert_eq!(public_subjects(), vec!["April update", "March update"]);
+    let ssr = client
+        .get(format!("{}/site/newsletter", server.url))
+        .send()
+        .expect("ssr again")
+        .text()
+        .expect("ssr body");
+    assert!(ssr.contains("April update"), "publishing must invalidate the page cache");
+
+    // Deselecting removes it again.
+    let resp = client
+        .post(format!("{}/newsletter/issues/{}/visibility", server.api_url, april))
+        .bearer_auth(&admin)
+        .json(&json!({ "public": false }))
+        .send()
+        .expect("unpublish april");
+    assert_eq!(resp.status().as_u16(), 200);
+    assert_eq!(public_subjects(), vec!["March update"]);
+
+    // Guards: a draft cannot be published, an unknown id 404s.
+    let resp = client
+        .post(format!("{}/newsletter/issues/{}/visibility", server.api_url, draft))
+        .bearer_auth(&admin)
+        .json(&json!({ "public": true }))
+        .send()
+        .expect("publish draft");
+    assert_eq!(resp.status().as_u16(), 409, "a draft must not be publishable");
+    let resp = client
+        .post(format!("{}/newsletter/issues/9999/visibility", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({ "public": true }))
+        .send()
+        .expect("publish missing");
+    assert_eq!(resp.status().as_u16(), 404);
+
+    // The toggle is owner-only: anonymous and plain users are refused.
+    let resp = client
+        .post(format!("{}/newsletter/issues/{}/visibility", server.api_url, march))
+        .json(&json!({ "public": false }))
+        .send()
+        .expect("anonymous toggle");
+    assert_eq!(resp.status().as_u16(), 401, "anonymous must not reach the toggle");
+    let resp = client
+        .post(format!("{}/auth/users", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({
+            "username": "arch_user",
+            "email": "arch_user@example.com",
+            "role": "user",
+            "password": "userpw12345",
+        }))
+        .send()
+        .expect("create user");
+    assert!(resp.status().is_success());
+    let resp = client
+        .post(format!("{}/auth/login", server.api_url))
+        .json(&json!({"username": "arch_user", "password": "userpw12345"}))
+        .send()
+        .expect("login");
+    let user = resp.json::<Value>().expect("json")["token"].as_str().expect("token").to_string();
+    let resp = client
+        .post(format!("{}/newsletter/issues/{}/visibility", server.api_url, march))
+        .bearer_auth(&user)
+        .json(&json!({ "public": false }))
+        .send()
+        .expect("user toggle");
+    assert_eq!(resp.status().as_u16(), 403, "a non-owner must not curate the archive");
+    assert_eq!(public_subjects(), vec!["March update"], "refused toggles must change nothing");
+}
+
 /// Newsletter sending never falls back to the account-email relay. With the
 /// dedicated credentials unset, send and test-send must refuse - silently
 /// borrowing the sign-in-code relay is exactly the blast radius this avoids.

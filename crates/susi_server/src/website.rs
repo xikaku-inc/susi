@@ -1655,6 +1655,14 @@ fn render_website(
         return (build_html_headers(), html).into_response();
     }
 
+    // /newsletter renders the public newsletter archive; an optional
+    // "newsletter" page row supplies the title/intro when present.
+    if !post_path && requested_slug.as_deref() == Some("newsletter") {
+        let html = render_newsletter_index(state, &pages, &products);
+        page_cache_put(cache_key, html.clone());
+        return (build_html_headers(), html).into_response();
+    }
+
     let slug_owned: Option<String> = requested_slug.or_else(|| {
         first_default_slug(&pages).map(|s| s.to_string())
     });
@@ -1792,6 +1800,106 @@ fn render_blog_index(
     // dateModified for the index: the newest post, else the intro page edit.
     let updated = posts.first().map(|p| p.4.clone()).unwrap_or(updated_at);
     let injected = render_seo_head("blog", &title, &description, &updated, None, pages, products, None, None);
+    let analytics = analytics_head(state);
+    WEBSITE_HTML
+        .replacen("<!--SEO_HEAD-->", &injected, 1)
+        .replacen("<!--ANALYTICS-->", &analytics, 1)
+        .replacen("<!--BODY_CONTENT-->", &body_html, 1)
+        .into()
+}
+
+/// Newsletter bodies reference uploaded images by bare filename (the composer
+/// upload hook inserts `data.name`, not a URL). The SPA resolves those
+/// client-side; the SSR fallback must point them at the asset store
+/// explicitly, or a crawler resolves them against /newsletter and gets the
+/// page shell back.
+fn absolutize_bare_img_srcs(html: &str) -> String {
+    let mut out = String::with_capacity(html.len() + 64);
+    let mut i = 0;
+    while let Some(p) = html[i..].find("src=\"") {
+        let start = i + p + 5;
+        out.push_str(&html[i..start]);
+        i = start;
+        let Some(e) = html[start..].find('"') else { break };
+        let url = &html[start..start + e];
+        let lower = url.to_ascii_lowercase();
+        if !(url.is_empty()
+            || url.starts_with('/')
+            || url.starts_with('#')
+            || lower.starts_with("http://")
+            || lower.starts_with("https://")
+            || lower.starts_with("data:"))
+        {
+            out.push_str("/api/v1/website/assets/");
+        }
+    }
+    out.push_str(&html[i..]);
+    out
+}
+
+/// Markdown for a newsletter issue as shown on the website: the email-only
+/// [TOC] marker lines are dropped - the site has its own TOC sidebar.
+fn newsletter_web_md(body_md: &str) -> String {
+    body_md
+        .lines()
+        .filter(|l| !crate::newsletter::is_toc_marker(l.trim()))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// SSR body + head for the /newsletter archive: intro from the optional
+/// "newsletter" page row, then every issue published to the site,
+/// newest first.
+fn render_newsletter_index(
+    state: &Arc<AppState>,
+    pages: &[PageRow],
+    products: &[(String, String, String, i64, String, Option<String>, String, bool, i64, String)],
+) -> Bytes {
+    let (row, issues) = {
+        let db = state.db.lock();
+        (
+            db.get_website_page("newsletter").unwrap_or(None),
+            db.list_public_newsletter_issues().unwrap_or_default(),
+        )
+    };
+    let (title, intro_md, updated_at, meta) = match row {
+        Some((t, body, _p, _o, upd, m, false, _k, _pd, _au, _rd)) => (t, body, upd, m),
+        _ => ("Newsletter".to_string(), String::new(), String::new(), String::new()),
+    };
+
+    let description = if !meta.trim().is_empty() {
+        meta
+    } else {
+        let d = derive_description(&intro_md);
+        if d.is_empty() { format!("Past newsletters from {}.", SITE_NAME) } else { d }
+    };
+
+    let mut body_html = if intro_md.is_empty() {
+        format!("<h1>{}</h1>", html_escape(&title))
+    } else {
+        render_body_html(&intro_md)
+    };
+    if issues.is_empty() {
+        body_html.push_str("<p>No newsletters yet.</p>");
+    } else {
+        body_html.push_str("<div class=\"blog-index\">");
+        for (_id, subject, body_md, sent_at) in &issues {
+            let date = sent_at.get(..10).unwrap_or(sent_at);
+            body_html.push_str(&format!(
+                "<article class=\"blog-index-item\"><div class=\"meta\">{date}</div>\
+                 <h1>{subject}</h1>{body}</article>",
+                date = html_escape(&format_post_date(date)),
+                subject = html_escape(subject),
+                body = absolutize_bare_img_srcs(&render_body_html(&newsletter_web_md(body_md))),
+            ));
+        }
+        body_html.push_str("</div>");
+    }
+
+    // dateModified for the archive: the newest issue, else the intro page edit.
+    let updated = issues.first().map(|i| i.3.clone()).unwrap_or(updated_at);
+    let injected =
+        render_seo_head("newsletter", &title, &description, &updated, None, pages, products, None, None);
     let analytics = analytics_head(state);
     WEBSITE_HTML
         .replacen("<!--SEO_HEAD-->", &injected, 1)

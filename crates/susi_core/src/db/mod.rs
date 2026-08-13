@@ -844,7 +844,9 @@ impl LicenseDb {
                 created_by TEXT    NOT NULL,
                 created_at TEXT    NOT NULL,
                 updated_at TEXT    NOT NULL,
-                sent_at    TEXT
+                sent_at    TEXT,
+                -- 1 = listed on the public website newsletter archive
+                public     INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS idx_newsletter_issues_status
                 ON newsletter_issues(status, created_at DESC);
@@ -1135,6 +1137,12 @@ impl LicenseDb {
         // user. A code is only accepted for a timestep newer than this.
         let _ = self.conn.execute_batch(
             "ALTER TABLE users ADD COLUMN totp_last_step INTEGER NOT NULL DEFAULT 0;",
+        );
+
+        // Opt-in flag for the public website newsletter archive. Existing
+        // issues stay off the site until explicitly published.
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE newsletter_issues ADD COLUMN public INTEGER NOT NULL DEFAULT 0;",
         );
 
         // >> Add new migrations as own execute_batch statements here <<
@@ -3994,5 +4002,86 @@ mod tests {
         assert!(db.delete_newsletter_issue(draft).unwrap());
         assert!(db.get_newsletter_issue(draft).unwrap().is_none());
         assert!(db.list_newsletter_deliveries(draft).unwrap().is_empty());
+    }
+
+    /// Only a sent issue can appear on the public website archive, and the
+    /// listing is opt-in per issue, newest first.
+    #[test]
+    fn test_newsletter_public_archive() {
+        let db = seed_campaign_db();
+        let send = |subject: &str| {
+            let id = db.create_newsletter_issue(subject, "# Hello", "admin").unwrap();
+            let audience = db.newsletter_audience().unwrap();
+            db.start_newsletter_send(id, &audience.recipients).unwrap();
+            for d in db.claim_pending_deliveries(10).unwrap() {
+                db.mark_delivery_sent(d.id).unwrap();
+            }
+            db.finalize_newsletter_issues().unwrap();
+            id
+        };
+
+        let draft = db.create_newsletter_issue("Draft", "Body", "admin").unwrap();
+        assert!(
+            !db.set_newsletter_issue_public(draft, true).unwrap(),
+            "a draft must not be publishable to the archive"
+        );
+
+        let first = send("First");
+        let second = send("Second");
+        assert!(db.list_public_newsletter_issues().unwrap().is_empty(), "opt-in per issue");
+        assert!(!db.get_newsletter_issue(first).unwrap().unwrap().public);
+
+        assert!(db.set_newsletter_issue_public(first, true).unwrap());
+        assert!(db.set_newsletter_issue_public(second, true).unwrap());
+        assert!(db.get_newsletter_issue(first).unwrap().unwrap().public);
+        let rows = db.list_public_newsletter_issues().unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.0).collect::<Vec<_>>(),
+            vec![second, first],
+            "newest first"
+        );
+        assert_eq!(rows[0].1, "Second");
+        assert_eq!(rows[0].2, "# Hello");
+        assert!(!rows[0].3.is_empty(), "sent_at is populated for a sent issue");
+
+        assert!(db.set_newsletter_issue_public(second, false).unwrap());
+        assert_eq!(db.list_public_newsletter_issues().unwrap().len(), 1);
+        assert!(!db.set_newsletter_issue_public(9999, true).unwrap());
+    }
+
+    /// A database from before the `public` column existed migrates cleanly and
+    /// keeps every existing issue off the website.
+    #[test]
+    fn test_newsletter_public_migration() {
+        let path = std::env::temp_dir()
+            .join(format!("susi_newsletter_pub_mig_{}.db", std::process::id()));
+        let p = path.to_str().unwrap().to_string();
+        let _ = std::fs::remove_file(&path);
+        {
+            let db = LicenseDb::open(&p).unwrap();
+            db.conn
+                .execute_batch("ALTER TABLE newsletter_issues DROP COLUMN public;")
+                .unwrap();
+            db.conn
+                .execute_batch(
+                    "INSERT INTO newsletter_issues (subject, status, created_by, created_at, updated_at, sent_at)
+                     VALUES ('Old issue', 'sent', 'admin', '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z');",
+                )
+                .unwrap();
+        }
+
+        let db = LicenseDb::open(&p).unwrap();
+        let issues = db.list_newsletter_issues().unwrap();
+        assert_eq!(issues.len(), 1);
+        assert!(
+            !issues[0].public,
+            "an existing issue must not appear on the website by the migration alone"
+        );
+        assert!(db.list_public_newsletter_issues().unwrap().is_empty());
+        assert!(db.set_newsletter_issue_public(issues[0].id, true).unwrap());
+        assert_eq!(db.list_public_newsletter_issues().unwrap().len(), 1);
+
+        drop(db);
+        let _ = std::fs::remove_file(&path);
     }
 }

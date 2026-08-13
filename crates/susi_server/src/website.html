@@ -1101,8 +1101,9 @@ async function loadPage(slug) {
     const resp = await fetch(API + '/website/pages/' + encodeURIComponent(slug), opts);
     if (!resp.ok) {
         currentPage = null;
-        // The /blog index works without a "blog" page row (title/intro only).
-        if (slug !== 'blog') {
+        // The /blog and /newsletter indexes work without a page row of their
+        // own (the row only supplies title/intro).
+        if (slug !== 'blog' && slug !== 'newsletter') {
             renderEmptyState('Page "' + slug + '" not found.');
             return;
         }
@@ -1172,9 +1173,12 @@ function renderSidebar() {
         return h;
     };
     // Fixed Blog/Shop links; '__blog__'/'__shop__' place them inside groups.
+    // The Newsletter archive rides directly below Blog wherever it is placed.
     const onPost = currentPage && currentPage.page_kind === 'post';
     const blogActive = (currentSlug === 'blog' || onPost) ? ' active' : '';
-    const blogLink = '<a class="section-head' + blogActive + '" href="' + SITE_PATH_PREFIX + '/blog">Blog</a>';
+    const newsletterActive = currentSlug === 'newsletter' ? ' active' : '';
+    const blogLink = '<a class="section-head' + blogActive + '" href="' + SITE_PATH_PREFIX + '/blog">Blog</a>'
+        + '<a class="section-head' + newsletterActive + '" href="' + SITE_PATH_PREFIX + '/newsletter">Newsletter</a>';
     const shopActive = currentSlug === '__shop__' ? ' active' : '';
     const shopLink = '<a class="section-head' + shopActive + '" href="/shop">Shop</a>';
     const bySlug = new Map(topLevel.map(p => [p.slug, p]));
@@ -1278,6 +1282,44 @@ async function renderBlogIndexView() {
     mountContactForms(c);
 }
 
+// Public /newsletter view: optional intro from the "newsletter" page row,
+// then every issue published to the site rendered in full, newest first.
+async function renderNewsletterIndexView() {
+    const c = document.getElementById('content');
+    updateAdminChrome();
+    let html = currentPage
+        ? renderMarkdown(currentPage.body_md || '')
+        : '<h1>Newsletter</h1>';
+    let issues = [];
+    try {
+        const r = await fetch(API + '/newsletter/public');
+        if (r.ok) issues = (await r.json()).issues || [];
+    } catch (e) {}
+    if (!issues.length) {
+        html += '<p>No newsletters yet.</p>';
+    } else {
+        // The email-only [TOC] marker has no meaning here - the site renders
+        // its own TOC sidebar from the headings.
+        const tocMarkers = new Set(['[toc]', '[[toc]]', '[[_toc_]]', '[_toc_]']);
+        html += '<div class="blog-index">';
+        issues.forEach(i => {
+            const body = (i.body_md || '').split('\n')
+                .filter(l => !tocMarkers.has(l.trim().toLowerCase())).join('\n');
+            html += '<article class="blog-index-item">'
+                + '<div class="meta">' + escHtml(formatPostDate((i.sent_at || '').slice(0, 10))) + '</div>'
+                + '<h1>' + escHtml(i.subject) + '</h1>'
+                + renderMarkdown(body)
+                + '</article>';
+        });
+        html += '</div>';
+    }
+    const { html: withIds, headings } = injectHeadingIds(html);
+    c.innerHTML = withIds;
+    renderToc(headings);
+    revealEmailObfs(c);
+    mountContactForms(c);
+}
+
 function renderNoPages() {
     const layout = document.getElementById('layout');
     if (layout) { layout.classList.add('no-toc'); layout.classList.add('no-sidebar'); }
@@ -1301,6 +1343,11 @@ function renderPage() {
     // "blog" intro page still uses the normal editor flow below.
     if (currentSlug === 'blog' && !editMode && !(previewMode && editDraft)) {
         renderBlogIndexView();
+        return;
+    }
+    // Same for the newsletter archive and its optional "newsletter" intro page.
+    if (currentSlug === 'newsletter' && !editMode && !(previewMode && editDraft)) {
+        renderNewsletterIndexView();
         return;
     }
     if (!currentPage) {

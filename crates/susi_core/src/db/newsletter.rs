@@ -153,6 +153,7 @@ pub struct NewsletterIssue {
     pub created_at: String,
     pub updated_at: String,
     pub sent_at: Option<String>,
+    pub public: bool,
     pub pending: i64,
     pub sent: i64,
     pub failed: i64,
@@ -179,7 +180,7 @@ pub struct PendingDelivery {
 }
 
 const ISSUE_SELECT: &str = "SELECT i.id, i.subject, i.body_md, i.status, i.created_by,
-        i.created_at, i.updated_at, i.sent_at,
+        i.created_at, i.updated_at, i.sent_at, i.public,
         COALESCE(SUM(CASE WHEN d.status = 'pending' THEN 1 ELSE 0 END), 0),
         COALESCE(SUM(CASE WHEN d.status = 'sent'    THEN 1 ELSE 0 END), 0),
         COALESCE(SUM(CASE WHEN d.status = 'failed'  THEN 1 ELSE 0 END), 0)
@@ -196,9 +197,10 @@ fn row_to_issue(r: &rusqlite::Row<'_>) -> rusqlite::Result<NewsletterIssue> {
         created_at: r.get(5)?,
         updated_at: r.get(6)?,
         sent_at: r.get(7)?,
-        pending: r.get(8)?,
-        sent: r.get(9)?,
-        failed: r.get(10)?,
+        public: r.get::<_, i64>(8)? != 0,
+        pending: r.get(9)?,
+        sent: r.get(10)?,
+        failed: r.get(11)?,
     })
 }
 
@@ -258,6 +260,45 @@ impl LicenseDb {
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
         let rows = stmt
             .query_map([], row_to_issue)
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    /// Toggle an issue's listing on the public website archive. Sent issues
+    /// only - a draft is not a document anyone was sent.
+    pub fn set_newsletter_issue_public(
+        &self,
+        id: i64,
+        public: bool,
+    ) -> Result<bool, LicenseError> {
+        let n = self
+            .conn
+            .execute(
+                "UPDATE newsletter_issues SET public = ?1 WHERE id = ?2 AND status = 'sent'",
+                params![public as i64, id],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))?;
+        Ok(n > 0)
+    }
+
+    /// Issues shown on the public website archive: (id, subject, body_md,
+    /// sent_at), newest first.
+    pub fn list_public_newsletter_issues(
+        &self,
+    ) -> Result<Vec<(i64, String, String, String)>, LicenseError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, subject, body_md, COALESCE(sent_at, created_at)
+                 FROM newsletter_issues
+                 WHERE public = 1 AND status = 'sent'
+                 ORDER BY COALESCE(sent_at, created_at) DESC",
+            )
+            .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
             .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
             .filter_map(|r| r.ok())
             .collect();

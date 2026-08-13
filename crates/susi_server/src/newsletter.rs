@@ -624,7 +624,7 @@ fn size_attrs(size: &(Option<String>, Option<String>)) -> String {
 // ---------------------------------------------------------------------------
 
 /// The docs' inline TOC tag, alone on a line: `[TOC]`, `[[TOC]]`, `[[_TOC_]]`.
-fn is_toc_marker(trimmed: &str) -> bool {
+pub(crate) fn is_toc_marker(trimmed: &str) -> bool {
     matches!(
         trimmed.to_ascii_lowercase().as_str(),
         "[toc]" | "[[toc]]" | "[[_toc_]]" | "[_toc_]"
@@ -1584,6 +1584,64 @@ fn issue_not_editable(db: &LicenseDb, id: i64) -> (StatusCode, Json<ErrorRespons
         ),
         _ => error_response(StatusCode::NOT_FOUND, "Issue not found"),
     }
+}
+
+#[derive(Deserialize)]
+pub(crate) struct IssueVisibilityRequest {
+    public: bool,
+}
+
+/// Toggle a sent issue's listing on the public website newsletter archive.
+pub(crate) async fn handle_set_issue_public(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<IssueVisibilityRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    require_owner(&state, &principal)?;
+
+    let db = state.db.lock();
+    if !db
+        .set_newsletter_issue_public(id, req.public)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+    {
+        return Err(match db.get_newsletter_issue(id) {
+            Ok(Some(i)) => error_response(
+                StatusCode::CONFLICT,
+                &format!("Issue is '{}' - only sent issues can be shown on the website", i.status),
+            ),
+            _ => error_response(StatusCode::NOT_FOUND, "Issue not found"),
+        });
+    }
+    audit_db(
+        &db,
+        &principal.username,
+        if req.public { "newsletter.publish" } else { "newsletter.unpublish" },
+        &id.to_string(),
+        "",
+    );
+    website::invalidate_page_cache();
+    Ok(Json(serde_json::json!({ "status": "OK", "id": id, "public": req.public })))
+}
+
+/// Public: the issues selected for the website archive, newest first. Feeds
+/// the /newsletter page on the public site.
+pub(crate) async fn handle_public_issues(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let issues = {
+        let db = state.db.lock();
+        db.list_public_newsletter_issues()
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+    };
+    let issues: Vec<serde_json::Value> = issues
+        .into_iter()
+        .map(|(id, subject, body_md, sent_at)| {
+            serde_json::json!({ "id": id, "subject": subject, "body_md": body_md, "sent_at": sent_at })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({ "issues": issues })))
 }
 
 pub(crate) async fn handle_list_deliveries(
