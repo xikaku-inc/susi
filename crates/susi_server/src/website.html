@@ -798,6 +798,18 @@ function pageHref(slug) {
     return SITE_PATH_PREFIX + prefix + encodeURIComponent(slug);
 }
 function siteRootHref() { return SITE_PATH_PREFIX || '/'; }
+// Carry the ad click IDs across in-app navigation. Analytics only loads once
+// the visitor accepts cookies, which may happen after they have left the
+// landing page - without this the click ID is gone and the conversion cannot
+// be attributed to the campaign that paid for the visit.
+function adClickQuery() {
+    const keep = new URLSearchParams();
+    new URLSearchParams(location.search).forEach((v, k) => {
+        if (k === 'gclid' || k === 'gbraid' || k === 'wbraid') keep.set(k, v);
+    });
+    const s = keep.toString();
+    return s ? '?' + s : '';
+}
 // Footer links carry clean paths; prefix them on non-canonical hosts.
 document.querySelectorAll('.site-footer a[data-site-link]').forEach(a => {
     a.href = SITE_PATH_PREFIX + a.getAttribute('data-site-link');
@@ -1965,7 +1977,7 @@ function scrollToAnchor(id) {
 }
 
 function navigateTo(slug) {
-    const target = slug ? pageHref(slug) : siteRootHref();
+    const target = (slug ? pageHref(slug) : siteRootHref()) + adClickQuery();
     if (location.pathname + location.search !== target) {
         history.pushState({}, '', target);
     }
