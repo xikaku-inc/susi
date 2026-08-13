@@ -57,6 +57,27 @@ const TAG_STYLES: &[(&str, &str)] = &[
 /// padding, which would render as a box inside a box.
 const PRE_CODE_STYLE: &str = "font-family:inherit;font-size:inherit;background:none;padding:0;";
 
+/// Marker classes the video block and the [TOC] box plant for `inject_styles`
+/// to react to. Email clients never see a stylesheet, so the classes style
+/// nothing by themselves - they only steer which inline styles get injected.
+const POSTER_CLASS: &str = "poster";
+const OUTLOOK_ONLY_CLASS: &str = "outlook-only";
+const TOC_BOX_CLASS: &str = "toc";
+const TOC_TITLE_CLASS: &str = "toc-title";
+const TOC_ITEM_CLASS: &str = "toc-item";
+const TOC_SUB_CLASS: &str = "toc-sub";
+
+/// The [TOC] box mirrors the docs' inline TOC: bordered box, small-caps
+/// "Contents" title, h3 entries indented under their h2. Kept in the body
+/// text colour - grey labels are banned in customer mail, and blue would
+/// promise a click these entries can't deliver.
+const TOC_BOX_STYLE: &str = "margin:18px 0;padding:14px 18px;background:#f3f4f6;\
+                             border:1px solid #e4e6ea;border-radius:8px;";
+const TOC_TITLE_STYLE: &str = "font-size:11px;font-weight:600;text-transform:uppercase;\
+                               letter-spacing:0.06em;margin-bottom:8px;";
+const TOC_ITEM_STYLE: &str = "padding:3px 0;line-height:1.4;";
+const TOC_SUB_STYLE: &str = "padding:3px 0 3px 16px;font-size:13px;line-height:1.4;";
+
 /// Rewrite one URL from the markdown source into something an inbox can fetch.
 ///
 /// Three shapes occur. Absolute and scheme-qualified URLs pass through.
@@ -120,10 +141,26 @@ fn inject_styles(html: &str) -> String {
             || bytes[end] == b'>'
             || bytes[end] == b'/'
             || bytes[end].is_ascii_whitespace();
+        let tag_end = html[end..].find('>').map_or(html.len(), |o| end + o);
+        let attrs = &html[end..tag_end];
         let style = if !delimited {
             None
         } else if name.eq_ignore_ascii_case("code") && in_pre {
             Some(PRE_CODE_STYLE)
+        } else if name.eq_ignore_ascii_case("br") {
+            // The <br> a video block plants after its poster exists only for
+            // Outlook, whose engine ignores display (both the poster's block
+            // and this none). Everywhere else the block img already breaks the
+            // line, so the visible <br> would add an empty line of dead space.
+            (attr_value(attrs, "class") == Some(OUTLOOK_ONLY_CLASS)).then_some("display:none;")
+        } else if name.eq_ignore_ascii_case("div") {
+            attr_value(attrs, "class").and_then(|c| match c {
+                TOC_BOX_CLASS => Some(TOC_BOX_STYLE),
+                TOC_TITLE_CLASS => Some(TOC_TITLE_STYLE),
+                TOC_ITEM_CLASS => Some(TOC_ITEM_STYLE),
+                TOC_SUB_CLASS => Some(TOC_SUB_STYLE),
+                _ => None,
+            })
         } else {
             TAG_STYLES
                 .iter()
@@ -140,8 +177,12 @@ fn inject_styles(html: &str) -> String {
             // attribute, and web clients honour CSS more consistently than
             // presentational attributes. The attribute stays for Outlook.
             if name.eq_ignore_ascii_case("img") {
-                let tag_end = html[end..].find('>').map_or(html.len(), |o| end + o);
-                out.push_str(&img_size_style(&html[end..tag_end]));
+                out.push_str(&img_size_style(attrs));
+                // A poster sits above its own caption link; the standard 16px
+                // image margin reads as a gap between unrelated blocks there.
+                if attr_value(attrs, "class") == Some(POSTER_CLASS) {
+                    out.push_str("margin-bottom:6px;");
+                }
             }
             out.push('"');
         }
@@ -235,6 +276,11 @@ pub(crate) fn render_email_html_with_images(
     let mut inline: Vec<InlineImage> = Vec::new();
     let mut seen: HashMap<String, String> = HashMap::new();
 
+    // The docs' [TOC] tag works here too. Expanded first so the box rides
+    // through the same sanitize-and-style pipeline as everything else.
+    let body_md = expand_toc(body_md, true);
+    let body_md = body_md.as_str();
+
     // `{width=...}` is how an image is sized everywhere else on the site, so it
     // has to work here too, and a video URL in image syntax must become a
     // poster rather than a broken <img>. pulldown-cmark parses neither, and the
@@ -279,9 +325,15 @@ pub(crate) fn render_email_html_with_images(
     html::push_html(&mut raw, parser);
     // `cid` is not in ammonia's default scheme allowlist, so without this the
     // sanitizer silently strips the src of every embedded image. Safe to add:
-    // a cid: URL can only address a part of this same message.
+    // a cid: URL can only address a part of this same message. The two class
+    // allowances keep the video block's marker classes alive; a class is inert
+    // in email (no stylesheet ever ships), so an author writing one by hand
+    // can at most opt into the same injected styles.
     let clean = ammonia::Builder::default()
         .add_url_schemes(&["cid"])
+        .add_tag_attributes("img", &["class"])
+        .add_tag_attributes("br", &["class"])
+        .add_tag_attributes("div", &["class"])
         .clean(&raw)
         .to_string();
     let styled = inject_styles(&clean);
@@ -522,9 +574,11 @@ fn video_block(
             None => p.url.clone(),
         };
         let alt = if alt.is_empty() { p.title.as_str() } else { alt };
+        // The <br> only lines Outlook up; everywhere else the block poster
+        // already breaks the line and inject_styles hides the <br>, keeping
+        // the caption link snug under the image.
         out.push_str(&format!(
-            r#"<a href="{}"><img alt="{}" src="{}"{}></a><br>"#,
-            href,
+            r#"<a href="{href}"><img alt="{}" src="{}" class="{POSTER_CLASS}"{}></a><br class="{OUTLOOK_ONLY_CLASS}">"#,
             html_escape(alt),
             html_escape(&src),
             size_attrs(size),
@@ -565,10 +619,100 @@ fn size_attrs(size: &(Option<String>, Option<String>)) -> String {
     out
 }
 
+// ---------------------------------------------------------------------------
+// Table of contents
+// ---------------------------------------------------------------------------
+
+/// The docs' inline TOC tag, alone on a line: `[TOC]`, `[[TOC]]`, `[[_TOC_]]`.
+fn is_toc_marker(trimmed: &str) -> bool {
+    matches!(
+        trimmed.to_ascii_lowercase().as_str(),
+        "[toc]" | "[[toc]]" | "[[_toc_]]" | "[_toc_]"
+    )
+}
+
+/// Replace every standalone [TOC] marker: with the Contents box in the HTML
+/// part, with nothing in the text part - a list that links nowhere is dead
+/// weight in plain text. Markers inside fenced code stay literal, matching
+/// the docs renderer.
+fn expand_toc(body_md: &str, with_box: bool) -> String {
+    let mut toc: Option<String> = None;
+    let mut in_fence = false;
+    let mut out = String::with_capacity(body_md.len() + 256);
+    for line in body_md.lines() {
+        let t = line.trim();
+        if t.starts_with("```") || t.starts_with("~~~") {
+            in_fence = !in_fence;
+        } else if !in_fence && is_toc_marker(t) {
+            if with_box {
+                let html = toc.get_or_insert_with(|| toc_html(body_md));
+                if !html.is_empty() {
+                    out.push_str(html);
+                    // Blank line: the raw HTML block must end before whatever
+                    // follows, or the next paragraph is swallowed into it.
+                    out.push_str("\n\n");
+                }
+            }
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// The Contents box: the issue's own h2/h3 headings. Deliberately not links -
+/// in-message anchor jumps are broken in the Gmail app and Outlook, and a
+/// dead link is worse than plain text.
+fn toc_html(body_md: &str) -> String {
+    use pulldown_cmark::{Event, HeadingLevel, Parser, Tag, TagEnd};
+
+    let mut items: Vec<(HeadingLevel, String)> = Vec::new();
+    let mut current: Option<(HeadingLevel, String)> = None;
+    for ev in Parser::new_ext(body_md, markdown_options()) {
+        match ev {
+            Event::Start(Tag::Heading { level: level @ (HeadingLevel::H2 | HeadingLevel::H3), .. }) => {
+                current = Some((level, String::new()));
+            }
+            Event::Text(t) | Event::Code(t) => {
+                if let Some((_, buf)) = current.as_mut() {
+                    buf.push_str(&t);
+                }
+            }
+            Event::End(TagEnd::Heading(_)) => {
+                if let Some((level, text)) = current.take() {
+                    let text = text.trim().to_string();
+                    if !text.is_empty() {
+                        items.push((level, text));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if items.is_empty() {
+        return String::new();
+    }
+
+    let mut out = format!(
+        r#"<div class="{TOC_BOX_CLASS}"><div class="{TOC_TITLE_CLASS}">Contents</div>"#
+    );
+    for (level, text) in items {
+        let class = if level == pulldown_cmark::HeadingLevel::H2 { TOC_ITEM_CLASS } else { TOC_SUB_CLASS };
+        out.push_str(&format!(r#"<div class="{}">{}</div>"#, class, html_escape(&text)));
+    }
+    out.push_str("</div>");
+    out
+}
+
 /// Plain-text alternative. Every send is multipart/alternative, and a text part
 /// that is just the raw markdown reads badly and hurts deliverability.
 pub(crate) fn render_email_text(body_md: &str, base_url: &str, asset_base: &str) -> String {
     use pulldown_cmark::{Event, Parser, Tag, TagEnd};
+
+    // The [TOC] marker is dropped here; the box would be a linkless list.
+    let body_md = expand_toc(body_md, false);
+    let body_md = body_md.as_str();
 
     // Sizing is markup, not prose: drop the attribute span so the text part
     // does not read `[image: logo.png]{width=30%}`. A video has no poster to
@@ -2022,6 +2166,32 @@ mod tests {
         assert!(!html.contains("src=\"https://vimeo.com"), "the page is never an img src: {}", html);
     }
 
+    /// The caption link must sit snug under the poster: the Outlook-only <br>
+    /// is hidden where CSS works, and the poster trades the 16px image margin
+    /// for a 6px one. An author's own hard break must keep rendering.
+    #[test]
+    fn poster_caption_gap_is_tight() {
+        let html = render_email_html_with_images(
+            "![Demo](https://vimeo.com/76979871)",
+            BASE,
+            ASSETS,
+            "",
+            None,
+            &fake_poster(),
+        )
+        .0;
+        assert!(img_style(&html).ends_with("margin-bottom:6px;"), "got: {}", html);
+        assert!(
+            html.contains(r#"<br style="display:none;" class="outlook-only">"#),
+            "the br must exist for Outlook and be hidden elsewhere: {}",
+            html
+        );
+
+        let hard_break = render_email_html("one  \ntwo", BASE, ASSETS, "");
+        assert!(hard_break.contains("<br"), "got: {}", hard_break);
+        assert!(!hard_break.contains("display:none"), "author breaks stay visible: {}", hard_break);
+    }
+
     /// The preview renders in a browser, which cannot resolve cid: but can
     /// fetch the poster over the network.
     #[test]
@@ -2085,6 +2255,66 @@ mod tests {
     fn text_part_points_at_the_watch_page() {
         let text = render_email_text("![Demo](https://player.vimeo.com/video/76979871)", BASE, ASSETS);
         assert_eq!(text, "Watch the video: https://vimeo.com/76979871");
+    }
+
+    // ---- Table of contents -------------------------------------------------
+
+    /// The docs' [TOC] tag: a Contents box of the issue's h2/h3 headings,
+    /// with inline formatting flattened, entities escaped, h3 indented.
+    #[test]
+    fn toc_marker_becomes_contents_box() {
+        let out = html("[TOC]\n\n## Alpha\n\ntext\n\n### Beta `sub`\n\n## Gamma & Co\n");
+        assert!(!out.contains("[TOC]"), "the marker must not leak: {}", out);
+        assert!(out.contains(">Contents</div>"), "got: {}", out);
+        assert!(out.contains(">Alpha</div>"), "got: {}", out);
+        assert!(out.contains(">Beta sub</div>"), "inline code flattens: {}", out);
+        assert!(out.contains(">Gamma &amp; Co</div>"), "got: {}", out);
+        assert!(out.contains(r#"class="toc""#), "the box style hook: {}", out);
+        assert!(
+            out.contains("padding:3px 0 3px 16px;"),
+            "the h3 entry is indented: {}",
+            out
+        );
+        // Content after the box must stay outside it.
+        assert!(out.contains("<p style"), "the paragraph survives: {}", out);
+    }
+
+    /// All marker spellings the docs accept work, and h1 stays out of the box
+    /// (it is the issue title, not a section).
+    #[test]
+    fn toc_variants_and_h1_exclusion() {
+        for marker in ["[TOC]", "[toc]", "[[TOC]]", "[[_TOC_]]"] {
+            let out = html(&format!("# Title\n\n{}\n\n## Section\n", marker));
+            assert!(out.contains(">Contents</div>"), "{} must expand: {}", marker, out);
+            assert!(!out.contains(">Title</div>"), "h1 stays out of the box: {}", out);
+        }
+    }
+
+    /// No h2/h3 headings means no box - a Contents box with nothing in it
+    /// (or the raw marker) must never reach a subscriber.
+    #[test]
+    fn toc_without_sections_disappears() {
+        let out = html("# Only a title\n\n[TOC]\n\nJust a paragraph.\n");
+        assert!(!out.contains("Contents"), "got: {}", out);
+        assert!(!out.contains("[TOC]"), "got: {}", out);
+        assert!(!out.contains(r#"class="toc""#), "got: {}", out);
+    }
+
+    /// Inside a code fence the marker is content, not markup.
+    #[test]
+    fn toc_marker_in_code_fence_stays_literal() {
+        let out = html("```\n[TOC]\n```\n\n## Section\n");
+        assert!(out.contains("[TOC]"), "the fenced marker is text: {}", out);
+        assert!(!out.contains("Contents"), "no box: {}", out);
+    }
+
+    /// The text part drops the marker entirely.
+    #[test]
+    fn text_part_drops_toc_marker() {
+        let text = render_email_text("[TOC]\n\n## Section\n\nBody.", BASE, ASSETS);
+        assert!(!text.contains("[TOC]"), "got: {:?}", text);
+        assert!(!text.contains("Contents"), "got: {:?}", text);
+        assert!(text.contains("Section"), "the heading itself stays: {:?}", text);
     }
 
     /// Style injection walks the HTML byte by byte; it must not re-encode the
