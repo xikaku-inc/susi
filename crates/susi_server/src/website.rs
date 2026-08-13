@@ -2047,11 +2047,14 @@ pub fn analytics_head(state: &Arc<AppState>) -> String {
 
 /// Pure renderer behind `analytics_head`. Nothing third-party loads at parse
 /// time: the configured tag IDs are embedded as data and the vendors (gtag.js
-/// for GA + Google Ads, the Reddit pixel) are only injected after the visitor
-/// grants consent via the cookie banner (ePrivacy Art 5(3)). The choice is
-/// stored in localStorage; "decline" keeps the page free of any third-party
-/// request. Conversion labels surface as `window.__adsConv` post-consent, so
-/// the existing conversion-firing site JS needs no changes.
+/// for GA + Google Ads, the Reddit pixel) are only injected once the visitor's
+/// consent state allows it. Prior opt-in via the banner is required in the
+/// EEA/UK/CH (ePrivacy Art 5(3)), detected from the browser time zone and
+/// failing safe to "required" when that is unreadable; elsewhere the vendors
+/// load by default and the footer link re-opens the banner to opt out. The
+/// choice is stored in localStorage; "decline" keeps the page free of any
+/// third-party request. Conversion labels surface as `window.__adsConv`
+/// post-consent, so the existing conversion-firing site JS needs no changes.
 fn render_analytics_head(
     ga_id: Option<&str>,
     ads_id: Option<&str>,
@@ -2093,7 +2096,9 @@ fn render_analytics_head(
 <script>\n\
 (function() {{\n\
 var cfg = {{{cfg}}};\n\
+var loaded = false;\n\
 function loadVendors() {{\n\
+  loaded = true;\n\
   if (cfg.ga || cfg.ads) {{\n\
     var s = document.createElement('script');\n\
     s.async = true;\n\
@@ -2116,6 +2121,7 @@ window.__applyConsent = function(granted) {{\n\
   var b = document.getElementById('cookieConsent');\n\
   if (b) b.remove();\n\
   if (granted) loadVendors();\n\
+  else if (loaded) location.reload();\n\
 }};\n\
 function showBanner() {{\n\
   if (document.getElementById('cookieConsent')) return;\n\
@@ -2132,13 +2138,30 @@ function showBanner() {{\n\
   document.getElementById('ccAccept').onclick = function() {{ window.__applyConsent(true); }};\n\
   document.getElementById('ccDecline').onclick = function() {{ window.__applyConsent(false); }};\n\
 }}\n\
+var CONSENT_TZ = ['Atlantic/Reykjavik','Atlantic/Canary','Atlantic/Madeira','Atlantic/Azores','Atlantic/Faroe','Africa/Ceuta','Asia/Nicosia','Asia/Famagusta','America/Martinique','America/Guadeloupe','America/Cayenne','America/Miquelon','Indian/Reunion','Indian/Mayotte'];\n\
+function consentRequired() {{\n\
+  var tz = '';\n\
+  try {{ tz = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; }} catch (e) {{ return true; }}\n\
+  if (!tz) return true;\n\
+  return tz.indexOf('Europe/') === 0 || CONSENT_TZ.indexOf(tz) !== -1;\n\
+}}\n\
+function onReady(fn) {{\n\
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', fn);\n\
+  else fn();\n\
+}}\n\
+function wireSettingsLink() {{\n\
+  var l = document.querySelector('[data-cookie-settings]');\n\
+  if (!l) return;\n\
+  l.style.display = '';\n\
+  l.onclick = function(e) {{ e.preventDefault(); showBanner(); }};\n\
+}}\n\
 var choice = null;\n\
 try {{ choice = localStorage.getItem('cookie_consent'); }} catch (e) {{}}\n\
 if (choice === 'accepted') {{ loadVendors(); }}\n\
-else if (choice !== 'declined') {{\n\
-  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', showBanner);\n\
-  else showBanner();\n\
-}}\n\
+else if (choice === 'declined') {{}}\n\
+else if (consentRequired()) {{ onReady(showBanner); }}\n\
+else {{ loadVendors(); }}\n\
+onReady(wireSettingsLink);\n\
 }})();\n\
 </script>\n",
         cfg = cfg.join(","),
@@ -2765,6 +2788,20 @@ mod tests {
     #[test]
     fn analytics_head_empty_when_unset() {
         assert_eq!(render_analytics_head(None, None, None, None, None), "");
+    }
+
+    #[test]
+    fn analytics_head_geo_gates_consent() {
+        let out = render_analytics_head(None, Some("AW-18330845601"), Some("ctLabel-1"), None, None);
+        // EEA/UK/CH sees the banner first; everyone else loads by default.
+        assert!(out.contains("tz.indexOf('Europe/') === 0"), "got: {}", out);
+        assert!(out.contains("Asia/Nicosia"), "Cyprus is EU but not under Europe/");
+        // Unreadable time zone must fall back to requiring consent.
+        assert!(out.contains("catch (e) { return true; }"), "got: {}", out);
+        assert!(out.contains("if (!tz) return true;"), "got: {}", out);
+        // A stored decline still blocks both paths.
+        assert!(out.contains("else if (choice === 'declined') {}"), "got: {}", out);
+        assert!(out.contains("data-cookie-settings"), "opt-out link must be wired");
     }
 
     #[test]

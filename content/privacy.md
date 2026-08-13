@@ -26,7 +26,7 @@ The data controller is Xikaku / LP-Research. For any privacy request, contact us
 
 ## Cookies, analytics and advertising
 
-The service itself uses only technically necessary browser storage (your session token and preferences such as the color theme). Analytics and advertising tags (Google Analytics, Google Ads, Reddit pixel) load **only after you accept them** in the cookie banner. If you decline, no third-party tracking request is made. You can change your mind at any time by clearing this site's data in your browser, which shows the banner again.
+The service itself uses only technically necessary browser storage (your session token and preferences such as the color theme). If you are in the EEA, the UK or Switzerland, analytics and advertising tags (Google Analytics, Google Ads, Reddit pixel) load **only after you accept them** in the cookie banner. Elsewhere they load by default and you can opt out at any time. If you decline, no third-party tracking request is made. You can change your choice at any time through the "Cookie settings" link in the footer.
 
 ## Processors and recipients
 
