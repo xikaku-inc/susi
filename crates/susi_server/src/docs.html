@@ -1615,8 +1615,11 @@ function renderToc(headings) {
     }
     if (layout) layout.classList.remove('no-toc');
 
+    // Indent by depth relative to the shallowest heading so pages built on
+    // h1 nest the same as h2-based pages.
+    const minLevel = Math.min(...items.map(h => h.level));
     const links = items.map(h => {
-        const cls = 'lvl-' + h.level;
+        const cls = 'lvl-' + Math.min(4, h.level - minLevel + 2);
         return '<a class="' + cls + '" href="#' + h.id + '" data-toc-id="' + h.id + '">' + escHtml(h.text) + '</a>';
     }).join('');
     rail.innerHTML = '<div class="toc-title">On this page</div>' + links;
