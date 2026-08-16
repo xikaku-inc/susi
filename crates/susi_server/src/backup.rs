@@ -288,7 +288,7 @@ fn build_archive(
     // one leaked SUSI_BACKUP_KEY collapse every layer of key separation. Keep
     // an offline copy of those three files when provisioning the host; a
     // restore needs them from that copy.
-    let mut dirs = vec!["docs"];
+    let mut dirs = vec!["docs", "website"];
     if include_releases {
         dirs.push("releases");
     }

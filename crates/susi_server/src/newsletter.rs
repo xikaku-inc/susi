@@ -426,11 +426,14 @@ fn embed_local_image(
     Some(format!("cid:{}", cid))
 }
 
-/// Where the composer's uploaded images land - the website asset store, which
-/// `website::assets_dir` owns. Mirrored rather than shared because that helper
-/// is private to its module.
+/// Where the composer's uploaded images land - the default site's website
+/// asset store, which `website::assets_dir` owns. Mirrored rather than shared
+/// because that helper is private to its module.
 pub(crate) fn newsletter_assets_dir(state: &AppState) -> std::path::PathBuf {
-    std::path::Path::new(&state.data_dir).join("website").join("assets")
+    std::path::Path::new(&state.data_dir)
+        .join("website")
+        .join("assets")
+        .join(crate::sites::default_site().id)
 }
 
 /// Only real raster image types are embedded. SVG is deliberately excluded:

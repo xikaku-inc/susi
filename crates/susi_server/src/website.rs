@@ -1,6 +1,7 @@
 //! Public website endpoints.
 //!
-//! Simple single-site page store at `/api/v1/website/...`. Public reads for
+//! Per-site page store at `/api/v1/website/...` (see `sites.rs` for the
+//! registry and how a request resolves to a site). Public reads for
 //! viewing pages + assets; admin writes (JWT/API-token) for editing. Unlike
 //! `docs`, there's no release concept and no pipeline/user origin split -
 //! all content is hand-authored via the in-browser editor.
@@ -11,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use axum::{
     body::Bytes,
-    extract::{Multipart, Path, State},
+    extract::{Multipart, Path, Query, State},
     http::{header, HeaderMap, StatusCode},
     response::IntoResponse,
     Json,
@@ -21,10 +22,60 @@ use serde_json::json;
 use susi_core::error::LicenseError;
 
 use crate::docs::{docs_llms_section, docs_sitemap_entries, harden_svg_response, safe_filename, DOCS_PUBLIC_BASE};
+use crate::sites::{self, SiteConfig};
 use crate::{error_response, require_admin_full, validate_principal, AppState, ErrorResponse};
 
-fn assets_dir(state: &AppState) -> std::path::PathBuf {
-    std::path::Path::new(&state.data_dir).join("website").join("assets")
+fn assets_dir(state: &AppState, site: &SiteConfig) -> std::path::PathBuf {
+    std::path::Path::new(&state.data_dir)
+        .join("website")
+        .join("assets")
+        .join(site.id)
+}
+
+/// One-time disk layout migration: files that predate per-site asset
+/// directories sit directly in `website/assets/` and belong to the default
+/// site. Idempotent; called once at startup.
+pub(crate) fn migrate_assets_layout(state: &AppState) {
+    let root = std::path::Path::new(&state.data_dir).join("website").join("assets");
+    let Ok(entries) = std::fs::read_dir(&root) else { return };
+    let files: Vec<_> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_file())
+        .collect();
+    if files.is_empty() {
+        return;
+    }
+    let target = root.join(sites::default_site().id);
+    if let Err(e) = std::fs::create_dir_all(&target) {
+        log::error!("Asset layout migration: mkdir {}: {}", target.display(), e);
+        return;
+    }
+    for f in files {
+        let to = target.join(f.file_name());
+        if let Err(e) = std::fs::rename(f.path(), &to) {
+            log::error!("Asset layout migration: move {:?}: {}", f.file_name(), e);
+        }
+    }
+    log::info!("Moved legacy website assets into {}", target.display());
+}
+
+/// Optional `?site=` query on website endpoints. The dashboard passes it
+/// explicitly (its host resolves to no site); public traffic resolves via
+/// the Host header and falls back to the default site.
+#[derive(Deserialize)]
+pub struct SiteQuery {
+    site: Option<String>,
+}
+
+fn resolve_site(
+    headers: &HeaderMap,
+    q: &SiteQuery,
+) -> Result<&'static SiteConfig, (StatusCode, Json<ErrorResponse>)> {
+    match q.site.as_deref() {
+        Some(id) => sites::site_by_id(id)
+            .ok_or_else(|| error_response(StatusCode::BAD_REQUEST, "Unknown site")),
+        None => Ok(sites::site_from_headers(headers).unwrap_or_else(sites::default_site)),
+    }
 }
 
 fn content_type_for(name: &str) -> &'static str {
@@ -113,15 +164,17 @@ fn is_admin_request(headers: &HeaderMap, state: &AppState) -> bool {
 pub async fn handle_list_pages(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let site = resolve_site(&headers, &sq)?;
     let is_admin = is_admin_request(&headers, &state);
-    let nav = nav_structure_json(&state);
+    let nav = nav_structure_json(&state, site);
     let db = state.db.lock();
-    let mut pages = db.list_website_pages().map_err(db_err)?;
+    let mut pages = db.list_website_pages(site.id).map_err(db_err)?;
     if !is_admin {
         pages = visible_pages(pages);
     }
-    let assets = db.list_website_assets().map_err(db_err)?;
+    let assets = db.list_website_assets(site.id).map_err(db_err)?;
     let pages_json: Vec<_> = pages
         .into_iter()
         .map(|(slug, title, parent_slug, ord, updated_at, meta_description, hidden, page_kind, published_at, author_username, redirect_to)| {
@@ -150,6 +203,8 @@ pub async fn handle_list_pages(
         .map(|(name, size)| json!({ "name": name, "size": size }))
         .collect();
     Ok(Json(json!({
+        "site": site.id,
+        "sites": sites::SITES.iter().map(|s| json!({ "id": s.id, "name": s.name })).collect::<Vec<_>>(),
         "pages": pages_json,
         "assets": assets_json,
         "nav": nav,
@@ -159,13 +214,15 @@ pub async fn handle_list_pages(
 pub async fn handle_get_page(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
     Path(slug): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let site = resolve_site(&headers, &sq)?;
     safe_slug(&slug)?;
     let is_admin = is_admin_request(&headers, &state);
     let db = state.db.lock();
     let page = db
-        .get_website_page(&slug)
+        .get_website_page(site.id, &slug)
         .map_err(db_err)?
         .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Page not found"))?;
     let (title, body_md, parent_slug, ord, updated_at, meta_description, hidden, page_kind, published_at, author_username, redirect_to) = page;
@@ -228,10 +285,13 @@ fn byline_suffix(author: Option<&str>) -> String {
 
 pub async fn handle_get_asset(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
     Path(file_name): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let site = resolve_site(&headers, &sq)?;
     safe_filename(&file_name)?;
-    let path = assets_dir(&state).join(&file_name);
+    let path = assets_dir(&state, site).join(&file_name);
     if !path.exists() {
         return Err(error_response(StatusCode::NOT_FOUND, "Asset not found"));
     }
@@ -278,16 +338,18 @@ pub struct UpsertPageRequest {
 pub async fn handle_upsert_page(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
     Path(slug): Path<String>,
     Json(req): Json<UpsertPageRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let site = resolve_site(&headers, &sq)?;
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
     safe_slug(&slug)?;
 
     let (id, url) = {
         let mut db = state.db.lock();
-        let existing = db.get_website_page(&slug).map_err(db_err)?;
+        let existing = db.get_website_page(site.id, &slug).map_err(db_err)?;
         let page_kind = req
             .page_kind
             .clone()
@@ -346,6 +408,7 @@ pub async fn handle_upsert_page(
             return Err(error_response(StatusCode::BAD_REQUEST, "A page cannot redirect to itself"));
         }
         let id = db.upsert_website_page(
+            site.id,
             &slug,
             &req.title,
             &req.body_md,
@@ -360,15 +423,15 @@ pub async fn handle_upsert_page(
         )
         .map_err(db_err)?;
         let url = if page_kind == "post" {
-            canonical_post_url(&slug)
+            canonical_post_url(site, &slug)
         } else {
-            let pages = visible_pages(db.list_website_pages().unwrap_or_default());
-            canonical_page_url(&slug, first_default_slug(&pages) == Some(slug.as_str()))
+            let pages = visible_pages(db.list_website_pages(site.id).unwrap_or_default());
+            canonical_page_url(site, &slug, first_default_slug(&pages) == Some(slug.as_str()))
         };
         (id, url)
     };
     invalidate_page_cache();
-    ping_indexnow(&state, vec![url]);
+    ping_indexnow(&state, site, vec![url]);
     Ok(Json(json!({ "id": id, "slug": slug })))
 }
 
@@ -379,13 +442,15 @@ pub async fn handle_upsert_page(
 pub async fn handle_list_page_revisions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
     Path(slug): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let site = resolve_site(&headers, &sq)?;
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
     safe_slug(&slug)?;
     let db = state.db.lock();
-    let rows = db.list_page_revisions(&slug).map_err(db_err)?;
+    let rows = db.list_page_revisions(site.id, &slug).map_err(db_err)?;
     let revisions: Vec<_> = rows
         .into_iter()
         .map(|(id, captured_at, author, title, body_len)| json!({
@@ -402,14 +467,16 @@ pub async fn handle_list_page_revisions(
 pub async fn handle_get_page_revision(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
     Path((slug, id)): Path<(String, i64)>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let site = resolve_site(&headers, &sq)?;
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
     safe_slug(&slug)?;
     let db = state.db.lock();
     let row = db
-        .get_page_revision(&slug, id)
+        .get_page_revision(site.id, &slug, id)
         .map_err(db_err)?
         .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Revision not found"))?;
     let (title, body_md, parent_slug, ord, captured_at, author) = row;
@@ -424,26 +491,28 @@ pub async fn handle_get_page_revision(
 pub async fn handle_restore_page_revision(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
     Path((slug, id)): Path<(String, i64)>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let site = resolve_site(&headers, &sq)?;
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
     safe_slug(&slug)?;
     let mut db = state.db.lock();
     let rev = db
-        .get_page_revision(&slug, id)
+        .get_page_revision(site.id, &slug, id)
         .map_err(db_err)?
         .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Revision not found"))?;
     let (title, body_md, parent_slug, ord, _captured_at, _author) = rev;
     // Preserve the current meta_description, kind, publish date and author
     // when restoring prior body/title.
     let (existing_meta, existing_kind, existing_pub, existing_author, existing_redirect) = db
-        .get_website_page(&slug)
+        .get_website_page(site.id, &slug)
         .map_err(db_err)?
         .map(|(_t, _b, _p, _o, _u, m, _h, k, pd, au, rd)| (m, k, pd, au, rd))
         .unwrap_or_else(|| (String::new(), "page".to_string(), String::new(), String::new(), String::new()));
     let new_id = db.upsert_website_page(
-        &slug, &title, &body_md, parent_slug.as_deref(), ord,
+        site.id, &slug, &title, &body_md, parent_slug.as_deref(), ord,
         &existing_meta,
         &existing_kind,
         &existing_pub,
@@ -452,14 +521,14 @@ pub async fn handle_restore_page_revision(
         Some(&principal.username),
     ).map_err(db_err)?;
     let url = if existing_kind == "post" {
-        canonical_post_url(&slug)
+        canonical_post_url(site, &slug)
     } else {
-        let pages = visible_pages(db.list_website_pages().unwrap_or_default());
-        canonical_page_url(&slug, first_default_slug(&pages) == Some(slug.as_str()))
+        let pages = visible_pages(db.list_website_pages(site.id).unwrap_or_default());
+        canonical_page_url(site, &slug, first_default_slug(&pages) == Some(slug.as_str()))
     };
     drop(db);
     invalidate_page_cache();
-    ping_indexnow(&state, vec![url]);
+    ping_indexnow(&state, site, vec![url]);
     Ok(Json(json!({ "id": new_id, "slug": slug, "restored_from": id })))
 }
 
@@ -470,11 +539,13 @@ pub async fn handle_restore_page_revision(
 pub async fn handle_list_assets_with_usage(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let site = resolve_site(&headers, &sq)?;
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
     let db = state.db.lock();
-    let rows = db.list_website_assets_with_usage().map_err(db_err)?;
+    let rows = db.list_website_assets_with_usage(site.id).map_err(db_err)?;
     let assets: Vec<_> = rows
         .into_iter()
         .map(|(name, size, usage_count, pages_csv, products_csv)| {
@@ -507,9 +578,11 @@ pub struct RenameAssetRequest {
 pub async fn handle_rename_asset(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
     Path(file_name): Path<String>,
     Json(req): Json<RenameAssetRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let site = resolve_site(&headers, &sq)?;
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
     safe_filename(&file_name)?;
@@ -518,7 +591,7 @@ pub async fn handle_rename_asset(
 
     let (ok, n_pages) = {
         let mut db = state.db.lock();
-        db.rename_website_asset(&file_name, new_name).map_err(|e| {
+        db.rename_website_asset(site.id, &file_name, new_name).map_err(|e| {
             let msg = e.to_string();
             if msg.contains("already exists") {
                 error_response(StatusCode::CONFLICT, &msg)
@@ -531,7 +604,7 @@ pub async fn handle_rename_asset(
         return Err(error_response(StatusCode::NOT_FOUND, "Asset not found"));
     }
     // Move file on disk.
-    let dir = assets_dir(&state);
+    let dir = assets_dir(&state, site);
     let old_path = dir.join(&file_name);
     let new_path = dir.join(new_name);
     if old_path.exists() {
@@ -561,9 +634,11 @@ pub struct RenamePageRequest {
 pub async fn handle_rename_page(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
     Path(slug): Path<String>,
     Json(req): Json<RenamePageRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let site = resolve_site(&headers, &sq)?;
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
     let new_slug = req.new_slug.trim();
@@ -573,24 +648,24 @@ pub async fn handle_rename_page(
 
     let result = {
         let mut db = state.db.lock();
-        db.rename_website_page(&slug, new_slug)
+        db.rename_website_page(site.id, &slug, new_slug)
     };
     match result {
         Ok(true) => {
             let renamed_is_post = {
                 let db = state.db.lock();
-                db.get_website_page(new_slug).ok().flatten().map(|r| r.7 == "post").unwrap_or(false)
+                db.get_website_page(site.id, new_slug).ok().flatten().map(|r| r.7 == "post").unwrap_or(false)
             };
             let urls = if renamed_is_post {
-                vec![canonical_post_url(&slug), canonical_post_url(new_slug)]
+                vec![canonical_post_url(site, &slug), canonical_post_url(site, new_slug)]
             } else {
                 vec![
-                    canonical_page_url(&slug, false),
-                    canonical_page_url(new_slug, false),
+                    canonical_page_url(site, &slug, false),
+                    canonical_page_url(site, new_slug, false),
                 ]
             };
             invalidate_page_cache();
-            ping_indexnow(&state, urls);
+            ping_indexnow(&state, site, urls);
             Ok(Json(json!({ "slug": new_slug })))
         }
         Ok(false) => Err(error_response(StatusCode::NOT_FOUND, "Page not found")),
@@ -613,55 +688,61 @@ pub struct SetPageHiddenRequest {
 pub async fn handle_set_page_hidden(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
     Path(slug): Path<String>,
     Json(req): Json<SetPageHiddenRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let site = resolve_site(&headers, &sq)?;
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
     safe_slug(&slug)?;
 
     let (updated, was_post) = {
         let db = state.db.lock();
-        let was_post = db.get_website_page(&slug).ok().flatten().map(|r| r.7 == "post").unwrap_or(false);
-        (db.set_website_page_hidden(&slug, req.hidden).map_err(db_err)?, was_post)
+        let was_post = db.get_website_page(site.id, &slug).ok().flatten().map(|r| r.7 == "post").unwrap_or(false);
+        (db.set_website_page_hidden(site.id, &slug, req.hidden).map_err(db_err)?, was_post)
     };
     if !updated {
         return Err(error_response(StatusCode::NOT_FOUND, "Page not found"));
     }
     invalidate_page_cache();
-    let url = if was_post { canonical_post_url(&slug) } else { canonical_page_url(&slug, false) };
-    ping_indexnow(&state, vec![url]);
+    let url = if was_post { canonical_post_url(site, &slug) } else { canonical_page_url(site, &slug, false) };
+    ping_indexnow(&state, site, vec![url]);
     Ok(Json(json!({ "slug": slug, "hidden": req.hidden })))
 }
 
 pub async fn handle_delete_page(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
     Path(slug): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let site = resolve_site(&headers, &sq)?;
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
     safe_slug(&slug)?;
 
     let (removed, was_post) = {
         let db = state.db.lock();
-        let was_post = db.get_website_page(&slug).ok().flatten().map(|r| r.7 == "post").unwrap_or(false);
-        (db.delete_website_page(&slug).map_err(db_err)?, was_post)
+        let was_post = db.get_website_page(site.id, &slug).ok().flatten().map(|r| r.7 == "post").unwrap_or(false);
+        (db.delete_website_page(site.id, &slug).map_err(db_err)?, was_post)
     };
     if !removed {
         return Err(error_response(StatusCode::NOT_FOUND, "Page not found"));
     }
     invalidate_page_cache();
-    let url = if was_post { canonical_post_url(&slug) } else { canonical_page_url(&slug, false) };
-    ping_indexnow(&state, vec![url]);
+    let url = if was_post { canonical_post_url(site, &slug) } else { canonical_page_url(site, &slug, false) };
+    ping_indexnow(&state, site, vec![url]);
     Ok(Json(json!({ "status": "OK" })))
 }
 
 pub async fn handle_upload_asset(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
     mut multipart: Multipart,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let site = resolve_site(&headers, &sq)?;
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
 
@@ -687,7 +768,7 @@ pub async fn handle_upload_asset(
     }
     safe_filename(&file_name)?;
 
-    let dir = assets_dir(&state);
+    let dir = assets_dir(&state, site);
     std::fs::create_dir_all(&dir).map_err(|e| {
         error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("mkdir: {}", e))
     })?;
@@ -698,7 +779,7 @@ pub async fn handle_upload_asset(
 
     {
         let db = state.db.lock();
-        db.upsert_website_asset(&file_name, bytes.len() as u64)
+        db.upsert_website_asset(site.id, &file_name, bytes.len() as u64)
             .map_err(db_err)?;
     }
 
@@ -710,17 +791,19 @@ pub async fn handle_upload_asset(
 pub async fn handle_delete_asset(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
     Path(file_name): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let site = resolve_site(&headers, &sq)?;
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
     safe_filename(&file_name)?;
 
     let removed = {
         let db = state.db.lock();
-        db.delete_website_asset(&file_name).map_err(db_err)?
+        db.delete_website_asset(site.id, &file_name).map_err(db_err)?
     };
-    let _ = std::fs::remove_file(assets_dir(&state).join(&file_name));
+    let _ = std::fs::remove_file(assets_dir(&state, site).join(&file_name));
     if !removed {
         return Err(error_response(StatusCode::NOT_FOUND, "Asset not found"));
     }
@@ -744,15 +827,18 @@ pub(crate) const WEBSITE_HTML: &str = include_str!("website.html");
 const PRIVACY_MD: &str = include_str!("../../../content/privacy.md");
 const IMPRINT_MD: &str = include_str!("../../../content/imprint.md");
 
+/// The legal seed applies to the default site only; a migrated site brings
+/// its own legal pages as content.
 pub(crate) fn seed_legal_pages(state: &Arc<AppState>) {
+    let site = sites::default_site();
     for (slug, title, body) in [
         ("privacy", "Privacy Policy", PRIVACY_MD),
         ("imprint", "Imprint", IMPRINT_MD),
     ] {
         let mut db = state.db.lock();
-        let exists = db.get_website_page(slug).ok().flatten().is_some();
+        let exists = db.get_website_page(site.id, slug).ok().flatten().is_some();
         if !exists {
-            match db.upsert_website_page(slug, title, body, None, 900, "", "page", "", "", "", None) {
+            match db.upsert_website_page(site.id, slug, title, body, None, 900, "", "page", "", "", "", None) {
                 Ok(_) => log::info!("Seeded website page '{}'", slug),
                 Err(e) => log::error!("Failed to seed website page '{}': {}", slug, e),
             }
@@ -760,30 +846,8 @@ pub(crate) fn seed_legal_pages(state: &Arc<AppState>) {
     }
     invalidate_page_cache();
 }
-const SITE_NAME: &str = "Xikaku";
-const SITE_TAGLINE: &str = "Sight beyond Sight";
-const ORG_LEGAL_NAME: &str = "LP-Research Inc.";
-const ORG_ADDR_LOCALITY: &str = "Tokyo";
-const ORG_ADDR_COUNTRY: &str = "JP";
-const CONTACT_EMAIL: &str = "info@xikaku.com";
 
-/// Canonical public domain. All canonical/og:url/sitemap/breadcrumb URLs
-/// point here regardless of which host served the request, consolidating
-/// SEO equity to xikaku.com. Clean slug form: /{slug} (no /site/ prefix).
-const PUBLIC_BASE: &str = "https://xikaku.com";
-
-/// Brand asset URLs. og-image is the 1200x630 social-card; logo is the
-/// horizontal wordmark used by Google's knowledge-panel via Organization.logo.
-const LOGO_URL: &str = "https://xikaku.com/static/logo.png";
-const OG_IMAGE_URL: &str = "https://xikaku.com/static/og-image.png";
-
-/// Public profile URLs included as Organization.sameAs in JSON-LD.
-const SOCIAL_LINKS: &[&str] = &[
-    "https://github.com/xikaku-inc",
-    "https://www.linkedin.com/company/xikaku",
-];
-
-/// Embedded brand assets, served at /static/* (and /favicon.ico).
+/// Embedded default-site brand assets, served at /static/* (and /favicon.ico).
 const LOGO_PNG: &[u8] = include_bytes!("assets/xikaku-logo.png");
 const LOGO_DARK_PNG: &[u8] = include_bytes!("assets/xikaku-logo-dark.png");
 const OG_IMAGE_PNG: &[u8] = include_bytes!("assets/xikaku-og-image.png");
@@ -791,31 +855,6 @@ const ICON_PNG: &[u8] = include_bytes!("assets/xikaku-icon.png");
 const FAVICON_32_PNG: &[u8] = include_bytes!("assets/xikaku-favicon-32.png");
 const FAVICON_180_PNG: &[u8] = include_bytes!("assets/xikaku-favicon-180.png");
 const FAVICON_ICO: &[u8] = include_bytes!("assets/favicon.ico");
-
-// SEO blocks that are identical across every page. Build once at startup so
-// the per-request render path doesn't re-`format!` ~1 KB of JSON-LD.
-static SAME_AS_JOINED: LazyLock<String> = LazyLock::new(|| {
-    SOCIAL_LINKS
-        .iter()
-        .map(|u| format!("\"{}\"", html_escape(u)))
-        .collect::<Vec<_>>()
-        .join(",")
-});
-
-static ORG_JSONLD: LazyLock<String> = LazyLock::new(|| {
-    format!(
-        r#"{{"@context":"https://schema.org","@type":"Organization","name":"{name}","legalName":"{legal}","url":"{url}","logo":"{logo}","slogan":"{slogan}","email":"{email}","address":{{"@type":"PostalAddress","addressLocality":"{loc}","addressCountry":"{country}"}},"contactPoint":{{"@type":"ContactPoint","contactType":"customer support","email":"{email}","areaServed":["US","CA"]}},"sameAs":[{same_as}]}}"#,
-        name = html_escape(SITE_NAME),
-        legal = html_escape(ORG_LEGAL_NAME),
-        url = html_escape(PUBLIC_BASE),
-        logo = html_escape(LOGO_URL),
-        slogan = html_escape(SITE_TAGLINE),
-        email = html_escape(CONTACT_EMAIL),
-        loc = html_escape(ORG_ADDR_LOCALITY),
-        country = html_escape(ORG_ADDR_COUNTRY),
-        same_as = &*SAME_AS_JOINED,
-    )
-});
 
 // Per-slug rendered HTML cache. The full SSR pipeline (DB reads, two pulldown
 // passes, JSON-LD format!, three replacen over a 100 KB shell) takes hundreds
@@ -879,17 +918,17 @@ pub async fn handle_favicon_ico() -> impl IntoResponse { cached_image("image/x-i
 
 /// Build the canonical URL for a website page. The home slug renders as the
 /// bare domain (`https://xikaku.com/`); other slugs render as `/{slug}`.
-fn canonical_page_url(slug: &str, is_home: bool) -> String {
+fn canonical_page_url(site: &SiteConfig, slug: &str, is_home: bool) -> String {
     if is_home {
-        format!("{}/", PUBLIC_BASE)
+        format!("{}/", site.public_base)
     } else {
-        format!("{}/{}", PUBLIC_BASE, slug)
+        format!("{}/{}", site.public_base, slug)
     }
 }
 
 /// Blog posts live under `/blog/{slug}`.
-fn canonical_post_url(slug: &str) -> String {
-    format!("{}/blog/{}", PUBLIC_BASE, slug)
+fn canonical_post_url(site: &SiteConfig, slug: &str) -> String {
+    format!("{}/blog/{}", site.public_base, slug)
 }
 
 /// Format a YYYY-MM-DD publish date for display ("July 26, 2026"); returns
@@ -1005,8 +1044,10 @@ pub(crate) fn derive_description(body_md: &str) -> String {
 /// Extract the first image URL from a markdown body. Used to set per-page
 /// `og:image` so social previews don't all share the generic site card.
 /// Returns the absolute URL when the source is already absolute, or
-/// `{PUBLIC_BASE}/{path}` when relative.
-fn first_image_url(body_md: &str) -> Option<String> {
+/// `{PUBLIC_BASE}{path}` for a rooted path. A bare filename is an uploaded
+/// asset (the composer inserts `data.name`, not a URL) and resolves to the
+/// asset store - crawlers get the page shell back otherwise.
+fn first_image_url(site: &SiteConfig, body_md: &str) -> Option<String> {
     use pulldown_cmark::{Event, Parser, Tag};
     for ev in Parser::new(body_md) {
         if let Event::Start(Tag::Image { dest_url, .. }) = ev {
@@ -1015,8 +1056,12 @@ fn first_image_url(body_md: &str) -> Option<String> {
             if s.starts_with("http://") || s.starts_with("https://") {
                 return Some(s);
             }
-            let path = if s.starts_with('/') { s } else { format!("/{}", s) };
-            return Some(format!("{}{}", PUBLIC_BASE, path));
+            let path = if s.starts_with('/') {
+                s
+            } else {
+                format!("/api/v1/website/assets/{}", s)
+            };
+            return Some(format!("{}{}", site.public_base, path));
         }
     }
     None
@@ -1292,12 +1337,12 @@ fn sorted_posts(pages: &[PageRow]) -> Vec<&PageRow> {
 
 /// Post excerpt for index/feed surfaces: explicit meta_description when set,
 /// otherwise derived from the post body.
-fn post_excerpt(state: &Arc<AppState>, p: &PageRow) -> String {
+fn post_excerpt(state: &Arc<AppState>, site: &SiteConfig, p: &PageRow) -> String {
     if !p.5.trim().is_empty() {
         return p.5.clone();
     }
     let db = state.db.lock();
-    db.get_website_page(&p.0)
+    db.get_website_page(site.id, &p.0)
         .ok()
         .flatten()
         .map(|(_t, body, ..)| derive_description(&body))
@@ -1305,6 +1350,7 @@ fn post_excerpt(state: &Arc<AppState>, p: &PageRow) -> String {
 }
 
 fn build_breadcrumbs(
+    site: &SiteConfig,
     pages: &[PageRow],
     slug: &str,
     home_slug: Option<&str>,
@@ -1322,7 +1368,7 @@ fn build_breadcrumbs(
                     r#"{{"@type":"ListItem","position":{},"name":"{}","item":"{}"}}"#,
                     pos,
                     html_escape(&home_page.1),
-                    html_escape(&canonical_page_url(hs, true)),
+                    html_escape(&canonical_page_url(site, hs, true)),
                 ));
                 pos += 1;
             }
@@ -1332,14 +1378,14 @@ fn build_breadcrumbs(
             r#"{{"@type":"ListItem","position":{},"name":"{}","item":"{}"}}"#,
             pos,
             html_escape(blog_title),
-            html_escape(&format!("{}/blog", PUBLIC_BASE)),
+            html_escape(&format!("{}/blog", site.public_base)),
         ));
         pos += 1;
         items.push(format!(
             r#"{{"@type":"ListItem","position":{},"name":"{}","item":"{}"}}"#,
             pos,
             html_escape(&by_slug[slug].1),
-            html_escape(&canonical_post_url(slug)),
+            html_escape(&canonical_post_url(site, slug)),
         ));
         return format!(
             r#"{{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{}]}}"#,
@@ -1367,7 +1413,7 @@ fn build_breadcrumbs(
                     r#"{{"@type":"ListItem","position":{},"name":"{}","item":"{}"}}"#,
                     pos,
                     html_escape(&home_page.1),
-                    html_escape(&canonical_page_url(hs, true)),
+                    html_escape(&canonical_page_url(site, hs, true)),
                 ));
                 pos += 1;
             }
@@ -1379,7 +1425,7 @@ fn build_breadcrumbs(
             r#"{{"@type":"ListItem","position":{},"name":"{}","item":"{}"}}"#,
             pos,
             html_escape(&p.1),
-            html_escape(&canonical_page_url(&p.0, is_home)),
+            html_escape(&canonical_page_url(site, &p.0, is_home)),
         ));
         pos += 1;
     }
@@ -1390,6 +1436,7 @@ fn build_breadcrumbs(
 }
 
 fn render_seo_head(
+    site: &SiteConfig,
     slug: &str,
     page_title: &str,
     description: &str,
@@ -1403,19 +1450,19 @@ fn render_seo_head(
     let home_slug = first_default_slug(pages);
     let is_home = home_slug == Some(slug);
     let canonical = if post_published.is_some() {
-        canonical_post_url(slug)
+        canonical_post_url(site, slug)
     } else {
-        canonical_page_url(slug, is_home)
+        canonical_page_url(site, slug, is_home)
     };
     let full_title = if is_home {
-        format!("{} - {}", SITE_NAME, SITE_TAGLINE)
+        format!("{} - {}", site.name, site.tagline)
     } else {
-        format!("{} - {}", page_title, SITE_NAME)
+        format!("{} - {}", page_title, site.name)
     };
 
-    // Organization JSON-LD is identical across every page - built once at
-    // module init by `ORG_JSONLD: LazyLock<String>`.
-    let org_jsonld: &str = &ORG_JSONLD;
+    // Organization JSON-LD is identical across a site's pages - built once
+    // at module init in `sites.rs`.
+    let org_jsonld: &str = sites::org_jsonld(site);
 
     // Per-page schema: WebSite (with sitelinks search action stub) for the
     // home page, BlogPosting for posts, WebPage for everything else. This
@@ -1432,60 +1479,78 @@ fn render_seo_head(
             ),
             None => format!(
                 r#"{{"@type":"Organization","name":"{}","url":"{}"}}"#,
-                html_escape(SITE_NAME),
-                html_escape(PUBLIC_BASE),
+                html_escape(site.name),
+                html_escape(site.public_base),
             ),
         };
+        let publisher_logo = if site.logo_url.is_empty() {
+            String::new()
+        } else {
+            format!(r#","logo":{{"@type":"ImageObject","url":"{}"}}"#, html_escape(site.logo_url))
+        };
         format!(
-            r#"{{"@context":"https://schema.org","@type":"BlogPosting","headline":"{title}","description":"{desc}","url":"{url}","mainEntityOfPage":{{"@type":"WebPage","@id":"{url}"}},"datePublished":"{published}","dateModified":"{date}","author":{author_ld},"publisher":{{"@type":"Organization","name":"{site}","url":"{base}","logo":{{"@type":"ImageObject","url":"{logo}"}}}}}}"#,
+            r#"{{"@context":"https://schema.org","@type":"BlogPosting","headline":"{title}","description":"{desc}","url":"{url}","mainEntityOfPage":{{"@type":"WebPage","@id":"{url}"}},"datePublished":"{published}","dateModified":"{date}","author":{author_ld},"publisher":{{"@type":"Organization","name":"{site_name}","url":"{base}"{publisher_logo}}}}}"#,
             title = html_escape(page_title),
             desc = html_escape(description),
             url = html_escape(&canonical),
             published = html_escape(published),
             date = html_escape(&date_modified),
             author_ld = author_ld,
-            site = html_escape(SITE_NAME),
-            base = html_escape(PUBLIC_BASE),
-            logo = html_escape(LOGO_URL),
+            site_name = html_escape(site.name),
+            base = html_escape(site.public_base),
+            publisher_logo = publisher_logo,
         )
     } else if is_home {
         format!(
             r#"{{"@context":"https://schema.org","@type":"WebSite","name":"{name}","url":"{url}","description":"{desc}","publisher":{{"@type":"Organization","name":"{name}","url":"{url}"}}}}"#,
-            name = html_escape(SITE_NAME),
-            url = html_escape(PUBLIC_BASE),
+            name = html_escape(site.name),
+            url = html_escape(site.public_base),
             desc = html_escape(description),
         )
     } else {
         format!(
-            r#"{{"@context":"https://schema.org","@type":"WebPage","name":"{title}","description":"{desc}","url":"{url}","dateModified":"{date}","isPartOf":{{"@type":"WebSite","name":"{site}","url":"{base}"}},"publisher":{{"@type":"Organization","name":"{site}","url":"{base}"}}}}"#,
+            r#"{{"@context":"https://schema.org","@type":"WebPage","name":"{title}","description":"{desc}","url":"{url}","dateModified":"{date}","isPartOf":{{"@type":"WebSite","name":"{site_name}","url":"{base}"}},"publisher":{{"@type":"Organization","name":"{site_name}","url":"{base}"}}}}"#,
             title = html_escape(page_title),
             desc = html_escape(description),
             url = html_escape(&canonical),
             date = html_escape(&date_modified),
-            site = html_escape(SITE_NAME),
-            base = html_escape(PUBLIC_BASE),
+            site_name = html_escape(site.name),
+            base = html_escape(site.public_base),
         )
     };
 
-    let breadcrumb_jsonld = build_breadcrumbs(pages, slug, home_slug);
+    let breadcrumb_jsonld = build_breadcrumbs(site, pages, slug, home_slug);
 
     // Product schema: emit one Product per matching shop SKU. A page slug
     // like `lpms-curs3` matches every shop product whose SKU starts with the
     // slug (e.g., lpms-curs3-can, lpms-curs3-rs232) so the page describes the
     // family with one Offer per variant.
-    let product_blocks = build_product_jsonld(slug, products);
+    let product_blocks = build_product_jsonld(site, slug, products);
 
-    let og_image = og_image_override.unwrap_or(OG_IMAGE_URL);
+    // Per-page hero image, falling back to the site's social card; a site
+    // without one omits the image tags entirely.
+    let og_image = og_image_override
+        .map(str::to_string)
+        .or_else(|| (!site.og_image_url.is_empty()).then(|| site.og_image_url.to_string()));
     // Per-page hero image keeps standard 1200x630 dimensions only when we
     // fall back to the bundled site card; for body-derived images we omit
     // the dimensions to avoid lying about the source image.
-    let omit_og_dims = og_image_override.is_some();
-
-    let og_dims = if omit_og_dims {
-        String::new()
-    } else {
-        "<meta property=\"og:image:width\" content=\"1200\">\n\
-         <meta property=\"og:image:height\" content=\"630\">\n".to_string()
+    let og_image_meta = match og_image.as_deref() {
+        Some(img) => {
+            let mut m = format!("<meta property=\"og:image\" content=\"{}\">\n", html_escape(img));
+            if og_image_override.is_none() {
+                m.push_str(
+                    "<meta property=\"og:image:width\" content=\"1200\">\n\
+                     <meta property=\"og:image:height\" content=\"630\">\n",
+                );
+            }
+            m.push_str(&format!(
+                "<meta name=\"twitter:image\" content=\"{}\">\n",
+                html_escape(img),
+            ));
+            m
+        }
+        None => String::new(),
     };
     // Posts advertise themselves as articles with publish/modified times.
     let article_meta = match post_published {
@@ -1509,12 +1574,10 @@ fn render_seo_head(
             "<meta property=\"og:description\" content=\"{desc}\">\n",
             "<meta property=\"og:url\" content=\"{canonical}\">\n",
             "{article_meta}",
-            "<meta property=\"og:image\" content=\"{og_image}\">\n",
-            "{og_dims}",
+            "{og_image_meta}",
             "<meta name=\"twitter:card\" content=\"summary_large_image\">\n",
             "<meta name=\"twitter:title\" content=\"{title}\">\n",
             "<meta name=\"twitter:description\" content=\"{desc}\">\n",
-            "<meta name=\"twitter:image\" content=\"{og_image}\">\n",
             "<script type=\"application/ld+json\">{org_ld}</script>\n",
             "<script type=\"application/ld+json\">{page_ld}</script>\n",
             "<script type=\"application/ld+json\">{bc_ld}</script>\n",
@@ -1522,12 +1585,11 @@ fn render_seo_head(
         title = html_escape(&full_title),
         desc = html_escape(description),
         canonical = html_escape(&canonical),
-        base = PUBLIC_BASE,
+        base = site.public_base,
         og_type = if post_published.is_some() { "article" } else { "website" },
         article_meta = article_meta,
-        site = html_escape(SITE_NAME),
-        og_image = html_escape(og_image),
-        og_dims = og_dims,
+        site = html_escape(site.name),
+        og_image_meta = og_image_meta,
         org_ld = org_jsonld,
         page_ld = page_jsonld,
         bc_ld = breadcrumb_jsonld,
@@ -1542,10 +1604,14 @@ fn render_seo_head(
 /// slug (slug is a prefix of SKU). Returns an empty Vec if no products match,
 /// so non-product pages render no extra schema.
 fn build_product_jsonld(
+    site: &SiteConfig,
     slug: &str,
     products: &[(String, String, String, i64, String, Option<String>, String, bool, i64, String)],
 ) -> Vec<String> {
     let mut out = Vec::new();
+    if !site.has_shop {
+        return out;
+    }
     for (sku, title, desc_md, price_cents, currency, image_url, _tax, active, _ord, _upd) in products {
         if !active { continue; }
         let sku_lc = sku.to_lowercase();
@@ -1558,21 +1624,22 @@ fn build_product_jsonld(
             if s.starts_with("http://") || s.starts_with("https://") {
                 s.to_string()
             } else if s.starts_with('/') {
-                format!("{}{}", PUBLIC_BASE, s)
+                format!("{}{}", site.public_base, s)
             } else {
-                format!("{}/{}", PUBLIC_BASE, s)
+                format!("{}/{}", site.public_base, s)
             }
-        }).unwrap_or_else(|| OG_IMAGE_URL.to_string());
+        }).unwrap_or_else(|| site.og_image_url.to_string());
         out.push(format!(
-            r#"{{"@context":"https://schema.org","@type":"Product","name":"{name}","description":"{desc}","sku":"{sku}","brand":{{"@type":"Brand","name":"Xikaku"}},"image":"{img}","offers":{{"@type":"Offer","price":"{price}","priceCurrency":"{cur}","availability":"https://schema.org/InStock","url":"{url}","seller":{{"@type":"Organization","name":"Xikaku","url":"{base}"}}}}}}"#,
+            r#"{{"@context":"https://schema.org","@type":"Product","name":"{name}","description":"{desc}","sku":"{sku}","brand":{{"@type":"Brand","name":"{brand}"}},"image":"{img}","offers":{{"@type":"Offer","price":"{price}","priceCurrency":"{cur}","availability":"https://schema.org/InStock","url":"{url}","seller":{{"@type":"Organization","name":"{brand}","url":"{base}"}}}}}}"#,
             name = html_escape(title),
             desc = html_escape(&desc),
             sku = html_escape(sku),
+            brand = html_escape(site.name),
             img = html_escape(&img),
             price = price,
             cur = html_escape(&cur_upper),
-            url = html_escape(&format!("{}/shop/{}", PUBLIC_BASE, sku)),
-            base = html_escape(PUBLIC_BASE),
+            url = html_escape(&format!("{}/shop/{}", site.public_base, sku)),
+            base = html_escape(site.public_base),
         ));
     }
     out
@@ -1581,41 +1648,77 @@ fn build_product_jsonld(
 pub async fn handle_website_render_root(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
 ) -> axum::response::Response {
-    render_website(&state, &headers, None, false)
+    render_website(&state, &headers, &sq, None, false)
 }
 
 pub async fn handle_website_render_slug(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
     Path(slug): Path<String>,
 ) -> axum::response::Response {
-    render_website(&state, &headers, Some(slug), false)
+    render_website(&state, &headers, &sq, Some(slug), false)
 }
 
 /// `/site/blog/{slug}` - blog posts under the /blog/ URL prefix.
 pub async fn handle_website_render_post(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
     Path(slug): Path<String>,
 ) -> axum::response::Response {
-    render_website(&state, &headers, Some(slug), true)
+    render_website(&state, &headers, &sq, Some(slug), true)
+}
+
+/// Per-site config injected into the shell so the client JS knows which site
+/// it renders: canonical hosts (clean-URL detection), brand imagery, and
+/// which fixed features exist.
+fn site_config_script(site: &SiteConfig) -> String {
+    format!(
+        "<script>window.__SITE={};</script>",
+        json!({
+            "id": site.id,
+            "name": site.name,
+            "hosts": site.hosts,
+            "brand_logo": site.brand_logo,
+            "brand_logo_dark": site.brand_logo_dark,
+            "has_shop": site.has_shop,
+            "has_newsletter": site.has_newsletter,
+        }),
+    )
+}
+
+/// Inject head + body into the compiled-in shell.
+pub(crate) fn render_shell(state: &Arc<AppState>, site: &SiteConfig, seo_head: &str, body_html: &str) -> Bytes {
+    WEBSITE_HTML
+        .replacen("<!--SEO_HEAD-->", seo_head, 1)
+        .replacen("<!--SITE_CONFIG-->", &site_config_script(site), 1)
+        .replacen("<!--ANALYTICS-->", &analytics_head(state, site), 1)
+        .replacen("<!--BODY_CONTENT-->", body_html, 1)
+        .into()
 }
 
 fn render_website(
     state: &Arc<AppState>,
     headers: &HeaderMap,
+    sq: &SiteQuery,
     requested_slug: Option<String>,
     post_path: bool,
 ) -> axum::response::Response {
+    let site = match resolve_site(headers, sq) {
+        Ok(s) => s,
+        Err(e) => return e.into_response(),
+    };
     // Build the cache key first so we can short-circuit on a hit. Use the raw
     // requested slug (None → "" for the home shell). When the slug resolves to
     // home via `first_default_slug`, the cache still keys on what the client
     // asked for; this is correct because invalidation is global and TTL is short.
     let cache_key = if post_path {
-        format!("blog/{}", requested_slug.as_deref().unwrap_or_default())
+        format!("{}|blog/{}", site.id, requested_slug.as_deref().unwrap_or_default())
     } else {
-        requested_slug.clone().unwrap_or_default()
+        format!("{}|{}", site.id, requested_slug.as_deref().unwrap_or_default())
     };
     if let Some(cached) = page_cache_get(&cache_key) {
         return (build_html_headers(), cached).into_response();
@@ -1624,8 +1727,8 @@ fn render_website(
     let (pages, products) = {
         let db = state.db.lock();
         (
-            visible_pages(db.list_website_pages().unwrap_or_default()),
-            db.list_products(true).unwrap_or_default(),
+            visible_pages(db.list_website_pages(site.id).unwrap_or_default()),
+            if site.has_shop { db.list_products(true).unwrap_or_default() } else { Vec::new() },
         )
     };
 
@@ -1635,7 +1738,7 @@ fn render_website(
     if let Some(s) = requested_slug.as_deref() {
         let target = {
             let db = state.db.lock();
-            db.get_website_page(s)
+            db.get_website_page(site.id, s)
                 .ok()
                 .flatten()
                 .map(|r| r.10)
@@ -1650,15 +1753,16 @@ fn render_website(
     // /blog renders the reverse-chron post index; an optional "blog" page row
     // supplies the title/intro when present.
     if !post_path && requested_slug.as_deref() == Some("blog") {
-        let html = render_blog_index(state, &pages, &products);
+        let html = render_blog_index(state, site, &pages, &products);
         page_cache_put(cache_key, html.clone());
         return (build_html_headers(), html).into_response();
     }
 
     // /newsletter renders the public newsletter archive; an optional
-    // "newsletter" page row supplies the title/intro when present.
-    if !post_path && requested_slug.as_deref() == Some("newsletter") {
-        let html = render_newsletter_index(state, &pages, &products);
+    // "newsletter" page row supplies the title/intro when present. Sites
+    // without a newsletter treat the slug as a normal page.
+    if !post_path && site.has_newsletter && requested_slug.as_deref() == Some("newsletter") {
+        let html = render_newsletter_index(state, site, &pages, &products);
         page_cache_put(cache_key, html.clone());
         return (build_html_headers(), html).into_response();
     }
@@ -1673,7 +1777,7 @@ fn render_website(
         if let Some(s) = slug_owned.as_deref() {
             let (row, author) = {
                 let db = state.db.lock();
-                let row = db.get_website_page(s).unwrap_or(None);
+                let row = db.get_website_page(site.id, s).unwrap_or(None);
                 let author = row.as_ref().and_then(|r| display_name(&db, &r.9));
                 (row, author)
             };
@@ -1688,29 +1792,29 @@ fn render_website(
                         meta
                     } else {
                         let d = derive_description(&body);
-                        if d.is_empty() { SITE_TAGLINE.to_string() } else { d }
+                        if d.is_empty() { site.tagline.to_string() } else { d }
                     };
                     let is_post_kind = kind == "post";
                     (t, desc, upd, Some(s.to_string()), body,
                      is_post_kind.then_some(published),
                      if is_post_kind { author } else { None })
                 }
-                _ => (SITE_NAME.to_string(), SITE_TAGLINE.to_string(), String::new(), None, String::new(), None, None),
+                _ => (site.name.to_string(), site.tagline.to_string(), String::new(), None, String::new(), None, None),
             }
         } else {
-            (SITE_NAME.to_string(), SITE_TAGLINE.to_string(), String::new(), None, String::new(), None, None)
+            (site.name.to_string(), site.tagline.to_string(), String::new(), None, String::new(), None, None)
         };
 
-    let og_image = first_image_url(&body_md);
+    let og_image = first_image_url(site, &body_md);
     let injected = match valid_slug.as_deref() {
         Some(s) => render_seo_head(
-            s, &title, &description, &updated_at, og_image.as_deref(), &pages, &products,
+            site, s, &title, &description, &updated_at, og_image.as_deref(), &pages, &products,
             post_published.as_deref(), post_author.as_deref(),
         ),
         None => format!(
             "<title>{}</title>\n<meta name=\"description\" content=\"{}\">\n",
-            html_escape(SITE_NAME),
-            html_escape(SITE_TAGLINE),
+            html_escape(site.name),
+            html_escape(site.tagline),
         ),
     };
 
@@ -1725,16 +1829,11 @@ fn render_website(
                 byline_suffix(post_author.as_deref()),
             ));
         }
-        h.push_str(&render_body_html(&body_md));
+        h.push_str(&absolutize_bare_img_srcs(&render_body_html(&body_md)));
         h
     };
 
-    let analytics = analytics_head(state);
-    let html: Bytes = WEBSITE_HTML
-        .replacen("<!--SEO_HEAD-->", &injected, 1)
-        .replacen("<!--ANALYTICS-->", &analytics, 1)
-        .replacen("<!--BODY_CONTENT-->", &body_html, 1)
-        .into();
+    let html = render_shell(state, site, &injected, &body_html);
     page_cache_put(cache_key, html.clone());
     (build_html_headers(), html).into_response()
 }
@@ -1743,12 +1842,13 @@ fn render_website(
 /// row, then every visible post newest-first with date and excerpt.
 fn render_blog_index(
     state: &Arc<AppState>,
+    site: &SiteConfig,
     pages: &[PageRow],
     products: &[(String, String, String, i64, String, Option<String>, String, bool, i64, String)],
 ) -> Bytes {
     let row = {
         let db = state.db.lock();
-        db.get_website_page("blog").unwrap_or(None)
+        db.get_website_page(site.id, "blog").unwrap_or(None)
     };
     let (title, intro_md, updated_at, meta) = match row {
         Some((t, body, _p, _o, upd, m, false, _k, _pd, _au, _rd)) => (t, body, upd, m),
@@ -1760,7 +1860,7 @@ fn render_blog_index(
         meta
     } else {
         let d = derive_description(&intro_md);
-        if d.is_empty() { format!("News and updates from {}.", SITE_NAME) } else { d }
+        if d.is_empty() { format!("News and updates from {}.", site.name) } else { d }
     };
 
     let mut body_html = if intro_md.is_empty() {
@@ -1777,7 +1877,7 @@ fn render_blog_index(
             let (post_body, author) = {
                 let db = state.db.lock();
                 let body = db
-                    .get_website_page(&p.0)
+                    .get_website_page(site.id, &p.0)
                     .ok()
                     .flatten()
                     .map(|(_t, body, ..)| body)
@@ -1799,13 +1899,8 @@ fn render_blog_index(
 
     // dateModified for the index: the newest post, else the intro page edit.
     let updated = posts.first().map(|p| p.4.clone()).unwrap_or(updated_at);
-    let injected = render_seo_head("blog", &title, &description, &updated, None, pages, products, None, None);
-    let analytics = analytics_head(state);
-    WEBSITE_HTML
-        .replacen("<!--SEO_HEAD-->", &injected, 1)
-        .replacen("<!--ANALYTICS-->", &analytics, 1)
-        .replacen("<!--BODY_CONTENT-->", &body_html, 1)
-        .into()
+    let injected = render_seo_head(site, "blog", &title, &description, &updated, None, pages, products, None, None);
+    render_shell(state, site, &injected, &body_html)
 }
 
 /// Newsletter bodies reference uploaded images by bare filename (the composer
@@ -1852,13 +1947,14 @@ fn newsletter_web_md(body_md: &str) -> String {
 /// newest first.
 fn render_newsletter_index(
     state: &Arc<AppState>,
+    site: &SiteConfig,
     pages: &[PageRow],
     products: &[(String, String, String, i64, String, Option<String>, String, bool, i64, String)],
 ) -> Bytes {
     let (row, issues) = {
         let db = state.db.lock();
         (
-            db.get_website_page("newsletter").unwrap_or(None),
+            db.get_website_page(site.id, "newsletter").unwrap_or(None),
             db.list_public_newsletter_issues().unwrap_or_default(),
         )
     };
@@ -1871,7 +1967,7 @@ fn render_newsletter_index(
         meta
     } else {
         let d = derive_description(&intro_md);
-        if d.is_empty() { format!("Past newsletters from {}.", SITE_NAME) } else { d }
+        if d.is_empty() { format!("Past newsletters from {}.", site.name) } else { d }
     };
 
     let mut body_html = if intro_md.is_empty() {
@@ -1899,20 +1995,23 @@ fn render_newsletter_index(
     // dateModified for the archive: the newest issue, else the intro page edit.
     let updated = issues.first().map(|i| i.3.clone()).unwrap_or(updated_at);
     let injected =
-        render_seo_head("newsletter", &title, &description, &updated, None, pages, products, None, None);
-    let analytics = analytics_head(state);
-    WEBSITE_HTML
-        .replacen("<!--SEO_HEAD-->", &injected, 1)
-        .replacen("<!--ANALYTICS-->", &analytics, 1)
-        .replacen("<!--BODY_CONTENT-->", &body_html, 1)
-        .into()
+        render_seo_head(site, "newsletter", &title, &description, &updated, None, pages, products, None, None);
+    render_shell(state, site, &injected, &body_html)
 }
 
 /// RSS 2.0 feed of visible posts at /blog/rss.xml.
-pub async fn handle_blog_rss(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn handle_blog_rss(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
+) -> impl IntoResponse {
+    let site = match resolve_site(&headers, &sq) {
+        Ok(s) => s,
+        Err(e) => return e.into_response(),
+    };
     let pages = {
         let db = state.db.lock();
-        visible_pages(db.list_website_pages().unwrap_or_default())
+        visible_pages(db.list_website_pages(site.id).unwrap_or_default())
     };
     let posts = sorted_posts(&pages);
 
@@ -1921,20 +2020,20 @@ pub async fn handle_blog_rss(State(state): State<Arc<AppState>>) -> impl IntoRes
         "<rss version=\"2.0\" xmlns:atom=\"http://www.w3.org/2005/Atom\">\n",
         "<channel>\n",
     ));
-    xml.push_str(&format!("<title>{} Blog</title>\n", xml_escape(SITE_NAME)));
-    xml.push_str(&format!("<link>{}/blog</link>\n", PUBLIC_BASE));
+    xml.push_str(&format!("<title>{} Blog</title>\n", xml_escape(site.name)));
+    xml.push_str(&format!("<link>{}/blog</link>\n", site.public_base));
     xml.push_str(&format!(
         "<atom:link href=\"{}/blog/rss.xml\" rel=\"self\" type=\"application/rss+xml\"/>\n",
-        PUBLIC_BASE,
+        site.public_base,
     ));
     xml.push_str(&format!(
         "<description>News and updates from {}.</description>\n",
-        xml_escape(SITE_NAME),
+        xml_escape(site.name),
     ));
     xml.push_str("<language>en</language>\n");
     for p in &posts {
-        let excerpt = post_excerpt(&state, p);
-        let url = canonical_post_url(&p.0);
+        let excerpt = post_excerpt(&state, site, p);
+        let url = canonical_post_url(site, &p.0);
         xml.push_str("<item>\n");
         xml.push_str(&format!("<title>{}</title>\n", xml_escape(&p.1)));
         xml.push_str(&format!("<link>{}</link>\n", xml_escape(&url)));
@@ -1955,7 +2054,7 @@ pub async fn handle_blog_rss(State(state): State<Arc<AppState>>) -> impl IntoRes
     let mut h = HeaderMap::new();
     h.insert(header::CONTENT_TYPE, "application/rss+xml; charset=utf-8".parse().unwrap());
     h.insert(header::CACHE_CONTROL, "public, max-age=600".parse().unwrap());
-    (h, xml)
+    (h, xml).into_response()
 }
 
 fn build_html_headers() -> HeaderMap {
@@ -2002,10 +2101,10 @@ fn is_valid_nav_structure(s: &str) -> bool {
 
 /// Parsed nav structure for the public pages response, or None when the
 /// setting is unset/invalid (the site then falls back to a flat nav).
-pub fn nav_structure_json(state: &Arc<AppState>) -> Option<serde_json::Value> {
+pub fn nav_structure_json(state: &Arc<AppState>, site: &SiteConfig) -> Option<serde_json::Value> {
     let raw = {
         let db = state.db.lock();
-        db.get_site_setting(SETTING_NAV_STRUCTURE).ok().flatten()?
+        db.get_site_setting(&sites::setting_key(site, SETTING_NAV_STRUCTURE)).ok().flatten()?
     };
     if !is_valid_nav_structure(&raw) {
         return None;
@@ -2025,18 +2124,19 @@ fn is_valid_analytics_id(s: &str) -> bool {
 
 /// Render the analytics `<script>` blocks from the configured tag IDs,
 /// or empty string when unset. Called per-request - DB lookups are cheap.
-pub fn analytics_head(state: &Arc<AppState>) -> String {
+pub fn analytics_head(state: &Arc<AppState>, site: &SiteConfig) -> String {
     let (ga_id, ads_id, ads_contact, ads_purchase, reddit_id) = {
         let db = state.db.lock();
         (
-            db.get_site_setting(SETTING_GOOGLE_ANALYTICS_ID).ok().flatten(),
-            db.get_site_setting(SETTING_GOOGLE_ADS_ID).ok().flatten(),
-            db.get_site_setting(SETTING_GOOGLE_ADS_LABEL_CONTACT).ok().flatten(),
-            db.get_site_setting(SETTING_GOOGLE_ADS_LABEL_PURCHASE).ok().flatten(),
-            db.get_site_setting(SETTING_REDDIT_PIXEL_ID).ok().flatten(),
+            db.get_site_setting(&sites::setting_key(site, SETTING_GOOGLE_ANALYTICS_ID)).ok().flatten(),
+            db.get_site_setting(&sites::setting_key(site, SETTING_GOOGLE_ADS_ID)).ok().flatten(),
+            db.get_site_setting(&sites::setting_key(site, SETTING_GOOGLE_ADS_LABEL_CONTACT)).ok().flatten(),
+            db.get_site_setting(&sites::setting_key(site, SETTING_GOOGLE_ADS_LABEL_PURCHASE)).ok().flatten(),
+            db.get_site_setting(&sites::setting_key(site, SETTING_REDDIT_PIXEL_ID)).ok().flatten(),
         )
     };
     render_analytics_head(
+        site,
         ga_id.as_deref(),
         ads_id.as_deref(),
         ads_contact.as_deref(),
@@ -2056,6 +2156,7 @@ pub fn analytics_head(state: &Arc<AppState>) -> String {
 /// third-party request. Conversion labels surface as `window.__adsConv`
 /// post-consent, so the existing conversion-firing site JS needs no changes.
 fn render_analytics_head(
+    site: &SiteConfig,
     ga_id: Option<&str>,
     ads_id: Option<&str>,
     ads_contact: Option<&str>,
@@ -2125,7 +2226,7 @@ window.__applyConsent = function(granted) {{\n\
 }};\n\
 function showBanner() {{\n\
   if (document.getElementById('cookieConsent')) return;\n\
-  var prefix = (location.host === 'xikaku.com' || location.host === 'www.xikaku.com') ? '' : '/site';\n\
+  var prefix = ({hosts}.indexOf(location.host) !== -1) ? '' : '/site';\n\
   var b = document.createElement('div');\n\
   b.id = 'cookieConsent';\n\
   b.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:9999;display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:center;padding:14px 16px;background:var(--bg2,#161922);border-top:1px solid var(--border,#262b38);color:var(--text1,#e6e8ec);font-size:14px;';\n\
@@ -2165,18 +2266,14 @@ onReady(wireSettingsLink);\n\
 }})();\n\
 </script>\n",
         cfg = cfg.join(","),
+        hosts = serde_json::to_string(site.hosts).unwrap_or_else(|_| "[]".to_string()),
     )
 }
 
-/// The sitemap differs per host: the marketing site lives on xikaku.com, the
-/// documentation on susi.lp-research.com. Everything else (robots allow-list,
-/// llms.txt) is host-independent.
+/// True when the request came in on a marketing-site host (clean slug URLs);
+/// false on the dashboard/docs host, where the site lives under /site.
 fn is_marketing_host(headers: &HeaderMap) -> bool {
-    headers
-        .get(header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .map(|h| h.to_ascii_lowercase().contains("xikaku.com"))
-        .unwrap_or(false)
+    sites::site_from_headers(headers).is_some()
 }
 
 /// Google Search Console site-verification file for susi.lp-research.com.
@@ -2187,7 +2284,10 @@ pub async fn handle_google_site_verification() -> impl IntoResponse {
 }
 
 pub async fn handle_robots_txt(headers: HeaderMap) -> impl IntoResponse {
-    let sitemap_base = if is_marketing_host(&headers) { PUBLIC_BASE } else { DOCS_PUBLIC_BASE };
+    let sitemap_base = match sites::site_from_headers(&headers) {
+        Some(site) => site.public_base,
+        None => DOCS_PUBLIC_BASE,
+    };
     let body = format!(
         concat!(
             "User-agent: *\n",
@@ -2223,18 +2323,18 @@ pub async fn handle_sitemap_xml(
     let mut xml = String::from(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n",
     );
-    if is_marketing_host(&headers) {
+    if let Some(site) = sites::site_from_headers(&headers) {
         let pages = {
             let db = state.db.lock();
-            visible_pages(db.list_website_pages().unwrap_or_default())
+            visible_pages(db.list_website_pages(site.id).unwrap_or_default())
         };
         let home_slug = first_default_slug(&pages).map(|s| s.to_string());
         for (slug, _title, _parent, _ord, updated_at, _meta, _hidden, kind, _published, _author, _rd) in &pages {
             let is_home = home_slug.as_deref() == Some(slug.as_str());
             let loc = if kind == "post" {
-                canonical_post_url(slug)
+                canonical_post_url(site, slug)
             } else {
-                canonical_page_url(slug, is_home)
+                canonical_page_url(site, slug, is_home)
             };
             xml.push_str("  <url>\n");
             xml.push_str(&format!("    <loc>{}</loc>\n", xml_escape(&loc)));
@@ -2263,22 +2363,21 @@ pub async fn handle_sitemap_xml(
 
 pub async fn handle_llms_txt(
     State(state): State<Arc<AppState>>,
-    _headers: HeaderMap,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
+    let site = sites::site_from_headers(&headers).unwrap_or_else(sites::default_site);
     let pages = {
         let db = state.db.lock();
-        visible_pages(db.list_website_pages().unwrap_or_default())
+        visible_pages(db.list_website_pages(site.id).unwrap_or_default())
     };
     let home_slug = first_default_slug(&pages).map(|s| s.to_string());
 
     let mut body = String::new();
-    body.push_str(&format!("# {}\n\n", SITE_NAME));
-    body.push_str(&format!("> {}\n\n", SITE_TAGLINE));
+    body.push_str(&format!("# {}\n\n", site.name));
+    body.push_str(&format!("> {}\n\n", site.tagline));
     body.push_str(&format!(
-        "{} ({}) builds sensor-fusion and perception software for autonomous systems. \
-         The pages listed below are the authoritative source for products, documentation, \
-         and company information.\n\n",
-        SITE_NAME, ORG_LEGAL_NAME,
+        "{} ({}) {}\n\n",
+        site.name, site.org_legal_name, site.llms_blurb,
     ));
 
     body.push_str("## Pages\n");
@@ -2291,14 +2390,14 @@ pub async fn handle_llms_txt(
         } else {
             let row = {
                 let db = state.db.lock();
-                db.get_website_page(slug).unwrap_or(None)
+                db.get_website_page(site.id, slug).unwrap_or(None)
             };
             row.map(|(_t, body, ..)| derive_description(&body))
                 .unwrap_or_default()
         };
         let indent = if parent.is_some() { "  " } else { "" };
         let is_home = home_slug.as_deref() == Some(slug.as_str());
-        let url = canonical_page_url(slug, is_home);
+        let url = canonical_page_url(site, slug, is_home);
         if desc_source.is_empty() {
             body.push_str(&format!("{}- [{}]({})\n", indent, title, url));
         } else {
@@ -2309,8 +2408,8 @@ pub async fn handle_llms_txt(
     if !posts.is_empty() {
         body.push_str("\n## Blog\n");
         for p in &posts {
-            let excerpt = post_excerpt(&state, p);
-            let url = canonical_post_url(&p.0);
+            let excerpt = post_excerpt(&state, site, p);
+            let url = canonical_post_url(site, &p.0);
             if excerpt.is_empty() {
                 body.push_str(&format!("- [{}]({}) ({})\n", p.1, url, p.8));
             } else {
@@ -2318,7 +2417,11 @@ pub async fn handle_llms_txt(
             }
         }
     }
-    body.push_str(&docs_llms_section(&state));
+    // The product docs live on the dashboard host and belong to the default
+    // site's llms.txt only.
+    if site.id == sites::default_site().id {
+        body.push_str(&docs_llms_section(&state));
+    }
 
     let mut h = HeaderMap::new();
     h.insert(header::CONTENT_TYPE, "text/plain; charset=utf-8".parse().unwrap());
@@ -2342,19 +2445,19 @@ const KNOWN_SITE_SETTING_KEYS: &[&str] = &[
 pub async fn handle_admin_get_site_settings(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let site = resolve_site(&headers, &sq)?;
     let p = validate_principal(&headers, &state)?;
     require_admin_full(&state, &p)?;
-    let pairs = {
-        let db = state.db.lock();
-        db.list_site_settings().map_err(db_err)?
-    };
     let mut out = serde_json::Map::new();
+    let db = state.db.lock();
     for k in KNOWN_SITE_SETTING_KEYS {
-        out.insert((*k).to_string(), serde_json::Value::String(String::new()));
-    }
-    for (k, v) in pairs {
-        out.insert(k, serde_json::Value::String(v));
+        let v = db
+            .get_site_setting(&sites::setting_key(site, k))
+            .map_err(db_err)?
+            .unwrap_or_default();
+        out.insert((*k).to_string(), serde_json::Value::String(v));
     }
     Ok(Json(serde_json::Value::Object(out)))
 }
@@ -2368,8 +2471,10 @@ pub struct UpdateSiteSettingsRequest {
 pub async fn handle_admin_put_site_settings(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
     Json(req): Json<UpdateSiteSettingsRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let site = resolve_site(&headers, &sq)?;
     let p = validate_principal(&headers, &state)?;
     require_admin_full(&state, &p)?;
     for (k, v) in &req.fields {
@@ -2392,7 +2497,7 @@ pub async fn handle_admin_put_site_settings(
             ));
         }
         let db = state.db.lock();
-        db.set_site_setting(k, trimmed).map_err(db_err)?;
+        db.set_site_setting(&sites::setting_key(site, k), trimmed).map_err(db_err)?;
     }
     invalidate_page_cache();
     Ok(Json(json!({ "status": "OK" })))
@@ -2418,26 +2523,29 @@ fn generate_indexnow_key() -> String {
     hex::encode(bytes)
 }
 
-/// Fetch the configured IndexNow key, lazily creating one the first time.
-fn get_or_create_indexnow_key(state: &Arc<AppState>) -> Option<String> {
+/// Fetch the site's IndexNow key, lazily creating one the first time.
+fn get_or_create_indexnow_key(state: &Arc<AppState>, site: &SiteConfig) -> Option<String> {
+    let setting = sites::setting_key(site, SETTING_INDEXNOW_KEY);
     let existing = {
         let db = state.db.lock();
-        db.get_site_setting(SETTING_INDEXNOW_KEY).ok().flatten()
+        db.get_site_setting(&setting).ok().flatten()
     };
     if let Some(k) = existing.filter(|k| !k.is_empty()) {
         return Some(k);
     }
     let key = generate_indexnow_key();
     let db = state.db.lock();
-    db.set_site_setting(SETTING_INDEXNOW_KEY, &key).ok()?;
+    db.set_site_setting(&setting, &key).ok()?;
     Some(key)
 }
 
 pub async fn handle_indexnow_key_file(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(filename): Path<String>,
 ) -> impl IntoResponse {
-    let Some(key) = get_or_create_indexnow_key(&state) else {
+    let site = sites::site_from_headers(&headers).unwrap_or_else(sites::default_site);
+    let Some(key) = get_or_create_indexnow_key(&state, site) else {
         return (StatusCode::INTERNAL_SERVER_ERROR, "key unavailable").into_response();
     };
     let expected = format!("{}.txt", key);
@@ -2453,10 +2561,10 @@ pub async fn handle_indexnow_key_file(
 /// Fire an async IndexNow notification for the given URLs. Returns immediately;
 /// the network request runs in a background task. Silently no-ops when there's
 /// no key (e.g., DB error during bootstrap).
-pub fn ping_indexnow(state: &Arc<AppState>, urls: Vec<String>) {
+pub fn ping_indexnow(state: &Arc<AppState>, site: &SiteConfig, urls: Vec<String>) {
     if urls.is_empty() { return; }
-    let Some(key) = get_or_create_indexnow_key(state) else { return };
-    let host = PUBLIC_BASE
+    let Some(key) = get_or_create_indexnow_key(state, site) else { return };
+    let host = site.public_base
         .trim_start_matches("https://")
         .trim_start_matches("http://")
         .trim_end_matches('/')
@@ -2466,7 +2574,7 @@ pub fn ping_indexnow(state: &Arc<AppState>, urls: Vec<String>) {
     // the verification file). Nginx is configured to proxy
     // `^/[a-f0-9]{32}\.txt$` to the backend `/api/v1/indexnow/{filename}`
     // route.
-    let key_location = format!("{}/{}.txt", PUBLIC_BASE, key);
+    let key_location = format!("{}/{}.txt", site.public_base, key);
     let body = serde_json::to_string(&json!({
         "host": host,
         "key": key,
@@ -2529,8 +2637,26 @@ mod tests {
     fn first_image_url_extracts_relative() {
         let md = "# Title\n\nIntro text.\n\n![hero](/static/foo.png)\n\nMore text.\n";
         assert_eq!(
-            first_image_url(md),
+            first_image_url(sites::default_site(), md),
             Some("https://xikaku.com/static/foo.png".to_string())
+        );
+    }
+
+    #[test]
+    fn first_image_url_resolves_bare_asset_name() {
+        let md = "# Title\n\n![hero](image-2026-07-29T00-31-54-518.png)\n";
+        assert_eq!(
+            first_image_url(sites::default_site(), md),
+            Some("https://xikaku.com/api/v1/website/assets/image-2026-07-29T00-31-54-518.png".to_string())
+        );
+    }
+
+    #[test]
+    fn first_image_url_uses_site_base() {
+        let md = "![hero](/media/foo.png)";
+        assert_eq!(
+            first_image_url(sites::site_by_id("lpr").unwrap(), md),
+            Some("https://www.lp-research.com/media/foo.png".to_string())
         );
     }
 
@@ -2538,14 +2664,14 @@ mod tests {
     fn first_image_url_passes_absolute() {
         let md = "![hero](https://cdn.example.com/img.jpg)";
         assert_eq!(
-            first_image_url(md),
+            first_image_url(sites::default_site(), md),
             Some("https://cdn.example.com/img.jpg".to_string())
         );
     }
 
     #[test]
     fn first_image_url_none_when_no_images() {
-        assert_eq!(first_image_url("# Just text\n\nNo images here."), None);
+        assert_eq!(first_image_url(sites::default_site(), "# Just text\n\nNo images here."), None);
     }
 
     #[test]
@@ -2756,6 +2882,7 @@ mod tests {
     #[test]
     fn analytics_head_single_loader_for_ga_and_ads() {
         let out = render_analytics_head(
+            sites::default_site(),
             Some("G-XSW6TEN1CZ"),
             Some("AW-18330845601"),
             Some("ctLabel-1"),
@@ -2773,7 +2900,7 @@ mod tests {
 
     #[test]
     fn analytics_head_ads_only() {
-        let out = render_analytics_head(None, Some("AW-18330845601"), None, None, None);
+        let out = render_analytics_head(sites::default_site(), None, Some("AW-18330845601"), None, None, None);
         assert!(out.contains("ads:'AW-18330845601'"));
         assert!(!out.contains("conv:{"));
         assert!(!out.contains("ga:'"));
@@ -2781,18 +2908,26 @@ mod tests {
 
     #[test]
     fn analytics_head_labels_ignored_without_ads_id() {
-        let out = render_analytics_head(Some("G-XSW6TEN1CZ"), None, Some("ctLabel-1"), None, None);
+        let out = render_analytics_head(sites::default_site(), Some("G-XSW6TEN1CZ"), None, Some("ctLabel-1"), None, None);
         assert!(!out.contains("conv:{"));
     }
 
     #[test]
     fn analytics_head_empty_when_unset() {
-        assert_eq!(render_analytics_head(None, None, None, None, None), "");
+        assert_eq!(render_analytics_head(sites::default_site(), None, None, None, None, None), "");
+    }
+
+    #[test]
+    fn analytics_head_banner_prefix_uses_site_hosts() {
+        let out = render_analytics_head(sites::default_site(), None, Some("AW-18330845601"), None, None, None);
+        assert!(out.contains(r#"["xikaku.com","www.xikaku.com"].indexOf(location.host)"#), "got: {}", out);
+        let out = render_analytics_head(sites::site_by_id("lpr").unwrap(), None, Some("AW-18330845601"), None, None, None);
+        assert!(out.contains(r#"["lp-research.com","www.lp-research.com"].indexOf(location.host)"#), "got: {}", out);
     }
 
     #[test]
     fn analytics_head_geo_gates_consent() {
-        let out = render_analytics_head(None, Some("AW-18330845601"), Some("ctLabel-1"), None, None);
+        let out = render_analytics_head(sites::default_site(), None, Some("AW-18330845601"), Some("ctLabel-1"), None, None);
         // EEA/UK/CH sees the banner first; everyone else loads by default.
         assert!(out.contains("tz.indexOf('Europe/') === 0"), "got: {}", out);
         assert!(out.contains("Asia/Nicosia"), "Cyprus is EU but not under Europe/");

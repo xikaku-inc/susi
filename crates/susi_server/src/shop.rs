@@ -765,11 +765,17 @@ fn build_customer_confirmation(
 
     let subject = format!("Thanks for your order - Xikaku {}", order_label);
 
+    let has_preorder = line_items_have_preorder(line_items);
+
     // -------- Plain text --------
     let mut text = String::new();
     text.push_str(&format!("Hi {},\n\n",
         if name.is_empty() { "there" } else { name }));
-    text.push_str(&format!("Thank you for your order! Order {} has been received and we're getting it ready.\n\n", order_label));
+    if has_preorder {
+        text.push_str(&format!("Thank you for your order! Order {} has been received.\n\n", order_label));
+    } else {
+        text.push_str(&format!("Thank you for your order! Order {} has been received and we're getting it ready.\n\n", order_label));
+    }
 
     text.push_str("Items\n");
     if line_items.is_empty() {
@@ -805,7 +811,11 @@ fn build_customer_confirmation(
     }
 
     text.push_str("A PDF invoice is attached for your records.\n\n");
-    text.push_str("We'll send another email with your tracking number once your order ships from our Los Angeles office.\n\n");
+    if has_preorder {
+        text.push_str("Your order includes a pre-order item and will ship within the window shown next to the item. We'll send another email with your tracking number as soon as it ships from our Los Angeles office.\n\n");
+    } else {
+        text.push_str("We'll send another email with your tracking number once your order ships from our Los Angeles office.\n\n");
+    }
     if !support.is_empty() {
         text.push_str(&format!("Questions? Reach us at {}.\n\n", support));
     }
@@ -888,6 +898,17 @@ fn build_customer_confirmation(
         )
     };
 
+    let intro_html = if has_preorder {
+        "Thanks for your purchase from Xikaku - we've received your order."
+    } else {
+        "Thanks for your purchase from Xikaku - we've received your order and are getting it ready."
+    };
+    let shipping_html = if has_preorder {
+        "Your order includes a pre-order item and will ship within the window shown next to the item. You'll get a second email with your tracking number as soon as it ships from our Los Angeles office."
+    } else {
+        "We're processing your order now. You'll get a second email with your tracking number once it ships from our Los Angeles office."
+    };
+
     let html = format!(
         "<!doctype html><html><body style=\"margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#ffffff;color:#1a1d23;\">\
          <div style=\"max-width:600px;margin:0 auto;padding:32px 24px;\">\
@@ -897,7 +918,7 @@ fn build_customer_confirmation(
            <h1 style=\"font-size:22px;margin:0 0 6px;\">Thank you for your order</h1>\
            <p style=\"color:#5c6470;margin:0 0 20px;\">Order {order} · {date}</p>\
            <p>Hi {name_html},</p>\
-           <p>Thanks for your purchase from Xikaku - we've received your order and are getting it ready.</p>\
+           <p>{intro}</p>\
            {extra_block}\
            <h2 style=\"font-size:14px;margin:28px 0 8px;\">Items</h2>\
            <table style=\"width:100%;border-collapse:collapse;\">\
@@ -911,7 +932,7 @@ fn build_customer_confirmation(
            </table>\
            {address_section}\
            <p style=\"margin-top:24px;font-size:13px;color:#5c6470;\">\
-             We're processing your order now. You'll get a second email with your tracking number once it ships from our Los Angeles office.\
+             {shipping_note}\
            </p>\
            <p style=\"color:#5c6470;font-size:12px;margin-top:18px;\">A PDF invoice is attached to this email for your records.</p>\
            {support_block}\
@@ -921,6 +942,8 @@ fn build_customer_confirmation(
         order = order_label,
         date = chrono::Utc::now().format("%Y-%m-%d"),
         name_html = html_escape_local(if name.is_empty() { "there" } else { name }),
+        intro = intro_html,
+        shipping_note = shipping_html,
         extra_block = extra_block,
         rows = if item_rows.is_empty() { "<tr><td style=\"padding:8px 0;color:#5c6470;\">(item details unavailable)</td></tr>".into() } else { item_rows },
         subtotal = html_escape_local(&fmt_money(amount_subtotal, currency)),
@@ -1169,6 +1192,18 @@ fn fmt_money(cents: i64, currency: &str) -> String {
     format!("{}.{:02} {}", whole, frac, currency.to_uppercase())
 }
 
+/// True when any line item's title carries a "pre-order" tag. Pre-order
+/// products declare themselves via their shop title, so the flag survives
+/// the round-trip through Stripe without extra metadata.
+fn line_items_have_preorder(line_items: &[Value]) -> bool {
+    line_items.iter().any(|li| {
+        li.get("description")
+            .and_then(|v| v.as_str())
+            .map(|d| d.to_ascii_lowercase().contains("pre-order"))
+            .unwrap_or(false)
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Admin endpoints (JWT)
 // ---------------------------------------------------------------------------
@@ -1237,7 +1272,7 @@ pub async fn handle_upsert_product(
     {
         let db = state.db.lock();
         if let Some(asset) = req.image_asset.as_deref() {
-            if !asset.is_empty() && !db.website_asset_exists(asset).map_err(db_err)? {
+            if !asset.is_empty() && !db.website_asset_exists(crate::sites::default_site().id, asset).map_err(db_err)? {
                 return Err(error_response(
                     StatusCode::BAD_REQUEST,
                     &format!("Unknown image_asset: {}", asset),
@@ -1789,15 +1824,19 @@ pub async fn handle_admin_put_settings(
 // ---------------------------------------------------------------------------
 
 pub async fn handle_shop_page(State(state): State<Arc<AppState>>) -> axum::response::Html<String> {
+    // The shop belongs to the default site.
+    let site = crate::sites::default_site();
     let head = "<title>Shop - Xikaku</title>\n\
                 <meta name=\"description\" content=\"Order Xikaku IMU and inertial sensors directly. Shipped from our Los Angeles office.\">\n\
                 <meta property=\"og:title\" content=\"Shop - Xikaku\">\n\
                 <meta property=\"og:type\" content=\"website\">\n";
-    let analytics = crate::website::analytics_head(&state);
-    let html = crate::website::WEBSITE_HTML
-        .replacen("<!--SEO_HEAD-->", head, 1)
-        .replacen("<!--ANALYTICS-->", &analytics, 1)
-        .replacen("<!--BODY_CONTENT-->", "<div class=\"empty-state\">Loading…</div>", 1);
+    let html = String::from_utf8_lossy(&crate::website::render_shell(
+        &state,
+        site,
+        head,
+        "<div class=\"empty-state\">Loading…</div>",
+    ))
+    .into_owned();
     axum::response::Html(html)
 }
 
@@ -1866,5 +1905,18 @@ mod tests {
         assert!(rate_applies(&["*".into()], "US"));
         assert!(rate_applies(&["US".into(), "CA".into()], "us"));
         assert!(!rate_applies(&["US".into()], "GB"));
+    }
+
+    #[test]
+    fn preorder_detection_from_line_items() {
+        let preorder = vec![
+            json!({"description": "LPMS-B2 - Wireless 9-Axis IMU (Bluetooth)"}),
+            json!({"description": "Xicap - Spatial Tracker for Apple Vision Pro (Pre-order - ships end of Oct / early Nov 2026)"}),
+        ];
+        assert!(line_items_have_preorder(&preorder));
+        let regular = vec![json!({"description": "LPMS-B2 - Wireless 9-Axis IMU (Bluetooth)"})];
+        assert!(!line_items_have_preorder(&regular));
+        assert!(!line_items_have_preorder(&[]));
+        assert!(!line_items_have_preorder(&[json!({"quantity": 1})]));
     }
 }

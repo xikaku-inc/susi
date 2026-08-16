@@ -1692,7 +1692,10 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
 <div id="page-website" class="dash-page">
     <div style="margin-top:8px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
         <h2 style="font-size:16px;font-weight:600;">Website - Pages</h2>
-        <button onclick="showWebsitePageModal()">+ New Page</button>
+        <div style="display:flex;align-items:center;gap:10px;">
+            <select id="websiteSiteSelect" onchange="switchWebsiteSite()"></select>
+            <button onclick="showWebsitePageModal()">+ New Page</button>
+        </div>
     </div>
     <div class="card" style="padding:0;">
         <table style="width:100%;" id="websitePagesTable">
@@ -6376,7 +6379,7 @@ async function saveShopSettings() {
 async function loadSiteSettings() {
     if (!roleIsAdmin(userRole)) return;
     try {
-        const resp = await fetch(API + '/site/admin/settings', { headers: authHeaders() });
+        const resp = await fetch(API + '/site/admin/settings' + wsQ(), { headers: authHeaders() });
         if (!resp.ok) return;
         const s = await resp.json();
         document.getElementById('siteSetGaId').value = s.google_analytics_id || '';
@@ -6407,7 +6410,7 @@ async function saveSiteSettings() {
         nav_structure: navRaw,
     };
     try {
-        const resp = await fetch(API + '/site/admin/settings', {
+        const resp = await fetch(API + '/site/admin/settings' + wsQ(), {
             method: 'PUT',
             headers: { ...authHeaders(), 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
@@ -7586,15 +7589,33 @@ async function submitMarkShipped() {
 // tab just lists pages and lets you create / delete / jump-to-editor.
 // ---------------------------------------------------------------------------
 let websitePages = [];
+// Which site the website admin section operates on; every website/site-settings
+// call carries it explicitly since the dashboard host resolves to no site.
+let websiteSite = 'xikaku';
+
+function wsQ(sep) { return (sep || '?') + 'site=' + encodeURIComponent(websiteSite); }
+
+function switchWebsiteSite() {
+    websiteSite = document.getElementById('websiteSiteSelect').value;
+    loadWebsitePages();
+    loadWebsiteAssets();
+    loadSiteSettings();
+}
 
 async function loadWebsitePages() {
     if (!roleIsAdmin(userRole)) return;
     const tbody = document.getElementById('websitePagesBody');
     try {
-        const resp = await fetch(API + '/website/pages', { headers: authHeaders() });
+        const resp = await fetch(API + '/website/pages' + wsQ(), { headers: authHeaders() });
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
         const data = await resp.json();
         websitePages = data.pages || [];
+        const sel = document.getElementById('websiteSiteSelect');
+        if (sel && !sel.options.length && Array.isArray(data.sites)) {
+            sel.innerHTML = data.sites.map(s =>
+                '<option value="' + escHtml(s.id) + '">' + escHtml(s.name) + '</option>').join('');
+            sel.value = websiteSite;
+        }
         renderWebsitePagesTable();
     } catch (e) {
         tbody.innerHTML = '<tr><td colspan="6" class="empty-state"><p>Failed to load: ' + escHtml(e.message) + '</p></td></tr>';
@@ -7608,7 +7629,7 @@ function renderWebsitePagesTable() {
         return;
     }
     tbody.innerHTML = websitePages.map(p => {
-        const editUrl = (p.page_kind === 'post' ? '/site/blog/' : '/site/') + encodeURIComponent(p.slug);
+        const editUrl = (p.page_kind === 'post' ? '/site/blog/' : '/site/') + encodeURIComponent(p.slug) + wsQ();
         const parent = p.parent_slug
             ? '<code>' + escHtml(p.parent_slug) + '</code>'
             : '<span style="color:var(--text2);">-</span>';
@@ -7648,7 +7669,7 @@ function renderWebsitePagesTable() {
 
 async function toggleWebsitePageHidden(slug, hidden) {
     try {
-        const resp = await fetch(API + '/website/pages/' + encodeURIComponent(slug) + '/visibility', {
+        const resp = await fetch(API + '/website/pages/' + encodeURIComponent(slug) + '/visibility' + wsQ(), {
             method: 'POST',
             headers: { ...authHeaders(), 'Content-Type': 'application/json' },
             body: JSON.stringify({ hidden }),
@@ -7709,7 +7730,7 @@ async function createWebsitePage() {
         meta_description: '',
     };
     try {
-        const resp = await fetch(API + '/website/pages/' + encodeURIComponent(slug), {
+        const resp = await fetch(API + '/website/pages/' + encodeURIComponent(slug) + wsQ(), {
             method: 'PUT',
             headers: { ...authHeaders(), 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
@@ -7722,7 +7743,7 @@ async function createWebsitePage() {
         }
         closeWebsitePageModal();
         // Straight into the inline editor to write the content.
-        location.href = '/site/' + encodeURIComponent(slug);
+        location.href = '/site/' + encodeURIComponent(slug) + wsQ();
     } catch (e) {
         errEl.textContent = e.message || 'Failed to create page';
         errEl.style.display = '';
@@ -7732,7 +7753,7 @@ async function createWebsitePage() {
 async function deleteWebsitePage(slug) {
     if (!confirm('Delete page "' + slug + '"? This cannot be undone.')) return;
     try {
-        const resp = await fetch(API + '/website/pages/' + encodeURIComponent(slug), {
+        const resp = await fetch(API + '/website/pages/' + encodeURIComponent(slug) + wsQ(), {
             method: 'DELETE',
             headers: authHeaders(),
         });
@@ -7752,7 +7773,7 @@ async function deleteWebsitePage(slug) {
 
 let websiteAssets = [];
 
-function assetUrl(name) { return API + '/website/assets/' + encodeURIComponent(name); }
+function assetUrl(name) { return API + '/website/assets/' + encodeURIComponent(name) + wsQ(); }
 function isImageAsset(name) { return /\.(png|jpe?g|gif|svg|webp)$/i.test(name); }
 
 function fmtAssetSize(bytes) {
@@ -7765,7 +7786,7 @@ async function loadWebsiteAssets() {
     if (!roleIsAdmin(userRole)) return;
     const tbody = document.getElementById('websiteAssetsBody');
     try {
-        const resp = await fetch(API + '/website/admin/assets', { headers: authHeaders() });
+        const resp = await fetch(API + '/website/admin/assets' + wsQ(), { headers: authHeaders() });
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
         websiteAssets = (await resp.json()).assets || [];
         renderWebsiteAssetsTable();
@@ -7785,7 +7806,7 @@ function renderWebsiteAssetsTable() {
             ? '<img src="' + assetUrl(a.name) + '" loading="lazy" style="width:40px;height:40px;object-fit:cover;border-radius:4px;">'
             : '<span style="color:var(--text2);font-size:11px;">file</span>';
         const usedBy = (a.pages || []).map(s =>
-                '<a href="/site/' + encodeURIComponent(s) + '" target="_blank" rel="noopener"><code>' + escHtml(s) + '</code></a>')
+                '<a href="/site/' + encodeURIComponent(s) + wsQ() + '" target="_blank" rel="noopener"><code>' + escHtml(s) + '</code></a>')
             .concat((a.products || []).map(s => '<code>' + escHtml(s) + '</code> (shop)'));
         const menuId = 'website-asset-menu-' + i;
         return '<tr>'
@@ -7818,7 +7839,7 @@ async function uploadWebsiteAsset(file) {
         && !confirm('Asset "' + name + '" already exists. Overwrite it?')) return null;
     const fd = new FormData();
     fd.append('file', file, name);
-    const resp = await fetch(API + '/website/assets', {
+    const resp = await fetch(API + '/website/assets' + wsQ(), {
         method: 'POST',
         headers: { 'Authorization': 'Bearer ' + authToken },
         body: fd,
@@ -7847,7 +7868,7 @@ async function renameWebsiteAsset(name) {
     const newName = (prompt('Rename asset "' + name + '" to:', name) || '').trim();
     if (!newName || newName === name) return;
     try {
-        const resp = await fetch(API + '/website/assets/' + encodeURIComponent(name) + '/rename', {
+        const resp = await fetch(API + '/website/assets/' + encodeURIComponent(name) + '/rename' + wsQ(), {
             method: 'POST',
             headers: authHeaders(),
             body: JSON.stringify({ new_name: newName }),
@@ -7868,7 +7889,7 @@ async function deleteWebsiteAsset(name) {
     msg += '\nThis cannot be undone.';
     if (!confirm(msg)) return;
     try {
-        const resp = await fetch(API + '/website/assets/' + encodeURIComponent(name), {
+        const resp = await fetch(API + '/website/assets/' + encodeURIComponent(name) + wsQ(), {
             method: 'DELETE', headers: authHeaders(),
         });
         if (!resp.ok) { const d = await resp.json().catch(() => ({})); toast('Error: ' + (d.error || resp.status), 'error'); return; }

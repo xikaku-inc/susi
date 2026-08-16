@@ -1,4 +1,5 @@
 mod docs;
+mod sites;
 mod website;
 mod email;
 mod shop;
@@ -3178,6 +3179,9 @@ async fn main() -> Result<()> {
     // Seed the legal pages (privacy policy + imprint) on first boot so the
     // public site always carries them; an admin can edit the content later.
     website::seed_legal_pages(&state);
+
+    // Move pre-multi-site asset files into the default site's directory.
+    website::migrate_assets_layout(&state);
 
     // Periodic session cleanup + data-retention enforcement (GDPR Art
     // 5(1)(e)). Lease-expired machine activations are NOT deleted - they
