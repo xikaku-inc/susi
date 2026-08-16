@@ -35,6 +35,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use tower::Layer as _;
 use tower_http::set_header::SetResponseHeaderLayer;
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use clap::Parser;
@@ -3696,15 +3697,25 @@ async fn main() -> Result<()> {
         ))
         .with_state(state);
 
+    // Trailing slashes are trimmed before routing: every legacy WordPress
+    // URL ends in '/', and matchit treats /site/{slug}/ as unmatched. This
+    // must wrap the finished router - as a Router layer it would run after
+    // route matching, too late.
+    let app = tower_http::normalize_path::NormalizePathLayer::trim_trailing_slash()
+        .layer(app);
+
     let listener = tokio::net::TcpListener::bind(&cli.listen)
         .await
         .with_context(|| format!("Failed to bind to {}", cli.listen))?;
 
     log::info!("License server listening on {}", cli.listen);
     log::info!("Dashboard: http://{}", cli.listen);
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-        .await
-        .context("Server error")?;
+    axum::serve(
+        listener,
+        axum::ServiceExt::<axum::extract::Request>::into_make_service_with_connect_info::<SocketAddr>(app),
+    )
+    .await
+    .context("Server error")?;
 
     Ok(())
 }
