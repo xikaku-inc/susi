@@ -561,6 +561,17 @@ impl LicenseDb {
             );
             CREATE INDEX IF NOT EXISTS idx_website_pages_parent ON website_pages(parent_slug);
 
+            -- Path-level 301 map per site, for legacy URLs (e.g. WordPress
+            -- permalinks with '/') that can't be expressed as page slugs.
+            CREATE TABLE IF NOT EXISTS site_redirects (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                site TEXT NOT NULL,
+                from_path TEXT NOT NULL,
+                to_path TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(site, from_path)
+            );
+
             CREATE TABLE IF NOT EXISTS website_assets (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 site TEXT NOT NULL DEFAULT 'xikaku',
@@ -3815,6 +3826,37 @@ mod tests {
             .unwrap();
         assert_eq!(db.list_page_revisions("lpr", "home").unwrap().len(), 1);
         assert_eq!(db.list_page_revisions("xikaku", "home").unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_site_redirects_are_site_scoped() {
+        let db = test_db();
+        db.upsert_site_redirect("lpr", "/products/imu/lpms-ig1", "/lpms-ig1").unwrap();
+        db.upsert_site_redirect("lpr", "/category/blog", "/blog").unwrap();
+        db.upsert_site_redirect("xikaku", "/category/blog", "/other").unwrap();
+
+        assert_eq!(
+            db.get_site_redirect("lpr", "/products/imu/lpms-ig1").unwrap().as_deref(),
+            Some("/lpms-ig1")
+        );
+        assert_eq!(db.get_site_redirect("lpr", "/category/blog").unwrap().as_deref(), Some("/blog"));
+        assert_eq!(db.get_site_redirect("xikaku", "/category/blog").unwrap().as_deref(), Some("/other"));
+        assert_eq!(db.get_site_redirect("lpr", "/nope").unwrap(), None);
+
+        // Upsert overwrites the target.
+        db.upsert_site_redirect("lpr", "/category/blog", "/news").unwrap();
+        assert_eq!(
+            db.get_site_redirect("lpr", "/category/blog").unwrap().as_deref(),
+            Some("/news")
+        );
+
+        let rows = db.list_site_redirects("lpr").unwrap();
+        assert_eq!(rows.len(), 2);
+        let id = rows[0].0;
+        assert!(db.delete_site_redirect("lpr", id).unwrap());
+        assert!(!db.delete_site_redirect("lpr", id).unwrap());
+        assert_eq!(db.list_site_redirects("lpr").unwrap().len(), 1);
+        assert_eq!(db.list_site_redirects("xikaku").unwrap().len(), 1);
     }
 
     /// A deployed database has the single-site schema with inline UNIQUE on

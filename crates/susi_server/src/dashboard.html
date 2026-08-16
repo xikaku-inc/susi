@@ -1740,6 +1740,31 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
         </table>
     </div>
 
+    <div style="margin-top:40px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
+        <h2 style="font-size:16px;font-weight:600;">Website - Redirects</h2>
+        <div style="display:flex;gap:8px;align-items:center;">
+            <label for="redirectFrom" style="font-size:12px;color:var(--text2);">From</label>
+            <input type="text" id="redirectFrom" style="width:220px;">
+            <label for="redirectTo" style="font-size:12px;color:var(--text2);">To</label>
+            <input type="text" id="redirectTo" style="width:180px;">
+            <button onclick="addWebsiteRedirect()">+ Add</button>
+        </div>
+    </div>
+    <div class="card" style="padding:0;">
+        <table style="width:100%;" id="websiteRedirectsTable">
+            <thead>
+                <tr>
+                    <th>From path</th>
+                    <th>To</th>
+                    <th style="width:80px;"></th>
+                </tr>
+            </thead>
+            <tbody id="websiteRedirectsBody">
+                <tr><td colspan="3" class="empty-state"><p>Loading...</p></td></tr>
+            </tbody>
+        </table>
+    </div>
+
     <div style="margin-top:40px;margin-bottom:14px;">
         <h2 style="font-size:16px;font-weight:600;margin:0 0 14px;">Site Settings</h2>
         <div class="card settings-card">
@@ -3446,6 +3471,7 @@ function enterDashboard() {
         loadShop();
         loadWebsitePages();
         loadWebsiteAssets();
+        loadWebsiteRedirects();
         loadSiteSettings();
         loadAssignableUsers();
     } else {
@@ -7599,7 +7625,69 @@ function switchWebsiteSite() {
     websiteSite = document.getElementById('websiteSiteSelect').value;
     loadWebsitePages();
     loadWebsiteAssets();
+    loadWebsiteRedirects();
     loadSiteSettings();
+}
+
+// ----- Path-level 301 redirects -----
+
+let websiteRedirects = [];
+
+async function loadWebsiteRedirects() {
+    if (!roleIsAdmin(userRole)) return;
+    const tbody = document.getElementById('websiteRedirectsBody');
+    try {
+        const resp = await fetch(API + '/website/redirects' + wsQ(), { headers: authHeaders() });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        websiteRedirects = (await resp.json()).redirects || [];
+        renderWebsiteRedirectsTable();
+    } catch (e) {
+        tbody.innerHTML = '<tr><td colspan="3" class="empty-state"><p>Failed to load: ' + escHtml(e.message) + '</p></td></tr>';
+    }
+}
+
+function renderWebsiteRedirectsTable() {
+    const tbody = document.getElementById('websiteRedirectsBody');
+    if (!websiteRedirects.length) {
+        tbody.innerHTML = '<tr><td colspan="3" class="empty-state"><p>No redirects yet</p></td></tr>';
+        return;
+    }
+    tbody.innerHTML = websiteRedirects.map(r =>
+        '<tr>'
+        + '<td><code>' + escHtml(r.from_path) + '</code></td>'
+        + '<td><code>' + escHtml(r.to_path) + '</code></td>'
+        + '<td style="text-align:right;"><button class="danger" onclick="deleteWebsiteRedirect(' + r.id + ')">Delete</button></td>'
+        + '</tr>').join('');
+}
+
+async function addWebsiteRedirect() {
+    const from = document.getElementById('redirectFrom').value.trim();
+    const to = document.getElementById('redirectTo').value.trim();
+    if (!from || !to) { toast('Both fields are required', 'error'); return; }
+    try {
+        const resp = await fetch(API + '/website/redirects' + wsQ(), {
+            method: 'PUT',
+            headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+            body: JSON.stringify({ from_path: from, to_path: to }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) { toast(data.error || ('HTTP ' + resp.status), 'error'); return; }
+        document.getElementById('redirectFrom').value = '';
+        document.getElementById('redirectTo').value = '';
+        toast('Redirect added', 'success');
+        await loadWebsiteRedirects();
+    } catch (e) { toast(e.message || 'Failed to add', 'error'); }
+}
+
+async function deleteWebsiteRedirect(id) {
+    try {
+        const resp = await fetch(API + '/website/redirects/' + id + wsQ(), {
+            method: 'DELETE', headers: authHeaders(),
+        });
+        if (!resp.ok) { const d = await resp.json().catch(() => ({})); toast(d.error || ('HTTP ' + resp.status), 'error'); return; }
+        toast('Redirect deleted', 'success');
+        await loadWebsiteRedirects();
+    } catch (e) { toast(e.message || 'Failed to delete', 'error'); }
 }
 
 async function loadWebsitePages() {

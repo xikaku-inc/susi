@@ -1118,7 +1118,7 @@ pub async fn handle_ws_delete_doc_asset(
 }
 
 /// Pick a title: first H1 in the markdown, else humanize the slug.
-fn derive_title(slug: &str, body: &str) -> String {
+pub(crate) fn derive_title(slug: &str, body: &str) -> String {
     for line in body.lines() {
         let t = line.trim_start();
         if let Some(rest) = t.strip_prefix("# ") {

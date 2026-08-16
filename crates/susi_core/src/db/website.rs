@@ -321,6 +321,78 @@ impl LicenseDb {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Path-level 301 redirects
+    // -----------------------------------------------------------------------
+
+    pub fn upsert_site_redirect(
+        &self,
+        site: &str,
+        from_path: &str,
+        to_path: &str,
+    ) -> Result<(), LicenseError> {
+        self.conn
+            .execute(
+                "INSERT INTO site_redirects (site, from_path, to_path, updated_at)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(site, from_path) DO UPDATE SET
+                   to_path = excluded.to_path,
+                   updated_at = excluded.updated_at",
+                params![site, from_path, to_path, Utc::now().to_rfc3339()],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB upsert redirect: {}", e)))?;
+        Ok(())
+    }
+
+    pub fn get_site_redirect(&self, site: &str, from_path: &str) -> Result<Option<String>, LicenseError> {
+        match self.conn.query_row(
+            "SELECT to_path FROM site_redirects WHERE site = ?1 AND from_path = ?2",
+            params![site, from_path],
+            |r| r.get::<_, String>(0),
+        ) {
+            Ok(v) => Ok(Some(v)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(LicenseError::Other(format!("DB get redirect: {}", e))),
+        }
+    }
+
+    pub fn list_site_redirects(
+        &self,
+        site: &str,
+    ) -> Result<Vec<(i64, String, String, String)>, LicenseError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, from_path, to_path, updated_at FROM site_redirects
+                 WHERE site = ?1 ORDER BY from_path",
+            )
+            .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
+        let rows = stmt
+            .query_map(params![site], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    pub fn delete_site_redirect(&self, site: &str, id: i64) -> Result<bool, LicenseError> {
+        let n = self
+            .conn
+            .execute(
+                "DELETE FROM site_redirects WHERE site = ?1 AND id = ?2",
+                params![site, id],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB delete redirect: {}", e)))?;
+        Ok(n > 0)
+    }
+
     /// Set the hidden flag on a page. Returns false if the slug doesn't exist.
     pub fn set_website_page_hidden(&self, site: &str, slug: &str, hidden: bool) -> Result<bool, LicenseError> {
         let n = self

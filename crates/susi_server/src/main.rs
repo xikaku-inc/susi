@@ -3236,6 +3236,11 @@ async fn main() -> Result<()> {
         // by the {slug} route above); posts live under /site/blog/{slug}.
         .route("/site/blog/rss.xml", get(website::handle_blog_rss))
         .route("/site/blog/{slug}", get(website::handle_website_render_post))
+        // Deeper paths only exist as redirect-map entries (legacy WordPress
+        // permalinks); anything unmapped is a 404 with the site shell. The
+        // wildcard sits one segment deep because matchit rejects {*path}
+        // alongside the {slug} route above.
+        .route("/site/{head}/{*rest}", get(website::handle_website_render_path))
         // Brand assets referenced from <head> (og:image, Organization.logo, favicons)
         .route("/static/logo.png", get(website::handle_logo_png))
         .route("/static/logo-dark.png", get(website::handle_logo_dark_png))
@@ -3554,6 +3559,26 @@ async fn main() -> Result<()> {
         .route(
             "/api/v1/website/admin/assets",
             get(website::handle_list_assets_with_usage),
+        )
+        // Website admin - path-level 301 redirect map
+        .route(
+            "/api/v1/website/redirects",
+            get(website::handle_list_redirects)
+                .put(website::handle_upsert_redirect),
+        )
+        .route(
+            "/api/v1/website/redirects/{id}",
+            axum::routing::delete(website::handle_delete_redirect),
+        )
+        .route(
+            "/api/v1/website/redirects/import",
+            post(website::handle_import_redirects),
+        )
+        // Website admin - bulk page/asset import (WordPress migration)
+        .merge(
+            Router::new()
+                .route("/api/v1/website/import", post(website::handle_import_pages))
+                .layer(DefaultBodyLimit::max(100 * 1024 * 1024))
         )
         // Public contact form
         .route("/api/v1/contact/config", get(contact::handle_get_config))

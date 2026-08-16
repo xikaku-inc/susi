@@ -3959,7 +3959,7 @@ fn test_blog_posts() {
         .expect("hide draft");
     assert_eq!(resp.status().as_u16(), 200);
 
-    // Public page list: posts carry kind/date/excerpt; the draft is absent.
+    // Public page list: posts carry kind/date; the draft is absent.
     let body = http.get(format!("{}/website/pages", server.api_url))
         .send().expect("list").json::<Value>().unwrap();
     let pages = body["pages"].as_array().unwrap();
@@ -4070,6 +4070,149 @@ fn test_blog_posts() {
         .send().expect("get").json::<Value>().unwrap();
     let published = body["published_at"].as_str().unwrap();
     assert_eq!(published.len(), 10, "published_at must default to a YYYY-MM-DD date, got {:?}", published);
+}
+
+/// Path-level redirect map + bulk page import: the importer creates pages,
+/// assets and legacy-URL redirects per site in one multipart call, and the
+/// mapped WordPress-style paths 301 to their new homes.
+#[test]
+fn test_redirect_map_and_bulk_import() {
+    let server = TestServer::start();
+    let token = server.admin_token();
+    let http = server.http();
+    let no_redirect = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("client");
+
+    // Hand-rolled multipart (the test client has no multipart feature).
+    let manifest = json!({
+        "lpms-ig1": {
+            "title": "LPMS-IG1",
+            "meta_description": "High precision IMU",
+            "redirect_from": ["/products/inertial-measurement-units-imu/lpms-ig1/"]
+        },
+        "hello-post": {
+            "page_kind": "post",
+            "published_at": "2026-01-15",
+            "redirect_from": ["/2026/01/hello-post/"]
+        }
+    })
+    .to_string();
+    let b = "XSUSIBOUNDARY";
+    let mut body = String::new();
+    body.push_str(&format!("--{b}\r\nContent-Disposition: form-data; name=\"manifest\"\r\n\r\n{manifest}\r\n"));
+    body.push_str(&format!("--{b}\r\nContent-Disposition: form-data; name=\"page\"; filename=\"lpms-ig1.md\"\r\n\r\n# LPMS-IG1\n\nSensor page body.\r\n"));
+    body.push_str(&format!("--{b}\r\nContent-Disposition: form-data; name=\"page\"; filename=\"hello-post.md\"\r\n\r\n# Hello\n\nPost body.\r\n"));
+    body.push_str(&format!("--{b}\r\nContent-Disposition: form-data; name=\"asset\"; filename=\"pixel.png\"\r\nContent-Type: image/png\r\n\r\nPNGDATA\r\n"));
+    body.push_str(&format!("--{b}--\r\n"));
+    let resp = http
+        .post(format!("{}/website/import?site=lpr", server.api_url))
+        .bearer_auth(&token)
+        .header("Content-Type", format!("multipart/form-data; boundary={b}"))
+        .body(body)
+        .send()
+        .expect("import");
+    assert_eq!(resp.status().as_u16(), 200, "{}", resp.text().unwrap_or_default());
+    let out = resp.json::<Value>().unwrap();
+    assert_eq!(out["pages_written"], json!(2));
+    assert_eq!(out["assets_written"], json!(1));
+    assert_eq!(out["redirects_written"], json!(2));
+
+    // Imported content is site-scoped and carries manifest metadata.
+    let page = http
+        .get(format!("{}/website/pages/lpms-ig1?site=lpr", server.api_url))
+        .send().expect("get imported").json::<Value>().unwrap();
+    assert_eq!(page["title"], json!("LPMS-IG1"));
+    assert_eq!(page["meta_description"], json!("High precision IMU"));
+    let post = http
+        .get(format!("{}/website/pages/hello-post?site=lpr", server.api_url))
+        .send().expect("get imported post").json::<Value>().unwrap();
+    assert_eq!(post["page_kind"], json!("post"));
+    let resp = http
+        .get(format!("{}/website/pages/lpms-ig1?site=xikaku", server.api_url))
+        .send().expect("cross-site get");
+    assert_eq!(resp.status().as_u16(), 404, "import must not leak across sites");
+
+    // The imported asset serves from the lpr store only.
+    let resp = no_redirect
+        .get(format!("{}/website/assets/pixel.png", server.api_url))
+        .header("Host", "www.lp-research.com")
+        .send().expect("asset lpr");
+    assert_eq!(resp.status().as_u16(), 200);
+    let resp = no_redirect
+        .get(format!("{}/website/assets/pixel.png", server.api_url))
+        .header("Host", "xikaku.com")
+        .send().expect("asset xikaku");
+    assert_eq!(resp.status().as_u16(), 404);
+
+    // Legacy deep URL 301s on the lpr host; trailing slash and query are
+    // tolerated, and the clean-URL form is used on the marketing host.
+    let resp = no_redirect
+        .get(format!("{}/site/products/inertial-measurement-units-imu/lpms-ig1/?utm_source=x", server.url))
+        .header("Host", "www.lp-research.com")
+        .send().expect("deep redirect");
+    assert_eq!(resp.status().as_u16(), 301);
+    assert_eq!(resp.headers()["location"].to_str().unwrap(), "/lpms-ig1");
+    // Posts land on their /blog/ permalink.
+    let resp = no_redirect
+        .get(format!("{}/site/2026/01/hello-post/", server.url))
+        .header("Host", "www.lp-research.com")
+        .send().expect("post redirect");
+    assert_eq!(resp.status().as_u16(), 301);
+    assert_eq!(resp.headers()["location"].to_str().unwrap(), "/blog/hello-post");
+    // Off the marketing host the target keeps the /site prefix.
+    let resp = no_redirect
+        .get(format!("{}/site/2026/01/hello-post/?site=lpr", server.url))
+        .send().expect("post redirect dashboard host");
+    assert_eq!(resp.status().as_u16(), 301);
+    assert_eq!(resp.headers()["location"].to_str().unwrap(), "/site/blog/hello-post");
+    // The other site's map is untouched.
+    let resp = no_redirect
+        .get(format!("{}/site/2026/01/hello-post/", server.url))
+        .header("Host", "xikaku.com")
+        .send().expect("cross-site path");
+    assert_eq!(resp.status().as_u16(), 404);
+
+    // Single-segment legacy paths work through the redirect API + slug route.
+    let resp = http
+        .put(format!("{}/website/redirects?site=lpr", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "from_path": "/old-sensor/", "to_path": "lpms-ig1" }))
+        .send().expect("upsert redirect");
+    assert_eq!(resp.status().as_u16(), 200);
+    let resp = no_redirect
+        .get(format!("{}/site/old-sensor", server.url))
+        .header("Host", "www.lp-research.com")
+        .send().expect("single-seg redirect");
+    assert_eq!(resp.status().as_u16(), 301);
+    assert_eq!(resp.headers()["location"].to_str().unwrap(), "/lpms-ig1");
+
+    // List + delete round-trip.
+    let list = http
+        .get(format!("{}/website/redirects?site=lpr", server.api_url))
+        .bearer_auth(&token)
+        .send().expect("list").json::<Value>().unwrap();
+    let redirects = list["redirects"].as_array().unwrap();
+    assert_eq!(redirects.len(), 3);
+    let id = redirects.iter().find(|r| r["from_path"] == "/old-sensor").unwrap()["id"].as_i64().unwrap();
+    let resp = http
+        .delete(format!("{}/website/redirects/{}?site=lpr", server.api_url, id))
+        .bearer_auth(&token)
+        .send().expect("delete");
+    assert_eq!(resp.status().as_u16(), 200);
+    let resp = no_redirect
+        .get(format!("{}/site/old-sensor", server.url))
+        .header("Host", "www.lp-research.com")
+        .send().expect("deleted redirect");
+    assert_ne!(resp.status().as_u16(), 301, "deleted redirect must stop firing");
+
+    // Unauthenticated writes are rejected by the default-deny middleware.
+    let resp = http
+        .put(format!("{}/website/redirects?site=lpr", server.api_url))
+        .json(&json!({ "from_path": "/x/", "to_path": "/y" }))
+        .send().expect("anon upsert");
+    assert_eq!(resp.status().as_u16(), 401);
 }
 
 /// Blog bylines: a post credits a user account, the public site shows that

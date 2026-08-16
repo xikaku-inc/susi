@@ -65,6 +65,8 @@ pub(crate) fn migrate_assets_layout(state: &AppState) {
 #[derive(Deserialize)]
 pub struct SiteQuery {
     site: Option<String>,
+    // Blog index page number (ignored everywhere else).
+    page: Option<usize>,
 }
 
 fn resolve_site(
@@ -1715,8 +1717,13 @@ fn render_website(
     // requested slug (None → "" for the home shell). When the slug resolves to
     // home via `first_default_slug`, the cache still keys on what the client
     // asked for; this is correct because invalidation is global and TTL is short.
+    // The blog index keys on its page number too, or page 2 would serve a
+    // cached page 1.
+    let blog_page = sq.page.unwrap_or(1).max(1);
     let cache_key = if post_path {
         format!("{}|blog/{}", site.id, requested_slug.as_deref().unwrap_or_default())
+    } else if requested_slug.as_deref() == Some("blog") {
+        format!("{}|blog|p={}", site.id, blog_page)
     } else {
         format!("{}|{}", site.id, requested_slug.as_deref().unwrap_or_default())
     };
@@ -1732,28 +1739,35 @@ fn render_website(
         )
     };
 
-    // A retired page 301s to its replacement. Checked before rendering and
-    // never cached - retired slugs see little traffic, and a stale 301 is the
-    // one redirect a browser will not re-ask about.
+    // A retired page 301s to its replacement; an unknown slug may still be
+    // covered by the redirect map. Both are checked before rendering and
+    // never cached - a stale 301 is the one redirect a browser will not
+    // re-ask about.
     if let Some(s) = requested_slug.as_deref() {
-        let target = {
+        let row_redirect = {
             let db = state.db.lock();
-            db.get_website_page(site.id, s)
-                .ok()
-                .flatten()
-                .map(|r| r.10)
-                .filter(|t| !t.trim().is_empty())
+            db.get_website_page(site.id, s).ok().flatten().map(|r| r.10)
         };
-        if let Some(t) = target {
-            let to = redirect_location(&t, &pages, is_marketing_host(headers));
-            return (StatusCode::MOVED_PERMANENTLY, [(header::LOCATION, to)]).into_response();
+        match row_redirect {
+            Some(t) if !t.trim().is_empty() => {
+                let to = redirect_location(&t, &pages, is_marketing_host(headers));
+                return (StatusCode::MOVED_PERMANENTLY, [(header::LOCATION, to)]).into_response();
+            }
+            Some(_) => {}
+            None => {
+                let path = if post_path { format!("/blog/{}", s) } else { format!("/{}", s) };
+                if let Some(to) = lookup_site_redirect(state, site, &path) {
+                    let loc = redirect_map_location(&to, is_marketing_host(headers));
+                    return (StatusCode::MOVED_PERMANENTLY, [(header::LOCATION, loc)]).into_response();
+                }
+            }
         }
     }
 
     // /blog renders the reverse-chron post index; an optional "blog" page row
     // supplies the title/intro when present.
     if !post_path && requested_slug.as_deref() == Some("blog") {
-        let html = render_blog_index(state, site, &pages, &products);
+        let html = render_blog_index(state, site, &pages, &products, blog_page);
         page_cache_put(cache_key, html.clone());
         return (build_html_headers(), html).into_response();
     }
@@ -1838,13 +1852,21 @@ fn render_website(
     (build_html_headers(), html).into_response()
 }
 
+const POSTS_PER_PAGE: usize = 10;
+
+/// `/blog` URL for the given page, for pager links.
+fn blog_index_href(page_num: usize) -> String {
+    if page_num > 1 { format!("/blog?page={}", page_num) } else { "/blog".to_string() }
+}
+
 /// SSR body + head for the /blog index: intro from the optional "blog" page
-/// row, then every visible post newest-first with date and excerpt.
+/// row, then a page of full posts newest-first.
 fn render_blog_index(
     state: &Arc<AppState>,
     site: &SiteConfig,
     pages: &[PageRow],
     products: &[(String, String, String, i64, String, Option<String>, String, bool, i64, String)],
+    page_num: usize,
 ) -> Bytes {
     let row = {
         let db = state.db.lock();
@@ -1854,7 +1876,7 @@ fn render_blog_index(
         Some((t, body, _p, _o, upd, m, false, _k, _pd, _au, _rd)) => (t, body, upd, m),
         _ => ("Blog".to_string(), String::new(), String::new(), String::new()),
     };
-    let posts = sorted_posts(pages);
+    let all_posts = sorted_posts(pages);
 
     let description = if !meta.trim().is_empty() {
         meta
@@ -1868,12 +1890,18 @@ fn render_blog_index(
     } else {
         render_body_html(&intro_md)
     };
+
+    let posts = &all_posts;
+
     if posts.is_empty() {
         body_html.push_str("<p>No posts yet.</p>");
     } else {
+        let total_pages = posts.len().div_ceil(POSTS_PER_PAGE);
+        let page_num = page_num.min(total_pages);
+        let start = (page_num - 1) * POSTS_PER_PAGE;
         // Full posts inline, newest first - the date links to the permalink.
         body_html.push_str("<div class=\"blog-index\">");
-        for p in &posts {
+        for p in posts.iter().skip(start).take(POSTS_PER_PAGE) {
             let (post_body, author) = {
                 let db = state.db.lock();
                 let body = db
@@ -1895,10 +1923,29 @@ fn render_blog_index(
             ));
         }
         body_html.push_str("</div>");
+
+        if total_pages > 1 {
+            let mut pager = String::from("<nav class=\"blog-pager\">");
+            if page_num > 1 {
+                pager.push_str(&format!(
+                    "<a href=\"{}\">← Newer</a>",
+                    html_escape(&blog_index_href(page_num - 1)),
+                ));
+            }
+            pager.push_str(&format!("<span>Page {} of {}</span>", page_num, total_pages));
+            if page_num < total_pages {
+                pager.push_str(&format!(
+                    "<a href=\"{}\">Older →</a>",
+                    html_escape(&blog_index_href(page_num + 1)),
+                ));
+            }
+            pager.push_str("</nav>");
+            body_html.push_str(&pager);
+        }
     }
 
     // dateModified for the index: the newest post, else the intro page edit.
-    let updated = posts.first().map(|p| p.4.clone()).unwrap_or(updated_at);
+    let updated = all_posts.first().map(|p| p.4.clone()).unwrap_or(updated_at);
     let injected = render_seo_head(site, "blog", &title, &description, &updated, None, pages, products, None, None);
     render_shell(state, site, &injected, &body_html)
 }
@@ -2504,6 +2551,391 @@ pub async fn handle_admin_put_site_settings(
 }
 
 // ---------------------------------------------------------------------------
+// Path-level 301 redirects
+//
+// Page slugs can't contain '/', so legacy URLs (WordPress permalinks like
+// /products/imu/lpms-ig1/) live in a per-site path->target map instead.
+// Multi-segment paths land in `handle_website_render_path` (the /site/{*path}
+// fallback route); single-segment misses are checked in `render_website`.
+// ---------------------------------------------------------------------------
+
+/// Query/fragment stripped, leading slash ensured, trailing slashes dropped.
+fn normalize_redirect_path(path: &str) -> String {
+    let p = path.split(['?', '#']).next().unwrap_or("").trim();
+    let mut p = if p.starts_with('/') { p.to_string() } else { format!("/{}", p) };
+    while p.len() > 1 && p.ends_with('/') {
+        p.pop();
+    }
+    p
+}
+
+fn lookup_site_redirect(state: &Arc<AppState>, site: &SiteConfig, path: &str) -> Option<String> {
+    let db = state.db.lock();
+    db.get_site_redirect(site.id, &normalize_redirect_path(path)).ok().flatten()
+}
+
+/// Where a mapped redirect sends the visitor: absolute URLs pass through,
+/// rooted paths keep the /site prefix off the marketing hosts.
+fn redirect_map_location(target: &str, marketing_host: bool) -> String {
+    let t = target.trim();
+    if t.starts_with("http://") || t.starts_with("https://") {
+        return t.to_string();
+    }
+    let path = if t.starts_with('/') { t.to_string() } else { format!("/{}", t) };
+    if marketing_host { path } else { format!("/site{}", path) }
+}
+
+fn validate_redirect_pair(from_path: &str, to_path: &str) -> Result<(String, String), (StatusCode, Json<ErrorResponse>)> {
+    let from = normalize_redirect_path(from_path);
+    if from == "/" || from.len() > 512 || from.contains('\0') {
+        return Err(error_response(StatusCode::BAD_REQUEST, &format!("Invalid from_path: {}", from_path)));
+    }
+    let to = to_path.trim();
+    if to.is_empty() || to.len() > 1024 || to.contains('\0') {
+        return Err(error_response(StatusCode::BAD_REQUEST, &format!("Invalid to_path for {}", from_path)));
+    }
+    let to = if to.starts_with("http://") || to.starts_with("https://") || to.starts_with('/') {
+        to.to_string()
+    } else {
+        format!("/{}", to)
+    };
+    if normalize_redirect_path(&to) == from {
+        return Err(error_response(StatusCode::BAD_REQUEST, &format!("{} would redirect to itself", from)));
+    }
+    Ok((from, to))
+}
+
+/// GET /site/{head}/{*rest} - anything deeper than one segment. Only
+/// redirect-map entries live here; everything else is a hard 404 (with the
+/// site shell so a human still gets navigation).
+pub async fn handle_website_render_path(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
+    Path((head, rest)): Path<(String, String)>,
+) -> axum::response::Response {
+    let site = match resolve_site(&headers, &sq) {
+        Ok(s) => s,
+        Err(e) => return e.into_response(),
+    };
+    let path = format!("{}/{}", head, rest);
+    if let Some(to) = lookup_site_redirect(&state, site, &path) {
+        let loc = redirect_map_location(&to, is_marketing_host(&headers));
+        return (StatusCode::MOVED_PERMANENTLY, [(header::LOCATION, loc)]).into_response();
+    }
+    let head = format!(
+        "<title>{}</title>\n<meta name=\"robots\" content=\"noindex\">\n",
+        html_escape(site.name),
+    );
+    let html = render_shell(&state, site, &head, "<div class=\"empty-state\">Page not found</div>");
+    (StatusCode::NOT_FOUND, build_html_headers(), html).into_response()
+}
+
+pub async fn handle_list_redirects(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let site = resolve_site(&headers, &sq)?;
+    let principal = validate_principal(&headers, &state)?;
+    require_admin_full(&state, &principal)?;
+    let rows = {
+        let db = state.db.lock();
+        db.list_site_redirects(site.id).map_err(db_err)?
+    };
+    let redirects: Vec<_> = rows
+        .into_iter()
+        .map(|(id, from, to, updated_at)| json!({
+            "id": id, "from_path": from, "to_path": to, "updated_at": updated_at,
+        }))
+        .collect();
+    Ok(Json(json!({ "site": site.id, "redirects": redirects })))
+}
+
+#[derive(Deserialize)]
+pub struct RedirectEntry {
+    pub from_path: String,
+    pub to_path: String,
+}
+
+pub async fn handle_upsert_redirect(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
+    Json(req): Json<RedirectEntry>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let site = resolve_site(&headers, &sq)?;
+    let principal = validate_principal(&headers, &state)?;
+    require_admin_full(&state, &principal)?;
+    let (from, to) = validate_redirect_pair(&req.from_path, &req.to_path)?;
+    {
+        let db = state.db.lock();
+        db.upsert_site_redirect(site.id, &from, &to).map_err(db_err)?;
+    }
+    Ok(Json(json!({ "from_path": from, "to_path": to })))
+}
+
+pub async fn handle_delete_redirect(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
+    Path(id): Path<i64>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let site = resolve_site(&headers, &sq)?;
+    let principal = validate_principal(&headers, &state)?;
+    require_admin_full(&state, &principal)?;
+    let removed = {
+        let db = state.db.lock();
+        db.delete_site_redirect(site.id, id).map_err(db_err)?
+    };
+    if !removed {
+        return Err(error_response(StatusCode::NOT_FOUND, "Redirect not found"));
+    }
+    Ok(Json(json!({ "status": "OK" })))
+}
+
+#[derive(Deserialize)]
+pub struct ImportRedirectsRequest {
+    pub redirects: Vec<RedirectEntry>,
+}
+
+pub async fn handle_import_redirects(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
+    Json(req): Json<ImportRedirectsRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let site = resolve_site(&headers, &sq)?;
+    let principal = validate_principal(&headers, &state)?;
+    require_admin_full(&state, &principal)?;
+    if req.redirects.len() > 5000 {
+        return Err(error_response(StatusCode::BAD_REQUEST, "At most 5000 redirects per import"));
+    }
+    // Validate everything before writing anything.
+    let mut pairs = Vec::with_capacity(req.redirects.len());
+    for r in &req.redirects {
+        pairs.push(validate_redirect_pair(&r.from_path, &r.to_path)?);
+    }
+    {
+        let db = state.db.lock();
+        for (from, to) in &pairs {
+            db.upsert_site_redirect(site.id, from, to).map_err(db_err)?;
+        }
+    }
+    log::info!("Imported {} redirect(s) for site {}", pairs.len(), site.id);
+    Ok(Json(json!({ "imported": pairs.len() })))
+}
+
+// ---------------------------------------------------------------------------
+// Bulk page import - the WordPress-migration counterpart of the docs importer.
+// Multipart: `manifest` (JSON keyed by slug), many `page` fields (slug.md),
+// many `asset` file fields. Pages are upserted (revisions captured), assets
+// overwritten, and any `redirect_from` paths land in the redirect map
+// pointing at the page's canonical path.
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize, Default)]
+pub struct ImportPageEntry {
+    pub title: Option<String>,
+    pub parent_slug: Option<String>,
+    pub ord: Option<i64>,
+    #[serde(default)]
+    pub meta_description: String,
+    pub page_kind: Option<String>,
+    pub published_at: Option<String>,
+    #[serde(default)]
+    pub redirect_from: Vec<String>,
+}
+
+pub async fn handle_import_pages(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
+    mut multipart: Multipart,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let site = resolve_site(&headers, &sq)?;
+    let principal = validate_principal(&headers, &state)?;
+    require_admin_full(&state, &principal)?;
+
+    let mut manifest: HashMap<String, ImportPageEntry> = HashMap::new();
+    let mut page_bodies: Vec<(String, String)> = Vec::new();
+    let mut assets: Vec<(String, Vec<u8>)> = Vec::new();
+
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| error_response(StatusCode::BAD_REQUEST, &format!("Multipart: {}", e)))?
+    {
+        let field_name = field.name().unwrap_or("").to_string();
+        match field_name.as_str() {
+            "manifest" => {
+                let txt = field
+                    .text()
+                    .await
+                    .map_err(|e| error_response(StatusCode::BAD_REQUEST, &e.to_string()))?;
+                manifest = serde_json::from_str(&txt).map_err(|e| {
+                    error_response(StatusCode::BAD_REQUEST, &format!("Manifest JSON: {}", e))
+                })?;
+            }
+            "page" => {
+                let file_name = field.file_name().unwrap_or("").to_string();
+                if !file_name.to_ascii_lowercase().ends_with(".md") {
+                    return Err(error_response(
+                        StatusCode::BAD_REQUEST,
+                        &format!("Page '{}' must end in .md", file_name),
+                    ));
+                }
+                let slug = file_name[..file_name.len() - 3].to_string();
+                safe_slug(&slug)?;
+                let body = field
+                    .text()
+                    .await
+                    .map_err(|e| error_response(StatusCode::BAD_REQUEST, &e.to_string()))?;
+                page_bodies.push((slug, body));
+            }
+            "asset" => {
+                let file_name = field.file_name().unwrap_or("").to_string();
+                safe_filename(&file_name)?;
+                let bytes = field
+                    .bytes()
+                    .await
+                    .map_err(|e| error_response(StatusCode::BAD_REQUEST, &e.to_string()))?;
+                assets.push((file_name, bytes.to_vec()));
+            }
+            _ => {}
+        }
+    }
+
+    if page_bodies.is_empty() && assets.is_empty() {
+        return Err(error_response(StatusCode::BAD_REQUEST, "No pages or assets uploaded"));
+    }
+
+    // Validate every page before writing anything.
+    struct ImportRow {
+        slug: String,
+        title: String,
+        body: String,
+        parent_slug: Option<String>,
+        ord: i64,
+        meta_description: String,
+        page_kind: String,
+        published_at: String,
+        redirect_from: Vec<String>,
+    }
+    let mut rows: Vec<ImportRow> = Vec::with_capacity(page_bodies.len());
+    for (slug, body) in page_bodies {
+        let entry = manifest.remove(&slug).unwrap_or_default();
+        let page_kind = entry.page_kind.unwrap_or_else(|| "page".to_string());
+        if page_kind != "page" && page_kind != "post" {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("{}: page_kind must be 'page' or 'post'", slug),
+            ));
+        }
+        let mut published_at = entry.published_at.unwrap_or_default().trim().to_string();
+        if page_kind == "post" {
+            if published_at.is_empty() {
+                published_at = chrono::Utc::now().format("%Y-%m-%d").to_string();
+            } else if chrono::NaiveDate::parse_from_str(&published_at, "%Y-%m-%d").is_err() {
+                return Err(error_response(
+                    StatusCode::BAD_REQUEST,
+                    &format!("{}: published_at must be YYYY-MM-DD", slug),
+                ));
+            }
+        } else {
+            published_at.clear();
+        }
+        let mut redirect_from = Vec::with_capacity(entry.redirect_from.len());
+        let canonical_path = if page_kind == "post" {
+            format!("/blog/{}", slug)
+        } else {
+            format!("/{}", slug)
+        };
+        for from in &entry.redirect_from {
+            let (from, _to) = validate_redirect_pair(from, &canonical_path)?;
+            redirect_from.push(from);
+        }
+        let title = entry.title.unwrap_or_else(|| crate::docs::derive_title(&slug, &body));
+        rows.push(ImportRow {
+            slug,
+            title,
+            body,
+            parent_slug: entry.parent_slug,
+            ord: entry.ord.unwrap_or(0),
+            meta_description: entry.meta_description,
+            page_kind,
+            published_at,
+            redirect_from,
+        });
+    }
+
+    let mut urls: Vec<String> = Vec::with_capacity(rows.len());
+    {
+        let mut db = state.db.lock();
+        for r in &rows {
+            db.upsert_website_page(
+                site.id,
+                &r.slug,
+                &r.title,
+                &r.body,
+                r.parent_slug.as_deref(),
+                r.ord,
+                &r.meta_description,
+                &r.page_kind,
+                &r.published_at,
+                "",
+                "",
+                Some(&principal.username),
+            )
+            .map_err(db_err)?;
+            let canonical_path = if r.page_kind == "post" {
+                format!("/blog/{}", r.slug)
+            } else {
+                format!("/{}", r.slug)
+            };
+            for from in &r.redirect_from {
+                db.upsert_site_redirect(site.id, from, &canonical_path).map_err(db_err)?;
+            }
+            urls.push(if r.page_kind == "post" {
+                canonical_post_url(site, &r.slug)
+            } else {
+                canonical_page_url(site, &r.slug, false)
+            });
+        }
+    }
+
+    let mut assets_written = 0usize;
+    if !assets.is_empty() {
+        let dir = assets_dir(&state, site);
+        std::fs::create_dir_all(&dir).map_err(|e| {
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("mkdir: {}", e))
+        })?;
+        let db = state.db.lock();
+        for (name, bytes) in &assets {
+            std::fs::write(dir.join(name), bytes).map_err(|e| {
+                error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("write {}: {}", name, e))
+            })?;
+            db.upsert_website_asset(site.id, name, bytes.len() as u64).map_err(db_err)?;
+            assets_written += 1;
+        }
+    }
+
+    invalidate_page_cache();
+    let n_pages = rows.len();
+    let n_redirects: usize = rows.iter().map(|r| r.redirect_from.len()).sum();
+    ping_indexnow(&state, site, urls);
+    log::info!(
+        "Website import for site {}: {} page(s), {} asset(s), {} redirect(s)",
+        site.id, n_pages, assets_written, n_redirects,
+    );
+    Ok(Json(json!({
+        "pages_written": n_pages,
+        "assets_written": assets_written,
+        "redirects_written": n_redirects,
+    })))
+}
+
+// ---------------------------------------------------------------------------
 // IndexNow - push page changes to Bing/Yandex/Naver/Seznam (Google opts out).
 //
 // Spec: https://www.indexnow.org/documentation
@@ -2937,6 +3369,40 @@ mod tests {
         // A stored decline still blocks both paths.
         assert!(out.contains("else if (choice === 'declined') {}"), "got: {}", out);
         assert!(out.contains("data-cookie-settings"), "opt-out link must be wired");
+    }
+
+    #[test]
+    fn normalize_redirect_path_canonicalizes() {
+        assert_eq!(normalize_redirect_path("/products/imu/lpms-ig1/"), "/products/imu/lpms-ig1");
+        assert_eq!(normalize_redirect_path("products/imu"), "/products/imu");
+        assert_eq!(normalize_redirect_path("/category/blog/?utm=x#frag"), "/category/blog");
+        assert_eq!(normalize_redirect_path("/"), "/");
+        assert_eq!(normalize_redirect_path("///"), "/");
+    }
+
+    #[test]
+    fn redirect_pair_validation() {
+        let (f, t) = validate_redirect_pair("/old-page/", "new-page").ok().unwrap();
+        assert_eq!(f, "/old-page");
+        assert_eq!(t, "/new-page");
+        let (_, t) = validate_redirect_pair("/x", "https://example.com/y").ok().unwrap();
+        assert_eq!(t, "https://example.com/y");
+        assert!(validate_redirect_pair("/", "/x").is_err());
+        assert!(validate_redirect_pair("/x", "").is_err());
+        assert!(validate_redirect_pair("/same", "/same/").is_err());
+    }
+
+    #[test]
+    fn redirect_map_location_prefixes_off_marketing() {
+        assert_eq!(redirect_map_location("/lpms-ig1", true), "/lpms-ig1");
+        assert_eq!(redirect_map_location("/lpms-ig1", false), "/site/lpms-ig1");
+        assert_eq!(redirect_map_location("https://a.example/b", false), "https://a.example/b");
+    }
+
+    #[test]
+    fn blog_index_hrefs_carry_page_state() {
+        assert_eq!(blog_index_href(1), "/blog");
+        assert_eq!(blog_index_href(3), "/blog?page=3");
     }
 
     #[test]

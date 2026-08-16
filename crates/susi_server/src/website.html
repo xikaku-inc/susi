@@ -294,6 +294,9 @@ body {
    it replaces, not like body copy. */
 .blog-index-item h1 a { color: inherit; text-decoration: none; }
 .blog-index-item h1 a:hover { color: var(--accent); }
+.blog-pager { display: flex; align-items: center; gap: 16px; margin: 28px 0; }
+.blog-pager a { color: var(--accent); text-decoration: none; }
+.blog-pager span { color: var(--text2); font-size: 14px; }
 
 /* EasyMDE theme overrides - match the surrounding dark UI. */
 .EasyMDEContainer { background: var(--bg); }
@@ -1274,12 +1277,20 @@ function renderEmptyState(msg) {
     document.getElementById('editBtn').style.display = 'none';
 }
 
-// Public /blog view: optional intro from the "blog" page row, then every
-// post rendered in full, newest first, with the date linking to the
-// permalink. Admins also see hidden (draft) posts, marked as such.
+// Public /blog view: optional intro from the "blog" page row, then a page of
+// full posts, newest first, with the date linking to the permalink. Mirrors
+// the SSR index (render_blog_index) including the ?page= query state.
+// Admins also see hidden (draft) posts, marked as such.
+const BLOG_POSTS_PER_PAGE = 10;
+
+function blogIndexHref(pageNum) {
+    return SITE_PATH_PREFIX + '/blog' + (pageNum > 1 ? '?page=' + pageNum : '');
+}
+
 async function renderBlogIndexView() {
     const c = document.getElementById('content');
     updateAdminChrome();
+    let pageNum = Math.max(1, parseInt(new URLSearchParams(location.search).get('page'), 10) || 1);
     let html = currentPage
         ? renderMarkdown(currentPage.body_md || '')
         : '<h1>Blog</h1>';
@@ -1289,15 +1300,19 @@ async function renderBlogIndexView() {
     if (!posts.length) {
         html += '<p>No posts yet.</p>';
     } else {
+        const totalPages = Math.ceil(posts.length / BLOG_POSTS_PER_PAGE);
+        pageNum = Math.min(pageNum, totalPages);
+        const visible = posts.slice((pageNum - 1) * BLOG_POSTS_PER_PAGE, pageNum * BLOG_POSTS_PER_PAGE);
+        // Full posts inline - bodies are fetched for the visible page only.
         const opts = authToken() ? { headers: { 'Authorization': 'Bearer ' + authToken() } } : {};
-        const bodies = await Promise.all(posts.map(async p => {
+        const bodies = await Promise.all(visible.map(async p => {
             try {
                 const r = await fetch(API + '/website/pages/' + encodeURIComponent(p.slug) + siteQ(), opts);
                 return r.ok ? (await r.json()).body_md || '' : '';
             } catch (e) { return ''; }
         }));
         html += '<div class="blog-index">';
-        posts.forEach((p, i) => {
+        visible.forEach((p, i) => {
             const permalink = pageHref(p.slug);
             // Admins edit a post straight from the index - otherwise the only
             // way in is the dashboard page list.
@@ -1315,6 +1330,13 @@ async function renderBlogIndexView() {
                 + '</article>';
         });
         html += '</div>';
+        if (totalPages > 1) {
+            html += '<nav class="blog-pager">'
+                + (pageNum > 1 ? '<a href="' + escHtml(blogIndexHref(pageNum - 1)) + '">← Newer</a>' : '')
+                + '<span>Page ' + pageNum + ' of ' + totalPages + '</span>'
+                + (pageNum < totalPages ? '<a href="' + escHtml(blogIndexHref(pageNum + 1)) + '">Older →</a>' : '')
+                + '</nav>';
+        }
     }
     const { html: withIds, headings } = injectHeadingIds(html);
     c.innerHTML = withIds;
@@ -2095,18 +2117,32 @@ document.addEventListener('click', (e) => {
         return;
     }
     // Legacy /site/{slug} form (susi.lp-research.com or old links on xikaku).
-    const legacy = href.match(/^\/site\/([^\/\?#]+)/);
+    // Single segment only - deeper /site/a/b paths are redirect-map territory
+    // and must reach the server. A query (blog filter/page) rides along.
+    const legacy = href.match(/^\/site\/([^\/\?#]+)(\?[^#]*)?$/);
     if (legacy) {
         e.preventDefault();
-        navigateTo(decodeURIComponent(legacy[1]));
+        if (legacy[2]) {
+            history.pushState({}, '', href);
+            route();
+            window.scrollTo(0, 0);
+        } else {
+            navigateTo(decodeURIComponent(legacy[1]));
+        }
         return;
     }
     // Clean form (xikaku.com): /{slug} where slug isn't a reserved top-level path.
     if (SITE_PATH_PREFIX === '') {
-        const clean = href.match(/^\/([^\/\?#]+)$/);
+        const clean = href.match(/^\/([^\/\?#]+)(\?[^#]*)?$/);
         if (clean && !RESERVED_TOP_PATHS.has(clean[1])) {
             e.preventDefault();
-            navigateTo(decodeURIComponent(clean[1]));
+            if (clean[2]) {
+                history.pushState({}, '', href);
+                route();
+                window.scrollTo(0, 0);
+            } else {
+                navigateTo(decodeURIComponent(clean[1]));
+            }
         }
     }
 });
