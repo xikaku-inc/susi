@@ -2745,6 +2745,8 @@ pub struct ImportPageEntry {
     pub published_at: Option<String>,
     #[serde(default)]
     pub redirect_from: Vec<String>,
+    #[serde(default)]
+    pub hidden: bool,
 }
 
 pub async fn handle_import_pages(
@@ -2821,6 +2823,7 @@ pub async fn handle_import_pages(
         page_kind: String,
         published_at: String,
         redirect_from: Vec<String>,
+        hidden: bool,
     }
     let mut rows: Vec<ImportRow> = Vec::with_capacity(page_bodies.len());
     for (slug, body) in page_bodies {
@@ -2866,6 +2869,7 @@ pub async fn handle_import_pages(
             page_kind,
             published_at,
             redirect_from,
+            hidden: entry.hidden,
         });
     }
 
@@ -2888,6 +2892,7 @@ pub async fn handle_import_pages(
                 Some(&principal.username),
             )
             .map_err(db_err)?;
+            db.set_website_page_hidden(site.id, &r.slug, r.hidden).map_err(db_err)?;
             let canonical_path = if r.page_kind == "post" {
                 format!("/blog/{}", r.slug)
             } else {
@@ -2896,11 +2901,13 @@ pub async fn handle_import_pages(
             for from in &r.redirect_from {
                 db.upsert_site_redirect(site.id, from, &canonical_path).map_err(db_err)?;
             }
-            urls.push(if r.page_kind == "post" {
-                canonical_post_url(site, &r.slug)
-            } else {
-                canonical_page_url(site, &r.slug, false)
-            });
+            if !r.hidden {
+                urls.push(if r.page_kind == "post" {
+                    canonical_post_url(site, &r.slug)
+                } else {
+                    canonical_page_url(site, &r.slug, false)
+                });
+            }
         }
     }
 

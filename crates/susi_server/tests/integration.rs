@@ -4096,6 +4096,10 @@ fn test_redirect_map_and_bulk_import() {
             "page_kind": "post",
             "published_at": "2026-01-15",
             "redirect_from": ["/2026/01/hello-post/"]
+        },
+        "old-widget": {
+            "title": "Old Widget",
+            "hidden": true
         }
     })
     .to_string();
@@ -4103,6 +4107,7 @@ fn test_redirect_map_and_bulk_import() {
     let mut body = String::new();
     body.push_str(&format!("--{b}\r\nContent-Disposition: form-data; name=\"manifest\"\r\n\r\n{manifest}\r\n"));
     body.push_str(&format!("--{b}\r\nContent-Disposition: form-data; name=\"page\"; filename=\"lpms-ig1.md\"\r\n\r\n# LPMS-IG1\n\nSensor page body.\r\n"));
+    body.push_str(&format!("--{b}\r\nContent-Disposition: form-data; name=\"page\"; filename=\"old-widget.md\"\r\n\r\n# Old Widget\n\nRetired sensor.\r\n"));
     body.push_str(&format!("--{b}\r\nContent-Disposition: form-data; name=\"page\"; filename=\"hello-post.md\"\r\n\r\n# Hello\n\nPost body.\r\n"));
     body.push_str(&format!("--{b}\r\nContent-Disposition: form-data; name=\"asset\"; filename=\"pixel.png\"\r\nContent-Type: image/png\r\n\r\nPNGDATA\r\n"));
     body.push_str(&format!("--{b}--\r\n"));
@@ -4115,9 +4120,21 @@ fn test_redirect_map_and_bulk_import() {
         .expect("import");
     assert_eq!(resp.status().as_u16(), 200, "{}", resp.text().unwrap_or_default());
     let out = resp.json::<Value>().unwrap();
-    assert_eq!(out["pages_written"], json!(2));
+    assert_eq!(out["pages_written"], json!(3));
     assert_eq!(out["assets_written"], json!(1));
     assert_eq!(out["redirects_written"], json!(2));
+
+    // A manifest "hidden" flag imports the page as a draft: admins see it,
+    // the public does not.
+    let resp = http
+        .get(format!("{}/website/pages/old-widget?site=lpr", server.api_url))
+        .send().expect("public hidden get");
+    assert_eq!(resp.status().as_u16(), 404, "hidden import must not be public");
+    let page = http
+        .get(format!("{}/website/pages/old-widget?site=lpr", server.api_url))
+        .bearer_auth(&token)
+        .send().expect("admin hidden get").json::<Value>().unwrap();
+    assert_eq!(page["hidden"], json!(true));
 
     // Imported content is site-scoped and carries manifest metadata.
     let page = http
@@ -4154,6 +4171,18 @@ fn test_redirect_map_and_bulk_import() {
         .send().expect("deep redirect");
     assert_eq!(resp.status().as_u16(), 301);
     assert_eq!(resp.headers()["location"].to_str().unwrap(), "/lpms-ig1");
+    // Single-segment legacy URLs keep their WordPress trailing slash - the
+    // NormalizePath wrapper must trim it before routing or these 404.
+    let resp = no_redirect
+        .get(format!("{}/site/2026/01/hello-post/", server.url))
+        .header("Host", "www.lp-research.com")
+        .send().expect("trailing slash deep");
+    assert_eq!(resp.status().as_u16(), 301);
+    let resp = no_redirect
+        .get(format!("{}/site/lpms-ig1/", server.url))
+        .header("Host", "www.lp-research.com")
+        .send().expect("trailing slash page");
+    assert_eq!(resp.status().as_u16(), 200, "live page with trailing slash must render");
     // Posts land on their /blog/ permalink.
     let resp = no_redirect
         .get(format!("{}/site/2026/01/hello-post/", server.url))

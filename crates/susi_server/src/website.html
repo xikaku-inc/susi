@@ -1222,9 +1222,9 @@ function renderSidebar() {
     const blogActive = (currentSlug === 'blog' || onPost) ? ' active' : '';
     const newsletterActive = currentSlug === 'newsletter' ? ' active' : '';
     const blogLink = '<a class="section-head' + blogActive + '" href="' + SITE_PATH_PREFIX + '/blog">Blog</a>'
-        + '<a class="section-head' + newsletterActive + '" href="' + SITE_PATH_PREFIX + '/newsletter">Newsletter</a>';
+        + (SITE.has_newsletter ? '<a class="section-head' + newsletterActive + '" href="' + SITE_PATH_PREFIX + '/newsletter">Newsletter</a>' : '');
     const shopActive = currentSlug === '__shop__' ? ' active' : '';
-    const shopLink = '<a class="section-head' + shopActive + '" href="/shop">Shop</a>';
+    const shopLink = SITE.has_shop ? '<a class="section-head' + shopActive + '" href="/shop">Shop</a>' : '';
     const bySlug = new Map(topLevel.map(p => [p.slug, p]));
     let html = '';
     if (navStructure && navStructure.length) {
