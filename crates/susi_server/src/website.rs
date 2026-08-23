@@ -1396,10 +1396,11 @@ pub(crate) fn render_body_html(body_md: &str) -> String {
     let parser = Parser::new_ext(&cleaned, opts);
     let mut out = String::with_capacity(cleaned.len() * 2);
     html::push_html(&mut out, parser);
-    ammonia::Builder::default()
+    let clean = ammonia::Builder::default()
         .add_generic_attributes(&["class", "id"])
         .clean(&out)
-        .to_string()
+        .to_string();
+    absolutize_bare_img_srcs(&clean)
 }
 
 fn first_default_slug(pages: &[PageRow]) -> Option<&str> {
@@ -1950,7 +1951,7 @@ fn render_website(
                 byline_suffix(post_author.as_deref()),
             ));
         }
-        h.push_str(&absolutize_bare_img_srcs(&render_body_html(&body_md)));
+        h.push_str(&render_body_html(&body_md));
         h
     };
 
@@ -2057,11 +2058,12 @@ fn render_blog_index(
     render_shell(state, site, &injected, &body_html)
 }
 
-/// Newsletter bodies reference uploaded images by bare filename (the composer
-/// upload hook inserts `data.name`, not a URL). The SPA resolves those
-/// client-side; the SSR fallback must point them at the asset store
-/// explicitly, or a crawler resolves them against /newsletter and gets the
-/// page shell back.
+/// Bodies reference uploaded images by bare filename (the composer upload hook
+/// inserts `data.name`, not a URL). The SPA resolves those client-side; the SSR
+/// output must point them at the asset store explicitly, or a crawler resolves
+/// them against the current path and gets the page shell back. Applied to every
+/// SSR body via `render_body_html` - docs bodies arrive with rooted paths
+/// already and pass through untouched.
 fn absolutize_bare_img_srcs(html: &str) -> String {
     let mut out = String::with_capacity(html.len() + 64);
     let mut i = 0;
@@ -2140,7 +2142,7 @@ fn render_newsletter_index(
                  <h1>{subject}</h1>{body}</article>",
                 date = html_escape(&format_post_date(date)),
                 subject = html_escape(subject),
-                body = absolutize_bare_img_srcs(&render_body_html(&newsletter_web_md(body_md))),
+                body = render_body_html(&newsletter_web_md(body_md)),
             ));
         }
         body_html.push_str("</div>");
@@ -2233,12 +2235,45 @@ pub const SETTING_BG_PARALLAX: &str = "bg_parallax";
 
 /// Sidebar nav config: JSON array of groups rendered between the ungrouped
 /// pages and nothing else. Items are page slugs, plus the pseudo-slugs
-/// "__blog__" and "__shop__" for the fixed Blog/Shop links.
+/// "__blog__" and "__shop__" for the fixed Blog/Shop links, or
+/// `{"title", "url"}` objects for links off the site (docs, external shop).
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NavGroup {
     title: String,
-    items: Vec<String>,
+    items: Vec<NavItem>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NavLink {
+    title: String,
+    url: String,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum NavItem {
+    Slug(String),
+    Link(NavLink),
+}
+
+impl NavItem {
+    fn is_valid(&self) -> bool {
+        match self {
+            NavItem::Slug(s) => !s.is_empty() && s.len() <= 100,
+            // Only http(s) and site-rooted targets: a `javascript:` URL here
+            // would end up in an href on every page of the site.
+            NavItem::Link(l) => {
+                !l.title.trim().is_empty()
+                    && l.title.len() <= 40
+                    && l.url.len() <= 200
+                    && (l.url.starts_with("https://")
+                        || l.url.starts_with("http://")
+                        || l.url.starts_with('/'))
+            }
+        }
+    }
 }
 
 fn is_valid_nav_structure(s: &str) -> bool {
@@ -2252,7 +2287,7 @@ fn is_valid_nav_structure(s: &str) -> bool {
                     !g.title.trim().is_empty()
                         && g.title.len() <= 40
                         && g.items.len() <= 50
-                        && g.items.iter().all(|i| !i.is_empty() && i.len() <= 100)
+                        && g.items.iter().all(NavItem::is_valid)
                 })
         }
         Err(_) => false,
@@ -2878,6 +2913,10 @@ pub struct ImportPageEntry {
     pub redirect_from: Vec<String>,
     #[serde(default)]
     pub hidden: bool,
+    /// Retires the page: it 301s here and leaves nav, sitemap and llms.txt,
+    /// but keeps its content so it can be brought back.
+    #[serde(default)]
+    pub redirect_to: String,
 }
 
 pub async fn handle_import_pages(
@@ -2955,6 +2994,7 @@ pub async fn handle_import_pages(
         published_at: String,
         redirect_from: Vec<String>,
         hidden: bool,
+        redirect_to: String,
     }
     let mut rows: Vec<ImportRow> = Vec::with_capacity(page_bodies.len());
     for (slug, body) in page_bodies {
@@ -2989,6 +3029,10 @@ pub async fn handle_import_pages(
             let (from, _to) = validate_redirect_pair(from, &canonical_path)?;
             redirect_from.push(from);
         }
+        let redirect_to = entry.redirect_to.trim().to_string();
+        if !redirect_to.is_empty() {
+            validate_redirect_pair(&canonical_path, &redirect_to)?;
+        }
         let title = entry.title.unwrap_or_else(|| crate::docs::derive_title(&slug, &body));
         rows.push(ImportRow {
             slug,
@@ -3001,6 +3045,7 @@ pub async fn handle_import_pages(
             published_at,
             redirect_from,
             hidden: entry.hidden,
+            redirect_to,
         });
     }
 
@@ -3019,7 +3064,7 @@ pub async fn handle_import_pages(
                 &r.page_kind,
                 &r.published_at,
                 "",
-                "",
+                &r.redirect_to,
                 Some(&principal.username),
             )
             .map_err(db_err)?;
@@ -3032,7 +3077,7 @@ pub async fn handle_import_pages(
             for from in &r.redirect_from {
                 db.upsert_site_redirect(site.id, from, &canonical_path).map_err(db_err)?;
             }
-            if !r.hidden {
+            if !r.hidden && r.redirect_to.is_empty() {
                 urls.push(if r.page_kind == "post" {
                     canonical_post_url(site, &r.slug)
                 } else {
@@ -3301,6 +3346,17 @@ mod tests {
     }
 
     #[test]
+    fn render_body_html_resolves_bare_image_names() {
+        // Bare filenames are uploaded assets; every other form is left alone.
+        let h = render_body_html(
+            "![](shot.png)\n\n![](/api/v1/docs/v1/assets/doc.png)\n\n![](https://x.example/a.png)\n",
+        );
+        assert!(h.contains(r#"src="/api/v1/website/assets/shot.png""#), "{}", h);
+        assert!(h.contains(r#"src="/api/v1/docs/v1/assets/doc.png""#), "{}", h);
+        assert!(h.contains(r#"src="https://x.example/a.png""#), "{}", h);
+    }
+
+    #[test]
     fn render_body_html_strips_xss_vectors() {
         let md = "<script>alert(1)</script>\n\n\
                   <img src=\"/x.png\" onerror=\"alert(1)\">\n\n\
@@ -3557,6 +3613,23 @@ mod tests {
                 {"title":"Company","items":["our-story","contact"]}]"#
         ));
         assert!(is_valid_nav_structure("[]"));
+    }
+
+    #[test]
+    fn nav_structure_validator_accepts_external_links() {
+        assert!(is_valid_nav_structure(
+            r#"[{"title":"Support","items":[{"title":"Documentation","url":"https://wiki.example/space"},
+                {"title":"Customer Area","url":"/customer-area/dashboard"},"contact"]}]"#
+        ));
+        // A link item must carry a title, a safe URL scheme and nothing else.
+        assert!(!is_valid_nav_structure(
+            r#"[{"title":"S","items":[{"title":"X","url":"javascript:alert(1)"}]}]"#
+        ));
+        assert!(!is_valid_nav_structure(r#"[{"title":"S","items":[{"title":"","url":"/x"}]}]"#));
+        assert!(!is_valid_nav_structure(r#"[{"title":"S","items":[{"url":"/x"}]}]"#));
+        assert!(!is_valid_nav_structure(
+            r#"[{"title":"S","items":[{"title":"X","url":"/x","target":"_blank"}]}]"#
+        ));
     }
 
     #[test]

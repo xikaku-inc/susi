@@ -9,4 +9,6 @@ license.json
 build/
 CMakeUserPresets.json
 
+__pycache__/
+
 .vscode

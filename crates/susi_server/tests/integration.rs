@@ -4181,6 +4181,10 @@ fn test_redirect_map_and_bulk_import() {
         "old-widget": {
             "title": "Old Widget",
             "hidden": true
+        },
+        "old-overview": {
+            "title": "Old Overview",
+            "redirect_to": "/lpms-ig1"
         }
     })
     .to_string();
@@ -4189,6 +4193,7 @@ fn test_redirect_map_and_bulk_import() {
     body.push_str(&format!("--{b}\r\nContent-Disposition: form-data; name=\"manifest\"\r\n\r\n{manifest}\r\n"));
     body.push_str(&format!("--{b}\r\nContent-Disposition: form-data; name=\"page\"; filename=\"lpms-ig1.md\"\r\n\r\n# LPMS-IG1\n\nSensor page body.\r\n"));
     body.push_str(&format!("--{b}\r\nContent-Disposition: form-data; name=\"page\"; filename=\"old-widget.md\"\r\n\r\n# Old Widget\n\nRetired sensor.\r\n"));
+    body.push_str(&format!("--{b}\r\nContent-Disposition: form-data; name=\"page\"; filename=\"old-overview.md\"\r\n\r\n# Old Overview\n\nSuperseded.\r\n"));
     body.push_str(&format!("--{b}\r\nContent-Disposition: form-data; name=\"page\"; filename=\"hello-post.md\"\r\n\r\n# Hello\n\nPost body.\r\n"));
     body.push_str(&format!("--{b}\r\nContent-Disposition: form-data; name=\"asset\"; filename=\"pixel.png\"\r\nContent-Type: image/png\r\n\r\nPNGDATA\r\n"));
     body.push_str(&format!("--{b}--\r\n"));
@@ -4201,7 +4206,7 @@ fn test_redirect_map_and_bulk_import() {
         .expect("import");
     assert_eq!(resp.status().as_u16(), 200, "{}", resp.text().unwrap_or_default());
     let out = resp.json::<Value>().unwrap();
-    assert_eq!(out["pages_written"], json!(3));
+    assert_eq!(out["pages_written"], json!(4));
     assert_eq!(out["assets_written"], json!(1));
     assert_eq!(out["redirects_written"], json!(2));
 
@@ -4216,6 +4221,21 @@ fn test_redirect_map_and_bulk_import() {
         .bearer_auth(&token)
         .send().expect("admin hidden get").json::<Value>().unwrap();
     assert_eq!(page["hidden"], json!(true));
+
+    // A manifest "redirect_to" retires the page: it 301s and leaves the
+    // sitemap, but keeps its body.
+    let resp = no_redirect
+        .get(format!("{}/site/old-overview", server.url))
+        .header("Host", "www.lp-research.com")
+        .send().expect("retired page");
+    assert_eq!(resp.status().as_u16(), 301);
+    assert_eq!(resp.headers()["location"].to_str().unwrap(), "/lpms-ig1");
+    let sitemap = no_redirect
+        .get(format!("{}/sitemap.xml", server.url))
+        .header("Host", "www.lp-research.com")
+        .send().expect("sitemap").text().unwrap();
+    assert!(!sitemap.contains("/old-overview"), "retired page must stay out of the sitemap");
+    assert!(sitemap.contains("/blog/hello-post"), "{}", sitemap);
 
     // Imported content is site-scoped and carries manifest metadata.
     let page = http

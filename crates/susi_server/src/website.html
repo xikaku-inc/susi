@@ -1291,17 +1291,25 @@ function renderSidebar() {
     if (navStructure && navStructure.length) {
         // Grouped nav from the "nav_structure" site setting. Ungrouped pages
         // (Home, any newly created top-level page) come first, in ord order.
-        const groupedSlugs = new Set(navStructure.flatMap(g => g.items || []));
+        const groupedSlugs = new Set(navStructure.flatMap(g => g.items || [])
+            .filter(s => typeof s === 'string'));
         topLevel.filter(p => !groupedSlugs.has(p.slug)).forEach(p => html += renderTop(p));
         navStructure.forEach(g => {
             let body = '';
             (g.items || []).forEach(s => {
-                if (s === '__blog__') body += blogLink;
+                if (s && typeof s === 'object') {
+                    body += '<a class="section-head" href="' + escHtml(s.url) + '">'
+                        + escHtml(s.title) + '</a>';
+                }
+                else if (s === '__blog__') body += blogLink;
                 else if (s === '__shop__') body += shopLink;
                 else if (bySlug.has(s)) body += renderTop(bySlug.get(s));
             });
             if (body) html += '<h3>' + escHtml(g.title || '') + '</h3>' + body;
         });
+        // Links no group placed keep their flat-nav position at the end.
+        if (!groupedSlugs.has('__blog__')) html += blogLink;
+        if (!groupedSlugs.has('__shop__')) html += shopLink;
     } else {
         // No nav config: flat top-level list with Blog and Shop at the end.
         topLevel.forEach(p => html += renderTop(p));
