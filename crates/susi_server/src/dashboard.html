@@ -1819,23 +1819,23 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
             <div class="detail-body">
                 <div class="form-row">
                     <label for="siteSetGaId">Google Analytics Measurement ID</label>
-                    <input type="text" id="siteSetGaId" autocomplete="off">
+                    <input type="text" id="siteSetGaId" autocomplete="off" readonly onfocus="this.removeAttribute('readonly')">
                 </div>
                 <div class="form-row">
                     <label for="siteSetAdsId">Google Ads Conversion ID</label>
-                    <input type="text" id="siteSetAdsId" autocomplete="off">
+                    <input type="text" id="siteSetAdsId" autocomplete="off" readonly onfocus="this.removeAttribute('readonly')">
                 </div>
                 <div class="form-row">
                     <label for="siteSetAdsLabelContact">Google Ads conversion label - contact form</label>
-                    <input type="text" id="siteSetAdsLabelContact" autocomplete="off">
+                    <input type="text" id="siteSetAdsLabelContact" autocomplete="off" readonly onfocus="this.removeAttribute('readonly')">
                 </div>
                 <div class="form-row">
                     <label for="siteSetAdsLabelPurchase">Google Ads conversion label - shop purchase</label>
-                    <input type="text" id="siteSetAdsLabelPurchase" autocomplete="off">
+                    <input type="text" id="siteSetAdsLabelPurchase" autocomplete="off" readonly onfocus="this.removeAttribute('readonly')">
                 </div>
                 <div class="form-row">
                     <label for="siteSetRedditPixelId">Reddit Pixel ID</label>
-                    <input type="text" id="siteSetRedditPixelId" autocomplete="off">
+                    <input type="text" id="siteSetRedditPixelId" autocomplete="off" readonly onfocus="this.removeAttribute('readonly')">
                 </div>
                 <div class="form-row">
                     <label for="siteSetNavStructure">Sidebar navigation groups (JSON)</label>
@@ -1852,7 +1852,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                 </div>
                 <div class="form-row">
                     <label for="siteSetBgVeil">Background transparency (%)</label>
-                    <input type="text" id="siteSetBgVeil" inputmode="numeric" autocomplete="off" style="width:90px;">
+                    <input type="text" id="siteSetBgVeil" inputmode="numeric" autocomplete="off" readonly onfocus="this.removeAttribute('readonly')" style="width:90px;">
                 </div>
                 <div class="toggle-row">
                     <input type="checkbox" id="siteSetBgParallax">
