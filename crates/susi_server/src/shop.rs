@@ -24,6 +24,7 @@ use serde_json::{json, Value};
 use sha2::Sha256;
 use susi_core::error::LicenseError;
 
+use crate::countries;
 use crate::email::{EmailAttachment, InlineImage};
 use crate::invoice_pdf;
 use crate::{
@@ -137,6 +138,38 @@ pub async fn handle_get_product(
     Ok(Json(product_to_json(row)))
 }
 
+/// Destinations the shop currently serves, for the public country selector.
+/// Ordered by display name so the dropdown reads naturally.
+pub async fn handle_list_shipping_countries(
+    State(state): State<Arc<AppState>>,
+) -> Json<Value> {
+    let mut list: Vec<Value> = enabled_shipping_countries(&state)
+        .into_iter()
+        .map(|code| {
+            let name = countries::name(&code).unwrap_or("");
+            json!({ "code": code, "name": name })
+        })
+        .collect();
+    list.sort_by(|a, b| a["name"].as_str().unwrap_or("").cmp(b["name"].as_str().unwrap_or("")));
+    Json(json!({ "countries": list }))
+}
+
+/// Full catalogue of shippable destinations, for the admin picker.
+pub async fn handle_admin_list_countries(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
+    let p = validate_principal(&headers, &state)?;
+    require_admin_full(&state, &p)?;
+    let mut list: Vec<(&str, &str)> = countries::SHIPPING_COUNTRIES.to_vec();
+    list.sort_by_key(|(_, name)| *name);
+    let out: Vec<Value> = list
+        .into_iter()
+        .map(|(code, name)| json!({ "code": code, "name": name }))
+        .collect();
+    Ok(Json(json!({ "countries": out })))
+}
+
 // ---------------------------------------------------------------------------
 // Checkout
 // ---------------------------------------------------------------------------
@@ -161,8 +194,12 @@ fn rate_applies(regions: &[String], country: &str) -> bool {
 
 /// Collect the union of allowed countries across all active rates. Stripe
 /// requires 2-letter ISO codes; if a rate declares `*`, we expand it to the
-/// supported country list. Shop currently ships to US and Canada only.
-fn allowed_countries_for_checkout(rates: &[(i64, String, i64, String, Option<i64>, Option<i64>, String, bool, i64)]) -> Vec<String> {
+/// shop's enabled destinations. A rate naming a country that is no longer
+/// enabled contributes nothing.
+fn allowed_countries_for_checkout(
+    rates: &[(i64, String, i64, String, Option<i64>, Option<i64>, String, bool, i64)],
+    enabled: &[String],
+) -> Vec<String> {
     let mut set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut wildcard = false;
     for r in rates {
@@ -171,17 +208,44 @@ fn allowed_countries_for_checkout(rates: &[(i64, String, i64, String, Option<i64
             if reg == "*" { wildcard = true; }
             else {
                 let up = reg.to_uppercase();
-                if SUPPORTED_SHIPPING_COUNTRIES.contains(&up.as_str()) { set.insert(up); }
+                if enabled.contains(&up) { set.insert(up); }
             }
         }
     }
     if wildcard {
-        for c in SUPPORTED_SHIPPING_COUNTRIES { set.insert((*c).into()); }
+        for c in enabled { set.insert(c.clone()); }
     }
     set.into_iter().collect()
 }
 
-const SUPPORTED_SHIPPING_COUNTRIES: &[&str] = &["US", "CA"];
+/// Destinations the shop serves before the admin has ever saved the setting.
+const DEFAULT_SHIPPING_COUNTRIES: &[&str] = &["US", "CA"];
+
+/// Parse the stored `shipping_countries` setting into canonical uppercase
+/// codes, dropping anything Stripe won't accept. Falls back to the default
+/// when unset or empty.
+fn parse_shipping_countries(raw: &str) -> Vec<String> {
+    let list: Vec<String> = raw
+        .split(',')
+        .map(|s| s.trim().to_uppercase())
+        .filter(|s| countries::is_supported(s))
+        .collect();
+    if list.is_empty() {
+        return DEFAULT_SHIPPING_COUNTRIES.iter().map(|c| (*c).to_string()).collect();
+    }
+    let mut list = list;
+    list.sort();
+    list.dedup();
+    list
+}
+
+fn enabled_shipping_countries(state: &AppState) -> Vec<String> {
+    let raw = {
+        let db = state.db.lock();
+        db.get_shop_setting(SETTING_SHIPPING_COUNTRIES).ok().flatten().unwrap_or_default()
+    };
+    parse_shipping_countries(&raw)
+}
 
 /// Push a (key, value) pair onto a form builder using Stripe's bracket syntax.
 /// e.g. `push(&mut form, &["line_items", "0", "price_data", "currency"], "usd")`
@@ -217,8 +281,9 @@ pub async fn handle_create_checkout_session(
         return Err(error_response(StatusCode::BAD_REQUEST, "Too many items"));
     }
     // ISO-3166-1 alpha-2 country codes are 2 letters; allow empty (initial
-    // page load before the country selector is rendered). Shop only serves
-    // the US and Canada - reject all other destinations.
+    // page load before the country selector is rendered). Reject destinations
+    // the admin has not enabled.
+    let enabled = enabled_shipping_countries(&state);
     if !req.destination_country.is_empty() {
         if req.destination_country.len() != 2
             || !req.destination_country.chars().all(|c| c.is_ascii_alphabetic())
@@ -226,8 +291,11 @@ pub async fn handle_create_checkout_session(
             return Err(error_response(StatusCode::BAD_REQUEST, "Invalid destination country"));
         }
         let up = req.destination_country.to_uppercase();
-        if !SUPPORTED_SHIPPING_COUNTRIES.contains(&up.as_str()) {
-            return Err(error_response(StatusCode::BAD_REQUEST, "We only ship to the US and Canada"));
+        if !enabled.contains(&up) {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("We don't ship to {}", countries::name(&up).unwrap_or(up.as_str())),
+            ));
         }
     }
 
@@ -357,12 +425,15 @@ pub async fn handle_create_checkout_session(
     // a delivery address that's distinct from billing. When the merchant
     // has configured rates, use their regions; otherwise fall back to a
     // common-countries list so checkout still works during initial setup.
-    let countries = if applicable.is_empty() {
-        SUPPORTED_SHIPPING_COUNTRIES.iter().map(|c| (*c).to_string()).collect()
+    let allowed = if applicable.is_empty() {
+        enabled.clone()
     } else {
-        allowed_countries_for_checkout(&applicable)
+        allowed_countries_for_checkout(&applicable, &enabled)
     };
-    for (i, c) in countries.iter().enumerate() {
+    // Every rate could name only countries that were since disabled; fall back
+    // so Stripe never sees an empty allowed_countries array.
+    let allowed = if allowed.is_empty() { enabled.clone() } else { allowed };
+    for (i, c) in allowed.iter().enumerate() {
         push_form(&mut form, &["shipping_address_collection", "allowed_countries", &i.to_string()], c.clone());
     }
 
@@ -696,6 +767,7 @@ const SETTING_NOTIFY_EMAILS: &str = "notification_emails";
 const SETTING_CUSTOMER_EMAIL_ENABLED: &str = "customer_email_enabled";
 const SETTING_CUSTOMER_THANK_YOU: &str = "customer_thank_you_html";
 const SETTING_SUPPORT_CONTACT: &str = "support_contact";
+const SETTING_SHIPPING_COUNTRIES: &str = "shipping_countries";
 
 /// Comma-or-whitespace-split a recipients string, trim, and dedupe.
 fn split_recipients(s: &str) -> Vec<String> {
@@ -1351,7 +1423,10 @@ pub struct ShippingRateRequest {
 
 fn default_regions() -> Vec<String> { vec!["*".into()] }
 
-fn validate_rate_body(r: &ShippingRateRequest) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
+fn validate_rate_body(
+    r: &ShippingRateRequest,
+    enabled: &[String],
+) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
     if r.label.trim().is_empty() {
         return Err(error_response(StatusCode::BAD_REQUEST, "Label is required"));
     }
@@ -1364,8 +1439,11 @@ fn validate_rate_body(r: &ShippingRateRequest) -> Result<String, (StatusCode, Js
             return Err(error_response(StatusCode::BAD_REQUEST, &format!("Invalid region code: {}", reg)));
         }
         let up = reg.to_uppercase();
-        if !SUPPORTED_SHIPPING_COUNTRIES.contains(&up.as_str()) {
-            return Err(error_response(StatusCode::BAD_REQUEST, &format!("Unsupported region: {} (only US and CA are supported)", reg)));
+        if !enabled.contains(&up) {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("{} is not one of the shop's shipping countries", up),
+            ));
         }
     }
     let normalized: Vec<String> = r.regions.iter()
@@ -1382,7 +1460,7 @@ pub async fn handle_create_shipping_rate(
 ) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
     let p = validate_principal(&headers, &state)?;
     require_admin_full(&state, &p)?;
-    let regions_json = validate_rate_body(&req)?;
+    let regions_json = validate_rate_body(&req, &enabled_shipping_countries(&state))?;
     let id = {
         let db = state.db.lock();
         db.insert_shipping_rate(
@@ -1407,7 +1485,7 @@ pub async fn handle_update_shipping_rate(
 ) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
     let p = validate_principal(&headers, &state)?;
     require_admin_full(&state, &p)?;
-    let regions_json = validate_rate_body(&req)?;
+    let regions_json = validate_rate_body(&req, &enabled_shipping_countries(&state))?;
     let ok = {
         let db = state.db.lock();
         db.update_shipping_rate(
@@ -1742,7 +1820,32 @@ const KNOWN_SETTING_KEYS: &[&str] = &[
     SETTING_CUSTOMER_EMAIL_ENABLED,
     SETTING_CUSTOMER_THANK_YOU,
     SETTING_SUPPORT_CONTACT,
+    SETTING_SHIPPING_COUNTRIES,
 ];
+
+/// Normalize a submitted shipping-country list to canonical, sorted, deduped
+/// uppercase codes. Rejects anything Stripe won't accept and refuses to leave
+/// the shop with no destination at all.
+fn normalize_shipping_countries(raw: &str) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
+    let mut out: Vec<String> = Vec::new();
+    for part in raw.split(',') {
+        let code = part.trim();
+        if code.is_empty() { continue; }
+        if !countries::is_supported(code) {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("Not a shippable country code: {}", code),
+            ));
+        }
+        out.push(code.to_uppercase());
+    }
+    out.sort();
+    out.dedup();
+    if out.is_empty() {
+        return Err(error_response(StatusCode::BAD_REQUEST, "Select at least one shipping country"));
+    }
+    Ok(out.join(","))
+}
 
 pub async fn handle_admin_get_settings(
     State(state): State<Arc<AppState>>,
@@ -1758,6 +1861,12 @@ pub async fn handle_admin_get_settings(
     for k in KNOWN_SETTING_KEYS {
         out.insert((*k).to_string(), Value::String(String::new()));
     }
+    // Surface the effective default so the picker reflects what the shop
+    // actually serves before the setting has ever been saved.
+    out.insert(
+        SETTING_SHIPPING_COUNTRIES.into(),
+        Value::String(DEFAULT_SHIPPING_COUNTRIES.join(",")),
+    );
     for (k, v) in pairs {
         out.insert(k, Value::String(v));
     }
@@ -1806,6 +1915,7 @@ pub async fn handle_admin_put_settings(
                 }
             }
             SETTING_SUPPORT_CONTACT => v.trim().to_string(),
+            SETTING_SHIPPING_COUNTRIES => normalize_shipping_countries(v)?,
             _ => v.clone(),
         };
         let db = state.db.lock();
@@ -1898,6 +2008,77 @@ mod tests {
     fn signature_verify_rejects_bad_sig() {
         let header = "t=1700000000,v1=deadbeef";
         assert!(verify_stripe_signature("whsec_test", header, b"{}", 1_700_000_000).is_err());
+    }
+
+    fn rate(regions_json: &str) -> (i64, String, i64, String, Option<i64>, Option<i64>, String, bool, i64) {
+        (1, "Std".into(), 500, "usd".into(), None, None, regions_json.into(), true, 0)
+    }
+
+    #[test]
+    fn shipping_countries_default_when_unset_or_junk() {
+        assert_eq!(parse_shipping_countries(""), vec!["US", "CA"]);
+        assert_eq!(parse_shipping_countries("  "), vec!["US", "CA"]);
+        // Codes Stripe rejects are dropped; an all-junk list falls back.
+        assert_eq!(parse_shipping_countries("KP,XX"), vec!["US", "CA"]);
+    }
+
+    #[test]
+    fn shipping_countries_parse_is_canonical() {
+        assert_eq!(parse_shipping_countries("il, us , IL"), vec!["IL", "US"]);
+        assert_eq!(parse_shipping_countries("US,CA,IL,KP"), vec!["CA", "IL", "US"]);
+    }
+
+    #[test]
+    fn normalize_shipping_countries_validates() {
+        assert_eq!(normalize_shipping_countries("us, ca, il").ok(), Some("CA,IL,US".into()));
+        assert_eq!(normalize_shipping_countries("IL,IL").ok(), Some("IL".into()));
+        // Empty selection and codes Stripe refuses are hard errors, not silent drops.
+        assert!(normalize_shipping_countries("").is_err());
+        assert!(normalize_shipping_countries(" , ").is_err());
+        assert!(normalize_shipping_countries("US,KP").is_err());
+        assert!(normalize_shipping_countries("US,ZZ").is_err());
+        assert!(normalize_shipping_countries("US,USA").is_err());
+    }
+
+    #[test]
+    fn allowed_countries_track_the_enabled_list() {
+        let enabled: Vec<String> = vec!["CA".into(), "IL".into(), "US".into()];
+        // A wildcard rate expands to every enabled destination.
+        assert_eq!(
+            allowed_countries_for_checkout(&[rate(r#"["*"]"#)], &enabled),
+            vec!["CA", "IL", "US"],
+        );
+        // Explicit regions are honoured, case-insensitively.
+        assert_eq!(
+            allowed_countries_for_checkout(&[rate(r#"["il","us"]"#)], &enabled),
+            vec!["IL", "US"],
+        );
+        // A rate naming a country that was since disabled contributes nothing.
+        assert_eq!(
+            allowed_countries_for_checkout(&[rate(r#"["IL","GB"]"#)], &["IL".to_string()]),
+            vec!["IL"],
+        );
+        assert!(allowed_countries_for_checkout(&[rate(r#"["GB"]"#)], &enabled).is_empty());
+    }
+
+    #[test]
+    fn rate_regions_must_be_enabled_countries() {
+        let enabled: Vec<String> = vec!["IL".into(), "US".into()];
+        let mk = |regions: Vec<&str>| ShippingRateRequest {
+            label: "Std".into(),
+            amount_cents: 500,
+            currency: "usd".into(),
+            delivery_min_days: None,
+            delivery_max_days: None,
+            regions: regions.into_iter().map(String::from).collect(),
+            active: true,
+            ord: 0,
+        };
+        assert_eq!(validate_rate_body(&mk(vec!["il"]), &enabled).ok(), Some(r#"["IL"]"#.into()));
+        assert_eq!(validate_rate_body(&mk(vec!["*"]), &enabled).ok(), Some(r#"["*"]"#.into()));
+        // Valid ISO code, but the shop does not ship there.
+        assert!(validate_rate_body(&mk(vec!["GB"]), &enabled).is_err());
+        assert!(validate_rate_body(&mk(vec!["ILX"]), &enabled).is_err());
     }
 
     #[test]

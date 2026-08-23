@@ -1,3 +1,4 @@
+mod countries;
 mod docs;
 mod sites;
 mod website;
@@ -1330,6 +1331,7 @@ fn is_public_api_route(method: &Method, path: &str) -> bool {
         ["website", "pages", _] => get,
         ["website", "assets", _] => get,
         ["shop", "products"] | ["shop", "products", _] => get,
+        ["shop", "shipping_countries"] => get,
         ["shop", "checkout"] | ["shop", "webhook"] => post,
         ["contact"] => post,
         ["contact", "config"] => get,
@@ -3596,6 +3598,7 @@ async fn main() -> Result<()> {
         .route("/shop/{sku}", get(shop::handle_shop_page))
         // Public JSON API
         .route("/api/v1/shop/products", get(shop::handle_list_products))
+        .route("/api/v1/shop/shipping_countries", get(shop::handle_list_shipping_countries))
         .route("/api/v1/shop/products/{sku}", get(shop::handle_get_product))
         .route("/api/v1/shop/checkout", post(shop::handle_create_checkout_session))
         .route("/api/v1/shop/webhook", post(shop::handle_stripe_webhook))
@@ -3609,6 +3612,7 @@ async fn main() -> Result<()> {
             axum::routing::put(shop::handle_upsert_product)
                 .delete(shop::handle_delete_product),
         )
+        .route("/api/v1/shop/admin/countries", get(shop::handle_admin_list_countries))
         .route(
             "/api/v1/shop/admin/shipping_rates",
             get(shop::handle_list_shipping_rates_admin)

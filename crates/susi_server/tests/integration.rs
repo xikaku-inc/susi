@@ -2173,6 +2173,86 @@ fn test_webhook_respects_payment_status() {
     assert_eq!(order_status("cs_fail").as_deref(), Some("payment_failed"));
 }
 
+/// The shop's shipping destinations are admin-managed: adding a country in the
+/// dashboard is what makes it selectable on the storefront and usable as a
+/// shipping-rate region. Nothing is hardcoded to US/CA any more.
+#[test]
+fn test_shipping_countries_are_admin_managed() {
+    let server = TestServer::start();
+    let admin = server.admin_token();
+    let client = server.http();
+
+    let public_codes = || -> Vec<String> {
+        client
+            .get(format!("{}/shop/shipping_countries", server.api_url))
+            .send()
+            .expect("list countries")
+            .json::<Value>()
+            .expect("countries json")["countries"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|c| c["code"].as_str().map(String::from))
+            .collect()
+    };
+    let put_countries = |v: &str| {
+        client
+            .put(format!("{}/shop/admin/settings", server.api_url))
+            .bearer_auth(&admin)
+            .json(&json!({ "shipping_countries": v }))
+            .send()
+            .expect("put settings")
+    };
+    let post_rate = |regions: Value| {
+        client
+            .post(format!("{}/shop/admin/shipping_rates", server.api_url))
+            .bearer_auth(&admin)
+            .json(&json!({
+                "label": "Intl", "amount_cents": 2500, "currency": "usd", "regions": regions,
+            }))
+            .send()
+            .expect("post rate")
+    };
+
+    // Out of the box the shop serves US + CA, and Israel is refused.
+    assert_eq!(public_codes(), vec!["CA".to_string(), "US".to_string()]);
+    assert_eq!(post_rate(json!(["IL"])).status(), 400);
+
+    // The admin picker offers every destination Stripe accepts, and nothing
+    // Stripe would reject.
+    let catalogue = client
+        .get(format!("{}/shop/admin/countries", server.api_url))
+        .bearer_auth(&admin)
+        .send()
+        .expect("list catalogue")
+        .json::<Value>()
+        .expect("catalogue json")["countries"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let codes: Vec<&str> = catalogue.iter().filter_map(|c| c["code"].as_str()).collect();
+    assert!(codes.contains(&"IL"));
+    assert!(!codes.contains(&"KP"));
+
+    // Enabling Israel makes it public and unblocks an IL-scoped rate.
+    assert!(put_countries("US,CA,IL").status().is_success());
+    assert_eq!(
+        public_codes(),
+        vec!["CA".to_string(), "IL".to_string(), "US".to_string()],
+    );
+    assert!(post_rate(json!(["IL"])).status().is_success());
+
+    // Unsupported or empty selections are rejected, so the shop can never end
+    // up with a destination Stripe refuses or no destination at all.
+    assert_eq!(put_countries("US,KP").status(), 400);
+    assert_eq!(put_countries("").status(), 400);
+    assert_eq!(
+        public_codes(),
+        vec!["CA".to_string(), "IL".to_string(), "US".to_string()],
+    );
+}
+
 fn chrono_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

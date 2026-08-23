@@ -2418,9 +2418,20 @@ const SLUG_TO_SKU_PREFIXES = {
     'xicap-vision-pro-spatial-accessory': ['xicap-avp'],
 };
 
-const SHOP_COUNTRIES = [
-    ['US','United States'],['CA','Canada'],
-];
+// Destinations come from the shop's admin-managed list, fetched once per page.
+let shopCountries = null;
+let shopCountriesPromise = null;
+
+function loadShopCountries() {
+    if (shopCountries) return Promise.resolve(shopCountries);
+    if (!shopCountriesPromise) {
+        shopCountriesPromise = fetch(SHOP_API + '/shipping_countries')
+            .then(r => r.json())
+            .then(d => { shopCountries = d.countries || []; return shopCountries; })
+            .catch(() => { shopCountriesPromise = null; return []; });
+    }
+    return shopCountriesPromise;
+}
 
 function shopFmtMoney(cents, currency) {
     const amount = (cents / 100).toFixed(2);
@@ -2500,11 +2511,15 @@ function renderCart() {
     ensureCountrySelect();
 }
 
-function ensureCountrySelect() {
+async function ensureCountrySelect() {
     const sel = document.getElementById('cartCountry');
     if (!sel || sel.options.length) return;
-    const saved = localStorage.getItem('susi_ship_country') || 'US';
-    sel.innerHTML = SHOP_COUNTRIES.map(([c, n]) => '<option value="' + c + '"' + (c === saved ? ' selected' : '') + '>' + n + '</option>').join('');
+    const list = await loadShopCountries();
+    if (!list.length || sel.options.length) return;
+    // A previously saved country may since have been dropped from the list.
+    const saved = localStorage.getItem('susi_ship_country');
+    const pick = list.some(c => c.code === saved) ? saved : list[0].code;
+    sel.innerHTML = list.map(c => '<option value="' + c.code + '"' + (c.code === pick ? ' selected' : '') + '>' + escHtml(c.name) + '</option>').join('');
 }
 function persistShipCountry() {
     const sel = document.getElementById('cartCountry');
@@ -2526,7 +2541,7 @@ function closeCart() {
 async function checkout() {
     const cart = getCart();
     if (!cart.length) return;
-    const country = (document.getElementById('cartCountry') || {}).value || 'US';
+    const country = (document.getElementById('cartCountry') || {}).value || '';
     const btn = document.getElementById('checkoutBtn');
     const err = document.getElementById('cartError');
     err.style.display = 'none';

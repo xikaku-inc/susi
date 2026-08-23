@@ -509,6 +509,32 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
     border-top: 1px solid var(--border);
 }
 
+/* Shipping country picker */
+.country-picker {
+    max-height: 260px;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 10px 12px;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 2px 16px;
+}
+.country-picker label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0;
+    padding: 3px 0;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 400;
+    text-transform: none;
+    letter-spacing: 0;
+    color: var(--text);
+}
+.country-picker input[type="checkbox"] { width: auto; margin: 0; cursor: pointer; accent-color: var(--accent); }
+
 /* Search */
 #searchInput { min-width: 200px; }
 
@@ -1332,6 +1358,25 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
         </table>
     </div>
 
+    <div style="margin-top:40px;margin-bottom:14px;">
+        <h2 style="font-size:16px;font-weight:600;margin:0 0 14px;">Shipping Countries</h2>
+        <div class="card settings-card">
+            <div class="detail-body">
+                <div class="form-row">
+                    <label for="shopCountryFilter">Filter</label>
+                    <input type="search" id="shopCountryFilter" autocomplete="off" oninput="renderShopCountryPicker()">
+                </div>
+                <div class="form-row">
+                    <div id="shopCountryPicker" class="country-picker"></div>
+                </div>
+                <div id="shopCountryError" class="form-error" style="display:none;"></div>
+            </div>
+            <div class="form-footer">
+                <button class="primary" onclick="saveShopCountries()">Save countries</button>
+            </div>
+        </div>
+    </div>
+
     <div style="margin-top:40px;margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;">
         <h2 style="font-size:16px;font-weight:600;">Shipping Rates</h2>
         <button onclick="showShippingRateModal()">+ New Rate</button>
@@ -1929,7 +1974,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                 <div><label>Currency</label><input type="text" id="rateCurrency" value="usd" maxlength="3"></div>
             </div>
             <div class="form-row">
-                <label>Regions (US, CA, or * for both)</label>
+                <label>Regions (country codes, or * for all)</label>
                 <input type="text" id="rateRegions" value="*">
             </div>
             <div class="form-row" style="display:grid;grid-template-columns:1fr 1fr 100px;gap:12px;">
@@ -6352,7 +6397,61 @@ let editingRateId = null;      // null = create mode
 
 async function loadShop() {
     if (!roleIsAdmin(userRole)) return;
-    await Promise.all([loadShopProducts(), loadShopRates(), loadShopOrders(), loadShopSettings()]);
+    await Promise.all([loadShopProducts(), loadShopRates(), loadShopOrders(), loadShopSettings(), loadShopCountryCatalogue()]);
+}
+
+// ----- Shipping countries -----
+let shopAllCountries = [];
+let shopCountrySel = new Set();
+
+async function loadShopCountryCatalogue() {
+    if (shopAllCountries.length) { renderShopCountryPicker(); return; }
+    try {
+        const resp = await fetch(API + '/shop/admin/countries', { headers: authHeaders() });
+        if (!resp.ok) return;
+        shopAllCountries = (await resp.json()).countries || [];
+        renderShopCountryPicker();
+    } catch (e) {
+        // Non-fatal - the picker just stays empty.
+    }
+}
+
+function renderShopCountryPicker() {
+    const box = document.getElementById('shopCountryPicker');
+    if (!box || !shopAllCountries.length) return;
+    const q = (document.getElementById('shopCountryFilter').value || '').trim().toLowerCase();
+    // Selected first, so the current destinations stay visible while filtering.
+    const rows = shopAllCountries
+        .filter(c => !q || c.name.toLowerCase().includes(q) || c.code.toLowerCase() === q)
+        .sort((a, b) => {
+            const sa = shopCountrySel.has(a.code), sb = shopCountrySel.has(b.code);
+            return sa === sb ? a.name.localeCompare(b.name) : (sa ? -1 : 1);
+        });
+    box.innerHTML = rows.map(c =>
+        '<label><input type="checkbox" value="' + c.code + '"'
+        + (shopCountrySel.has(c.code) ? ' checked' : '')
+        + ' onchange="toggleShopCountry(this)">' + escHtml(c.name) + '</label>').join('');
+}
+
+function toggleShopCountry(el) {
+    if (el.checked) shopCountrySel.add(el.value); else shopCountrySel.delete(el.value);
+}
+
+async function saveShopCountries() {
+    const errEl = document.getElementById('shopCountryError');
+    errEl.style.display = 'none';
+    if (!shopCountrySel.size) { errEl.textContent = 'Select at least one shipping country'; errEl.style.display = ''; return; }
+    try {
+        const resp = await fetch(API + '/shop/admin/settings', {
+            method: 'PUT',
+            headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+            body: JSON.stringify({ shipping_countries: [...shopCountrySel].sort().join(',') }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) { errEl.textContent = data.error || ('HTTP ' + resp.status); errEl.style.display = ''; return; }
+        toast('Shipping countries saved', 'success');
+        renderShopCountryPicker();
+    } catch (e) { errEl.textContent = e.message; errEl.style.display = ''; }
 }
 
 async function loadShopSettings() {
@@ -6366,6 +6465,8 @@ async function loadShopSettings() {
         document.getElementById('shopSetCustomerEnabled').checked = (ce === '' || ce === '1' || ce === 'true' || ce == null);
         document.getElementById('shopSetSupport').value = s.support_contact || '';
         document.getElementById('shopSetThankYou').value = s.customer_thank_you_html || '';
+        shopCountrySel = new Set((s.shipping_countries || '').split(',').map(c => c.trim()).filter(Boolean));
+        renderShopCountryPicker();
         const hint = document.getElementById('shopSetEmailsHint');
         if (hint) {
             if (!s.notification_emails && s.notification_emails_fallback) {
@@ -6654,10 +6755,10 @@ async function saveRate() {
     errEl.style.display = 'none';
     const regionsRaw = document.getElementById('rateRegions').value;
     const regions = regionsRaw.split(',').map(s => s.trim()).filter(s => s.length > 0);
-    if (!regions.length) { errEl.textContent = 'At least one region required (US, CA, or * for both)'; errEl.style.display = ''; return; }
-    const allowed = new Set(['US', 'CA', '*']);
-    const bad = regions.find(r => !allowed.has(r.toUpperCase()));
-    if (bad) { errEl.textContent = 'Unsupported region "' + bad + '" - only US, CA, or * are allowed'; errEl.style.display = ''; return; }
+    if (!regions.length) { errEl.textContent = 'At least one region required (country codes, or * for all)'; errEl.style.display = ''; return; }
+    // Membership in the shop's shipping countries is enforced server-side.
+    const bad = regions.find(r => r !== '*' && !/^[A-Za-z]{2}$/.test(r));
+    if (bad) { errEl.textContent = 'Invalid region code "' + bad + '"'; errEl.style.display = ''; return; }
     const minDays = document.getElementById('rateMinDays').value;
     const maxDays = document.getElementById('rateMaxDays').value;
     const body = {
