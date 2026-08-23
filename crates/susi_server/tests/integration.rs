@@ -4364,6 +4364,7 @@ fn test_site_background_theme() {
             .send().expect("shell").text().unwrap();
         assert!(shell.contains(r#"<body class="has-bg" style="--bg-veil:72%">"#), "{} shell must carry the bg class with the default veil", host);
         assert!(shell.contains(r#"class="site-bg""#), "{} shell must inject the bg layer", host);
+        assert!(shell.contains("/static/bg.jpg?v=0"), "{} default bg must be version 0", host);
     }
 
     // An uploaded asset chosen via the bg_image setting overrides the
@@ -4396,6 +4397,12 @@ fn test_site_background_theme() {
         .send().expect("custom bg");
     assert_eq!(resp.headers()["content-type"].to_str().unwrap(), "image/jpeg");
     assert_eq!(resp.bytes().unwrap().as_ref(), b"fake-jpeg-bytes");
+    // The shell's bg URL is re-versioned so browsers fetch the change at once.
+    let shell = http.get(format!("{}/site", server.url))
+        .header("Host", "xikaku.com")
+        .send().expect("shell").text().unwrap();
+    assert!(shell.contains("/static/bg.jpg?v="), "shell must reference a versioned bg URL");
+    assert!(!shell.contains("/static/bg.jpg?v=0"), "custom bg must not use the default version");
     // The other site keeps its compiled-in default.
     let resp = http.get(format!("{}/static/bg.jpg", server.url))
         .header("Host", "www.lp-research.com")

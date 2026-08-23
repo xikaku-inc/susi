@@ -932,13 +932,14 @@ fn cached_image(
     (h, bytes).into_response()
 }
 
-// Admin-swappable artwork: short-lived cache so a change propagates quickly.
+// Admin-swappable artwork: the shell references it through a versioned URL
+// (see bg_version), so a long browser cache is safe.
 fn cached_image_owned(
     req_headers: &HeaderMap,
     content_type: &'static str,
     bytes: Vec<u8>,
 ) -> axum::response::Response {
-    let (h, matched) = image_headers(req_headers, content_type, "public, max-age=300", &bytes);
+    let (h, matched) = image_headers(req_headers, content_type, "public, max-age=86400", &bytes);
     if matched {
         return (StatusCode::NOT_MODIFIED, h).into_response();
     }
@@ -972,6 +973,26 @@ pub async fn handle_favicon_180_png(headers: HeaderMap) -> impl IntoResponse {
 pub async fn handle_favicon_ico(headers: HeaderMap) -> impl IntoResponse {
     cached_image(&headers, "image/x-icon", brand_site(&headers).favicon_ico)
 }
+/// Cache-busting version for the bg URL: changes whenever the served
+/// background changes (upload, re-upload, revert). "0" = compiled default.
+fn bg_version(state: &AppState, site: &SiteConfig, custom: &str) -> String {
+    if custom.is_empty() {
+        return "0".into();
+    }
+    use sha2::{Digest, Sha256};
+    let (len, mtime) = std::fs::metadata(assets_dir(state, site).join(custom))
+        .map(|m| {
+            let t = m
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_secs());
+            (m.len(), t)
+        })
+        .unwrap_or((0, 0));
+    hex::encode(&Sha256::digest(format!("{custom}|{len}|{mtime}"))[..4])
+}
+
 /// The uploaded per-site background (the `bg_image` site setting), if any.
 fn custom_bg_name(state: &AppState, site: &SiteConfig) -> Option<String> {
     let db = state.db.lock();
@@ -1872,10 +1893,13 @@ pub(crate) fn render_shell(state: &Arc<AppState>, site: &SiteConfig, seo_head: &
         return html.into();
     }
     let veil = veil.parse::<u8>().ok().filter(|v| *v <= 100).unwrap_or(72);
+    // The versioned URL busts browser caches the moment the bg changes; the
+    // inline style overrides only background-image, keeping the CSS sizing.
     let body = format!(
-        r#"<body class="has-bg{}" style="--bg-veil:{}%"><div class="site-bg" aria-hidden="true"></div>"#,
+        r#"<body class="has-bg{}" style="--bg-veil:{}%"><div class="site-bg" aria-hidden="true" style="background-image:url('/static/bg.jpg?v={}')"></div>"#,
         if parallax == "1" { " bg-parallax" } else { "" },
         veil,
+        bg_version(state, site, &custom_bg),
     );
     html.replacen("<body>", &body, 1).into()
 }
