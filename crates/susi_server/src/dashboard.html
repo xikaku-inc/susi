@@ -1819,27 +1819,44 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
             <div class="detail-body">
                 <div class="form-row">
                     <label for="siteSetGaId">Google Analytics Measurement ID</label>
-                    <input type="text" id="siteSetGaId">
+                    <input type="text" id="siteSetGaId" autocomplete="off">
                 </div>
                 <div class="form-row">
                     <label for="siteSetAdsId">Google Ads Conversion ID</label>
-                    <input type="text" id="siteSetAdsId">
+                    <input type="text" id="siteSetAdsId" autocomplete="off">
                 </div>
                 <div class="form-row">
                     <label for="siteSetAdsLabelContact">Google Ads conversion label - contact form</label>
-                    <input type="text" id="siteSetAdsLabelContact">
+                    <input type="text" id="siteSetAdsLabelContact" autocomplete="off">
                 </div>
                 <div class="form-row">
                     <label for="siteSetAdsLabelPurchase">Google Ads conversion label - shop purchase</label>
-                    <input type="text" id="siteSetAdsLabelPurchase">
+                    <input type="text" id="siteSetAdsLabelPurchase" autocomplete="off">
                 </div>
                 <div class="form-row">
                     <label for="siteSetRedditPixelId">Reddit Pixel ID</label>
-                    <input type="text" id="siteSetRedditPixelId">
+                    <input type="text" id="siteSetRedditPixelId" autocomplete="off">
                 </div>
                 <div class="form-row">
                     <label for="siteSetNavStructure">Sidebar navigation groups (JSON)</label>
                     <textarea id="siteSetNavStructure" rows="6" spellcheck="false" style="font-family:monospace;font-size:12px;"></textarea>
+                </div>
+                <div class="form-row">
+                    <label>Background image</label>
+                    <div style="display:flex;gap:8px;align-items:center;">
+                        <button type="button" onclick="document.getElementById('siteSetBgFile').click()">Upload…</button>
+                        <button type="button" id="siteSetBgRemove" onclick="removeSiteBg()" style="display:none;">Remove</button>
+                        <span id="siteSetBgName" style="font-size:12px;"></span>
+                        <input type="file" id="siteSetBgFile" accept="image/*" style="display:none;" onchange="pickSiteBg(this.files[0]);this.value='';">
+                    </div>
+                </div>
+                <div class="form-row">
+                    <label for="siteSetBgVeil">Background transparency (%)</label>
+                    <input type="text" id="siteSetBgVeil" inputmode="numeric" autocomplete="off" style="width:90px;">
+                </div>
+                <div class="toggle-row">
+                    <input type="checkbox" id="siteSetBgParallax">
+                    <label for="siteSetBgParallax">Background parallax</label>
                 </div>
                 <div id="siteSetError" class="form-error" style="display:none;"></div>
             </div>
@@ -6515,9 +6532,33 @@ async function loadSiteSettings() {
         document.getElementById('siteSetAdsLabelPurchase').value = s.google_ads_label_purchase || '';
         document.getElementById('siteSetRedditPixelId').value = s.reddit_pixel_id || '';
         document.getElementById('siteSetNavStructure').value = s.nav_structure || '';
+        siteBgImage = s.bg_image || '';
+        renderSiteBgRow();
+        document.getElementById('siteSetBgVeil').value = s.bg_veil || '72';
+        document.getElementById('siteSetBgParallax').checked = s.bg_parallax === '1';
     } catch (e) {
         // Non-fatal - settings just won't pre-fill.
     }
+}
+
+// The chosen background asset name; saved with the other site settings.
+let siteBgImage = '';
+function renderSiteBgRow() {
+    document.getElementById('siteSetBgName').textContent = siteBgImage;
+    document.getElementById('siteSetBgRemove').style.display = siteBgImage ? '' : 'none';
+}
+async function pickSiteBg(file) {
+    if (!file) return;
+    try {
+        const data = await uploadWebsiteAsset(file);
+        if (!data) return;
+        siteBgImage = data.name;
+        renderSiteBgRow();
+    } catch (e) { toast('Upload failed: ' + e.message, 'error'); }
+}
+function removeSiteBg() {
+    siteBgImage = '';
+    renderSiteBgRow();
 }
 
 async function saveSiteSettings() {
@@ -6535,6 +6576,9 @@ async function saveSiteSettings() {
         google_ads_label_purchase: document.getElementById('siteSetAdsLabelPurchase').value.trim(),
         reddit_pixel_id: document.getElementById('siteSetRedditPixelId').value.trim(),
         nav_structure: navRaw,
+        bg_image: siteBgImage,
+        bg_veil: document.getElementById('siteSetBgVeil').value.trim(),
+        bg_parallax: document.getElementById('siteSetBgParallax').checked ? '1' : '',
     };
     try {
         const resp = await fetch(API + '/site/admin/settings' + wsQ(), {

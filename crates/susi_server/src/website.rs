@@ -849,14 +849,9 @@ pub(crate) fn seed_legal_pages(state: &Arc<AppState>) {
     invalidate_page_cache();
 }
 
-/// Embedded default-site brand assets, served at /static/* (and /favicon.ico).
-const LOGO_PNG: &[u8] = include_bytes!("assets/xikaku-logo.png");
-const LOGO_DARK_PNG: &[u8] = include_bytes!("assets/xikaku-logo-dark.png");
+/// Logos and favicons live on the site (see sites.rs); the social card is
+/// still shared until each site has its own.
 const OG_IMAGE_PNG: &[u8] = include_bytes!("assets/xikaku-og-image.png");
-const ICON_PNG: &[u8] = include_bytes!("assets/xikaku-icon.png");
-const FAVICON_32_PNG: &[u8] = include_bytes!("assets/xikaku-favicon-32.png");
-const FAVICON_180_PNG: &[u8] = include_bytes!("assets/xikaku-favicon-180.png");
-const FAVICON_ICO: &[u8] = include_bytes!("assets/favicon.ico");
 
 // Per-slug rendered HTML cache. The full SSR pipeline (DB reads, two pulldown
 // passes, JSON-LD format!, three replacen over a 100 KB shell) takes hundreds
@@ -903,20 +898,106 @@ pub fn invalidate_page_cache() {
 
 // Returns the static byte slice unchanged - axum's IntoResponse for
 // `&'static [u8]` wraps it via `Body::from_static`, so no per-request copy.
-fn cached_image(content_type: &'static str, bytes: &'static [u8]) -> (HeaderMap, &'static [u8]) {
+// Brand artwork does change (a logo swap once stranded browsers on the
+// previous image for a day under `max-age=86400, immutable`), so the cache
+// is short-lived and revalidates by ETag after that.
+fn image_headers(
+    req_headers: &HeaderMap,
+    content_type: &'static str,
+    cache_control: &'static str,
+    bytes: &[u8],
+) -> (HeaderMap, bool) {
+    use sha2::{Digest, Sha256};
+    let etag = format!("\"{}\"", hex::encode(&Sha256::digest(bytes)[..8]));
     let mut h = HeaderMap::new();
     h.insert(header::CONTENT_TYPE, content_type.parse().unwrap());
-    h.insert(header::CACHE_CONTROL, "public, max-age=86400, immutable".parse().unwrap());
-    (h, bytes)
+    h.insert(header::CACHE_CONTROL, cache_control.parse().unwrap());
+    h.insert(header::ETAG, etag.parse().unwrap());
+    let matched = req_headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .map_or(false, |v| v.split(',').any(|t| t.trim().trim_start_matches("W/") == etag));
+    (h, matched)
 }
 
-pub async fn handle_logo_png() -> impl IntoResponse { cached_image("image/png", LOGO_PNG) }
-pub async fn handle_logo_dark_png() -> impl IntoResponse { cached_image("image/png", LOGO_DARK_PNG) }
-pub async fn handle_og_image_png() -> impl IntoResponse { cached_image("image/png", OG_IMAGE_PNG) }
-pub async fn handle_icon_png() -> impl IntoResponse { cached_image("image/png", ICON_PNG) }
-pub async fn handle_favicon_32_png() -> impl IntoResponse { cached_image("image/png", FAVICON_32_PNG) }
-pub async fn handle_favicon_180_png() -> impl IntoResponse { cached_image("image/png", FAVICON_180_PNG) }
-pub async fn handle_favicon_ico() -> impl IntoResponse { cached_image("image/x-icon", FAVICON_ICO) }
+fn cached_image(
+    req_headers: &HeaderMap,
+    content_type: &'static str,
+    bytes: &'static [u8],
+) -> axum::response::Response {
+    let (h, matched) = image_headers(req_headers, content_type, "public, max-age=3600", bytes);
+    if matched {
+        return (StatusCode::NOT_MODIFIED, h).into_response();
+    }
+    (h, bytes).into_response()
+}
+
+// Admin-swappable artwork: short-lived cache so a change propagates quickly.
+fn cached_image_owned(
+    req_headers: &HeaderMap,
+    content_type: &'static str,
+    bytes: Vec<u8>,
+) -> axum::response::Response {
+    let (h, matched) = image_headers(req_headers, content_type, "public, max-age=300", &bytes);
+    if matched {
+        return (StatusCode::NOT_MODIFIED, h).into_response();
+    }
+    (h, bytes).into_response()
+}
+
+/// Brand images are per site: the paths are shared, the bytes come from the
+/// site the Host header resolves to (the dashboard host gets the default).
+fn brand_site(headers: &HeaderMap) -> &'static SiteConfig {
+    sites::site_from_headers(headers).unwrap_or_else(sites::default_site)
+}
+
+pub async fn handle_logo_png(headers: HeaderMap) -> impl IntoResponse {
+    cached_image(&headers, "image/png", brand_site(&headers).logo_png)
+}
+pub async fn handle_logo_dark_png(headers: HeaderMap) -> impl IntoResponse {
+    cached_image(&headers, "image/png", brand_site(&headers).logo_dark_png)
+}
+pub async fn handle_og_image_png(headers: HeaderMap) -> impl IntoResponse {
+    cached_image(&headers, "image/png", OG_IMAGE_PNG)
+}
+pub async fn handle_icon_png(headers: HeaderMap) -> impl IntoResponse {
+    cached_image(&headers, "image/png", brand_site(&headers).icon_png)
+}
+pub async fn handle_favicon_32_png(headers: HeaderMap) -> impl IntoResponse {
+    cached_image(&headers, "image/png", brand_site(&headers).favicon_32_png)
+}
+pub async fn handle_favicon_180_png(headers: HeaderMap) -> impl IntoResponse {
+    cached_image(&headers, "image/png", brand_site(&headers).favicon_180_png)
+}
+pub async fn handle_favicon_ico(headers: HeaderMap) -> impl IntoResponse {
+    cached_image(&headers, "image/x-icon", brand_site(&headers).favicon_ico)
+}
+/// The uploaded per-site background (the `bg_image` site setting), if any.
+fn custom_bg_name(state: &AppState, site: &SiteConfig) -> Option<String> {
+    let db = state.db.lock();
+    db.get_site_setting(&sites::setting_key(site, SETTING_BG_IMAGE))
+        .ok()
+        .flatten()
+        .filter(|v| !v.is_empty())
+}
+
+pub async fn handle_bg_jpg(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    let site = brand_site(&headers);
+    if let Some(name) = custom_bg_name(&state, site) {
+        if safe_filename(&name).is_ok() {
+            if let Ok(bytes) = std::fs::read(assets_dir(&state, site).join(&name)) {
+                return cached_image_owned(&headers, content_type_for(&name), bytes);
+            }
+        }
+    }
+    if site.bg_image.is_empty() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    cached_image(&headers, "image/jpeg", site.bg_image)
+}
 
 /// Build the canonical URL for a website page. The home slug renders as the
 /// bare domain (`https://xikaku.com/`); other slugs render as `/{slug}`.
@@ -1466,6 +1547,12 @@ fn render_seo_head(
     // at module init in `sites.rs`.
     let org_jsonld: &str = sites::org_jsonld(site);
 
+    // Per-page hero image, falling back to the site's social card; a site
+    // without one omits the image tags entirely.
+    let og_image = og_image_override
+        .map(str::to_string)
+        .or_else(|| (!site.og_image_url.is_empty()).then(|| site.og_image_url.to_string()));
+
     // Per-page schema: WebSite (with sitelinks search action stub) for the
     // home page, BlogPosting for posts, WebPage for everything else. This
     // matches what Google's structured-data parser expects and powers rich
@@ -1490,11 +1577,18 @@ fn render_seo_head(
         } else {
             format!(r#","logo":{{"@type":"ImageObject","url":"{}"}}"#, html_escape(site.logo_url))
         };
+        // Google's Article rich result wants an image on the BlogPosting;
+        // reuse the page's og:image so both channels stay in sync.
+        let image_ld = match og_image.as_deref() {
+            Some(img) => format!(r#","image":"{}""#, html_escape(img)),
+            None => String::new(),
+        };
         format!(
-            r#"{{"@context":"https://schema.org","@type":"BlogPosting","headline":"{title}","description":"{desc}","url":"{url}","mainEntityOfPage":{{"@type":"WebPage","@id":"{url}"}},"datePublished":"{published}","dateModified":"{date}","author":{author_ld},"publisher":{{"@type":"Organization","name":"{site_name}","url":"{base}"{publisher_logo}}}}}"#,
+            r#"{{"@context":"https://schema.org","@type":"BlogPosting","headline":"{title}","description":"{desc}","url":"{url}"{image_ld},"mainEntityOfPage":{{"@type":"WebPage","@id":"{url}"}},"datePublished":"{published}","dateModified":"{date}","author":{author_ld},"publisher":{{"@type":"Organization","name":"{site_name}","url":"{base}"{publisher_logo}}}}}"#,
             title = html_escape(page_title),
             desc = html_escape(description),
             url = html_escape(&canonical),
+            image_ld = image_ld,
             published = html_escape(published),
             date = html_escape(&date_modified),
             author_ld = author_ld,
@@ -1529,11 +1623,6 @@ fn render_seo_head(
     // family with one Offer per variant.
     let product_blocks = build_product_jsonld(site, slug, products);
 
-    // Per-page hero image, falling back to the site's social card; a site
-    // without one omits the image tags entirely.
-    let og_image = og_image_override
-        .map(str::to_string)
-        .or_else(|| (!site.og_image_url.is_empty()).then(|| site.og_image_url.to_string()));
     // Per-page hero image keeps standard 1200x630 dimensions only when we
     // fall back to the bundled site card; for body-derived images we omit
     // the dimensions to avoid lying about the source image.
@@ -1692,14 +1781,32 @@ fn site_config_script(site: &SiteConfig) -> String {
     )
 }
 
-/// Inject head + body into the compiled-in shell.
+/// Inject head + body into the compiled-in shell. A site with background
+/// artwork (uploaded or compiled-in) gets the photo layer and the veil
+/// styles keyed on it.
 pub(crate) fn render_shell(state: &Arc<AppState>, site: &SiteConfig, seo_head: &str, body_html: &str) -> Bytes {
-    WEBSITE_HTML
+    let html = WEBSITE_HTML
         .replacen("<!--SEO_HEAD-->", seo_head, 1)
         .replacen("<!--SITE_CONFIG-->", &site_config_script(site), 1)
         .replacen("<!--ANALYTICS-->", &analytics_head(state, site), 1)
-        .replacen("<!--BODY_CONTENT-->", body_html, 1)
-        .into()
+        .replacen("<!--BODY_CONTENT-->", body_html, 1);
+    let (custom_bg, veil, parallax) = {
+        let db = state.db.lock();
+        let get = |k: &str| {
+            db.get_site_setting(&sites::setting_key(site, k)).ok().flatten().unwrap_or_default()
+        };
+        (get(SETTING_BG_IMAGE), get(SETTING_BG_VEIL), get(SETTING_BG_PARALLAX))
+    };
+    if site.bg_image.is_empty() && custom_bg.is_empty() {
+        return html.into();
+    }
+    let veil = veil.parse::<u8>().ok().filter(|v| *v <= 100).unwrap_or(72);
+    let body = format!(
+        r#"<body class="has-bg{}" style="--bg-veil:{}%"><div class="site-bg" aria-hidden="true"></div>"#,
+        if parallax == "1" { " bg-parallax" } else { "" },
+        veil,
+    );
+    html.replacen("<body>", &body, 1).into()
 }
 
 fn render_website(
@@ -2117,6 +2224,12 @@ pub const SETTING_GOOGLE_ADS_LABEL_CONTACT: &str = "google_ads_label_contact";
 pub const SETTING_GOOGLE_ADS_LABEL_PURCHASE: &str = "google_ads_label_purchase";
 pub const SETTING_REDDIT_PIXEL_ID: &str = "reddit_pixel_id";
 pub const SETTING_NAV_STRUCTURE: &str = "nav_structure";
+/// Asset file name serving as the site background; empty = compiled-in default.
+pub const SETTING_BG_IMAGE: &str = "bg_image";
+/// Veil strength over the background photo, 0-100 percent; empty = 72.
+pub const SETTING_BG_VEIL: &str = "bg_veil";
+/// "1" = the background drifts opposite to the scroll direction.
+pub const SETTING_BG_PARALLAX: &str = "bg_parallax";
 
 /// Sidebar nav config: JSON array of groups rendered between the ungrouped
 /// pages and nothing else. Items are page slugs, plus the pseudo-slugs
@@ -2487,6 +2600,9 @@ const KNOWN_SITE_SETTING_KEYS: &[&str] = &[
     SETTING_GOOGLE_ADS_LABEL_PURCHASE,
     SETTING_REDDIT_PIXEL_ID,
     SETTING_NAV_STRUCTURE,
+    SETTING_BG_IMAGE,
+    SETTING_BG_VEIL,
+    SETTING_BG_PARALLAX,
 ];
 
 pub async fn handle_admin_get_site_settings(
@@ -2535,6 +2651,21 @@ pub async fn handle_admin_put_site_settings(
                     StatusCode::BAD_REQUEST,
                     "nav_structure must be a JSON array of {\"title\", \"items\"} groups (max 4 KB)",
                 ));
+            }
+        } else if k == SETTING_BG_IMAGE {
+            if !trimmed.is_empty() {
+                safe_filename(trimmed)?;
+                if !assets_dir(&state, site).join(trimmed).is_file() {
+                    return Err(error_response(StatusCode::BAD_REQUEST, "Unknown asset"));
+                }
+            }
+        } else if k == SETTING_BG_VEIL {
+            if !trimmed.is_empty() && !trimmed.parse::<u8>().map_or(false, |v| v <= 100) {
+                return Err(error_response(StatusCode::BAD_REQUEST, "bg_veil must be 0-100"));
+            }
+        } else if k == SETTING_BG_PARALLAX {
+            if !matches!(trimmed, "" | "0" | "1") {
+                return Err(error_response(StatusCode::BAD_REQUEST, "bg_parallax must be \"1\" or empty"));
             }
         } else if !trimmed.is_empty() && !is_valid_analytics_id(trimmed) {
             // The remaining site settings are analytics tag IDs / labels.
@@ -3359,9 +3490,15 @@ mod tests {
     #[test]
     fn analytics_head_banner_prefix_uses_site_hosts() {
         let out = render_analytics_head(sites::default_site(), None, Some("AW-18330845601"), None, None, None);
-        assert!(out.contains(r#"["xikaku.com","www.xikaku.com"].indexOf(location.host)"#), "got: {}", out);
+        assert!(
+            out.contains(r#"["xikaku.com","www.xikaku.com","staging.xikaku.com"].indexOf(location.host)"#),
+            "got: {}", out
+        );
         let out = render_analytics_head(sites::site_by_id("lpr").unwrap(), None, Some("AW-18330845601"), None, None, None);
-        assert!(out.contains(r#"["lp-research.com","www.lp-research.com"].indexOf(location.host)"#), "got: {}", out);
+        assert!(
+            out.contains(r#"["lp-research.com","www.lp-research.com","staging.lp-research.com"].indexOf(location.host)"#),
+            "got: {}", out
+        );
     }
 
     #[test]

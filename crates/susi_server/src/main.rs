@@ -3251,6 +3251,7 @@ async fn main() -> Result<()> {
         .route("/static/icon.png", get(website::handle_icon_png))
         .route("/static/favicon-32.png", get(website::handle_favicon_32_png))
         .route("/static/favicon-180.png", get(website::handle_favicon_180_png))
+        .route("/static/bg.jpg", get(website::handle_bg_jpg))
         .route("/favicon.ico", get(website::handle_favicon_ico))
         // SEO / AI-crawler endpoints
         .route("/robots.txt", get(website::handle_robots_txt))

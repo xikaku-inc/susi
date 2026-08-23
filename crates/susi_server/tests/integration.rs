@@ -4052,6 +4052,7 @@ fn test_blog_posts() {
     let ssr = http.get(format!("{}/site/blog/first-post", server.url))
         .send().expect("post ssr").text().unwrap();
     assert!(ssr.contains(r#""@type":"BlogPosting""#), "missing BlogPosting: {}", &ssr[..600]);
+    assert!(ssr.contains(r#""image":"https://xikaku.com/static/og-image.png""#), "BlogPosting image missing");
     assert!(ssr.contains(r#"href="https://xikaku.com/blog/first-post""#), "wrong canonical");
     assert!(ssr.contains(r#"content="article""#), "og:type must be article");
     assert!(ssr.contains(r#"article:published_time" content="2026-07-01""#));
@@ -4322,6 +4323,104 @@ fn test_redirect_map_and_bulk_import() {
         .json(&json!({ "from_path": "/x/", "to_path": "/y" }))
         .send().expect("anon upsert");
     assert_eq!(resp.status().as_u16(), 401);
+}
+
+/// Photo background theme: /static/bg.jpg serves the per-host artwork and the
+/// shell opts into the frosted-panel layer on both marketing hosts.
+#[test]
+fn test_site_background_theme() {
+    let server = TestServer::start();
+    let http = reqwest::blocking::Client::new();
+
+    for host in ["xikaku.com", "www.lp-research.com"] {
+        let resp = http.get(format!("{}/static/bg.jpg", server.url))
+            .header("Host", host)
+            .send().expect("bg image");
+        assert_eq!(resp.status().as_u16(), 200, "{} must serve bg.jpg", host);
+        assert_eq!(resp.headers()["content-type"].to_str().unwrap(), "image/jpeg");
+
+        let shell = http.get(format!("{}/site", server.url))
+            .header("Host", host)
+            .send().expect("shell").text().unwrap();
+        assert!(shell.contains(r#"<body class="has-bg" style="--bg-veil:72%">"#), "{} shell must carry the bg class with the default veil", host);
+        assert!(shell.contains(r#"class="site-bg""#), "{} shell must inject the bg layer", host);
+    }
+
+    // An uploaded asset chosen via the bg_image setting overrides the
+    // compiled-in default, per site.
+    let token = server.admin_token();
+    let boundary = "XBGBOUNDARY";
+    let mut mp = Vec::new();
+    mp.extend_from_slice(format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"custom-bg.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n"
+    ).as_bytes());
+    mp.extend_from_slice(b"fake-jpeg-bytes");
+    mp.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    let resp = http
+        .post(format!("{}/website/assets?site=xikaku", server.api_url))
+        .bearer_auth(&token)
+        .header("content-type", format!("multipart/form-data; boundary={boundary}"))
+        .body(mp)
+        .send().expect("upload bg asset");
+    assert!(resp.status().is_success(), "upload: {}", resp.text().unwrap_or_default());
+
+    let resp = http
+        .put(format!("{}/site/admin/settings?site=xikaku", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "bg_image": "custom-bg.jpg" }))
+        .send().expect("set bg_image");
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let resp = http.get(format!("{}/static/bg.jpg", server.url))
+        .header("Host", "xikaku.com")
+        .send().expect("custom bg");
+    assert_eq!(resp.headers()["content-type"].to_str().unwrap(), "image/jpeg");
+    assert_eq!(resp.bytes().unwrap().as_ref(), b"fake-jpeg-bytes");
+    // The other site keeps its compiled-in default.
+    let resp = http.get(format!("{}/static/bg.jpg", server.url))
+        .header("Host", "www.lp-research.com")
+        .send().expect("lpr bg");
+    assert!(resp.bytes().unwrap().len() > 100_000, "lpr must keep the default");
+
+    // A name that is not an uploaded asset is rejected.
+    let resp = http
+        .put(format!("{}/site/admin/settings?site=xikaku", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "bg_image": "missing.png" }))
+        .send().expect("set missing");
+    assert_eq!(resp.status().as_u16(), 400);
+
+    // Clearing the setting reverts to the compiled-in default.
+    let resp = http
+        .put(format!("{}/site/admin/settings?site=xikaku", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "bg_image": "" }))
+        .send().expect("clear bg_image");
+    assert_eq!(resp.status().as_u16(), 200);
+    let resp = http.get(format!("{}/static/bg.jpg", server.url))
+        .header("Host", "xikaku.com")
+        .send().expect("default bg");
+    assert!(resp.bytes().unwrap().len() > 100_000, "xikaku must be back on the default");
+
+    // Veil strength and parallax reach the shell; invalid values are rejected.
+    let resp = http
+        .put(format!("{}/site/admin/settings?site=xikaku", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "bg_veil": "40", "bg_parallax": "1" }))
+        .send().expect("set veil+parallax");
+    assert_eq!(resp.status().as_u16(), 200);
+    let shell = http.get(format!("{}/site", server.url))
+        .header("Host", "xikaku.com")
+        .send().expect("shell").text().unwrap();
+    assert!(shell.contains(r#"<body class="has-bg bg-parallax" style="--bg-veil:40%">"#), "custom veil + parallax must reach the shell");
+    for bad in [json!({ "bg_veil": "150" }), json!({ "bg_veil": "abc" }), json!({ "bg_parallax": "yes" })] {
+        let resp = http
+            .put(format!("{}/site/admin/settings?site=xikaku", server.api_url))
+            .bearer_auth(&token)
+            .json(&bad)
+            .send().expect("bad setting");
+        assert_eq!(resp.status().as_u16(), 400, "{} must be rejected", bad);
+    }
 }
 
 /// Blog bylines: a post credits a user account, the public site shows that

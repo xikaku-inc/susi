@@ -17,8 +17,8 @@
 })();
 </script>
 <link rel="icon" href="/favicon.ico" sizes="32x32">
-<link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32.png">
-<link rel="apple-touch-icon" sizes="180x180" href="/static/favicon-180.png">
+<link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32.png?v=2">
+<link rel="apple-touch-icon" sizes="180x180" href="/static/favicon-180.png?v=2">
 <link rel="stylesheet" href="/docs/easymde.css">
 <script src="/docs/easymde.js" defer></script>
 <style>
@@ -66,6 +66,38 @@ body {
     line-height: 1.43;
     min-height: 100vh;
 }
+/* Photo background theme (SiteConfig.bg_image): one fixed image layer under
+   the whole page with a single theme-tinted veil over it - the one global
+   transparency knob (the color-mix percentage below). All surfaces above stay
+   transparent; browsers without color-mix keep the flat opaque theme. */
+.site-bg {
+    position: fixed; inset: 0; z-index: -1;
+    background: var(--bg) url('/static/bg.jpg') center / cover no-repeat;
+}
+.site-bg::after {
+    content: ""; position: absolute; inset: 0;
+    background: var(--bg);
+    background: color-mix(in srgb, var(--bg) var(--bg-veil, 72%), transparent);
+}
+/* Parallax: overscan the image layer so it can drift with the scroll
+   without exposing an edge. */
+body.bg-parallax .site-bg {
+    inset: -120px 0;
+    will-change: transform;
+}
+body.has-bg { background: transparent; }
+body.has-bg .header,
+body.has-bg .sidebar,
+body.has-bg .toc-rail,
+body.has-bg .site-footer { background: transparent; }
+/* Scrolling happens inside .page-scroll, clipped below the top bar, so
+   content never passes under it. The sticky rails re-anchor to the
+   container top; sticky admin bars anchor to 0 instead of the header. */
+body.has-bg { height: 100dvh; overflow: hidden; }
+body.has-bg .page-scroll { height: calc(100dvh - 56px); overflow-y: auto; }
+body.has-bg .sidebar,
+body.has-bg .toc-rail { top: 0; }
+body.has-bg .editor-toolbar { top: 0; }
 .header {
     height: 56px;
     border-bottom: 1px solid var(--border);
@@ -599,6 +631,13 @@ body {
     .layout.no-sidebar .sidebar { display: none; }
     .nav-toggle { display: inline-flex; }
     .content { padding: 20px 16px; max-width: 100%; }
+    /* The slide-in sidebar overlays content and needs its own backing. */
+    body.has-bg .sidebar {
+        background: var(--bg);
+        background: color-mix(in srgb, var(--bg) 88%, transparent);
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
+    }
     .content h1 { font-size: 26px; }
     .content h2 { font-size: 19px; }
     .header { padding: 0 12px; }
@@ -691,8 +730,8 @@ body {
         </svg>
     </button>
     <a href="/site" class="brand" aria-label="Xikaku">
-        <img class="logo-dark" src="/static/logo-dark.png" alt="Xikaku">
-        <img class="logo-light" src="/static/logo.png" alt="Xikaku">
+        <img class="logo-dark" src="/static/logo-dark.png?v=2" alt="">
+        <img class="logo-light" src="/static/logo.png?v=3" alt="">
     </a>
     <div class="header-right">
         <button id="editBtn" class="btn" onclick="enterEditMode()" style="display:none;">Edit</button>
@@ -704,6 +743,7 @@ body {
     </div>
 </div>
 
+<div class="page-scroll" id="pageScroll">
 <div class="layout no-sidebar no-toc" id="layout">
     <aside class="sidebar" id="sidebar"></aside>
     <main class="content" id="content"><!--BODY_CONTENT--></main>
@@ -715,6 +755,7 @@ body {
     <a href="/imprint" data-site-link="/imprint">Imprint</a>
     <a href="#" data-cookie-settings style="display:none">Cookie settings</a>
 </footer>
+</div>
 
 <div id="navOverlay" class="nav-overlay" onclick="closeSidebar()"></div>
 
@@ -788,6 +829,26 @@ if (window.matchMedia) {
         if ((localStorage.getItem('susi_theme') || 'system') === 'system') applyTheme('system');
     });
 }
+
+// Light parallax: the photo drifts opposite to the scroll, spending its
+// overscan across the page's full scroll range.
+(function () {
+    const bg = document.querySelector('.site-bg');
+    const ps = document.getElementById('pageScroll');
+    if (!bg || !ps || !document.body.classList.contains('bg-parallax')) return;
+    if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    const OVERSCAN = 120;
+    let ticking = false;
+    function apply() {
+        ticking = false;
+        const max = ps.scrollHeight - ps.clientHeight;
+        const y = max > 0 ? (ps.scrollTop / max) * OVERSCAN : 0;
+        bg.style.transform = 'translate3d(0,' + y.toFixed(1) + 'px,0)';
+    }
+    ps.addEventListener('scroll', () => {
+        if (!ticking) { ticking = true; requestAnimationFrame(apply); }
+    }, { passive: true });
+})();
 
 const API = '/api/v1';
 
@@ -2030,6 +2091,13 @@ function scrollToAnchor(id) {
     if (el) el.scrollIntoView({ block: 'start' });
 }
 
+// The bg theme scrolls inside #pageScroll instead of the window.
+function resetScroll() {
+    window.scrollTo(0, 0);
+    const ps = document.getElementById('pageScroll');
+    if (ps) ps.scrollTop = 0;
+}
+
 function navigateTo(slug) {
     const target = (slug ? pageHref(slug) : siteRootHref()) + adClickQuery();
     if (location.pathname + location.search !== target) {
@@ -2039,7 +2107,7 @@ function navigateTo(slug) {
         history.replaceState({}, '', target);
     }
     route();
-    window.scrollTo(0, 0);
+    resetScroll();
 }
 
 async function route() {
@@ -2104,7 +2172,7 @@ document.addEventListener('click', (e) => {
             history.pushState({}, '', href);
         }
         route();
-        window.scrollTo(0, 0);
+        resetScroll();
         return;
     }
     // Blog post links: /blog/{slug} or /site/blog/{slug}. The RSS feed is a
@@ -2125,7 +2193,7 @@ document.addEventListener('click', (e) => {
         if (legacy[2]) {
             history.pushState({}, '', href);
             route();
-            window.scrollTo(0, 0);
+            resetScroll();
         } else {
             navigateTo(decodeURIComponent(legacy[1]));
         }
@@ -2139,7 +2207,7 @@ document.addEventListener('click', (e) => {
             if (clean[2]) {
                 history.pushState({}, '', href);
                 route();
-                window.scrollTo(0, 0);
+                resetScroll();
             } else {
                 navigateTo(decodeURIComponent(clean[1]));
             }
