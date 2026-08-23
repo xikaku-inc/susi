@@ -274,13 +274,28 @@ body.has-bg .editor-toolbar { top: 0; }
 }
 .content th { background: var(--bg2); font-weight: 600; }
 .content tr:nth-child(even) td { background: var(--bg2); }
-.content table.grid { table-layout: fixed; }
-.content table.grid,
-.content table.grid th,
-.content table.grid td,
-.content table.grid tr:nth-child(even) td { background: transparent; border: none; }
-.content table.grid th { font-weight: inherit; text-align: left; }
-.content table.grid td, .content table.grid th { vertical-align: top; padding: 14px; }
+.content div.grid,
+.EasyMDEContainer .editor-preview div.grid,
+.EasyMDEContainer .editor-preview-side div.grid {
+    display: grid;
+    grid-template-columns: repeat(var(--cols, 2), minmax(0, 1fr));
+    gap: 28px; align-items: start; margin: 16px 0;
+}
+div.grid.cols-3 { --cols: 3; }
+div.grid.cols-4 { --cols: 4; }
+div.grid.cols-5 { --cols: 5; }
+div.grid.cols-6 { --cols: 6; }
+@media (max-width: 760px) {
+    .content div.grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 640px) {
+    .content div.grid.cols-2 { grid-template-columns: 1fr; }
+}
+@media (max-width: 460px) {
+    .content div.grid { grid-template-columns: 1fr; }
+    .content div.grid.cols-4, .content div.grid.cols-5,
+    .content div.grid.cols-6 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 .content .video-embed { position: relative; padding-top: 56.25%; margin: 16px 0; }
 .content .video-embed iframe {
     position: absolute; top: 0; left: 0;
@@ -291,11 +306,11 @@ body.has-bg .editor-toolbar { top: 0; }
 .content li { margin: 4px 0; }
 .content a { color: var(--accent); text-decoration: none; }
 .content a:hover { text-decoration: underline; }
-.content img { max-width: 100%; border-radius: var(--radius); display: block; margin: 16px auto; }
+.content img { max-width: 100%; height: auto; border-radius: var(--radius); display: block; margin: 16px auto; }
 .content img.no-radius, .EasyMDEContainer .editor-preview img.no-radius,
 .EasyMDEContainer .editor-preview-side img.no-radius { border-radius: 0; }
 .content hr { border: none; border-top: 1px solid var(--border); margin: 22px 0; }
-.content td img, .content th img { display: inline-block; margin: 0; }
+.content td img, .content th img, .content div.grid img { display: inline-block; margin: 0; }
 .content h1, .content h2, .content h3, .content h4 { scroll-margin-top: 72px; }
 
 .meta {
@@ -1119,17 +1134,25 @@ function renderMarkdown(src) {
                 rows.push(splitTableRow(lines[i])); i++;
             }
             const isGrid = headers.every(h => h.trim() === '');
-            let html = isGrid ? '<table class="grid"><tbody>' : '<div class="table-scroll"><table><thead><tr>';
-            if (!isGrid) {
+            let html;
+            if (isGrid) {
+                html = '<div class="grid cols-' + headers.length + '">';
+                rows.forEach(r => {
+                    for (let c = 0; c < headers.length; c++)
+                        html += '<div>' + renderInline(r[c] || '') + '</div>';
+                });
+                html += '</div>';
+            } else {
+                html = '<div class="table-scroll"><table><thead><tr>';
                 headers.forEach(hh => html += '<th>' + renderInline(hh) + '</th>');
                 html += '</tr></thead><tbody>';
+                rows.forEach(r => {
+                    html += '<tr>';
+                    r.forEach(c => html += '<td>' + renderInline(c) + '</td>');
+                    html += '</tr>';
+                });
+                html += '</tbody></table></div>';
             }
-            rows.forEach(r => {
-                html += '<tr>';
-                r.forEach(c => html += '<td>' + renderInline(c) + '</td>');
-                html += '</tr>';
-            });
-            html += '</tbody></table>' + (isGrid ? '' : '</div>');
             out.push(html);
             continue;
         }

@@ -1394,13 +1394,83 @@ pub(crate) fn render_body_html(body_md: &str) -> String {
     opts.insert(Options::ENABLE_TASKLISTS);
     opts.insert(Options::ENABLE_SMART_PUNCTUATION);
     let parser = Parser::new_ext(&cleaned, opts);
+    let events = grid_tables_to_divs(parser);
     let mut out = String::with_capacity(cleaned.len() * 2);
-    html::push_html(&mut out, parser);
+    html::push_html(&mut out, events.into_iter());
     let clean = ammonia::Builder::default()
         .add_generic_attributes(&["class", "id"])
         .clean(&out)
         .to_string();
     absolutize_bare_img_srcs(&clean)
+}
+
+/// Rewrite tables whose header cells are all empty - the "grid table"
+/// authoring convention for side-by-side content - into div-based CSS grids
+/// that reflow on narrow screens. Mirrors the client-side renderer in
+/// website.html, which emits the same `div.grid.cols-N` markup.
+fn grid_tables_to_divs<'a>(
+    parser: impl Iterator<Item = pulldown_cmark::Event<'a>>,
+) -> Vec<pulldown_cmark::Event<'a>> {
+    use pulldown_cmark::{html, Event, Tag, TagEnd};
+    let mut out = Vec::new();
+    let mut it = parser;
+    while let Some(ev) = it.next() {
+        let cols = match &ev {
+            Event::Start(Tag::Table(aligns)) => aligns.len(),
+            _ => {
+                out.push(ev);
+                continue;
+            }
+        };
+        // Buffer the whole table (tables don't nest in markdown).
+        let mut buf = Vec::new();
+        while let Some(e) = it.next() {
+            let done = matches!(e, Event::End(TagEnd::Table));
+            buf.push(e);
+            if done {
+                break;
+            }
+        }
+        let mut in_head = false;
+        let mut head_empty = true;
+        for e in &buf {
+            match e {
+                Event::Start(Tag::TableHead) => in_head = true,
+                Event::End(TagEnd::TableHead) => in_head = false,
+                Event::Start(Tag::TableCell) | Event::End(TagEnd::TableCell) => {}
+                _ if in_head => head_empty = false,
+                _ => {}
+            }
+        }
+        if !head_empty || cols < 2 {
+            out.push(ev);
+            out.extend(buf);
+            continue;
+        }
+        let mut div = format!("<div class=\"grid cols-{cols}\">");
+        let mut in_head = false;
+        let mut cell: Option<Vec<Event>> = None;
+        for e in buf {
+            match e {
+                Event::Start(Tag::TableHead) => in_head = true,
+                Event::End(TagEnd::TableHead) => in_head = false,
+                Event::Start(Tag::TableCell) if !in_head => cell = Some(Vec::new()),
+                Event::End(TagEnd::TableCell) if !in_head => {
+                    div.push_str("<div>");
+                    html::push_html(&mut div, cell.take().unwrap_or_default().into_iter());
+                    div.push_str("</div>");
+                }
+                e => {
+                    if let Some(c) = cell.as_mut() {
+                        c.push(e);
+                    }
+                }
+            }
+        }
+        div.push_str("</div>\n");
+        out.push(Event::Html(div.into()));
+    }
+    out
 }
 
 fn first_default_slug(pages: &[PageRow]) -> Option<&str> {
@@ -3396,6 +3466,24 @@ mod tests {
         let html = render_body_html(md);
         assert!(html.contains(r#"class="logo-dark""#), "got: {}", html);
         assert!(html.contains(r#"class="logo-light""#), "got: {}", html);
+    }
+
+    #[test]
+    fn empty_header_table_renders_as_reflowing_grid() {
+        let md = "|  |  |  |\n| --- | --- | --- |\n| ![a](/a.png){width=100%} **A** | ![b](/b.png){width=100%} **B** | |\n";
+        let html = render_body_html(md);
+        assert!(html.contains(r#"class="grid cols-3""#), "got: {}", html);
+        assert!(!html.contains("<table"), "got: {}", html);
+        assert!(html.contains(r#"src="/a.png""#), "got: {}", html);
+        assert!(html.contains("<strong>A</strong>"), "got: {}", html);
+    }
+
+    #[test]
+    fn normal_table_still_renders_as_table() {
+        let md = "| A | B |\n| --- | --- |\n| 1 | 2 |\n";
+        let html = render_body_html(md);
+        assert!(html.contains("<table"), "got: {}", html);
+        assert!(!html.contains("class=\"grid"), "got: {}", html);
     }
 
     #[test]
