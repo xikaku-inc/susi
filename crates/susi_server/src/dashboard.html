@@ -1812,6 +1812,41 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
 
     <div style="margin-top:40px;margin-bottom:14px;">
         <h2 style="font-size:16px;font-weight:600;margin:0 0 14px;">Site Settings</h2>
+        <div class="card settings-card" id="siteIdentityCard" style="display:none;margin-bottom:20px;">
+            <div class="detail-header" style="display:flex;align-items:center;justify-content:space-between;">
+                <h3>Identity</h3>
+                <button type="button" id="btnNewSite" onclick="enterSiteCreateMode()">+ New Site</button>
+            </div>
+            <div class="detail-body">
+                <div class="form-row" style="display:grid;grid-template-columns:160px 1fr;gap:12px;">
+                    <div><label>Id</label><input type="text" id="siteFieldId" autocomplete="off" disabled></div>
+                    <div><label>Name</label><input type="text" id="siteFieldName" autocomplete="off"></div>
+                </div>
+                <div class="form-row"><label>Tagline</label><input type="text" id="siteFieldTagline" autocomplete="off"></div>
+                <div class="form-row"><label>Hosts (one per line)</label><textarea id="siteFieldHosts" rows="3" spellcheck="false"></textarea></div>
+                <div class="form-row"><label>Public base URL</label><input type="text" id="siteFieldPublicBase" autocomplete="off"></div>
+                <div class="form-row" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+                    <div><label>Contact email</label><input type="text" id="siteFieldEmail" autocomplete="off" readonly onfocus="this.removeAttribute('readonly')"></div>
+                    <div><label>Legal name</label><input type="text" id="siteFieldLegal" autocomplete="off"></div>
+                </div>
+                <div class="form-row" style="display:grid;grid-template-columns:1fr 120px;gap:12px;">
+                    <div><label>Locality</label><input type="text" id="siteFieldLocality" autocomplete="off"></div>
+                    <div><label>Country</label><input type="text" id="siteFieldCountry" autocomplete="off"></div>
+                </div>
+                <div class="form-row"><label>OG image URL</label><input type="text" id="siteFieldOgImage" autocomplete="off"></div>
+                <div class="form-row"><label>Social links (one per line)</label><textarea id="siteFieldSocial" rows="2" spellcheck="false"></textarea></div>
+                <div class="form-row"><label>Area served (one per line)</label><textarea id="siteFieldArea" rows="2" spellcheck="false"></textarea></div>
+                <div class="form-row"><label>llms.txt blurb</label><textarea id="siteFieldBlurb" rows="3"></textarea></div>
+                <div class="toggle-row"><input type="checkbox" id="siteFieldBlog"><label for="siteFieldBlog">Blog</label></div>
+                <div class="toggle-row"><input type="checkbox" id="siteFieldShop"><label for="siteFieldShop">Shop</label></div>
+                <div class="toggle-row"><input type="checkbox" id="siteFieldNewsletter"><label for="siteFieldNewsletter">Newsletter</label></div>
+                <div id="siteIdentityError" class="form-error" style="display:none;"></div>
+            </div>
+            <div class="form-footer">
+                <button type="button" class="secondary" id="btnCancelSiteCreate" onclick="exitSiteCreateMode()" style="display:none;">Cancel</button>
+                <button class="primary" onclick="saveSite()">Save site</button>
+            </div>
+        </div>
         <div class="card settings-card">
             <div class="detail-header">
                 <h3>Analytics</h3>
@@ -1848,6 +1883,24 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                         <button type="button" id="siteSetBgRemove" onclick="removeSiteBg()" style="display:none;">Remove</button>
                         <span id="siteSetBgName" style="font-size:12px;"></span>
                         <input type="file" id="siteSetBgFile" accept="image/*" style="display:none;" onchange="pickSiteBg(this.files[0]);this.value='';">
+                    </div>
+                </div>
+                <div class="form-row">
+                    <label>Logo</label>
+                    <div style="display:flex;gap:8px;align-items:center;">
+                        <button type="button" onclick="document.getElementById('siteSetLogoFile').click()">Upload…</button>
+                        <button type="button" id="siteSetLogoRemove" onclick="removeSiteLogo()" style="display:none;">Remove</button>
+                        <span id="siteSetLogoName" style="font-size:12px;"></span>
+                        <input type="file" id="siteSetLogoFile" accept="image/*" style="display:none;" onchange="pickSiteLogo(this.files[0],false);this.value='';">
+                    </div>
+                </div>
+                <div class="form-row">
+                    <label>Logo (dark theme)</label>
+                    <div style="display:flex;gap:8px;align-items:center;">
+                        <button type="button" onclick="document.getElementById('siteSetLogoDarkFile').click()">Upload…</button>
+                        <button type="button" id="siteSetLogoDarkRemove" onclick="removeSiteLogoDark()" style="display:none;">Remove</button>
+                        <span id="siteSetLogoDarkName" style="font-size:12px;"></span>
+                        <input type="file" id="siteSetLogoDarkFile" accept="image/*" style="display:none;" onchange="pickSiteLogo(this.files[0],true);this.value='';">
                     </div>
                 </div>
                 <div class="form-row">
@@ -6522,6 +6575,12 @@ async function saveShopSettings() {
 
 async function loadSiteSettings() {
     if (!roleIsAdmin(userRole)) return;
+    const identityCard = document.getElementById('siteIdentityCard');
+    if (identityCard) {
+        const owner = roleIsOwner(userRole);
+        identityCard.style.display = owner ? '' : 'none';
+        if (owner) populateSiteIdentity();
+    }
     try {
         const resp = await fetch(API + '/site/admin/settings' + wsQ(), { headers: authHeaders() });
         if (!resp.ok) return;
@@ -6534,6 +6593,9 @@ async function loadSiteSettings() {
         document.getElementById('siteSetNavStructure').value = s.nav_structure || '';
         siteBgImage = s.bg_image || '';
         renderSiteBgRow();
+        siteLogoImage = s.logo_image || '';
+        siteLogoDarkImage = s.logo_dark_image || '';
+        renderSiteLogoRows();
         document.getElementById('siteSetBgVeil').value = s.bg_veil || '72';
         document.getElementById('siteSetBgParallax').checked = s.bg_parallax === '1';
     } catch (e) {
@@ -6561,6 +6623,33 @@ function removeSiteBg() {
     renderSiteBgRow();
 }
 
+// The chosen logo asset names; saved with the other site settings.
+let siteLogoImage = '';
+let siteLogoDarkImage = '';
+function renderSiteLogoRows() {
+    document.getElementById('siteSetLogoName').textContent = siteLogoImage;
+    document.getElementById('siteSetLogoRemove').style.display = siteLogoImage ? '' : 'none';
+    document.getElementById('siteSetLogoDarkName').textContent = siteLogoDarkImage;
+    document.getElementById('siteSetLogoDarkRemove').style.display = siteLogoDarkImage ? '' : 'none';
+}
+async function pickSiteLogo(file, dark) {
+    if (!file) return;
+    try {
+        const data = await uploadWebsiteAsset(file);
+        if (!data) return;
+        if (dark) siteLogoDarkImage = data.name; else siteLogoImage = data.name;
+        renderSiteLogoRows();
+    } catch (e) { toast('Upload failed: ' + e.message, 'error'); }
+}
+function removeSiteLogo() {
+    siteLogoImage = '';
+    renderSiteLogoRows();
+}
+function removeSiteLogoDark() {
+    siteLogoDarkImage = '';
+    renderSiteLogoRows();
+}
+
 async function saveSiteSettings() {
     const errEl = document.getElementById('siteSetError');
     errEl.style.display = 'none';
@@ -6579,6 +6668,8 @@ async function saveSiteSettings() {
         bg_image: siteBgImage,
         bg_veil: document.getElementById('siteSetBgVeil').value.trim(),
         bg_parallax: document.getElementById('siteSetBgParallax').checked ? '1' : '',
+        logo_image: siteLogoImage,
+        logo_dark_image: siteLogoDarkImage,
     };
     try {
         const resp = await fetch(API + '/site/admin/settings' + wsQ(), {
@@ -7917,6 +8008,103 @@ async function toggleWebsitePageHidden(slug, hidden) {
     } catch (e) {
         alert(e.message || 'Failed to update visibility');
     }
+}
+
+// Identity card: shows the selected site's registry entry; "+ New Site"
+// flips it into create mode until saved or cancelled.
+let siteCreateMode = false;
+
+function fillSiteIdentity(id, def) {
+    document.getElementById('siteFieldId').value = id || '';
+    document.getElementById('siteFieldName').value = def.name || '';
+    document.getElementById('siteFieldTagline').value = def.tagline || '';
+    document.getElementById('siteFieldHosts').value = (def.hosts || []).join('\n');
+    document.getElementById('siteFieldPublicBase').value = def.public_base || '';
+    document.getElementById('siteFieldEmail').value = def.contact_email || '';
+    document.getElementById('siteFieldLegal').value = def.org_legal_name || '';
+    document.getElementById('siteFieldLocality').value = def.addr_locality || '';
+    document.getElementById('siteFieldCountry').value = def.addr_country || '';
+    document.getElementById('siteFieldOgImage').value = def.og_image_url || '';
+    document.getElementById('siteFieldSocial').value = (def.social_links || []).join('\n');
+    document.getElementById('siteFieldArea').value = (def.area_served || []).join('\n');
+    document.getElementById('siteFieldBlurb').value = def.llms_blurb || '';
+    document.getElementById('siteFieldBlog').checked = def.has_blog !== false;
+    document.getElementById('siteFieldShop').checked = !!def.has_shop;
+    document.getElementById('siteFieldNewsletter').checked = !!def.has_newsletter;
+    document.getElementById('siteIdentityError').style.display = 'none';
+}
+
+async function populateSiteIdentity() {
+    if (siteCreateMode) return;
+    try {
+        const resp = await fetch(API + '/sites', { headers: authHeaders() });
+        if (!resp.ok) return;
+        const data = await resp.json();
+        const row = (data.sites || []).find(s => s.id === websiteSite);
+        if (row) fillSiteIdentity(row.id, row.def || {});
+    } catch (e) {
+        // Non-fatal - the card just won't pre-fill.
+    }
+}
+
+function enterSiteCreateMode() {
+    siteCreateMode = true;
+    fillSiteIdentity('', {});
+    document.getElementById('siteFieldId').disabled = false;
+    document.getElementById('btnCancelSiteCreate').style.display = '';
+    document.getElementById('btnNewSite').style.display = 'none';
+}
+
+function exitSiteCreateMode() {
+    siteCreateMode = false;
+    document.getElementById('siteFieldId').disabled = true;
+    document.getElementById('btnCancelSiteCreate').style.display = 'none';
+    document.getElementById('btnNewSite').style.display = '';
+    populateSiteIdentity();
+}
+
+async function saveSite() {
+    const errEl = document.getElementById('siteIdentityError');
+    errEl.style.display = 'none';
+    const val = (id) => document.getElementById(id).value.trim();
+    const lines = (id) => document.getElementById(id).value.split('\n').map(s => s.trim()).filter(Boolean);
+    const def = {
+        name: val('siteFieldName'),
+        tagline: val('siteFieldTagline'),
+        hosts: lines('siteFieldHosts'),
+        public_base: val('siteFieldPublicBase'),
+        contact_email: val('siteFieldEmail'),
+        org_legal_name: val('siteFieldLegal'),
+        addr_locality: val('siteFieldLocality'),
+        addr_country: val('siteFieldCountry'),
+        og_image_url: val('siteFieldOgImage'),
+        social_links: lines('siteFieldSocial'),
+        area_served: lines('siteFieldArea'),
+        llms_blurb: val('siteFieldBlurb'),
+        has_shop: document.getElementById('siteFieldShop').checked,
+        has_newsletter: document.getElementById('siteFieldNewsletter').checked,
+        has_blog: document.getElementById('siteFieldBlog').checked,
+    };
+    const url = siteCreateMode
+        ? API + '/sites'
+        : API + '/sites/' + encodeURIComponent(websiteSite);
+    const body = siteCreateMode ? { id: val('siteFieldId'), ...def } : def;
+    try {
+        const resp = await fetch(url, {
+            method: siteCreateMode ? 'POST' : 'PUT',
+            headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) { errEl.textContent = data.error || ('HTTP ' + resp.status); errEl.style.display = ''; return; }
+        toast('Site saved', 'success');
+        if (siteCreateMode && data.id) websiteSite = data.id;
+        exitSiteCreateMode();
+        const sel = document.getElementById('websiteSiteSelect');
+        if (sel) sel.innerHTML = '';
+        await loadWebsitePages();
+        await loadSiteSettings();
+    } catch (e) { errEl.textContent = e.message; errEl.style.display = ''; }
 }
 
 function showWebsitePageModal() {

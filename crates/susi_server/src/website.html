@@ -869,7 +869,7 @@ const API = '/api/v1';
 
 // Per-site config injected by the server (sites.rs). The fallback keeps the
 // shell working if the marker was not replaced (e.g. a stale cached page).
-const SITE = window.__SITE || { id: 'xikaku', name: 'Xikaku', hosts: ['xikaku.com', 'www.xikaku.com'], brand_logo: '/static/logo.png', brand_logo_dark: '/static/logo-dark.png', has_shop: true, has_newsletter: true };
+const SITE = window.__SITE || { id: 'xikaku', name: 'Xikaku', hosts: ['xikaku.com', 'www.xikaku.com'], brand_logo: '/static/logo.png', brand_logo_dark: '/static/logo-dark.png', has_shop: true, has_newsletter: true, has_blog: true };
 // Website API calls carry the site explicitly so editing keeps targeting the
 // rendered site even from a host that resolves to none (dashboard preview).
 function siteQ(sep) { return (sep || '?') + 'site=' + encodeURIComponent(SITE.id); }
@@ -1305,7 +1305,8 @@ function renderSidebar() {
     const onPost = currentPage && currentPage.page_kind === 'post';
     const blogActive = (currentSlug === 'blog' || onPost) ? ' active' : '';
     const newsletterActive = currentSlug === 'newsletter' ? ' active' : '';
-    const blogLink = '<a class="section-head' + blogActive + '" href="' + SITE_PATH_PREFIX + '/blog">Blog</a>'
+    const blogLink = (SITE.has_blog === false ? ''
+            : '<a class="section-head' + blogActive + '" href="' + SITE_PATH_PREFIX + '/blog">Blog</a>')
         + (SITE.has_newsletter ? '<a class="section-head' + newsletterActive + '" href="' + SITE_PATH_PREFIX + '/newsletter">Newsletter</a>' : '');
     const shopActive = currentSlug === '__shop__' ? ' active' : '';
     const shopLink = SITE.has_shop ? '<a class="section-head' + shopActive + '" href="/shop">Shop</a>' : '';

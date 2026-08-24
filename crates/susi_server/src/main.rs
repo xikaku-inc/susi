@@ -33,7 +33,7 @@ use axum::{
     extract::{ConnectInfo, DefaultBodyLimit, Multipart, Path, Query, State},
     http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode},
     response::{Html, IntoResponse},
-    routing::{get, post},
+    routing::{get, post, put},
     Json, Router,
 };
 use tower::Layer as _;
@@ -3179,6 +3179,10 @@ async fn main() -> Result<()> {
     // newsletter SMTP is unconfigured.
     newsletter::spawn_sender(Arc::clone(&state));
 
+    // Seed the sites table from the built-in definitions on first boot and
+    // load the runtime site registry from it.
+    sites::init_from_db(&state.db.lock());
+
     // Seed the legal pages (privacy policy + imprint) on first boot so the
     // public site always carries them; an admin can edit the content later.
     website::seed_legal_pages(&state);
@@ -3646,6 +3650,12 @@ async fn main() -> Result<()> {
             get(website::handle_admin_get_site_settings)
                 .put(website::handle_admin_put_site_settings),
         )
+        // Site registry (list: admin; create/update: owner).
+        .route(
+            "/api/v1/sites",
+            get(website::handle_admin_list_sites).post(website::handle_admin_create_site),
+        )
+        .route("/api/v1/sites/{id}", put(website::handle_admin_update_site))
         // Dropbox backups (JWT, admin-only)
         .route("/api/v1/admin/backup/status", get(backup::handle_backup_status))
         .route(

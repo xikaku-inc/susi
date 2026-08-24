@@ -731,6 +731,15 @@ impl LicenseDb {
                 value TEXT NOT NULL
             );
 
+            -- Registry of the public sites this backend serves. `config` is
+            -- the JSON SiteDef (name, hosts, org data, feature flags); seeded
+            -- from the built-in definitions on first startup.
+            CREATE TABLE IF NOT EXISTS sites (
+                id     TEXT PRIMARY KEY,
+                ord    INTEGER NOT NULL,
+                config TEXT NOT NULL
+            );
+
             -- Workspace-scoped recording files. Susi stores only metadata +
             -- the S3 object key; bytes live in the configured bucket under
             -- `workspaces/{id}/recordings/{uuid}`. Two-phase upload: a row is
@@ -1693,6 +1702,7 @@ mod license_listing;
 mod docs;
 mod website;
 mod shop;
+mod sites;
 mod sessions;
 mod audit;
 mod backup;

@@ -23,7 +23,7 @@ use susi_core::error::LicenseError;
 
 use crate::docs::{docs_llms_section, docs_sitemap_entries, harden_svg_response, safe_filename, DOCS_PUBLIC_BASE};
 use crate::sites::{self, SiteConfig};
-use crate::{error_response, require_admin_full, validate_principal, AppState, ErrorResponse};
+use crate::{error_response, require_admin_full, require_owner, validate_principal, AppState, ErrorResponse};
 
 fn assets_dir(state: &AppState, site: &SiteConfig) -> std::path::PathBuf {
     std::path::Path::new(&state.data_dir)
@@ -206,7 +206,7 @@ pub async fn handle_list_pages(
         .collect();
     Ok(Json(json!({
         "site": site.id,
-        "sites": sites::SITES.iter().map(|s| json!({ "id": s.id, "name": s.name })).collect::<Vec<_>>(),
+        "sites": sites::all_sites().iter().map(|s| json!({ "id": s.id, "name": s.name })).collect::<Vec<_>>(),
         "pages": pages_json,
         "assets": assets_json,
         "nav": nav,
@@ -952,30 +952,76 @@ fn brand_site(headers: &HeaderMap) -> &'static SiteConfig {
     sites::site_from_headers(headers).unwrap_or_else(sites::default_site)
 }
 
-pub async fn handle_logo_png(headers: HeaderMap) -> impl IntoResponse {
-    cached_image(&headers, "image/png", brand_site(&headers).logo_png)
+/// Compiled artwork for the resolved site, falling back to the default
+/// site's set so favicon requests never 404 on a young site.
+fn compiled_or_default_brand(site: &SiteConfig) -> &'static sites::CompiledBrand {
+    sites::compiled_brand(site.id)
+        .unwrap_or_else(|| sites::compiled_brand(sites::DEFAULT_SITE_ID).expect("default brand"))
 }
-pub async fn handle_logo_dark_png(headers: HeaderMap) -> impl IntoResponse {
-    cached_image(&headers, "image/png", brand_site(&headers).logo_dark_png)
+
+/// An uploaded per-site asset chosen by a setting (logo/bg), read from the
+/// site's asset store: (file name, bytes).
+fn custom_asset(state: &AppState, site: &SiteConfig, setting: &str) -> Option<(String, Vec<u8>)> {
+    let name = {
+        let db = state.db.lock();
+        db.get_site_setting(&sites::setting_key(site, setting)).ok().flatten()
+    }
+    .filter(|v| !v.is_empty())?;
+    if safe_filename(&name).is_err() {
+        return None;
+    }
+    let bytes = std::fs::read(assets_dir(state, site).join(&name)).ok()?;
+    Some((name, bytes))
+}
+
+pub async fn handle_logo_png(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    let site = brand_site(&headers);
+    if let Some((name, bytes)) = custom_asset(&state, site, SETTING_LOGO_IMAGE) {
+        return cached_image_owned(&headers, content_type_for(&name), bytes);
+    }
+    match sites::compiled_brand(site.id) {
+        Some(b) => cached_image(&headers, "image/png", b.logo),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+pub async fn handle_logo_dark_png(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    let site = brand_site(&headers);
+    // A site with only a light upload uses it for both themes.
+    if let Some((name, bytes)) = custom_asset(&state, site, SETTING_LOGO_DARK_IMAGE)
+        .or_else(|| custom_asset(&state, site, SETTING_LOGO_IMAGE))
+    {
+        return cached_image_owned(&headers, content_type_for(&name), bytes);
+    }
+    match sites::compiled_brand(site.id) {
+        Some(b) => cached_image(&headers, "image/png", b.logo_dark),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 pub async fn handle_og_image_png(headers: HeaderMap) -> impl IntoResponse {
     cached_image(&headers, "image/png", OG_IMAGE_PNG)
 }
 pub async fn handle_icon_png(headers: HeaderMap) -> impl IntoResponse {
-    cached_image(&headers, "image/png", brand_site(&headers).icon_png)
+    cached_image(&headers, "image/png", compiled_or_default_brand(brand_site(&headers)).icon)
 }
 pub async fn handle_favicon_32_png(headers: HeaderMap) -> impl IntoResponse {
-    cached_image(&headers, "image/png", brand_site(&headers).favicon_32_png)
+    cached_image(&headers, "image/png", compiled_or_default_brand(brand_site(&headers)).favicon_32)
 }
 pub async fn handle_favicon_180_png(headers: HeaderMap) -> impl IntoResponse {
-    cached_image(&headers, "image/png", brand_site(&headers).favicon_180_png)
+    cached_image(&headers, "image/png", compiled_or_default_brand(brand_site(&headers)).favicon_180)
 }
 pub async fn handle_favicon_ico(headers: HeaderMap) -> impl IntoResponse {
-    cached_image(&headers, "image/x-icon", brand_site(&headers).favicon_ico)
+    cached_image(&headers, "image/x-icon", compiled_or_default_brand(brand_site(&headers)).favicon_ico)
 }
-/// Cache-busting version for the bg URL: changes whenever the served
-/// background changes (upload, re-upload, revert). "0" = compiled default.
-fn bg_version(state: &AppState, site: &SiteConfig, custom: &str) -> String {
+
+/// Cache-busting version for an uploaded asset's URL: changes on any upload,
+/// re-upload, or revert. "0" = compiled-in artwork.
+fn asset_version(state: &AppState, site: &SiteConfig, custom: &str) -> String {
     if custom.is_empty() {
         return "0".into();
     }
@@ -993,13 +1039,48 @@ fn bg_version(state: &AppState, site: &SiteConfig, custom: &str) -> String {
     hex::encode(&Sha256::digest(format!("{custom}|{len}|{mtime}"))[..4])
 }
 
-/// The uploaded per-site background (the `bg_image` site setting), if any.
-fn custom_bg_name(state: &AppState, site: &SiteConfig) -> Option<String> {
-    let db = state.db.lock();
-    db.get_site_setting(&sites::setting_key(site, SETTING_BG_IMAGE))
-        .ok()
-        .flatten()
-        .filter(|v| !v.is_empty())
+fn bytes_version(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(&Sha256::digest(bytes)[..4])
+}
+
+// Header logo URLs per compiled brand, hashed once - a deploy with new art
+// re-versions them automatically.
+static COMPILED_LOGO_VERSIONS: LazyLock<HashMap<&'static str, (String, String)>> =
+    LazyLock::new(|| {
+        ["xikaku", "lpr"]
+            .iter()
+            .filter_map(|id| {
+                let b = sites::compiled_brand(id)?;
+                Some((*id, (bytes_version(b.logo), bytes_version(b.logo_dark))))
+            })
+            .collect()
+    });
+
+/// Header logo URLs for the client shell; empty = render the site name as text.
+fn brand_logo_urls(state: &AppState, site: &SiteConfig) -> (String, String) {
+    let (light, dark) = {
+        let db = state.db.lock();
+        let get = |k: &str| {
+            db.get_site_setting(&sites::setting_key(site, k)).ok().flatten().unwrap_or_default()
+        };
+        (get(SETTING_LOGO_IMAGE), get(SETTING_LOGO_DARK_IMAGE))
+    };
+    if !light.is_empty() {
+        let lv = asset_version(state, site, &light);
+        let dv = if dark.is_empty() { lv.clone() } else { asset_version(state, site, &dark) };
+        return (
+            format!("/static/logo.png?v={}", lv),
+            format!("/static/logo-dark.png?v={}", dv),
+        );
+    }
+    match COMPILED_LOGO_VERSIONS.get(site.id) {
+        Some((lv, dv)) => (
+            format!("/static/logo.png?v={}", lv),
+            format!("/static/logo-dark.png?v={}", dv),
+        ),
+        None => (String::new(), String::new()),
+    }
 }
 
 pub async fn handle_bg_jpg(
@@ -1007,17 +1088,13 @@ pub async fn handle_bg_jpg(
     headers: HeaderMap,
 ) -> axum::response::Response {
     let site = brand_site(&headers);
-    if let Some(name) = custom_bg_name(&state, site) {
-        if safe_filename(&name).is_ok() {
-            if let Ok(bytes) = std::fs::read(assets_dir(&state, site).join(&name)) {
-                return cached_image_owned(&headers, content_type_for(&name), bytes);
-            }
-        }
+    if let Some((name, bytes)) = custom_asset(&state, site, SETTING_BG_IMAGE) {
+        return cached_image_owned(&headers, content_type_for(&name), bytes);
     }
-    if site.bg_image.is_empty() {
-        return StatusCode::NOT_FOUND.into_response();
+    match sites::compiled_brand(site.id) {
+        Some(b) => cached_image(&headers, "image/jpeg", b.bg),
+        None => StatusCode::NOT_FOUND.into_response(),
     }
-    cached_image(&headers, "image/jpeg", site.bg_image)
 }
 
 /// Build the canonical URL for a website page. The home slug renders as the
@@ -1858,17 +1935,19 @@ pub async fn handle_website_render_post(
 /// Per-site config injected into the shell so the client JS knows which site
 /// it renders: canonical hosts (clean-URL detection), brand imagery, and
 /// which fixed features exist.
-fn site_config_script(site: &SiteConfig) -> String {
+fn site_config_script(state: &AppState, site: &SiteConfig) -> String {
+    let (brand_logo, brand_logo_dark) = brand_logo_urls(state, site);
     format!(
         "<script>window.__SITE={};</script>",
         json!({
             "id": site.id,
             "name": site.name,
             "hosts": site.hosts,
-            "brand_logo": site.brand_logo,
-            "brand_logo_dark": site.brand_logo_dark,
+            "brand_logo": brand_logo,
+            "brand_logo_dark": brand_logo_dark,
             "has_shop": site.has_shop,
             "has_newsletter": site.has_newsletter,
+            "has_blog": site.has_blog,
         }),
     )
 }
@@ -1879,7 +1958,7 @@ fn site_config_script(site: &SiteConfig) -> String {
 pub(crate) fn render_shell(state: &Arc<AppState>, site: &SiteConfig, seo_head: &str, body_html: &str) -> Bytes {
     let html = WEBSITE_HTML
         .replacen("<!--SEO_HEAD-->", seo_head, 1)
-        .replacen("<!--SITE_CONFIG-->", &site_config_script(site), 1)
+        .replacen("<!--SITE_CONFIG-->", &site_config_script(state, site), 1)
         .replacen("<!--ANALYTICS-->", &analytics_head(state, site), 1)
         .replacen("<!--BODY_CONTENT-->", body_html, 1);
     let (custom_bg, veil, parallax) = {
@@ -1889,7 +1968,7 @@ pub(crate) fn render_shell(state: &Arc<AppState>, site: &SiteConfig, seo_head: &
         };
         (get(SETTING_BG_IMAGE), get(SETTING_BG_VEIL), get(SETTING_BG_PARALLAX))
     };
-    if site.bg_image.is_empty() && custom_bg.is_empty() {
+    if sites::compiled_brand(site.id).is_none() && custom_bg.is_empty() {
         return html.into();
     }
     let veil = veil.parse::<u8>().ok().filter(|v| *v <= 100).unwrap_or(72);
@@ -1899,7 +1978,7 @@ pub(crate) fn render_shell(state: &Arc<AppState>, site: &SiteConfig, seo_head: &
         r#"<body class="has-bg{}" style="--bg-veil:{}%"><div class="site-bg" aria-hidden="true" style="background-image:url('/static/bg.jpg?v={}')"></div>"#,
         if parallax == "1" { " bg-parallax" } else { "" },
         veil,
-        bg_version(state, site, &custom_bg),
+        asset_version(state, site, &custom_bg),
     );
     html.replacen("<body>", &body, 1).into()
 }
@@ -2322,6 +2401,10 @@ pub const SETTING_REDDIT_PIXEL_ID: &str = "reddit_pixel_id";
 pub const SETTING_NAV_STRUCTURE: &str = "nav_structure";
 /// Asset file name serving as the site background; empty = compiled-in default.
 pub const SETTING_BG_IMAGE: &str = "bg_image";
+/// Asset file names serving as the site logo (light / dark theme); empty =
+/// compiled-in artwork where the site has it, text brand otherwise.
+pub const SETTING_LOGO_IMAGE: &str = "logo_image";
+pub const SETTING_LOGO_DARK_IMAGE: &str = "logo_dark_image";
 /// Veil strength over the background photo, 0-100 percent; empty = 72.
 pub const SETTING_BG_VEIL: &str = "bg_veil";
 /// "1" = the background drifts opposite to the scroll direction.
@@ -2732,6 +2815,8 @@ const KNOWN_SITE_SETTING_KEYS: &[&str] = &[
     SETTING_BG_IMAGE,
     SETTING_BG_VEIL,
     SETTING_BG_PARALLAX,
+    SETTING_LOGO_IMAGE,
+    SETTING_LOGO_DARK_IMAGE,
 ];
 
 pub async fn handle_admin_get_site_settings(
@@ -2781,7 +2866,7 @@ pub async fn handle_admin_put_site_settings(
                     "nav_structure must be a JSON array of {\"title\", \"items\"} groups (max 4 KB)",
                 ));
             }
-        } else if k == SETTING_BG_IMAGE {
+        } else if k == SETTING_BG_IMAGE || k == SETTING_LOGO_IMAGE || k == SETTING_LOGO_DARK_IMAGE {
             if !trimmed.is_empty() {
                 safe_filename(trimmed)?;
                 if !assets_dir(&state, site).join(trimmed).is_file() {
@@ -2806,7 +2891,161 @@ pub async fn handle_admin_put_site_settings(
         let db = state.db.lock();
         db.set_site_setting(&sites::setting_key(site, k), trimmed).map_err(db_err)?;
     }
+    // A logo change flips the JSON-LD logo URL baked into the registry.
+    if req.fields.contains_key(SETTING_LOGO_IMAGE) || req.fields.contains_key(SETTING_LOGO_DARK_IMAGE) {
+        sites::reload_from_db(&state.db.lock());
+    }
     invalidate_page_cache();
+    Ok(Json(json!({ "status": "OK" })))
+}
+
+// ---------------------------------------------------------------------------
+// Site registry admin (owner)
+// ---------------------------------------------------------------------------
+
+/// Hosts that must never be claimed by a site, or the dashboard becomes
+/// unreachable on them.
+const RESERVED_HOSTS: &[&str] =
+    &["susi.lp-research.com", "staging.susi.lp-research.com", "localhost", "127.0.0.1"];
+
+fn normalize_and_validate_site(
+    id: &str,
+    def: &mut sites::SiteDef,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    def.name = def.name.trim().to_string();
+    if def.name.is_empty() {
+        return Err(error_response(StatusCode::BAD_REQUEST, "name is required"));
+    }
+    def.public_base = def.public_base.trim().trim_end_matches('/').to_string();
+    if !def.public_base.starts_with("http://") && !def.public_base.starts_with("https://") {
+        return Err(error_response(StatusCode::BAD_REQUEST, "public_base must be an http(s) URL"));
+    }
+    // Tolerate pasted URLs: strip a scheme and anything after the host.
+    def.hosts = def
+        .hosts
+        .iter()
+        .map(|h| {
+            let h = h.trim().to_ascii_lowercase();
+            let h = h.strip_prefix("https://").or_else(|| h.strip_prefix("http://")).unwrap_or(&h);
+            h.split('/').next().unwrap_or("").to_string()
+        })
+        .filter(|h| !h.is_empty())
+        .collect();
+    if def.hosts.is_empty() {
+        return Err(error_response(StatusCode::BAD_REQUEST, "at least one host is required"));
+    }
+    for h in &def.hosts {
+        if !h.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-') {
+            return Err(error_response(StatusCode::BAD_REQUEST, &format!("invalid host: {}", h)));
+        }
+        if RESERVED_HOSTS.contains(&h.as_str()) {
+            return Err(error_response(StatusCode::BAD_REQUEST, &format!("host {} is reserved", h)));
+        }
+    }
+    for other in sites::all_sites() {
+        if other.id == id {
+            continue;
+        }
+        if let Some(h) = def.hosts.iter().find(|h| other.hosts.contains(&h.as_str())) {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("host {} already belongs to site {}", h, other.id),
+            ));
+        }
+    }
+    for v in [
+        &mut def.tagline,
+        &mut def.contact_email,
+        &mut def.org_legal_name,
+        &mut def.addr_locality,
+        &mut def.addr_country,
+        &mut def.og_image_url,
+        &mut def.llms_blurb,
+    ] {
+        *v = v.trim().to_string();
+    }
+    def.social_links =
+        def.social_links.iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+    def.area_served =
+        def.area_served.iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+    Ok(())
+}
+
+pub async fn handle_admin_list_sites(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let p = validate_principal(&headers, &state)?;
+    require_admin_full(&state, &p)?;
+    let rows = {
+        let db = state.db.lock();
+        db.list_sites().map_err(db_err)?
+    };
+    let sites_json: Vec<_> = rows
+        .iter()
+        .filter_map(|(id, json_str)| {
+            let def: sites::SiteDef = serde_json::from_str(json_str).ok()?;
+            Some(json!({ "id": id, "is_default": id == sites::DEFAULT_SITE_ID, "def": def }))
+        })
+        .collect();
+    Ok(Json(json!({ "sites": sites_json })))
+}
+
+#[derive(Deserialize)]
+pub struct CreateSiteRequest {
+    pub id: String,
+    #[serde(flatten)]
+    pub def: sites::SiteDef,
+}
+
+pub async fn handle_admin_create_site(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(mut req): Json<CreateSiteRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let p = validate_principal(&headers, &state)?;
+    require_owner(&state, &p)?;
+    let id = req.id.trim().to_ascii_lowercase();
+    if id.is_empty()
+        || id.len() > 32
+        || id.starts_with('-')
+        || !id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        return Err(error_response(StatusCode::BAD_REQUEST, "id must be a short lowercase slug"));
+    }
+    if sites::site_by_id(&id).is_some() {
+        return Err(error_response(StatusCode::BAD_REQUEST, "Site id already exists"));
+    }
+    normalize_and_validate_site(&id, &mut req.def)?;
+    {
+        let db = state.db.lock();
+        db.upsert_site(&id, None, &serde_json::to_string(&req.def).unwrap()).map_err(db_err)?;
+        sites::reload_from_db(&db);
+    }
+    invalidate_page_cache();
+    log::info!("Site '{}' created", id);
+    Ok(Json(json!({ "status": "OK", "id": id })))
+}
+
+pub async fn handle_admin_update_site(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(mut def): Json<sites::SiteDef>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let p = validate_principal(&headers, &state)?;
+    require_owner(&state, &p)?;
+    if sites::site_by_id(&id).is_none() {
+        return Err(error_response(StatusCode::NOT_FOUND, "Unknown site"));
+    }
+    normalize_and_validate_site(&id, &mut def)?;
+    {
+        let db = state.db.lock();
+        db.upsert_site(&id, None, &serde_json::to_string(&def).unwrap()).map_err(db_err)?;
+        sites::reload_from_db(&db);
+    }
+    invalidate_page_cache();
+    log::info!("Site '{}' updated", id);
     Ok(Json(json!({ "status": "OK" })))
 }
 

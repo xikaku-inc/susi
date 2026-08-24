@@ -4450,6 +4450,135 @@ fn test_site_background_theme() {
     }
 }
 
+/// Dynamic site registry: a site created through the owner API serves on its
+/// host with scoped content and an uploaded logo; host collisions are
+/// rejected; edits apply live.
+#[test]
+fn test_dynamic_site_registry() {
+    let server = TestServer::start();
+    let http = reqwest::blocking::Client::new();
+    let token = server.admin_token();
+
+    // The seeded registry lists the built-in sites in order.
+    let list = http.get(format!("{}/sites", server.api_url))
+        .bearer_auth(&token)
+        .send().expect("list sites").json::<Value>().unwrap();
+    let ids: Vec<_> = list["sites"].as_array().unwrap().iter()
+        .map(|s| s["id"].as_str().unwrap().to_string()).collect();
+    assert_eq!(ids, vec!["xikaku", "lpr"]);
+
+    // Create a personal site.
+    let resp = http.post(format!("{}/sites", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({
+            "id": "klaus",
+            "name": "Klaus Petersen",
+            "hosts": ["klaus.xikaku.com"],
+            "public_base": "https://klaus.xikaku.com",
+        }))
+        .send().expect("create site");
+    assert_eq!(resp.status().as_u16(), 200, "create: {}", resp.text().unwrap_or_default());
+
+    // It resolves by Host: shell carries its config, no background artwork
+    // yet, and the brand falls back to text (no logo URL).
+    let shell = http.get(format!("{}/site", server.url))
+        .header("Host", "klaus.xikaku.com")
+        .send().expect("shell").text().unwrap();
+    assert!(shell.contains(r#""id":"klaus""#), "shell must carry the new site config");
+    assert!(!shell.contains(r#"<body class="has-bg"#), "a young site has no bg artwork");
+    assert!(shell.contains(r#""brand_logo":"""#), "no logo yet means text brand");
+    let resp = http.get(format!("{}/static/logo.png", server.url))
+        .header("Host", "klaus.xikaku.com")
+        .send().expect("logo 404");
+    assert_eq!(resp.status().as_u16(), 404);
+
+    // Content is scoped to the new site and renders on its host.
+    let resp = http.put(format!("{}/website/pages/profile?site=klaus", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "title": "Profile", "body_md": "# Profile\n\nHello from my personal site." }))
+        .send().expect("create page");
+    assert_eq!(resp.status().as_u16(), 200, "page: {}", resp.text().unwrap_or_default());
+    let page = http.get(format!("{}/site/profile", server.url))
+        .header("Host", "klaus.xikaku.com")
+        .send().expect("page").text().unwrap();
+    assert!(page.contains("Hello from my personal site."));
+    let resp = http.get(format!("{}/website/pages/profile?site=xikaku", server.api_url))
+        .send().expect("cross-site page");
+    assert_eq!(resp.status().as_u16(), 404, "content must not leak across sites");
+    // The sole page acts as the home page, so the sitemap lists the root.
+    let sitemap = http.get(format!("{}/sitemap.xml", server.url))
+        .header("Host", "klaus.xikaku.com")
+        .send().expect("sitemap").text().unwrap();
+    assert!(sitemap.contains("<loc>https://klaus.xikaku.com/</loc>"), "{}", sitemap);
+
+    // An uploaded logo serves at the shared path for this site only.
+    let boundary = "XLOGOBOUNDARY";
+    let mut mp = Vec::new();
+    mp.extend_from_slice(format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"me.png\"\r\nContent-Type: image/png\r\n\r\n"
+    ).as_bytes());
+    mp.extend_from_slice(b"fake-png-bytes");
+    mp.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    let resp = http
+        .post(format!("{}/website/assets?site=klaus", server.api_url))
+        .bearer_auth(&token)
+        .header("content-type", format!("multipart/form-data; boundary={boundary}"))
+        .body(mp)
+        .send().expect("upload logo");
+    assert!(resp.status().is_success(), "upload: {}", resp.text().unwrap_or_default());
+    let resp = http
+        .put(format!("{}/site/admin/settings?site=klaus", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "logo_image": "me.png" }))
+        .send().expect("set logo");
+    assert_eq!(resp.status().as_u16(), 200);
+    let resp = http.get(format!("{}/static/logo.png", server.url))
+        .header("Host", "klaus.xikaku.com")
+        .send().expect("custom logo");
+    assert_eq!(resp.status().as_u16(), 200);
+    assert_eq!(resp.bytes().unwrap().as_ref(), b"fake-png-bytes");
+    let shell = http.get(format!("{}/site", server.url))
+        .header("Host", "klaus.xikaku.com")
+        .send().expect("shell").text().unwrap();
+    assert!(shell.contains("/static/logo.png?v="), "shell must advertise the versioned logo");
+    // The other sites keep their compiled logos.
+    let resp = http.get(format!("{}/static/logo.png", server.url))
+        .header("Host", "xikaku.com")
+        .send().expect("xikaku logo");
+    assert!(resp.bytes().unwrap().len() > 1000, "xikaku must keep its compiled logo");
+
+    // A host already claimed by another site is rejected; so is a reserved one.
+    for hosts in [json!(["xikaku.com"]), json!(["susi.lp-research.com"])] {
+        let resp = http.post(format!("{}/sites", server.api_url))
+            .bearer_auth(&token)
+            .json(&json!({ "id": "dup", "name": "Dup", "hosts": hosts, "public_base": "https://dup.example" }))
+            .send().expect("dup site");
+        assert_eq!(resp.status().as_u16(), 400, "hosts {} must be rejected", hosts);
+    }
+
+    // Edits apply live; the blog nav flag can be switched off.
+    let resp = http.put(format!("{}/sites/klaus", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({
+            "name": "Klaus P.",
+            "hosts": ["klaus.xikaku.com"],
+            "public_base": "https://klaus.xikaku.com",
+            "tagline": "Old school",
+            "has_blog": false,
+        }))
+        .send().expect("update site");
+    assert_eq!(resp.status().as_u16(), 200, "update: {}", resp.text().unwrap_or_default());
+    let shell = http.get(format!("{}/site", server.url))
+        .header("Host", "klaus.xikaku.com")
+        .send().expect("shell").text().unwrap();
+    assert!(shell.contains(r#""name":"Klaus P.""#), "edit must reach the served shell");
+    assert!(shell.contains(r#""has_blog":false"#), "blog flag must reach the shell");
+    let shell = http.get(format!("{}/site", server.url))
+        .header("Host", "xikaku.com")
+        .send().expect("shell").text().unwrap();
+    assert!(shell.contains(r#""has_blog":true"#), "existing sites keep the blog on");
+}
+
 /// Blog bylines: a post credits a user account, the public site shows that
 /// user's real name (never their username), and a name change reaches every
 /// post the author wrote.
