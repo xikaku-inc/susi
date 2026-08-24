@@ -1297,6 +1297,40 @@ identify the real client when the TCP peer is loopback (nginx). Without it,
 every request looks like it's coming from `127.0.0.1` and the per-IP limit
 becomes a per-box limit.
 
+### Adding a new site
+
+The backend serves any number of public sites, resolved from the request's
+Host header via the site registry (seeded from built-in definitions on first
+boot, then managed from the dashboard). Adding one:
+
+1. **Create the site** (owner account): dashboard → Website → Site Settings →
+   Identity card → **+ New Site**. Id is a short immutable slug; hosts are
+   bare hostnames (one per line, include the staging name); public base URL is
+   the canonical `https://` origin. Save.
+2. **Add content**: switch the site selector to the new site, create pages
+   (`+ New Page`), and upload a logo/background under Site Settings. Without a
+   logo the header shows the site name as text.
+3. **DNS**: point an A record for each hostname at the server IP (both the
+   production and staging names).
+4. **TLS**: expand the staging SAN cert and issue a production cert on the box
+   (the nginx authenticator answers the ACME challenges):
+
+   ```bash
+   sudo certbot certonly --nginx --expand --cert-name staging.xikaku.com \
+     -d staging.xikaku.com -d staging.lp-research.com -d staging.<name>
+   sudo certbot certonly --nginx --cert-name <domain> -d <domain>
+   ```
+
+5. **nginx**: add the staging hostname to both `server_name` lines in
+   `nginx/staging.sites.conf`, and create a production vhost from an existing
+   one (`nginx/klaus.xikaku.com.conf` is the template: proxy to `:3100`, keep
+   the pre-launch `noindex` + robots override until the site should be
+   indexed). Copy both to `/etc/nginx/conf.d/` on the box, then
+   `sudo nginx -t && sudo systemctl reload nginx`.
+
+Content and settings are per site; the shop and newsletter are shared
+instances that the per-site flags merely show or hide.
+
 ### Quick reference
 
 | Item | Location |
