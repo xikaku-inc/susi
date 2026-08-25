@@ -183,6 +183,7 @@ body.has-bg .editor-toolbar { top: 0; }
     font-size: 13px;
 }
 .site-footer a { color: var(--text2); text-decoration: none; }
+.site-footer #langSwitch span { color: var(--text2); }
 .site-footer a:hover { color: var(--text1); }
 .sidebar {
     border-right: 1px solid var(--border);
@@ -248,6 +249,9 @@ body.has-bg .editor-toolbar { top: 0; }
    visitors (admins keep it - the edit controls live there). The sidebar
    brand is its own flag (SiteConfig.sidebar_logo). */
 body.no-topbar .header { display: none; }
+/* The admin's restored top bar skips the brand - the sidebar carries it. */
+body.admin-topbar .header .brand { display: none; }
+body.admin-topbar .header { justify-content: flex-end; }
 body.no-topbar .layout { min-height: 100vh; }
 body.no-topbar .sidebar { top: 0; max-height: 100vh; }
 body.no-topbar .toc-rail { top: 0; max-height: 100vh; }
@@ -821,6 +825,7 @@ div.grid.cols-6 { --cols: 6; }
     <a href="/privacy" data-site-link="/privacy">Privacy Policy</a>
     <a href="/imprint" data-site-link="/imprint">Imprint</a>
     <a href="#" data-cookie-settings style="display:none">Cookie settings</a>
+    <span id="langSwitch" style="display:none;"></span>
 </footer>
 </div>
 
@@ -931,9 +936,29 @@ const API = '/api/v1';
 // Per-site config injected by the server (sites.rs). The fallback keeps the
 // shell working if the marker was not replaced (e.g. a stale cached page).
 const SITE = window.__SITE || { id: 'xikaku', name: 'Xikaku', hosts: ['xikaku.com', 'www.xikaku.com'], brand_logo: '/static/logo.png', brand_logo_dark: '/static/logo-dark.png', has_shop: true, has_newsletter: true, has_blog: true };
+// Content language of this render, injected by the server ("" = default).
+// A translated page lives at the same URLs one /{lang}/ segment deeper.
+const LANG = SITE.lang || '';
+const LANGS = SITE.langs || [];
+const LANG_PREFIX = LANG ? '/' + LANG : '';
+function langPages() { return pages.filter(p => (p.lang || '') === LANG); }
+// Chrome strings for translated renders; anything unlisted stays English.
+const L10N = {
+    ja: {
+        'Blog': 'ブログ', 'Newsletter': 'ニュースレター', 'Shop': 'ショップ',
+        'Privacy Policy': 'プライバシーポリシー', 'Imprint': '運営者情報',
+        'Cookie settings': 'クッキー設定', 'On this page': 'このページの内容',
+    },
+};
+function t(s) { return (LANG && L10N[LANG] && L10N[LANG][s]) || s; }
+
 // Website API calls carry the site explicitly so editing keeps targeting the
-// rendered site even from a host that resolves to none (dashboard preview).
-function siteQ(sep) { return (sep || '?') + 'site=' + encodeURIComponent(SITE.id); }
+// rendered site even from a host that resolves to none (dashboard preview);
+// the language rides along so page reads and edits stay in this translation.
+function siteQ(sep) {
+    return (sep || '?') + 'site=' + encodeURIComponent(SITE.id)
+        + (LANG ? '&lang=' + encodeURIComponent(LANG) : '');
+}
 
 // On a site's canonical hosts the website lives at clean URLs (/contact,
 // /about, etc.). On other hosts (susi.lp-research.com) it stays under
@@ -946,7 +971,7 @@ const SITE_PATH_PREFIX = CANONICAL_HOSTS.includes(location.host) ? '' : '/site';
 // those URLs must carry ?site= explicitly to serve THIS site's files.
 function previewAssetUrl(u) {
     if (!SITE_PATH_PREFIX || !u || !u.startsWith('/')) return u;
-    if (!u.startsWith('/static/') && !u.startsWith(API + '/website/assets/') && u !== '/favicon.ico') return u;
+    if (!u.startsWith('/static/') && !u.startsWith(API + '/website/assets/') && !u.startsWith('/favicon.ico')) return u;
     const p = new URL(u, location.origin);
     if (!p.searchParams.has('site')) p.searchParams.set('site', SITE.id);
     return p.pathname + p.search;
@@ -954,6 +979,7 @@ function previewAssetUrl(u) {
 
 // Top-level paths that must NOT be intercepted as website slugs on xikaku.com.
 const RESERVED_TOP_PATHS = new Set(['site', 'shop', 'api', 'static', 'docs', 'robots.txt', 'sitemap.xml', 'llms.txt', 'favicon.ico', 'health', '.well-known']);
+LANGS.forEach(l => RESERVED_TOP_PATHS.add(l));
 
 // Root-relative links authored in page bodies use the clean-URL form; under
 // /site they need the prefix (and the site param, so open-in-new-tab and
@@ -975,6 +1001,7 @@ function previewPageLink(u) {
     // auth check in updateAdminChrome settles it either way.
     if (SITE.no_topbar && localStorage.getItem('auth_token')) {
         document.body.classList.remove('no-topbar');
+        document.body.classList.add('admin-topbar');
     }
     const brand = document.querySelector('.brand');
     if (!brand) return;
@@ -1029,12 +1056,13 @@ if (SITE_PATH_PREFIX) {
     history.replaceState = (s, t, url) => rawReplace(s, t, keepSite(url));
 }
 function pageHref(slug) {
-    // Posts live under /blog/{slug}; everything else is /{slug}.
-    const p = pages.find(x => x.slug === slug);
+    // Posts live under /blog/{slug}; everything else is /{slug}. Both sit
+    // one /{lang}/ segment deeper on a translated render.
+    const p = langPages().find(x => x.slug === slug) || pages.find(x => x.slug === slug);
     const prefix = (p && p.page_kind === 'post') ? '/blog/' : '/';
-    return SITE_PATH_PREFIX + prefix + encodeURIComponent(slug);
+    return SITE_PATH_PREFIX + LANG_PREFIX + prefix + encodeURIComponent(slug);
 }
-function siteRootHref() { return SITE_PATH_PREFIX || '/'; }
+function siteRootHref() { return (SITE_PATH_PREFIX + LANG_PREFIX) || '/'; }
 // Carry the ad click IDs across in-app navigation. Analytics only loads once
 // the visitor accepts cookies, which may happen after they have left the
 // landing page - without this the click ID is gone and the conversion cannot
@@ -1047,10 +1075,50 @@ function adClickQuery() {
     const s = keep.toString();
     return s ? '?' + s : '';
 }
-// Footer links carry clean paths; prefix them on non-canonical hosts.
+// Footer links carry clean paths; prefix them on non-canonical hosts. The
+// labels follow the render language; the targets stay default-language until
+// those pages have translations.
 document.querySelectorAll('.site-footer a[data-site-link]').forEach(a => {
     a.href = SITE_PATH_PREFIX + a.getAttribute('data-site-link');
+    a.textContent = t(a.textContent);
 });
+
+// Footer language switcher: the current page's counterpart in each language,
+// or that language's home when the page has no translation. Full page loads -
+// the server re-renders the shell in the target language.
+function renderLangSwitch() {
+    const el = document.getElementById('langSwitch');
+    if (!el || !LANGS.length) return;
+    const names = { ja: '日本語' };
+    const hrefFor = (l, p) => {
+        const seg = p ? (p.page_kind === 'post' ? '/blog/' : '/') + encodeURIComponent(p.slug) : '';
+        // The path carries the target language; off the canonical hosts the
+        // site still travels by query (the render language must NOT - the
+        // full load re-resolves it from the path).
+        const q = SITE_PATH_PREFIX ? '?site=' + encodeURIComponent(SITE.id) : '';
+        return ((SITE_PATH_PREFIX + (l ? '/' + l : '') + seg) || '/') + q;
+    };
+    const parts = [];
+    if (LANG) {
+        const cur = langPages().find(p => p.slug === currentSlug);
+        const en = cur && cur.translation_of
+            ? pages.find(p => !(p.lang || '') && p.slug === cur.translation_of)
+            : null;
+        parts.push('<a href="' + escHtml(hrefFor('', en)) + '">English</a>');
+    } else {
+        parts.push('<span>English</span>');
+    }
+    LANGS.forEach(l => {
+        const label = names[l] || l.toUpperCase();
+        if (l === LANG) { parts.push('<span>' + escHtml(label) + '</span>'); return; }
+        const tr = currentSlug
+            ? pages.find(p => (p.lang || '') === l && p.translation_of === currentSlug)
+            : null;
+        parts.push('<a href="' + escHtml(hrefFor(l, tr)) + '">' + escHtml(label) + '</a>');
+    });
+    el.innerHTML = parts.join(' <span class="lang-sep">·</span> ');
+    el.style.display = '';
+}
 // Send a visitor to a retired page's replacement. Mirrors the server's 301
 // target rules: full URL, site-root path, or a bare slug.
 function followRedirect(target) {
@@ -1064,7 +1132,7 @@ function formatPostDate(s) {
     if (!s) return '';
     const d = new Date(s + 'T00:00:00');
     if (isNaN(d.getTime())) return s;
-    return d.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+    return d.toLocaleDateString(LANG === 'ja' ? 'ja-JP' : 'en-US', { year: 'numeric', month: 'long', day: 'numeric' });
 }
 // Byline appended to a post's date line; empty without a known author.
 function bylineSuffix(name) {
@@ -1114,7 +1182,10 @@ async function resolveAdminStatus() {
 }
 
 function updateAdminChrome() {
-    if (SITE.no_topbar) document.body.classList.toggle('no-topbar', !isAdmin);
+    if (SITE.no_topbar) {
+        document.body.classList.toggle('no-topbar', !isAdmin);
+        document.body.classList.toggle('admin-topbar', isAdmin);
+    }
     document.getElementById('navLogoutBtn').style.display = isAdmin ? '' : 'none';
     document.getElementById('newPageBtn').style.display = isAdmin ? '' : 'none';
     document.getElementById('newPostBtn').style.display = isAdmin ? '' : 'none';
@@ -1395,7 +1466,7 @@ async function loadPage(slug) {
 
 function sidebarBrandHtml() {
     if (!SITE.sidebar_logo) return '';
-    const home = SITE_PATH_PREFIX ? SITE_PATH_PREFIX + siteQ() : '/';
+    const home = SITE_PATH_PREFIX ? SITE_PATH_PREFIX + LANG_PREFIX + siteQ() : (LANG_PREFIX || '/');
     let inner;
     if (SITE.brand_logo) {
         inner = '<img class="logo-dark" src="' + escHtml(previewAssetUrl(SITE.brand_logo_dark || SITE.brand_logo)) + '" alt="' + escHtml(SITE.name) + '">'
@@ -1415,7 +1486,8 @@ function renderSidebar() {
     const onShop = currentSlug === '__shop__';
     // Posts never appear in the nav; readers reach them via the /blog index.
     // The optional "blog" intro page is covered by the fixed Blog link below.
-    const navPages = pages.filter(p => p.page_kind !== 'post' && p.slug !== 'blog');
+    // A translated render lists its own language's pages only.
+    const navPages = langPages().filter(p => p.page_kind !== 'post' && p.slug !== 'blog');
     if (navPages.length <= 1 && !onShop) {
         // A site with a sidebar logo keeps the sidebar - the brand lives there.
         sb.innerHTML = brand;
@@ -1454,18 +1526,19 @@ function renderSidebar() {
     const blogActive = (currentSlug === 'blog' || onPost) ? ' active' : '';
     const newsletterActive = currentSlug === 'newsletter' ? ' active' : '';
     const blogLink = (SITE.has_blog === false ? ''
-            : '<a class="section-head' + blogActive + '" href="' + SITE_PATH_PREFIX + '/blog">Blog</a>')
-        + (SITE.has_newsletter ? '<a class="section-head' + newsletterActive + '" href="' + SITE_PATH_PREFIX + '/newsletter">Newsletter</a>' : '');
+            : '<a class="section-head' + blogActive + '" href="' + SITE_PATH_PREFIX + LANG_PREFIX + '/blog">' + escHtml(t('Blog')) + '</a>')
+        + (SITE.has_newsletter && !LANG ? '<a class="section-head' + newsletterActive + '" href="' + SITE_PATH_PREFIX + '/newsletter">Newsletter</a>' : '');
     const shopActive = currentSlug === '__shop__' ? ' active' : '';
     const shopLink = SITE.has_shop ? '<a class="section-head' + shopActive + '" href="/shop">Shop</a>' : '';
-    const bySlug = new Map(topLevel.map(p => [p.slug, p]));
+    const bySlug = new Map(topLevel.map(p => [LANG ? (p.translation_of || p.slug) : p.slug, p]));
     let html = '';
     if (navStructure && navStructure.length) {
         // Grouped nav from the "nav_structure" site setting. Ungrouped pages
         // (Home, any newly created top-level page) come first, in ord order.
         const groupedSlugs = new Set(navStructure.flatMap(g => g.items || [])
             .filter(s => typeof s === 'string'));
-        topLevel.filter(p => !groupedSlugs.has(p.slug)).forEach(p => html += renderTop(p));
+        const groupKey = p => (LANG ? (p.translation_of || p.slug) : p.slug);
+        topLevel.filter(p => !groupedSlugs.has(groupKey(p))).forEach(p => html += renderTop(p));
         navStructure.forEach(g => {
             let body = '';
             (g.items || []).forEach(s => {
@@ -1501,6 +1574,7 @@ function renderSidebar() {
         }
     }
     sb.innerHTML = brand + html;
+    renderLangSwitch();
 }
 
 function renderSidebarItem(p, isHead, hasChildren, expanded) {
@@ -1522,7 +1596,7 @@ function renderEmptyState(msg) {
 // full posts, newest first, with the date linking to the permalink. Mirrors
 // the SSR index (render_blog_index) including the ?page= query state.
 // Admins also see hidden (draft) posts, marked as such.
-const BLOG_POSTS_PER_PAGE = 10;
+const BLOG_POSTS_PER_PAGE = 3;
 
 function blogIndexHref(pageNum) {
     return SITE_PATH_PREFIX + '/blog' + (pageNum > 1 ? '?page=' + pageNum : '');
@@ -1765,7 +1839,7 @@ function renderToc(headings) {
         const cls = 'lvl-' + Math.min(4, h.level - minLevel + 2);
         return '<a class="' + cls + '" href="#' + h.id + '" data-toc-id="' + h.id + '">' + escHtml(h.text) + '</a>';
     }).join('');
-    rail.innerHTML = '<div class="toc-title">On this page</div>' + links;
+    rail.innerHTML = '<div class="toc-title">' + escHtml(t('On this page')) + '</div>' + links;
 
     rail.querySelectorAll('a').forEach(a => {
         a.addEventListener('click', (e) => {
@@ -2246,7 +2320,13 @@ async function newPost() {
 // the canonical path form via replaceState so crawlers and shared links
 // resolve cleanly.
 function slugFromLocation() {
-    const path = location.pathname || '';
+    let path = location.pathname || '';
+    // A translated render sees the same URL space one /{lang}/ segment
+    // deeper; strip the prefix (after the optional /site) before matching.
+    if (LANG) {
+        path = path.replace(new RegExp('^(\\/site)?\\/' + LANG + '(?=\\/|$)'), '$1');
+        if (path === '' || path === '/site') return '';
+    }
     // Blog posts: /blog/{slug} (clean) or /site/blog/{slug} (legacy host).
     const post = path.match(/^(?:\/site)?\/blog\/([^\/\?#]+)$/);
     if (post) return decodeURIComponent(post[1]);
@@ -2321,10 +2401,18 @@ async function route() {
     if (slug) {
         await loadPage(slug);
     } else {
-        // Default: first top-level page by ord (posts never become home)
-        const sorted = [...pages].sort((a, b) => a.ord - b.ord || a.title.localeCompare(b.title));
-        const first = sorted.find(p => !p.parent_slug && p.page_kind !== 'post')
-            || sorted.find(p => p.page_kind !== 'post') || sorted[0];
+        // Default: first top-level page by ord (posts never become home).
+        // A translated render homes on the translation of that page.
+        const byOrd = rows => [...rows].sort((a, b) => a.ord - b.ord || a.title.localeCompare(b.title));
+        const en = byOrd(pages.filter(p => !(p.lang || '')));
+        let first = en.find(p => !p.parent_slug && p.page_kind !== 'post')
+            || en.find(p => p.page_kind !== 'post') || en[0];
+        if (LANG) {
+            const mine = byOrd(langPages());
+            first = (first && mine.find(p => p.translation_of === first.slug))
+                || mine.find(p => !p.parent_slug && p.page_kind !== 'post')
+                || mine[0] || first;
+        }
         history.replaceState({}, '', pageHref(first.slug) + location.search + (anchor ? '#' + encodeURIComponent(anchor) : ''));
         await loadPage(first.slug);
     }
@@ -2347,6 +2435,36 @@ document.addEventListener('click', (e) => {
     if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
     const href = a.getAttribute('href');
     if (!href) return;
+    // On a translated render, only same-language links stay in the SPA; a
+    // link out of the language (the switcher, an English cross-link) does a
+    // full load so the server re-renders in the right language.
+    if (LANG) {
+        const lp = new RegExp('^(?:\\/site)?\\/' + LANG + '(?=\\/|$)');
+        if (!lp.test(href)) return;
+        const stripped = href.replace(lp, '') || '/';
+        const post = stripped.match(/^\/blog\/([^\/\?#]+)$/);
+        if (post) {
+            if (post[1] === 'rss.xml') return;
+            e.preventDefault();
+            navigateTo(decodeURIComponent(post[1]));
+            return;
+        }
+        if (stripped === '/' || stripped === '/blog' || /^\/blog\?/.test(stripped)) {
+            e.preventDefault();
+            if (location.pathname + location.search !== href) {
+                history.pushState({}, '', href);
+            }
+            route();
+            resetScroll();
+            return;
+        }
+        const m = stripped.match(/^\/([^\/\?#]+)$/);
+        if (m && !RESERVED_TOP_PATHS.has(m[1])) {
+            e.preventDefault();
+            navigateTo(decodeURIComponent(m[1]));
+        }
+        return;
+    }
     if (href.startsWith('/shop')) {
         // Same-origin /shop, /shop/, /shop/{sku}, /shop/success, /shop/cancel.
         // Skip /shop#... (fragment-only) so anchors still work.
@@ -3155,7 +3273,7 @@ function shopRouteFromLocation() {
 // links point to "/" directly instead of triggering a 301 hop through nginx.
 // In the dashboard preview they navigate fully, so carry the site along.
 document.querySelectorAll('a[href="/site"]').forEach(a => {
-    a.setAttribute('href', SITE_PATH_PREFIX ? SITE_PATH_PREFIX + siteQ() : '/');
+    a.setAttribute('href', SITE_PATH_PREFIX ? SITE_PATH_PREFIX + LANG_PREFIX + siteQ() : (LANG_PREFIX || '/'));
 });
 
 (async () => {

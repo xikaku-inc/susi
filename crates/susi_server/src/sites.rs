@@ -51,6 +51,10 @@ pub struct SiteDef {
     /// content, and configs stored before the flag existed must keep it.
     #[serde(default = "default_true")]
     pub has_blog: bool,
+    /// Additional content languages beyond the site's default, served under
+    /// a /{lang}/ URL prefix (e.g. ["ja"]). Empty = monolingual.
+    #[serde(default)]
+    pub langs: Vec<String>,
 }
 
 fn default_true() -> bool {
@@ -77,6 +81,7 @@ pub struct SiteConfig {
     pub has_shop: bool,
     pub has_newsletter: bool,
     pub has_blog: bool,
+    pub langs: &'static [&'static str],
     org_jsonld: &'static str,
 }
 
@@ -146,6 +151,7 @@ fn builtin_defs() -> Vec<(&'static str, SiteDef)> {
                 has_shop: true,
                 has_newsletter: true,
                 has_blog: true,
+                langs: Vec::new(),
             },
         ),
         (
@@ -172,6 +178,7 @@ fn builtin_defs() -> Vec<(&'static str, SiteDef)> {
                 has_shop: false,
                 has_newsletter: false,
                 has_blog: true,
+                langs: s(&["ja"]),
             },
         ),
     ]
@@ -211,6 +218,7 @@ fn build_config(id: &str, def: &SiteDef, has_logo: bool) -> &'static SiteConfig 
         has_shop: def.has_shop,
         has_newsletter: def.has_newsletter,
         has_blog: def.has_blog,
+        langs: svec(&def.langs),
         org_jsonld: "",
     };
     cfg.org_jsonld = sstr(&build_org_jsonld(&cfg));

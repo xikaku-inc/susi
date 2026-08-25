@@ -11,6 +11,7 @@ impl LicenseDb {
     pub fn upsert_website_page(
         &mut self,
         site: &str,
+        lang: &str,
         slug: &str,
         title: &str,
         body_md: &str,
@@ -21,6 +22,7 @@ impl LicenseDb {
         published_at: &str,
         author_username: &str,
         redirect_to: &str,
+        translation_of: &str,
         author: Option<&str>,
     ) -> Result<i64, LicenseError> {
         let now = Utc::now().to_rfc3339();
@@ -32,8 +34,8 @@ impl LicenseDb {
         // Capture prior state as a revision if this is an update-with-change.
         let prior: Option<(String, String, Option<String>, i64)> = tx
             .query_row(
-                "SELECT title, body_md, parent_slug, ord FROM website_pages WHERE site = ?1 AND slug = ?2",
-                params![site, slug],
+                "SELECT title, body_md, parent_slug, ord FROM website_pages WHERE site = ?1 AND lang = ?2 AND slug = ?3",
+                params![site, lang, slug],
                 |r| {
                     Ok((
                         r.get::<_, String>(0)?,
@@ -53,18 +55,18 @@ impl LicenseDb {
             if !unchanged {
                 tx.execute(
                     "INSERT INTO website_page_revisions
-                       (site, slug, title, body_md, parent_slug, ord, captured_at, author)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                    params![site, slug, p_title, p_body, p_parent, p_ord, now, author],
+                       (site, lang, slug, title, body_md, parent_slug, ord, captured_at, author)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    params![site, lang, slug, p_title, p_body, p_parent, p_ord, now, author],
                 )
                 .map_err(|e| LicenseError::Other(format!("DB snapshot: {}", e)))?;
             }
         }
 
         tx.execute(
-            "INSERT INTO website_pages (site, slug, title, body_md, parent_slug, ord, updated_at, meta_description, page_kind, published_at, author_username, redirect_to)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
-             ON CONFLICT(site, slug) DO UPDATE SET
+            "INSERT INTO website_pages (site, lang, slug, title, body_md, parent_slug, ord, updated_at, meta_description, page_kind, published_at, author_username, redirect_to, translation_of)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+             ON CONFLICT(site, lang, slug) DO UPDATE SET
                title = excluded.title,
                body_md = excluded.body_md,
                parent_slug = excluded.parent_slug,
@@ -74,14 +76,15 @@ impl LicenseDb {
                page_kind = excluded.page_kind,
                published_at = excluded.published_at,
                author_username = excluded.author_username,
-               redirect_to = excluded.redirect_to",
-            params![site, slug, title, body_md, parent_slug, ord, now, meta_description, page_kind, published_at, author_username, redirect_to],
+               redirect_to = excluded.redirect_to,
+               translation_of = excluded.translation_of",
+            params![site, lang, slug, title, body_md, parent_slug, ord, now, meta_description, page_kind, published_at, author_username, redirect_to, translation_of],
         )
         .map_err(|e| LicenseError::Other(format!("DB upsert website page: {}", e)))?;
         let id = tx
             .query_row(
-                "SELECT id FROM website_pages WHERE site = ?1 AND slug = ?2",
-                params![site, slug],
+                "SELECT id FROM website_pages WHERE site = ?1 AND lang = ?2 AND slug = ?3",
+                params![site, lang, slug],
                 |r| r.get::<_, i64>(0),
             )
             .map_err(|e| LicenseError::Other(format!("DB lookup website page: {}", e)))?;
@@ -94,6 +97,7 @@ impl LicenseDb {
     pub fn list_page_revisions(
         &self,
         site: &str,
+        lang: &str,
         slug: &str,
     ) -> Result<Vec<(i64, String, Option<String>, String, i64)>, LicenseError> {
         let mut stmt = self
@@ -101,12 +105,12 @@ impl LicenseDb {
             .prepare(
                 "SELECT id, captured_at, author, title, LENGTH(body_md)
                  FROM website_page_revisions
-                 WHERE site = ?1 AND slug = ?2
+                 WHERE site = ?1 AND lang = ?2 AND slug = ?3
                  ORDER BY captured_at DESC, id DESC",
             )
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
         let rows = stmt
-            .query_map(params![site, slug], |r| {
+            .query_map(params![site, lang, slug], |r| {
                 Ok((
                     r.get::<_, i64>(0)?,
                     r.get::<_, String>(1)?,
@@ -125,6 +129,7 @@ impl LicenseDb {
     pub fn get_page_revision(
         &self,
         site: &str,
+        lang: &str,
         slug: &str,
         revision_id: i64,
     ) -> Result<Option<(String, String, Option<String>, i64, String, Option<String>)>, LicenseError>
@@ -133,8 +138,8 @@ impl LicenseDb {
             .query_row(
                 "SELECT title, body_md, parent_slug, ord, captured_at, author
                  FROM website_page_revisions
-                 WHERE site = ?1 AND slug = ?2 AND id = ?3",
-                params![site, slug, revision_id],
+                 WHERE site = ?1 AND lang = ?2 AND slug = ?3 AND id = ?4",
+                params![site, lang, slug, revision_id],
                 |r| {
                     Ok((
                         r.get::<_, String>(0)?,
@@ -257,13 +262,14 @@ impl LicenseDb {
         Ok((true, n_pages))
     }
 
+    /// All languages; the two trailing fields are (lang, translation_of).
     pub fn list_website_pages(
         &self,
         site: &str,
-    ) -> Result<Vec<(String, String, Option<String>, i64, String, String, bool, String, String, String, String)>, LicenseError> {
+    ) -> Result<Vec<(String, String, Option<String>, i64, String, String, bool, String, String, String, String, String, String)>, LicenseError> {
         let mut stmt = self.conn
             .prepare(
-                "SELECT slug, title, parent_slug, ord, updated_at, meta_description, hidden, page_kind, published_at, author_username, redirect_to FROM website_pages
+                "SELECT slug, title, parent_slug, ord, updated_at, meta_description, hidden, page_kind, published_at, author_username, redirect_to, lang, translation_of FROM website_pages
                  WHERE site = ?1
                  ORDER BY parent_slug NULLS FIRST, ord, title",
             )
@@ -282,6 +288,8 @@ impl LicenseDb {
                     r.get::<_, String>(8)?,
                     r.get::<_, String>(9)?,
                     r.get::<_, String>(10)?,
+                    r.get::<_, String>(11)?,
+                    r.get::<_, String>(12)?,
                 ))
             })
             .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
@@ -290,15 +298,17 @@ impl LicenseDb {
         Ok(rows)
     }
 
+    /// The trailing field is translation_of.
     pub fn get_website_page(
         &self,
         site: &str,
+        lang: &str,
         slug: &str,
-    ) -> Result<Option<(String, String, Option<String>, i64, String, String, bool, String, String, String, String)>, LicenseError> {
+    ) -> Result<Option<(String, String, Option<String>, i64, String, String, bool, String, String, String, String, String)>, LicenseError> {
         match self.conn.query_row(
-            "SELECT title, body_md, parent_slug, ord, updated_at, meta_description, hidden, page_kind, published_at, author_username, redirect_to FROM website_pages
-             WHERE site = ?1 AND slug = ?2",
-            params![site, slug],
+            "SELECT title, body_md, parent_slug, ord, updated_at, meta_description, hidden, page_kind, published_at, author_username, redirect_to, translation_of FROM website_pages
+             WHERE site = ?1 AND lang = ?2 AND slug = ?3",
+            params![site, lang, slug],
             |r| {
                 Ok((
                     r.get::<_, String>(0)?,
@@ -312,6 +322,7 @@ impl LicenseDb {
                     r.get::<_, String>(8)?,
                     r.get::<_, String>(9)?,
                     r.get::<_, String>(10)?,
+                    r.get::<_, String>(11)?,
                 ))
             },
         ) {
@@ -394,30 +405,36 @@ impl LicenseDb {
     }
 
     /// Set the hidden flag on a page. Returns false if the slug doesn't exist.
-    pub fn set_website_page_hidden(&self, site: &str, slug: &str, hidden: bool) -> Result<bool, LicenseError> {
+    pub fn set_website_page_hidden(&self, site: &str, lang: &str, slug: &str, hidden: bool) -> Result<bool, LicenseError> {
         let n = self
             .conn
             .execute(
-                "UPDATE website_pages SET hidden = ?1 WHERE site = ?2 AND slug = ?3",
-                params![hidden as i64, site, slug],
+                "UPDATE website_pages SET hidden = ?1 WHERE site = ?2 AND lang = ?3 AND slug = ?4",
+                params![hidden as i64, site, lang, slug],
             )
             .map_err(|e| LicenseError::Other(format!("DB set hidden: {}", e)))?;
         Ok(n > 0)
     }
 
-    pub fn delete_website_page(&self, site: &str, slug: &str) -> Result<bool, LicenseError> {
+    pub fn delete_website_page(&self, site: &str, lang: &str, slug: &str) -> Result<bool, LicenseError> {
         let n = self
             .conn
-            .execute("DELETE FROM website_pages WHERE site = ?1 AND slug = ?2", params![site, slug])
+            .execute(
+                "DELETE FROM website_pages WHERE site = ?1 AND lang = ?2 AND slug = ?3",
+                params![site, lang, slug],
+            )
             .map_err(|e| LicenseError::Other(format!("DB delete: {}", e)))?;
         Ok(n > 0)
     }
 
-    /// Rename a website page slug, cascading `parent_slug` references.
+    /// Rename a website page slug, cascading `parent_slug` references within
+    /// its language and `translation_of` links from other languages when the
+    /// renamed page is in the default language.
     /// Returns Ok(false) if the source slug doesn't exist; Err on UNIQUE conflict.
     pub fn rename_website_page(
         &mut self,
         site: &str,
+        lang: &str,
         old_slug: &str,
         new_slug: &str,
     ) -> Result<bool, LicenseError> {
@@ -430,18 +447,25 @@ impl LicenseDb {
             .map_err(|e| LicenseError::Other(format!("DB tx: {}", e)))?;
         let n = tx
             .execute(
-                "UPDATE website_pages SET slug = ?1 WHERE site = ?2 AND slug = ?3",
-                params![new_slug, site, old_slug],
+                "UPDATE website_pages SET slug = ?1 WHERE site = ?2 AND lang = ?3 AND slug = ?4",
+                params![new_slug, site, lang, old_slug],
             )
             .map_err(|e| LicenseError::Other(format!("DB rename: {}", e)))?;
         if n == 0 {
             return Ok(false);
         }
         tx.execute(
-            "UPDATE website_pages SET parent_slug = ?1 WHERE site = ?2 AND parent_slug = ?3",
-            params![new_slug, site, old_slug],
+            "UPDATE website_pages SET parent_slug = ?1 WHERE site = ?2 AND lang = ?3 AND parent_slug = ?4",
+            params![new_slug, site, lang, old_slug],
         )
         .map_err(|e| LicenseError::Other(format!("DB rename cascade: {}", e)))?;
+        if lang.is_empty() {
+            tx.execute(
+                "UPDATE website_pages SET translation_of = ?1 WHERE site = ?2 AND translation_of = ?3",
+                params![new_slug, site, old_slug],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB rename translation links: {}", e)))?;
+        }
         tx.commit()
             .map_err(|e| LicenseError::Other(format!("DB tx commit: {}", e)))?;
         Ok(true)

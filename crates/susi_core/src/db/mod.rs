@@ -557,7 +557,11 @@ impl LicenseDb {
                 published_at TEXT NOT NULL DEFAULT '',
                 author_username TEXT NOT NULL DEFAULT '',
                 redirect_to TEXT NOT NULL DEFAULT '',
-                UNIQUE(site, slug)
+                -- '' = the site's default language; a translated page carries
+                -- the language code and the default-language slug it mirrors.
+                lang TEXT NOT NULL DEFAULT '',
+                translation_of TEXT NOT NULL DEFAULT '',
+                UNIQUE(site, lang, slug)
             );
             CREATE INDEX IF NOT EXISTS idx_website_pages_parent ON website_pages(parent_slug);
 
@@ -589,7 +593,8 @@ impl LicenseDb {
                 parent_slug TEXT,
                 ord INTEGER NOT NULL DEFAULT 0,
                 captured_at TEXT NOT NULL,
-                author TEXT
+                author TEXT,
+                lang TEXT NOT NULL DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS idx_website_page_revisions_slug
                 ON website_page_revisions(slug, captured_at DESC);
@@ -1183,7 +1188,7 @@ impl LicenseDb {
                 |r| r.get(0),
             )
             .unwrap_or_default();
-        if !wp_sql.contains("UNIQUE(site, slug)") {
+        if !wp_sql.contains("UNIQUE(site, slug)") && !wp_sql.contains("UNIQUE(site, lang, slug)") {
             self.conn
                 .execute_batch(
                     "PRAGMA foreign_keys=OFF;
@@ -1246,6 +1251,56 @@ impl LicenseDb {
         }
         let _ = self.conn.execute_batch(
             "ALTER TABLE website_page_revisions ADD COLUMN site TEXT NOT NULL DEFAULT 'xikaku';",
+        );
+
+        // Website pages gain a language dimension: lang '' = the site's
+        // default language, translated pages carry a code plus the
+        // default-language slug they mirror. Translations may reuse a slug,
+        // so uniqueness widens to (site, lang, slug) via one rebuild.
+        let wp_sql: String = self
+            .conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='website_pages'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or_default();
+        if !wp_sql.contains("UNIQUE(site, lang, slug)") {
+            self.conn
+                .execute_batch(
+                    "PRAGMA foreign_keys=OFF;
+                     BEGIN;
+                     CREATE TABLE website_pages_new (
+                         id INTEGER PRIMARY KEY AUTOINCREMENT,
+                         site TEXT NOT NULL DEFAULT 'xikaku',
+                         slug TEXT NOT NULL,
+                         title TEXT NOT NULL,
+                         body_md TEXT NOT NULL DEFAULT '',
+                         parent_slug TEXT,
+                         ord INTEGER NOT NULL DEFAULT 0,
+                         updated_at TEXT NOT NULL,
+                         meta_description TEXT NOT NULL DEFAULT '',
+                         hidden INTEGER NOT NULL DEFAULT 0,
+                         page_kind TEXT NOT NULL DEFAULT 'page',
+                         published_at TEXT NOT NULL DEFAULT '',
+                         author_username TEXT NOT NULL DEFAULT '',
+                         redirect_to TEXT NOT NULL DEFAULT '',
+                         lang TEXT NOT NULL DEFAULT '',
+                         translation_of TEXT NOT NULL DEFAULT '',
+                         UNIQUE(site, lang, slug)
+                     );
+                     INSERT INTO website_pages_new (id, site, slug, title, body_md, parent_slug, ord, updated_at, meta_description, hidden, page_kind, published_at, author_username, redirect_to)
+                         SELECT id, site, slug, title, body_md, parent_slug, ord, updated_at, meta_description, hidden, page_kind, published_at, author_username, redirect_to FROM website_pages;
+                     DROP TABLE website_pages;
+                     ALTER TABLE website_pages_new RENAME TO website_pages;
+                     CREATE INDEX IF NOT EXISTS idx_website_pages_parent ON website_pages(parent_slug);
+                     COMMIT;
+                     PRAGMA foreign_keys=ON;",
+                )
+                .map_err(|e| LicenseError::Other(format!("DB website_pages lang rebuild: {}", e)))?;
+        }
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE website_page_revisions ADD COLUMN lang TEXT NOT NULL DEFAULT '';",
         );
 
         // >> Add new migrations as own execute_batch statements here <<
@@ -1915,12 +1970,12 @@ mod tests {
         db.seed_admin("hash").unwrap();
         db.create_user("writer", "hash", "user").unwrap();
         db.set_user_name("writer", "Klaus", "Petersen").unwrap();
-        db.upsert_website_page("xikaku", "post-1", "Post", "# Post", None, 0, "", "post", "2026-08-05", "writer", "", None)
+        db.upsert_website_page("xikaku", "", "post-1", "Post", "# Post", None, 0, "", "post", "2026-08-05", "writer", "", "", None)
             .unwrap();
-        assert_eq!(db.get_website_page("xikaku", "post-1").unwrap().unwrap().9, "writer");
+        assert_eq!(db.get_website_page("xikaku", "", "post-1").unwrap().unwrap().9, "writer");
 
         db.rename_user("writer", "klaus").unwrap();
-        assert_eq!(db.get_website_page("xikaku", "post-1").unwrap().unwrap().9, "klaus");
+        assert_eq!(db.get_website_page("xikaku", "", "post-1").unwrap().unwrap().9, "klaus");
         assert_eq!(
             db.get_user_display_name("klaus").unwrap().as_deref(),
             Some("Klaus Petersen")
@@ -3737,7 +3792,7 @@ mod tests {
     fn test_asset_usage_and_rename_covers_shop_products() {
         let mut db = test_db();
         db.upsert_website_asset("xikaku", "sensor.png", 123).unwrap();
-        db.upsert_website_page("xikaku", "intro", "Intro", "![img](sensor.png)", None, 0, "", "page", "", "", "", None)
+        db.upsert_website_page("xikaku", "", "intro", "Intro", "![img](sensor.png)", None, 0, "", "page", "", "", "", "", None)
             .unwrap();
         db.upsert_product("lpms-b2", "LPMS-B2", "", 34900, "usd", Some("sensor.png"), "txcd", true, 0)
             .unwrap();
@@ -3755,7 +3810,7 @@ mod tests {
         let (ok, n_pages) = db.rename_website_asset("xikaku", "sensor.png", "imu.png").unwrap();
         assert!(ok);
         assert_eq!(n_pages, 1);
-        let body = db.get_website_page("xikaku", "intro").unwrap().unwrap().1;
+        let body = db.get_website_page("xikaku", "", "intro").unwrap().unwrap().1;
         assert!(body.contains("](imu.png)"), "page body not rewritten: {}", body);
         let img: Option<String> = db
             .conn
@@ -3767,31 +3822,31 @@ mod tests {
     #[test]
     fn test_website_page_hidden_flag() {
         let mut db = test_db();
-        db.upsert_website_page("xikaku", "about", "About", "# About", None, 0, "", "page", "", "", "", None)
+        db.upsert_website_page("xikaku", "", "about", "About", "# About", None, 0, "", "page", "", "", "", "", None)
             .unwrap();
 
         // New pages default to visible.
         let pages = db.list_website_pages("xikaku").unwrap();
         assert_eq!(pages.len(), 1);
         assert!(!pages[0].6, "new page must not be hidden");
-        assert!(!db.get_website_page("xikaku", "about").unwrap().unwrap().6);
+        assert!(!db.get_website_page("xikaku", "", "about").unwrap().unwrap().6);
 
         // Hide, verify, and check that editing the page keeps it hidden.
-        assert!(db.set_website_page_hidden("xikaku", "about", true).unwrap());
-        assert!(db.get_website_page("xikaku", "about").unwrap().unwrap().6);
-        db.upsert_website_page("xikaku", "about", "About v2", "# About v2", None, 0, "", "page", "", "", "", None)
+        assert!(db.set_website_page_hidden("xikaku", "", "about", true).unwrap());
+        assert!(db.get_website_page("xikaku", "", "about").unwrap().unwrap().6);
+        db.upsert_website_page("xikaku", "", "about", "About v2", "# About v2", None, 0, "", "page", "", "", "", "", None)
             .unwrap();
         assert!(
-            db.get_website_page("xikaku", "about").unwrap().unwrap().6,
+            db.get_website_page("xikaku", "", "about").unwrap().unwrap().6,
             "editing a page must not reset the hidden flag"
         );
 
         // Show again.
-        assert!(db.set_website_page_hidden("xikaku", "about", false).unwrap());
-        assert!(!db.get_website_page("xikaku", "about").unwrap().unwrap().6);
+        assert!(db.set_website_page_hidden("xikaku", "", "about", false).unwrap());
+        assert!(!db.get_website_page("xikaku", "", "about").unwrap().unwrap().6);
 
         // Unknown slug reports not-found.
-        assert!(!db.set_website_page_hidden("xikaku", "nope", true).unwrap());
+        assert!(!db.set_website_page_hidden("xikaku", "", "nope", true).unwrap());
     }
 
     /// Two sites share the backend: the same slug and the same asset name must
@@ -3799,43 +3854,43 @@ mod tests {
     #[test]
     fn test_website_pages_are_site_scoped() {
         let mut db = test_db();
-        db.upsert_website_page("xikaku", "contact", "Contact X", "# X", None, 0, "", "page", "", "", "", None)
+        db.upsert_website_page("xikaku", "", "contact", "Contact X", "# X", None, 0, "", "page", "", "", "", "", None)
             .unwrap();
-        db.upsert_website_page("lpr", "contact", "Contact LP", "# LP", None, 0, "", "page", "", "", "", None)
+        db.upsert_website_page("lpr", "", "contact", "Contact LP", "# LP", None, 0, "", "page", "", "", "", "", None)
             .unwrap();
 
-        assert_eq!(db.get_website_page("xikaku", "contact").unwrap().unwrap().0, "Contact X");
-        assert_eq!(db.get_website_page("lpr", "contact").unwrap().unwrap().0, "Contact LP");
+        assert_eq!(db.get_website_page("xikaku", "", "contact").unwrap().unwrap().0, "Contact X");
+        assert_eq!(db.get_website_page("lpr", "", "contact").unwrap().unwrap().0, "Contact LP");
         assert_eq!(db.list_website_pages("xikaku").unwrap().len(), 1);
         assert_eq!(db.list_website_pages("lpr").unwrap().len(), 1);
 
         // Deleting on one site leaves the other untouched.
-        assert!(db.delete_website_page("lpr", "contact").unwrap());
-        assert!(db.get_website_page("lpr", "contact").unwrap().is_none());
-        assert!(db.get_website_page("xikaku", "contact").unwrap().is_some());
+        assert!(db.delete_website_page("lpr", "", "contact").unwrap());
+        assert!(db.get_website_page("lpr", "", "contact").unwrap().is_none());
+        assert!(db.get_website_page("xikaku", "", "contact").unwrap().is_some());
 
         // Assets: same name on both sites; rename on one site only rewrites
         // that site's page bodies.
         db.upsert_website_asset("xikaku", "hero.png", 1).unwrap();
         db.upsert_website_asset("lpr", "hero.png", 2).unwrap();
-        db.upsert_website_page("lpr", "home", "Home", "![h](hero.png)", None, 0, "", "page", "", "", "", None)
+        db.upsert_website_page("lpr", "", "home", "Home", "![h](hero.png)", None, 0, "", "page", "", "", "", "", None)
             .unwrap();
-        db.upsert_website_page("xikaku", "home", "Home", "![h](hero.png)", None, 0, "", "page", "", "", "", None)
+        db.upsert_website_page("xikaku", "", "home", "Home", "![h](hero.png)", None, 0, "", "page", "", "", "", "", None)
             .unwrap();
         let (ok, n) = db.rename_website_asset("lpr", "hero.png", "banner.png").unwrap();
         assert!(ok);
         assert_eq!(n, 1);
-        assert!(db.get_website_page("lpr", "home").unwrap().unwrap().1.contains("banner.png"));
-        assert!(db.get_website_page("xikaku", "home").unwrap().unwrap().1.contains("hero.png"));
+        assert!(db.get_website_page("lpr", "", "home").unwrap().unwrap().1.contains("banner.png"));
+        assert!(db.get_website_page("xikaku", "", "home").unwrap().unwrap().1.contains("hero.png"));
         assert!(db.website_asset_exists("xikaku", "hero.png").unwrap());
         assert!(!db.website_asset_exists("lpr", "hero.png").unwrap());
 
         // Revisions are site-scoped too (both 'home' pages were edited zero
         // times, so seed one revision on lpr only).
-        db.upsert_website_page("lpr", "home", "Home v2", "![h](banner.png) more", None, 0, "", "page", "", "", "", Some("k"))
+        db.upsert_website_page("lpr", "", "home", "Home v2", "![h](banner.png) more", None, 0, "", "page", "", "", "", "", Some("k"))
             .unwrap();
-        assert_eq!(db.list_page_revisions("lpr", "home").unwrap().len(), 1);
-        assert_eq!(db.list_page_revisions("xikaku", "home").unwrap().len(), 0);
+        assert_eq!(db.list_page_revisions("lpr", "", "home").unwrap().len(), 1);
+        assert_eq!(db.list_page_revisions("xikaku", "", "home").unwrap().len(), 0);
     }
 
     #[test]
@@ -3913,9 +3968,9 @@ mod tests {
 
         // Reopen: rows survive under site 'xikaku' and the composite key holds.
         let mut db = LicenseDb::open(&p).unwrap();
-        assert_eq!(db.get_website_page("xikaku", "about").unwrap().unwrap().0, "About");
+        assert_eq!(db.get_website_page("xikaku", "", "about").unwrap().unwrap().0, "About");
         assert_eq!(db.list_website_assets("xikaku").unwrap(), vec![("logo.png".to_string(), 42)]);
-        db.upsert_website_page("lpr", "about", "About LP", "", None, 0, "", "page", "", "", "", None)
+        db.upsert_website_page("lpr", "", "about", "About LP", "", None, 0, "", "page", "", "", "", "", None)
             .unwrap();
         assert_eq!(db.list_website_pages("xikaku").unwrap().len(), 1);
         assert_eq!(db.list_website_pages("lpr").unwrap().len(), 1);
@@ -3957,12 +4012,12 @@ mod tests {
         let mut db = LicenseDb::open(&p).unwrap();
         assert_eq!(db.get_user_name("legacy").unwrap(), (String::new(), String::new()));
         assert_eq!(db.get_user_display_name("legacy").unwrap(), None);
-        assert_eq!(db.get_website_page("xikaku", "old-post").unwrap().unwrap().9, "");
+        assert_eq!(db.get_website_page("xikaku", "", "old-post").unwrap().unwrap().9, "");
 
         db.set_user_name("legacy", "Klaus", "Petersen").unwrap();
-        db.upsert_website_page("xikaku", "old-post", "Old", "# Old", None, 0, "", "post", "2020-01-01", "legacy", "", None)
+        db.upsert_website_page("xikaku", "", "old-post", "Old", "# Old", None, 0, "", "post", "2020-01-01", "legacy", "", "", None)
             .unwrap();
-        assert_eq!(db.get_website_page("xikaku", "old-post").unwrap().unwrap().9, "legacy");
+        assert_eq!(db.get_website_page("xikaku", "", "old-post").unwrap().unwrap().9, "legacy");
         assert_eq!(db.list_users().unwrap()[0].last_name, "Petersen");
 
         drop(db);

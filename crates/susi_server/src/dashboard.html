@@ -1735,12 +1735,20 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
 
 <!-- Website Pages -->
 <div id="page-website" class="dash-page">
-    <div style="margin-top:8px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
-        <h2 style="font-size:16px;font-weight:600;">Website - Pages</h2>
-        <div style="display:flex;align-items:center;gap:10px;">
-            <select id="websiteSiteSelect" onchange="switchWebsiteSite()"></select>
-            <button onclick="showWebsitePageModal()">+ New Page</button>
-        </div>
+    <div style="margin-top:8px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
+        <h2 style="font-size:16px;font-weight:600;">Website</h2>
+        <select id="websiteSiteSelect" onchange="switchWebsiteSite()"></select>
+    </div>
+    <div class="ws-tabs" role="tablist">
+        <button class="ws-tab active" data-website-tab="pages" onclick="websiteTab('pages')">Pages</button>
+        <button class="ws-tab" data-website-tab="assets" onclick="websiteTab('assets')">Assets</button>
+        <button class="ws-tab" data-website-tab="redirects" onclick="websiteTab('redirects')">Redirects</button>
+        <button class="ws-tab" data-website-tab="settings" onclick="websiteTab('settings')">Settings</button>
+    </div>
+
+    <div class="ws-tab-panel active" data-website-panel="pages">
+    <div style="margin-bottom:12px;display:flex;justify-content:flex-end;">
+        <button onclick="showWebsitePageModal()">+ New Page</button>
     </div>
     <div class="card" style="padding:0;">
         <table style="width:100%;" id="websitePagesTable">
@@ -1761,12 +1769,12 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
         </table>
     </div>
 
-    <div style="margin-top:40px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
-        <h2 style="font-size:16px;font-weight:600;">Website - Assets</h2>
-        <div style="display:flex;gap:8px;">
-            <button onclick="document.getElementById('websiteAssetFile').click()">+ Upload Asset</button>
-            <input type="file" id="websiteAssetFile" style="display:none;" onchange="uploadWebsiteAssetFromPage(this.files[0]);this.value='';">
-        </div>
+    </div>
+
+    <div class="ws-tab-panel" data-website-panel="assets">
+    <div style="margin-bottom:12px;display:flex;justify-content:flex-end;gap:8px;">
+        <button onclick="document.getElementById('websiteAssetFile').click()">+ Upload Asset</button>
+        <input type="file" id="websiteAssetFile" style="display:none;" onchange="uploadWebsiteAssetFromPage(this.files[0]);this.value='';">
     </div>
     <div class="card" style="padding:0;">
         <table style="width:100%;" id="websiteAssetsTable">
@@ -1785,15 +1793,15 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
         </table>
     </div>
 
-    <div style="margin-top:40px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
-        <h2 style="font-size:16px;font-weight:600;">Website - Redirects</h2>
-        <div style="display:flex;gap:8px;align-items:center;">
-            <label for="redirectFrom" style="font-size:12px;color:var(--text2);">From</label>
-            <input type="text" id="redirectFrom" style="width:220px;">
-            <label for="redirectTo" style="font-size:12px;color:var(--text2);">To</label>
-            <input type="text" id="redirectTo" style="width:180px;">
-            <button onclick="addWebsiteRedirect()">+ Add</button>
-        </div>
+    </div>
+
+    <div class="ws-tab-panel" data-website-panel="redirects">
+    <div style="margin-bottom:12px;display:flex;gap:8px;align-items:center;justify-content:flex-end;">
+        <label for="redirectFrom" style="font-size:12px;color:var(--text2);">From</label>
+        <input type="text" id="redirectFrom" style="width:220px;">
+        <label for="redirectTo" style="font-size:12px;color:var(--text2);">To</label>
+        <input type="text" id="redirectTo" style="width:180px;">
+        <button onclick="addWebsiteRedirect()">+ Add</button>
     </div>
     <div class="card" style="padding:0;">
         <table style="width:100%;" id="websiteRedirectsTable">
@@ -1810,8 +1818,9 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
         </table>
     </div>
 
-    <div style="margin-top:40px;margin-bottom:14px;">
-        <h2 style="font-size:16px;font-weight:600;margin:0 0 14px;">Site Settings</h2>
+    </div>
+
+    <div class="ws-tab-panel" data-website-panel="settings">
         <div class="card settings-card" id="siteIdentityCard" style="display:none;margin-bottom:20px;">
             <div class="detail-header" style="display:flex;align-items:center;justify-content:space-between;">
                 <h3>Identity</h3>
@@ -1837,6 +1846,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                 <div class="form-row"><label>Social links (one per line)</label><textarea id="siteFieldSocial" rows="2" spellcheck="false"></textarea></div>
                 <div class="form-row"><label>Area served (one per line)</label><textarea id="siteFieldArea" rows="2" spellcheck="false"></textarea></div>
                 <div class="form-row"><label>llms.txt blurb</label><textarea id="siteFieldBlurb" rows="3"></textarea></div>
+                <div class="form-row"><label>Extra languages (one per line)</label><textarea id="siteFieldLangs" rows="2" spellcheck="false"></textarea></div>
                 <div class="toggle-row"><input type="checkbox" id="siteFieldBlog"><label for="siteFieldBlog">Blog</label></div>
                 <div class="toggle-row"><input type="checkbox" id="siteFieldShop"><label for="siteFieldShop">Shop</label></div>
                 <div class="toggle-row"><input type="checkbox" id="siteFieldNewsletter"><label for="siteFieldNewsletter">Newsletter</label></div>
@@ -1901,6 +1911,15 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                         <button type="button" id="siteSetLogoDarkRemove" onclick="removeSiteLogoDark()" style="display:none;">Remove</button>
                         <span id="siteSetLogoDarkName" style="font-size:12px;"></span>
                         <input type="file" id="siteSetLogoDarkFile" accept="image/*" style="display:none;" onchange="pickSiteLogo(this.files[0],true);this.value='';">
+                    </div>
+                </div>
+                <div class="form-row">
+                    <label>Favicon</label>
+                    <div style="display:flex;gap:8px;align-items:center;">
+                        <button type="button" onclick="document.getElementById('siteSetFaviconFile').click()">Upload…</button>
+                        <button type="button" id="siteSetFaviconRemove" onclick="removeSiteFavicon()" style="display:none;">Remove</button>
+                        <span id="siteSetFaviconName" style="font-size:12px;"></span>
+                        <input type="file" id="siteSetFaviconFile" accept="image/*,.ico" style="display:none;" onchange="pickSiteFavicon(this.files[0]);this.value='';">
                     </div>
                 </div>
                 <div class="form-row">
@@ -6611,6 +6630,7 @@ async function loadSiteSettings() {
         renderSiteBgRow();
         siteLogoImage = s.logo_image || '';
         siteLogoDarkImage = s.logo_dark_image || '';
+        siteFaviconImage = s.favicon_image || '';
         renderSiteLogoRows();
         document.getElementById('siteSetBgVeil').value = s.bg_veil || '72';
         document.getElementById('siteSetBgParallax').checked = s.bg_parallax === '1';
@@ -6642,14 +6662,17 @@ function removeSiteBg() {
     renderSiteBgRow();
 }
 
-// The chosen logo asset names; saved with the other site settings.
+// The chosen logo/favicon asset names; saved with the other site settings.
 let siteLogoImage = '';
 let siteLogoDarkImage = '';
+let siteFaviconImage = '';
 function renderSiteLogoRows() {
     document.getElementById('siteSetLogoName').textContent = siteLogoImage;
     document.getElementById('siteSetLogoRemove').style.display = siteLogoImage ? '' : 'none';
     document.getElementById('siteSetLogoDarkName').textContent = siteLogoDarkImage;
     document.getElementById('siteSetLogoDarkRemove').style.display = siteLogoDarkImage ? '' : 'none';
+    document.getElementById('siteSetFaviconName').textContent = siteFaviconImage;
+    document.getElementById('siteSetFaviconRemove').style.display = siteFaviconImage ? '' : 'none';
 }
 async function pickSiteLogo(file, dark) {
     if (!file) return;
@@ -6666,6 +6689,19 @@ function removeSiteLogo() {
 }
 function removeSiteLogoDark() {
     siteLogoDarkImage = '';
+    renderSiteLogoRows();
+}
+async function pickSiteFavicon(file) {
+    if (!file) return;
+    try {
+        const data = await uploadWebsiteAsset(file);
+        if (!data) return;
+        siteFaviconImage = data.name;
+        renderSiteLogoRows();
+    } catch (e) { toast('Upload failed: ' + e.message, 'error'); }
+}
+function removeSiteFavicon() {
+    siteFaviconImage = '';
     renderSiteLogoRows();
 }
 
@@ -6692,6 +6728,7 @@ async function saveSiteSettings() {
         sidebar_logo: document.getElementById('siteSetSidebarLogo').checked ? '1' : '',
         logo_image: siteLogoImage,
         logo_dark_image: siteLogoDarkImage,
+        favicon_image: siteFaviconImage,
     };
     try {
         const resp = await fetch(API + '/site/admin/settings' + wsQ(), {
@@ -7891,6 +7928,13 @@ function switchWebsiteSite() {
 
 let websiteRedirects = [];
 
+function websiteTab(name) {
+    document.querySelectorAll('#page-website .ws-tab').forEach(t =>
+        t.classList.toggle('active', t.dataset.websiteTab === name));
+    document.querySelectorAll('#page-website .ws-tab-panel').forEach(p =>
+        p.classList.toggle('active', p.dataset.websitePanel === name));
+}
+
 async function loadWebsiteRedirects() {
     if (!roleIsAdmin(userRole)) return;
     const tbody = document.getElementById('websiteRedirectsBody');
@@ -7975,18 +8019,22 @@ function renderWebsitePagesTable() {
         return;
     }
     tbody.innerHTML = websitePages.map(p => {
-        const editUrl = (p.page_kind === 'post' ? '/site/blog/' : '/site/') + encodeURIComponent(p.slug) + wsQ();
+        const lang = p.lang || '';
+        const langSeg = lang ? '/' + encodeURIComponent(lang) : '';
+        const editUrl = '/site' + langSeg + (p.page_kind === 'post' ? '/blog/' : '/') + encodeURIComponent(p.slug) + wsQ();
         const parent = p.parent_slug
             ? '<code>' + escHtml(p.parent_slug) + '</code>'
             : '<span style="color:var(--text2);">-</span>';
-        const menuId = 'website-page-menu-' + p.slug.replace(/[^a-zA-Z0-9_-]/g, '_');
+        const menuId = 'website-page-menu-' + (lang ? lang + '-' : '') + p.slug.replace(/[^a-zA-Z0-9_-]/g, '_');
         const slugArg = JSON.stringify(p.slug).replace(/"/g, '&quot;');
+        const langArg = JSON.stringify(lang).replace(/"/g, '&quot;');
         const hiddenBadge = p.hidden ? '<span class="badge">hidden</span>' : '';
+        const langBadge = lang ? '<span class="badge">' + escHtml(lang) + '</span>' : '';
         const postBadge = p.page_kind === 'post' ? '<span class="badge">post</span>' : '';
         const retiredBadge = p.redirect_to
             ? '<span class="badge" title="Redirects to ' + escHtml(p.redirect_to) + '">retired</span>'
             : '';
-        const tags = postBadge + hiddenBadge + retiredBadge;
+        const tags = langBadge + postBadge + hiddenBadge + retiredBadge;
         // Dim the content cells individually - opacity on the <tr> would
         // create a stacking context that traps the fixed-position dropdown
         // menu below the following rows.
@@ -8003,9 +8051,9 @@ function renderWebsitePagesTable() {
             +     '<button onclick="toggleDropdown(event,\'' + menuId + '\')">Actions &#9662;</button>'
             +     '<div id="' + menuId + '" class="dropdown-menu" style="display:none;">'
             +       '<a href="' + escHtml(editUrl) + '">Open editor</a>'
-            +       '<button onclick="toggleWebsitePageHidden(' + slugArg + ', ' + (p.hidden ? 'false' : 'true') + ')">' + (p.hidden ? 'Show on site' : 'Hide from site') + '</button>'
+            +       '<button onclick="toggleWebsitePageHidden(' + slugArg + ', ' + (p.hidden ? 'false' : 'true') + ', ' + langArg + ')">' + (p.hidden ? 'Show on site' : 'Hide from site') + '</button>'
             +       '<div class="divider"></div>'
-            +       '<button class="danger" onclick="deleteWebsitePage(' + slugArg + ')">Delete</button>'
+            +       '<button class="danger" onclick="deleteWebsitePage(' + slugArg + ', ' + langArg + ')">Delete</button>'
             +     '</div>'
             +   '</span>'
             + '</td>'
@@ -8013,9 +8061,10 @@ function renderWebsitePagesTable() {
     }).join('');
 }
 
-async function toggleWebsitePageHidden(slug, hidden) {
+async function toggleWebsitePageHidden(slug, hidden, lang) {
     try {
-        const resp = await fetch(API + '/website/pages/' + encodeURIComponent(slug) + '/visibility' + wsQ(), {
+        const langQ = lang ? '&lang=' + encodeURIComponent(lang) : '';
+        const resp = await fetch(API + '/website/pages/' + encodeURIComponent(slug) + '/visibility' + wsQ() + langQ, {
             method: 'POST',
             headers: { ...authHeaders(), 'Content-Type': 'application/json' },
             body: JSON.stringify({ hidden }),
@@ -8050,6 +8099,8 @@ function fillSiteIdentity(id, def) {
     document.getElementById('siteFieldSocial').value = (def.social_links || []).join('\n');
     document.getElementById('siteFieldArea').value = (def.area_served || []).join('\n');
     document.getElementById('siteFieldBlurb').value = def.llms_blurb || '';
+    document.getElementById('siteFieldLangs').value = (def.langs || []).join('
+');
     document.getElementById('siteFieldBlog').checked = def.has_blog !== false;
     document.getElementById('siteFieldShop').checked = !!def.has_shop;
     document.getElementById('siteFieldNewsletter').checked = !!def.has_newsletter;
@@ -8103,6 +8154,7 @@ async function saveSite() {
         social_links: lines('siteFieldSocial'),
         area_served: lines('siteFieldArea'),
         llms_blurb: val('siteFieldBlurb'),
+        langs: lines('siteFieldLangs'),
         has_shop: document.getElementById('siteFieldShop').checked,
         has_newsletter: document.getElementById('siteFieldNewsletter').checked,
         has_blog: document.getElementById('siteFieldBlog').checked,
@@ -8162,7 +8214,7 @@ async function createWebsitePage() {
         errEl.style.display = '';
         return;
     }
-    if (websitePages.some(p => p.slug === slug)) {
+    if (websitePages.some(p => p.slug === slug && !(p.lang || ''))) {
         errEl.textContent = 'Slug already exists.';
         errEl.style.display = '';
         return;
@@ -8195,10 +8247,11 @@ async function createWebsitePage() {
     }
 }
 
-async function deleteWebsitePage(slug) {
+async function deleteWebsitePage(slug, lang) {
     if (!confirm('Delete page "' + slug + '"? This cannot be undone.')) return;
     try {
-        const resp = await fetch(API + '/website/pages/' + encodeURIComponent(slug) + wsQ(), {
+        const langQ = lang ? '&lang=' + encodeURIComponent(lang) : '';
+        const resp = await fetch(API + '/website/pages/' + encodeURIComponent(slug) + wsQ() + langQ, {
             method: 'DELETE',
             headers: authHeaders(),
         });

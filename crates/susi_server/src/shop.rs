@@ -1943,6 +1943,7 @@ pub async fn handle_shop_page(State(state): State<Arc<AppState>>) -> axum::respo
     let html = String::from_utf8_lossy(&crate::website::render_shell(
         &state,
         site,
+        "",
         head,
         "<div class=\"empty-state\">Loading…</div>",
     ))

@@ -67,6 +67,32 @@ pub struct SiteQuery {
     site: Option<String>,
     // Blog index page number (ignored everywhere else).
     page: Option<usize>,
+    // Content language; nginx injects it for /{lang}/ prefixed URLs, the
+    // dashboard passes it when editing a translation. Empty/absent or a code
+    // the site doesn't declare = the default language.
+    lang: Option<String>,
+}
+
+/// The effective content language of a request: one of the site's declared
+/// extra languages, or "" for the default.
+fn resolve_lang(site: &SiteConfig, sq: &SiteQuery) -> String {
+    match sq.lang.as_deref() {
+        Some(l) if site.langs.contains(&l) => l.to_string(),
+        _ => String::new(),
+    }
+}
+
+/// Like `resolve_lang`, but an unknown language is an error rather than the
+/// default - admin writes must never land in the wrong language silently.
+fn require_lang(
+    site: &SiteConfig,
+    sq: &SiteQuery,
+) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
+    match sq.lang.as_deref() {
+        None | Some("") => Ok(String::new()),
+        Some(l) if site.langs.contains(&l) => Ok(l.to_string()),
+        Some(_) => Err(error_response(StatusCode::BAD_REQUEST, "Unknown language for this site")),
+    }
 }
 
 fn resolve_site(
@@ -87,6 +113,7 @@ fn content_type_for(name: &str) -> &'static str {
     else if lower.ends_with(".gif") { "image/gif" }
     else if lower.ends_with(".svg") { "image/svg+xml" }
     else if lower.ends_with(".webp") { "image/webp" }
+    else if lower.ends_with(".ico") { "image/x-icon" }
     else if lower.ends_with(".mp4") { "video/mp4" }
     else if lower.ends_with(".webm") { "video/webm" }
     else if lower.ends_with(".pdf") { "application/pdf" }
@@ -116,8 +143,14 @@ fn safe_slug(slug: &str) -> Result<&str, (StatusCode, Json<ErrorResponse>)> {
 
 /// Row shape returned by `list_website_pages`:
 /// (slug, title, parent_slug, ord, updated_at, meta_description, hidden,
-///  page_kind, published_at, author_username, redirect_to).
-type PageRow = (String, String, Option<String>, i64, String, String, bool, String, String, String, String);
+///  page_kind, published_at, author_username, redirect_to, lang,
+///  translation_of).
+type PageRow = (String, String, Option<String>, i64, String, String, bool, String, String, String, String, String, String);
+
+/// The rows belonging to one content language ("" = default).
+fn pages_in_lang(pages: &[PageRow], lang: &str) -> Vec<PageRow> {
+    pages.iter().filter(|p| p.11 == lang).cloned().collect()
+}
 
 /// True for a retired page: it 301s to `redirect_to` instead of rendering, and
 /// stays out of nav, sitemap, llms.txt, the blog index and the feed.
@@ -181,7 +214,7 @@ pub async fn handle_list_pages(
     let assets = db.list_website_assets(site.id).map_err(db_err)?;
     let pages_json: Vec<_> = pages
         .into_iter()
-        .map(|(slug, title, parent_slug, ord, updated_at, meta_description, hidden, page_kind, published_at, author_username, redirect_to)| {
+        .map(|(slug, title, parent_slug, ord, updated_at, meta_description, hidden, page_kind, published_at, author_username, redirect_to, lang, translation_of)| {
             let mut row = json!({
                 "slug": slug,
                 "title": title,
@@ -194,6 +227,8 @@ pub async fn handle_list_pages(
                 "published_at": published_at,
                 "author_name": display_name(&db, &author_username),
                 "redirect_to": redirect_to,
+                "lang": lang,
+                "translation_of": translation_of,
             });
             // The account name behind a byline is only the editor's business.
             if is_admin {
@@ -208,7 +243,7 @@ pub async fn handle_list_pages(
         .collect();
     Ok(Json(json!({
         "site": site.id,
-        "sites": sites::all_sites().iter().map(|s| json!({ "id": s.id, "name": s.name })).collect::<Vec<_>>(),
+        "sites": sites::all_sites().iter().map(|s| json!({ "id": s.id, "name": s.name, "langs": s.langs })).collect::<Vec<_>>(),
         "pages": pages_json,
         "assets": assets_json,
         "nav": nav,
@@ -222,14 +257,15 @@ pub async fn handle_get_page(
     Path(slug): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let site = resolve_site(&headers, &sq)?;
+    let lang = require_lang(site, &sq)?;
     safe_slug(&slug)?;
     let is_admin = is_admin_request(&headers, &state);
     let db = state.db.lock();
     let page = db
-        .get_website_page(site.id, &slug)
+        .get_website_page(site.id, &lang, &slug)
         .map_err(db_err)?
         .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Page not found"))?;
-    let (title, body_md, parent_slug, ord, updated_at, meta_description, hidden, page_kind, published_at, author_username, redirect_to) = page;
+    let (title, body_md, parent_slug, ord, updated_at, meta_description, hidden, page_kind, published_at, author_username, redirect_to, translation_of) = page;
     if hidden && !is_admin {
         return Err(error_response(StatusCode::NOT_FOUND, "Page not found"));
     }
@@ -246,6 +282,8 @@ pub async fn handle_get_page(
         "published_at": published_at,
         "author_name": display_name(&db, &author_username),
         "redirect_to": redirect_to,
+        "lang": lang,
+        "translation_of": translation_of,
     });
     if is_admin {
         out["author_username"] = json!(author_username);
@@ -426,6 +464,10 @@ pub struct UpsertPageRequest {
     // preserves the current setting; an empty string un-retires the page.
     #[serde(default)]
     pub redirect_to: Option<String>,
+    // For a translated page (?lang= set): the default-language slug it
+    // mirrors. Omitted preserves the current link; empty clears it.
+    #[serde(default)]
+    pub translation_of: Option<String>,
 }
 
 pub async fn handle_upsert_page(
@@ -436,13 +478,14 @@ pub async fn handle_upsert_page(
     Json(req): Json<UpsertPageRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let site = resolve_site(&headers, &sq)?;
+    let lang = require_lang(site, &sq)?;
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
     safe_slug(&slug)?;
 
     let (id, url) = {
         let mut db = state.db.lock();
-        let existing = db.get_website_page(site.id, &slug).map_err(db_err)?;
+        let existing = db.get_website_page(site.id, &lang, &slug).map_err(db_err)?;
         let page_kind = req
             .page_kind
             .clone()
@@ -500,8 +543,29 @@ pub async fn handle_upsert_page(
         {
             return Err(error_response(StatusCode::BAD_REQUEST, "A page cannot redirect to itself"));
         }
+        // Translation links only exist on translated pages, and must point at
+        // a default-language page so hreflang pairs stay resolvable.
+        let translation_of = if lang.is_empty() {
+            String::new()
+        } else {
+            let t = req
+                .translation_of
+                .clone()
+                .or_else(|| existing.as_ref().map(|r| r.11.clone()))
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            if !t.is_empty() && db.get_website_page(site.id, "", &t).map_err(db_err)?.is_none() {
+                return Err(error_response(
+                    StatusCode::BAD_REQUEST,
+                    "translation_of must name a default-language page",
+                ));
+            }
+            t
+        };
         let id = db.upsert_website_page(
             site.id,
+            &lang,
             &slug,
             &req.title,
             &req.body_md,
@@ -512,14 +576,17 @@ pub async fn handle_upsert_page(
             &published_at,
             &author_username,
             &redirect_to,
+            &translation_of,
             Some(&principal.username),
         )
         .map_err(db_err)?;
         let url = if page_kind == "post" {
-            canonical_post_url(site, &slug)
-        } else {
+            canonical_post_url(site, &lang, &slug)
+        } else if lang.is_empty() {
             let pages = visible_pages(db.list_website_pages(site.id).unwrap_or_default());
-            canonical_page_url(site, &slug, first_default_slug(&pages) == Some(slug.as_str()))
+            canonical_page_url(site, "", &slug, first_default_slug(&pages) == Some(slug.as_str()))
+        } else {
+            canonical_page_url(site, &lang, &slug, false)
         };
         (id, url)
     };
@@ -543,7 +610,7 @@ pub async fn handle_list_page_revisions(
     require_admin_full(&state, &principal)?;
     safe_slug(&slug)?;
     let db = state.db.lock();
-    let rows = db.list_page_revisions(site.id, &slug).map_err(db_err)?;
+    let rows = db.list_page_revisions(site.id, &require_lang(site, &sq)?, &slug).map_err(db_err)?;
     let revisions: Vec<_> = rows
         .into_iter()
         .map(|(id, captured_at, author, title, body_len)| json!({
@@ -564,12 +631,13 @@ pub async fn handle_get_page_revision(
     Path((slug, id)): Path<(String, i64)>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let site = resolve_site(&headers, &sq)?;
+    let lang = require_lang(site, &sq)?;
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
     safe_slug(&slug)?;
     let db = state.db.lock();
     let row = db
-        .get_page_revision(site.id, &slug, id)
+        .get_page_revision(site.id, &lang, &slug, id)
         .map_err(db_err)?
         .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Revision not found"))?;
     let (title, body_md, parent_slug, ord, captured_at, author) = row;
@@ -588,36 +656,40 @@ pub async fn handle_restore_page_revision(
     Path((slug, id)): Path<(String, i64)>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let site = resolve_site(&headers, &sq)?;
+    let lang = require_lang(site, &sq)?;
     let principal = validate_principal(&headers, &state)?;
     require_admin_full(&state, &principal)?;
     safe_slug(&slug)?;
     let mut db = state.db.lock();
     let rev = db
-        .get_page_revision(site.id, &slug, id)
+        .get_page_revision(site.id, &lang, &slug, id)
         .map_err(db_err)?
         .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Revision not found"))?;
     let (title, body_md, parent_slug, ord, _captured_at, _author) = rev;
     // Preserve the current meta_description, kind, publish date and author
     // when restoring prior body/title.
-    let (existing_meta, existing_kind, existing_pub, existing_author, existing_redirect) = db
-        .get_website_page(site.id, &slug)
+    let (existing_meta, existing_kind, existing_pub, existing_author, existing_redirect, existing_tr) = db
+        .get_website_page(site.id, &lang, &slug)
         .map_err(db_err)?
-        .map(|(_t, _b, _p, _o, _u, m, _h, k, pd, au, rd)| (m, k, pd, au, rd))
-        .unwrap_or_else(|| (String::new(), "page".to_string(), String::new(), String::new(), String::new()));
+        .map(|(_t, _b, _p, _o, _u, m, _h, k, pd, au, rd, tr)| (m, k, pd, au, rd, tr))
+        .unwrap_or_else(|| (String::new(), "page".to_string(), String::new(), String::new(), String::new(), String::new()));
     let new_id = db.upsert_website_page(
-        site.id, &slug, &title, &body_md, parent_slug.as_deref(), ord,
+        site.id, &lang, &slug, &title, &body_md, parent_slug.as_deref(), ord,
         &existing_meta,
         &existing_kind,
         &existing_pub,
         &existing_author,
         &existing_redirect,
+        &existing_tr,
         Some(&principal.username),
     ).map_err(db_err)?;
     let url = if existing_kind == "post" {
-        canonical_post_url(site, &slug)
-    } else {
+        canonical_post_url(site, &lang, &slug)
+    } else if lang.is_empty() {
         let pages = visible_pages(db.list_website_pages(site.id).unwrap_or_default());
-        canonical_page_url(site, &slug, first_default_slug(&pages) == Some(slug.as_str()))
+        canonical_page_url(site, "", &slug, first_default_slug(&pages) == Some(slug.as_str()))
+    } else {
+        canonical_page_url(site, &lang, &slug, false)
     };
     drop(db);
     invalidate_page_cache();
@@ -739,22 +811,23 @@ pub async fn handle_rename_page(
         return Err(error_response(StatusCode::BAD_REQUEST, "Invalid slug"));
     }
 
+    let lang = require_lang(site, &sq)?;
     let result = {
         let mut db = state.db.lock();
-        db.rename_website_page(site.id, &slug, new_slug)
+        db.rename_website_page(site.id, &lang, &slug, new_slug)
     };
     match result {
         Ok(true) => {
             let renamed_is_post = {
                 let db = state.db.lock();
-                db.get_website_page(site.id, new_slug).ok().flatten().map(|r| r.7 == "post").unwrap_or(false)
+                db.get_website_page(site.id, &lang, new_slug).ok().flatten().map(|r| r.7 == "post").unwrap_or(false)
             };
             let urls = if renamed_is_post {
-                vec![canonical_post_url(site, &slug), canonical_post_url(site, new_slug)]
+                vec![canonical_post_url(site, &lang, &slug), canonical_post_url(site, &lang, new_slug)]
             } else {
                 vec![
-                    canonical_page_url(site, &slug, false),
-                    canonical_page_url(site, new_slug, false),
+                    canonical_page_url(site, &lang, &slug, false),
+                    canonical_page_url(site, &lang, new_slug, false),
                 ]
             };
             invalidate_page_cache();
@@ -790,16 +863,17 @@ pub async fn handle_set_page_hidden(
     require_admin_full(&state, &principal)?;
     safe_slug(&slug)?;
 
+    let lang = require_lang(site, &sq)?;
     let (updated, was_post) = {
         let db = state.db.lock();
-        let was_post = db.get_website_page(site.id, &slug).ok().flatten().map(|r| r.7 == "post").unwrap_or(false);
-        (db.set_website_page_hidden(site.id, &slug, req.hidden).map_err(db_err)?, was_post)
+        let was_post = db.get_website_page(site.id, &lang, &slug).ok().flatten().map(|r| r.7 == "post").unwrap_or(false);
+        (db.set_website_page_hidden(site.id, &lang, &slug, req.hidden).map_err(db_err)?, was_post)
     };
     if !updated {
         return Err(error_response(StatusCode::NOT_FOUND, "Page not found"));
     }
     invalidate_page_cache();
-    let url = if was_post { canonical_post_url(site, &slug) } else { canonical_page_url(site, &slug, false) };
+    let url = if was_post { canonical_post_url(site, &lang, &slug) } else { canonical_page_url(site, &lang, &slug, false) };
     ping_indexnow(&state, site, vec![url]);
     Ok(Json(json!({ "slug": slug, "hidden": req.hidden })))
 }
@@ -815,16 +889,17 @@ pub async fn handle_delete_page(
     require_admin_full(&state, &principal)?;
     safe_slug(&slug)?;
 
+    let lang = require_lang(site, &sq)?;
     let (removed, was_post) = {
         let db = state.db.lock();
-        let was_post = db.get_website_page(site.id, &slug).ok().flatten().map(|r| r.7 == "post").unwrap_or(false);
-        (db.delete_website_page(site.id, &slug).map_err(db_err)?, was_post)
+        let was_post = db.get_website_page(site.id, &lang, &slug).ok().flatten().map(|r| r.7 == "post").unwrap_or(false);
+        (db.delete_website_page(site.id, &lang, &slug).map_err(db_err)?, was_post)
     };
     if !removed {
         return Err(error_response(StatusCode::NOT_FOUND, "Page not found"));
     }
     invalidate_page_cache();
-    let url = if was_post { canonical_post_url(site, &slug) } else { canonical_page_url(site, &slug, false) };
+    let url = if was_post { canonical_post_url(site, &lang, &slug) } else { canonical_page_url(site, &lang, &slug, false) };
     ping_indexnow(&state, site, vec![url]);
     Ok(Json(json!({ "status": "OK" })))
 }
@@ -929,9 +1004,9 @@ pub(crate) fn seed_legal_pages(state: &Arc<AppState>) {
         ("imprint", "Imprint", IMPRINT_MD),
     ] {
         let mut db = state.db.lock();
-        let exists = db.get_website_page(site.id, slug).ok().flatten().is_some();
+        let exists = db.get_website_page(site.id, "", slug).ok().flatten().is_some();
         if !exists {
-            match db.upsert_website_page(site.id, slug, title, body, None, 900, "", "page", "", "", "", None) {
+            match db.upsert_website_page(site.id, "", slug, title, body, None, 900, "", "page", "", "", "", "", None) {
                 Ok(_) => log::info!("Seeded website page '{}'", slug),
                 Err(e) => log::error!("Failed to seed website page '{}': {}", slug, e),
             }
@@ -1105,17 +1180,48 @@ pub async fn handle_logo_dark_png(
 pub async fn handle_og_image_png(headers: HeaderMap) -> impl IntoResponse {
     cached_image(&headers, "image/png", OG_IMAGE_PNG)
 }
-pub async fn handle_icon_png(headers: HeaderMap, Query(sq): Query<SiteQuery>) -> impl IntoResponse {
-    cached_image(&headers, "image/png", compiled_or_default_brand(brand_site(&headers, &sq)).icon)
+/// One uploaded favicon serves every icon route; browsers scale it.
+fn favicon_response(
+    state: &AppState,
+    headers: &HeaderMap,
+    sq: &SiteQuery,
+    compiled: fn(&sites::CompiledBrand) -> &'static [u8],
+    compiled_type: &'static str,
+) -> axum::response::Response {
+    let site = brand_site(headers, sq);
+    if let Some((name, bytes)) = custom_asset(state, site, SETTING_FAVICON_IMAGE) {
+        return cached_image_owned(headers, content_type_for(&name), bytes);
+    }
+    cached_image(headers, compiled_type, compiled(compiled_or_default_brand(site)))
 }
-pub async fn handle_favicon_32_png(headers: HeaderMap, Query(sq): Query<SiteQuery>) -> impl IntoResponse {
-    cached_image(&headers, "image/png", compiled_or_default_brand(brand_site(&headers, &sq)).favicon_32)
+
+pub async fn handle_icon_png(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
+) -> axum::response::Response {
+    favicon_response(&state, &headers, &sq, |b| b.icon, "image/png")
 }
-pub async fn handle_favicon_180_png(headers: HeaderMap, Query(sq): Query<SiteQuery>) -> impl IntoResponse {
-    cached_image(&headers, "image/png", compiled_or_default_brand(brand_site(&headers, &sq)).favicon_180)
+pub async fn handle_favicon_32_png(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
+) -> axum::response::Response {
+    favicon_response(&state, &headers, &sq, |b| b.favicon_32, "image/png")
 }
-pub async fn handle_favicon_ico(headers: HeaderMap, Query(sq): Query<SiteQuery>) -> impl IntoResponse {
-    cached_image(&headers, "image/x-icon", compiled_or_default_brand(brand_site(&headers, &sq)).favicon_ico)
+pub async fn handle_favicon_180_png(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
+) -> axum::response::Response {
+    favicon_response(&state, &headers, &sq, |b| b.favicon_180, "image/png")
+}
+pub async fn handle_favicon_ico(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
+) -> axum::response::Response {
+    favicon_response(&state, &headers, &sq, |b| b.favicon_ico, "image/x-icon")
 }
 
 /// Cache-busting version for an uploaded asset's URL: changes on any upload,
@@ -1191,19 +1297,93 @@ pub async fn handle_bg_jpg(
     }
 }
 
+/// Percent-encode a slug for use as a URL path segment: non-ASCII slugs
+/// (Japanese page names) are stored raw and carried encoded in URLs, the way
+/// WordPress served them. ASCII slugs pass through unchanged.
+fn encode_slug(slug: &str) -> String {
+    let mut out = String::with_capacity(slug.len());
+    for b in slug.bytes() {
+        match b {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
+}
+
+/// URL path prefix for a content language: "" for the default, "/ja" style
+/// for translations.
+fn lang_prefix(lang: &str) -> String {
+    if lang.is_empty() { String::new() } else { format!("/{}", lang) }
+}
+
 /// Build the canonical URL for a website page. The home slug renders as the
-/// bare domain (`https://xikaku.com/`); other slugs render as `/{slug}`.
-fn canonical_page_url(site: &SiteConfig, slug: &str, is_home: bool) -> String {
+/// bare domain (`https://xikaku.com/`, `/ja/` for translations); other slugs
+/// render as `[/{lang}]/{slug}`.
+fn canonical_page_url(site: &SiteConfig, lang: &str, slug: &str, is_home: bool) -> String {
     if is_home {
-        format!("{}/", site.public_base)
+        format!("{}{}/", site.public_base, lang_prefix(lang))
     } else {
-        format!("{}/{}", site.public_base, slug)
+        format!("{}{}/{}", site.public_base, lang_prefix(lang), encode_slug(slug))
     }
 }
 
-/// Blog posts live under `/blog/{slug}`.
-fn canonical_post_url(site: &SiteConfig, slug: &str) -> String {
-    format!("{}/blog/{}", site.public_base, slug)
+/// Blog posts live under `[/{lang}]/blog/{slug}`.
+fn canonical_post_url(site: &SiteConfig, lang: &str, slug: &str) -> String {
+    format!("{}{}/blog/{}", site.public_base, lang_prefix(lang), encode_slug(slug))
+}
+
+/// (hreflang code, url) pairs for a page and its translations, ending with
+/// x-default = the default-language URL. Empty when the page has no complete
+/// pair. The default language is advertised as "en".
+fn hreflang_pairs(site: &SiteConfig, pages: &[PageRow], lang: &str, slug: &str, is_post: bool) -> Vec<(String, String)> {
+    let default_slug = if lang.is_empty() {
+        slug.to_string()
+    } else {
+        match pages.iter().find(|p| p.11 == lang && p.0 == slug).map(|p| p.12.clone()) {
+            Some(t) if !t.is_empty() => t,
+            _ => return Vec::new(),
+        }
+    };
+    if !pages.iter().any(|p| p.11.is_empty() && p.0 == default_slug) {
+        return Vec::new();
+    }
+    let is_home = first_default_slug(&pages_in_lang(pages, "")) == Some(default_slug.as_str());
+    let url_for = |l: &str, s: &str| {
+        if is_post {
+            canonical_post_url(site, l, s)
+        } else {
+            canonical_page_url(site, l, s, is_home)
+        }
+    };
+    let default_url = url_for("", &default_slug);
+    let mut alts = vec![("en".to_string(), default_url.clone())];
+    for l in site.langs {
+        if let Some(t) = pages.iter().find(|p| p.11 == *l && p.12 == default_slug) {
+            alts.push((l.to_string(), url_for(l, &t.0)));
+        }
+    }
+    if alts.len() < 2 {
+        return Vec::new();
+    }
+    alts.push(("x-default".to_string(), default_url));
+    alts
+}
+
+/// The `<link rel="alternate" hreflang=...>` head lines for a page, or "".
+fn hreflang_links(site: &SiteConfig, pages: &[PageRow], lang: &str, slug: &str, is_post: bool) -> String {
+    hreflang_pairs(site, pages, lang, slug, is_post)
+        .iter()
+        .map(|(code, url)| {
+            format!(
+                "<link rel=\"alternate\" hreflang=\"{}\" href=\"{}\">\n",
+                html_escape(code),
+                html_escape(url),
+            )
+        })
+        .collect()
 }
 
 /// Format a YYYY-MM-DD publish date for display ("July 26, 2026"); returns
@@ -1713,7 +1893,7 @@ fn post_excerpt(state: &Arc<AppState>, site: &SiteConfig, p: &PageRow) -> String
         return p.5.clone();
     }
     let db = state.db.lock();
-    db.get_website_page(site.id, &p.0)
+    db.get_website_page(site.id, &p.11, &p.0)
         .ok()
         .flatten()
         .map(|(_t, body, ..)| derive_description(&body))
@@ -1722,6 +1902,7 @@ fn post_excerpt(state: &Arc<AppState>, site: &SiteConfig, p: &PageRow) -> String
 
 fn build_breadcrumbs(
     site: &SiteConfig,
+    lang: &str,
     pages: &[PageRow],
     slug: &str,
     home_slug: Option<&str>,
@@ -1739,7 +1920,7 @@ fn build_breadcrumbs(
                     r#"{{"@type":"ListItem","position":{},"name":"{}","item":"{}"}}"#,
                     pos,
                     html_escape(&home_page.1),
-                    html_escape(&canonical_page_url(site, hs, true)),
+                    html_escape(&canonical_page_url(site, lang, hs, true)),
                 ));
                 pos += 1;
             }
@@ -1749,14 +1930,14 @@ fn build_breadcrumbs(
             r#"{{"@type":"ListItem","position":{},"name":"{}","item":"{}"}}"#,
             pos,
             html_escape(blog_title),
-            html_escape(&format!("{}/blog", site.public_base)),
+            html_escape(&format!("{}{}/blog", site.public_base, lang_prefix(lang))),
         ));
         pos += 1;
         items.push(format!(
             r#"{{"@type":"ListItem","position":{},"name":"{}","item":"{}"}}"#,
             pos,
             html_escape(&by_slug[slug].1),
-            html_escape(&canonical_post_url(site, slug)),
+            html_escape(&canonical_post_url(site, lang, slug)),
         ));
         return format!(
             r#"{{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{}]}}"#,
@@ -1784,7 +1965,7 @@ fn build_breadcrumbs(
                     r#"{{"@type":"ListItem","position":{},"name":"{}","item":"{}"}}"#,
                     pos,
                     html_escape(&home_page.1),
-                    html_escape(&canonical_page_url(site, hs, true)),
+                    html_escape(&canonical_page_url(site, lang, hs, true)),
                 ));
                 pos += 1;
             }
@@ -1796,7 +1977,7 @@ fn build_breadcrumbs(
             r#"{{"@type":"ListItem","position":{},"name":"{}","item":"{}"}}"#,
             pos,
             html_escape(&p.1),
-            html_escape(&canonical_page_url(site, &p.0, is_home)),
+            html_escape(&canonical_page_url(site, lang, &p.0, is_home)),
         ));
         pos += 1;
     }
@@ -1808,6 +1989,8 @@ fn build_breadcrumbs(
 
 fn render_seo_head(
     site: &SiteConfig,
+    lang: &str,
+    hreflang_links: &str,
     slug: &str,
     page_title: &str,
     description: &str,
@@ -1821,9 +2004,9 @@ fn render_seo_head(
     let home_slug = first_default_slug(pages);
     let is_home = home_slug == Some(slug);
     let canonical = if post_published.is_some() {
-        canonical_post_url(site, slug)
+        canonical_post_url(site, lang, slug)
     } else {
-        canonical_page_url(site, slug, is_home)
+        canonical_page_url(site, lang, slug, is_home)
     };
     let full_title = if is_home {
         format!("{} - {}", site.name, site.tagline)
@@ -1903,7 +2086,7 @@ fn render_seo_head(
         )
     };
 
-    let breadcrumb_jsonld = build_breadcrumbs(site, pages, slug, home_slug);
+    let breadcrumb_jsonld = build_breadcrumbs(site, lang, pages, slug, home_slug);
 
     // Product schema: emit one Product per matching shop SKU. A page slug
     // like `lpms-curs3` matches every shop product whose SKU starts with the
@@ -1946,7 +2129,8 @@ fn render_seo_head(
             "<title>{title}</title>\n",
             "<meta name=\"description\" content=\"{desc}\">\n",
             "<link rel=\"canonical\" href=\"{canonical}\">\n",
-            "<link rel=\"alternate\" type=\"application/rss+xml\" title=\"{site} Blog\" href=\"{base}/blog/rss.xml\">\n",
+            "{hreflang}",
+            "<link rel=\"alternate\" type=\"application/rss+xml\" title=\"{site} Blog\" href=\"{base}{lang_pfx}/blog/rss.xml\">\n",
             "<meta property=\"og:type\" content=\"{og_type}\">\n",
             "<meta property=\"og:site_name\" content=\"{site}\">\n",
             "<meta property=\"og:title\" content=\"{title}\">\n",
@@ -1964,7 +2148,9 @@ fn render_seo_head(
         title = html_escape(&full_title),
         desc = html_escape(description),
         canonical = html_escape(&canonical),
+        hreflang = hreflang_links,
         base = site.public_base,
+        lang_pfx = lang_prefix(lang),
         og_type = if post_published.is_some() { "article" } else { "website" },
         article_meta = article_meta,
         site = html_escape(site.name),
@@ -2038,6 +2224,13 @@ pub async fn handle_website_render_slug(
     Query(sq): Query<SiteQuery>,
     Path(slug): Path<String>,
 ) -> axum::response::Response {
+    // /site/{lang} is a translation's home page, not a slug.
+    if let Ok(site) = resolve_site(&headers, &sq) {
+        if site.langs.contains(&slug.as_str()) {
+            let sq2 = SiteQuery { site: sq.site.clone(), page: sq.page, lang: Some(slug) };
+            return render_website(&state, &headers, &sq2, None, false);
+        }
+    }
     render_website(&state, &headers, &sq, Some(slug), false)
 }
 
@@ -2054,7 +2247,14 @@ pub async fn handle_website_render_post(
 /// Per-site config injected into the shell so the client JS knows which site
 /// it renders: canonical hosts (clean-URL detection), brand imagery, and
 /// which fixed features exist.
-fn site_config_script(state: &AppState, site: &SiteConfig, theme: &str, no_topbar: bool, sidebar_logo: bool) -> String {
+fn site_config_script(
+    state: &AppState,
+    site: &SiteConfig,
+    lang: &str,
+    theme: &str,
+    no_topbar: bool,
+    sidebar_logo: bool,
+) -> String {
     let (brand_logo, brand_logo_dark) = brand_logo_urls(state, site);
     format!(
         "<script>window.__SITE={};</script>",
@@ -2070,6 +2270,8 @@ fn site_config_script(state: &AppState, site: &SiteConfig, theme: &str, no_topba
             "theme": theme,
             "no_topbar": no_topbar,
             "sidebar_logo": sidebar_logo,
+            "langs": site.langs,
+            "lang": lang,
         }),
     )
 }
@@ -2077,8 +2279,8 @@ fn site_config_script(state: &AppState, site: &SiteConfig, theme: &str, no_topba
 /// Inject head + body into the compiled-in shell. A site with background
 /// artwork (uploaded or compiled-in) gets the photo layer and the veil
 /// styles keyed on it.
-pub(crate) fn render_shell(state: &Arc<AppState>, site: &SiteConfig, seo_head: &str, body_html: &str) -> Bytes {
-    let (custom_bg, veil, parallax, theme, no_topbar, sidebar_logo) = {
+pub(crate) fn render_shell(state: &Arc<AppState>, site: &SiteConfig, lang: &str, seo_head: &str, body_html: &str) -> Bytes {
+    let (custom_bg, veil, parallax, theme, no_topbar, sidebar_logo, favicon) = {
         let db = state.db.lock();
         let get = |k: &str| {
             db.get_site_setting(&sites::setting_key(site, k)).ok().flatten().unwrap_or_default()
@@ -2090,19 +2292,36 @@ pub(crate) fn render_shell(state: &Arc<AppState>, site: &SiteConfig, seo_head: &
             get(SETTING_THEME_MODE),
             get(SETTING_NO_TOPBAR) == "1",
             get(SETTING_SIDEBAR_LOGO) == "1",
+            get(SETTING_FAVICON_IMAGE),
         )
     };
     let theme = if matches!(theme.as_str(), "light" | "dark") { theme } else { String::new() };
     let mut html = WEBSITE_HTML
         .replacen("<!--SEO_HEAD-->", seo_head, 1)
-        .replacen("<!--SITE_CONFIG-->", &site_config_script(state, site, &theme, no_topbar, sidebar_logo), 1)
+        .replacen("<!--SITE_CONFIG-->", &site_config_script(state, site, lang, &theme, no_topbar, sidebar_logo), 1)
         .replacen("<!--ANALYTICS-->", &analytics_head(state, site), 1)
         .replacen("<!--BODY_CONTENT-->", body_html, 1);
-    // Pin the light palette before first paint; the client script sees the
-    // theme lock and never overrides it. Dark is the default palette, so a
-    // dark pin needs no attribute - the lock alone stops the light switch.
-    if theme == "light" {
-        html = html.replacen("<html lang=\"en\">", r#"<html lang="en" data-theme="light">"#, 1);
+    // One rewrite covers both html-tag concerns: the document language of a
+    // translated page, and the pinned light palette before first paint (the
+    // client script sees the theme lock and never overrides it; dark is the
+    // default palette, so a dark pin needs no attribute).
+    let html_lang = if lang.is_empty() { "en" } else { lang };
+    if html_lang != "en" || theme == "light" {
+        let tag = format!(
+            r#"<html lang="{}"{}>"#,
+            html_escape(html_lang),
+            if theme == "light" { r#" data-theme="light""# } else { "" },
+        );
+        html = html.replacen("<html lang=\"en\">", &tag, 1);
+    }
+    // An uploaded favicon re-versions the shell's icon links so browsers
+    // fetch the change at once; compiled artwork keeps the static ?v.
+    if !favicon.is_empty() {
+        let v = asset_version(state, site, &favicon);
+        html = html
+            .replacen("href=\"/favicon.ico\"", &format!("href=\"/favicon.ico?v={}\"", v), 1)
+            .replacen("/static/favicon-32.png?v=2", &format!("/static/favicon-32.png?v={}", v), 1)
+            .replacen("/static/favicon-180.png?v=2", &format!("/static/favicon-180.png?v={}", v), 1);
     }
     // The brand renders above the sidebar nav, and the sidebar column shows
     // immediately instead of waiting for the client nav render.
@@ -2178,6 +2397,7 @@ fn render_website(
         Ok(s) => s,
         Err(e) => return e.into_response(),
     };
+    let lang = resolve_lang(site, sq);
     // Build the cache key first so we can short-circuit on a hit. Use the raw
     // requested slug (None → "" for the home shell). When the slug resolves to
     // home via `first_default_slug`, the cache still keys on what the client
@@ -2186,16 +2406,18 @@ fn render_website(
     // cached page 1.
     let blog_page = sq.page.unwrap_or(1).max(1);
     let cache_key = if post_path {
-        format!("{}|blog/{}", site.id, requested_slug.as_deref().unwrap_or_default())
+        format!("{}|{}|blog/{}", site.id, lang, requested_slug.as_deref().unwrap_or_default())
     } else if requested_slug.as_deref() == Some("blog") {
-        format!("{}|blog|p={}", site.id, blog_page)
+        format!("{}|{}|blog|p={}", site.id, lang, blog_page)
     } else {
-        format!("{}|{}", site.id, requested_slug.as_deref().unwrap_or_default())
+        format!("{}|{}|{}", site.id, lang, requested_slug.as_deref().unwrap_or_default())
     };
     if let Some(cached) = page_cache_get(&cache_key) {
         return (build_html_headers(), cached).into_response();
     }
 
+    // All languages stay loaded - translation links cross the sets; rendering
+    // and nav work from the request language's slice.
     let (pages, products) = {
         let db = state.db.lock();
         (
@@ -2203,6 +2425,7 @@ fn render_website(
             if site.has_shop { db.list_products(true).unwrap_or_default() } else { Vec::new() },
         )
     };
+    let lang_pages = pages_in_lang(&pages, &lang);
 
     // A retired page 301s to its replacement; an unknown slug may still be
     // covered by the redirect map. Both are checked before rendering and
@@ -2211,7 +2434,7 @@ fn render_website(
     if let Some(s) = requested_slug.as_deref() {
         let row_redirect = {
             let db = state.db.lock();
-            db.get_website_page(site.id, s).ok().flatten().map(|r| r.10)
+            db.get_website_page(site.id, &lang, s).ok().flatten().map(|r| r.10)
         };
         match row_redirect {
             Some(t) if !t.trim().is_empty() => {
@@ -2232,22 +2455,35 @@ fn render_website(
     // /blog renders the reverse-chron post index; an optional "blog" page row
     // supplies the title/intro when present.
     if !post_path && requested_slug.as_deref() == Some("blog") {
-        let html = render_blog_index(state, site, &pages, &products, blog_page);
+        let html = render_blog_index(state, site, &lang, &pages, &products, blog_page);
         page_cache_put(cache_key, html.clone());
         return (build_html_headers(), html).into_response();
     }
 
     // /newsletter renders the public newsletter archive; an optional
     // "newsletter" page row supplies the title/intro when present. Sites
-    // without a newsletter treat the slug as a normal page.
-    if !post_path && site.has_newsletter && requested_slug.as_deref() == Some("newsletter") {
+    // without a newsletter treat the slug as a normal page. The archive
+    // exists in the default language only.
+    if !post_path && site.has_newsletter && lang.is_empty() && requested_slug.as_deref() == Some("newsletter") {
         let html = render_newsletter_index(state, site, &pages, &products);
         page_cache_put(cache_key, html.clone());
         return (build_html_headers(), html).into_response();
     }
 
+    // The home of a translation is the translated home page: the row that
+    // mirrors the default language's home slug, else the language's first
+    // top-level page.
     let slug_owned: Option<String> = requested_slug.or_else(|| {
-        first_default_slug(&pages).map(|s| s.to_string())
+        if lang.is_empty() {
+            first_default_slug(&pages).map(|s| s.to_string())
+        } else {
+            let default_home = first_default_slug(&pages_in_lang(&pages, "")).map(str::to_string);
+            pages
+                .iter()
+                .find(|p| p.11 == lang && !p.12.is_empty() && Some(&p.12) == default_home.as_ref())
+                .map(|p| p.0.clone())
+                .or_else(|| first_default_slug(&lang_pages).map(|s| s.to_string()))
+        }
     });
     // If the requested slug is unknown, render the shell anyway (SPA shows "Page not found")
     // but omit the SEO head - better than 500'ing.
@@ -2256,7 +2492,7 @@ fn render_website(
         if let Some(s) = slug_owned.as_deref() {
             let (row, author) = {
                 let db = state.db.lock();
-                let row = db.get_website_page(site.id, s).unwrap_or(None);
+                let row = db.get_website_page(site.id, &lang, s).unwrap_or(None);
                 let author = row.as_ref().and_then(|r| display_name(&db, &r.9));
                 (row, author)
             };
@@ -2264,7 +2500,7 @@ fn render_website(
             // head, no body - the SPA shows "Page not found" to visitors.
             // The /blog/ path only serves posts.
             match row {
-                Some((t, body, _p, _o, upd, meta, false, kind, published, _au, _rd))
+                Some((t, body, _p, _o, upd, meta, false, kind, published, _au, _rd, _tr))
                     if !post_path || kind == "post" =>
                 {
                     let desc = if !meta.trim().is_empty() {
@@ -2286,10 +2522,14 @@ fn render_website(
 
     let og_image = first_image_url(site, &body_md);
     let injected = match valid_slug.as_deref() {
-        Some(s) => render_seo_head(
-            site, s, &title, &description, &updated_at, og_image.as_deref(), &pages, &products,
-            post_published.as_deref(), post_author.as_deref(),
-        ),
+        Some(s) => {
+            let alt = hreflang_links(site, &pages, &lang, s, post_published.is_some());
+            render_seo_head(
+                site, &lang, &alt, s, &title, &description, &updated_at, og_image.as_deref(),
+                &lang_pages, &products,
+                post_published.as_deref(), post_author.as_deref(),
+            )
+        }
         None => format!(
             "<title>{}</title>\n<meta name=\"description\" content=\"{}\">\n",
             html_escape(site.name),
@@ -2312,16 +2552,17 @@ fn render_website(
         h
     };
 
-    let html = render_shell(state, site, &injected, &body_html);
+    let html = render_shell(state, site, &lang, &injected, &body_html);
     page_cache_put(cache_key, html.clone());
     (build_html_headers(), html).into_response()
 }
 
-const POSTS_PER_PAGE: usize = 10;
+const POSTS_PER_PAGE: usize = 3;
 
 /// `/blog` URL for the given page, for pager links.
-fn blog_index_href(page_num: usize) -> String {
-    if page_num > 1 { format!("/blog?page={}", page_num) } else { "/blog".to_string() }
+fn blog_index_href(lang: &str, page_num: usize) -> String {
+    let base = format!("{}/blog", lang_prefix(lang));
+    if page_num > 1 { format!("{}?page={}", base, page_num) } else { base }
 }
 
 /// SSR body + head for the /blog index: intro from the optional "blog" page
@@ -2329,19 +2570,21 @@ fn blog_index_href(page_num: usize) -> String {
 fn render_blog_index(
     state: &Arc<AppState>,
     site: &SiteConfig,
+    lang: &str,
     pages: &[PageRow],
     products: &[(String, String, String, i64, String, Option<String>, String, bool, i64, String)],
     page_num: usize,
 ) -> Bytes {
     let row = {
         let db = state.db.lock();
-        db.get_website_page(site.id, "blog").unwrap_or(None)
+        db.get_website_page(site.id, lang, "blog").unwrap_or(None)
     };
     let (title, intro_md, updated_at, meta) = match row {
-        Some((t, body, _p, _o, upd, m, false, _k, _pd, _au, _rd)) => (t, body, upd, m),
+        Some((t, body, _p, _o, upd, m, false, _k, _pd, _au, _rd, _tr)) => (t, body, upd, m),
         _ => ("Blog".to_string(), String::new(), String::new(), String::new()),
     };
-    let all_posts = sorted_posts(pages);
+    let lang_pages = pages_in_lang(pages, lang);
+    let all_posts = sorted_posts(&lang_pages);
 
     let description = if !meta.trim().is_empty() {
         meta
@@ -2370,14 +2613,14 @@ fn render_blog_index(
             let (post_body, author) = {
                 let db = state.db.lock();
                 let body = db
-                    .get_website_page(site.id, &p.0)
+                    .get_website_page(site.id, lang, &p.0)
                     .ok()
                     .flatten()
                     .map(|(_t, body, ..)| body)
                     .unwrap_or_default();
                 (body, display_name(&db, &p.9))
             };
-            let permalink = format!("/blog/{}", p.0);
+            let permalink = format!("{}/blog/{}", lang_prefix(lang), encode_slug(&p.0));
             body_html.push_str(&format!(
                 "<article class=\"blog-index-item\"><div class=\"meta\">\
                  <a href=\"{link}\">{date}</a>{byline}</div>{body}</article>",
@@ -2394,14 +2637,14 @@ fn render_blog_index(
             if page_num > 1 {
                 pager.push_str(&format!(
                     "<a href=\"{}\">← Newer</a>",
-                    html_escape(&blog_index_href(page_num - 1)),
+                    html_escape(&blog_index_href(lang, page_num - 1)),
                 ));
             }
             pager.push_str(&format!("<span>Page {} of {}</span>", page_num, total_pages));
             if page_num < total_pages {
                 pager.push_str(&format!(
                     "<a href=\"{}\">Older →</a>",
-                    html_escape(&blog_index_href(page_num + 1)),
+                    html_escape(&blog_index_href(lang, page_num + 1)),
                 ));
             }
             pager.push_str("</nav>");
@@ -2411,8 +2654,8 @@ fn render_blog_index(
 
     // dateModified for the index: the newest post, else the intro page edit.
     let updated = all_posts.first().map(|p| p.4.clone()).unwrap_or(updated_at);
-    let injected = render_seo_head(site, "blog", &title, &description, &updated, None, pages, products, None, None);
-    render_shell(state, site, &injected, &body_html)
+    let injected = render_seo_head(site, lang, "", "blog", &title, &description, &updated, None, &lang_pages, products, None, None);
+    render_shell(state, site, lang, &injected, &body_html)
 }
 
 /// Bodies reference uploaded images by bare filename (the composer upload hook
@@ -2467,12 +2710,12 @@ fn render_newsletter_index(
     let (row, issues) = {
         let db = state.db.lock();
         (
-            db.get_website_page(site.id, "newsletter").unwrap_or(None),
+            db.get_website_page(site.id, "", "newsletter").unwrap_or(None),
             db.list_public_newsletter_issues().unwrap_or_default(),
         )
     };
     let (title, intro_md, updated_at, meta) = match row {
-        Some((t, body, _p, _o, upd, m, false, _k, _pd, _au, _rd)) => (t, body, upd, m),
+        Some((t, body, _p, _o, upd, m, false, _k, _pd, _au, _rd, _tr)) => (t, body, upd, m),
         _ => ("Newsletter".to_string(), String::new(), String::new(), String::new()),
     };
 
@@ -2508,8 +2751,8 @@ fn render_newsletter_index(
     // dateModified for the archive: the newest issue, else the intro page edit.
     let updated = issues.first().map(|i| i.3.clone()).unwrap_or(updated_at);
     let injected =
-        render_seo_head(site, "newsletter", &title, &description, &updated, None, pages, products, None, None);
-    render_shell(state, site, &injected, &body_html)
+        render_seo_head(site, "", "", "newsletter", &title, &description, &updated, None, pages, products, None, None);
+    render_shell(state, site, "", &injected, &body_html)
 }
 
 /// RSS 2.0 feed of visible posts at /blog/rss.xml.
@@ -2522,11 +2765,13 @@ pub async fn handle_blog_rss(
         Ok(s) => s,
         Err(e) => return e.into_response(),
     };
+    let lang = resolve_lang(site, &sq);
     let pages = {
         let db = state.db.lock();
         visible_pages(db.list_website_pages(site.id).unwrap_or_default())
     };
-    let posts = sorted_posts(&pages);
+    let lang_pages = pages_in_lang(&pages, &lang);
+    let posts = sorted_posts(&lang_pages);
 
     let mut xml = String::from(concat!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n",
@@ -2534,19 +2779,23 @@ pub async fn handle_blog_rss(
         "<channel>\n",
     ));
     xml.push_str(&format!("<title>{} Blog</title>\n", xml_escape(site.name)));
-    xml.push_str(&format!("<link>{}/blog</link>\n", site.public_base));
+    xml.push_str(&format!("<link>{}{}/blog</link>\n", site.public_base, lang_prefix(&lang)));
     xml.push_str(&format!(
-        "<atom:link href=\"{}/blog/rss.xml\" rel=\"self\" type=\"application/rss+xml\"/>\n",
+        "<atom:link href=\"{}{}/blog/rss.xml\" rel=\"self\" type=\"application/rss+xml\"/>\n",
         site.public_base,
+        lang_prefix(&lang),
     ));
     xml.push_str(&format!(
         "<description>News and updates from {}.</description>\n",
         xml_escape(site.name),
     ));
-    xml.push_str("<language>en</language>\n");
+    xml.push_str(&format!(
+        "<language>{}</language>\n",
+        if lang.is_empty() { "en" } else { lang.as_str() },
+    ));
     for p in &posts {
         let excerpt = post_excerpt(&state, site, p);
-        let url = canonical_post_url(site, &p.0);
+        let url = canonical_post_url(site, &lang, &p.0);
         xml.push_str("<item>\n");
         xml.push_str(&format!("<title>{}</title>\n", xml_escape(&p.1)));
         xml.push_str(&format!("<link>{}</link>\n", xml_escape(&url)));
@@ -2589,6 +2838,9 @@ pub const SETTING_BG_IMAGE: &str = "bg_image";
 /// compiled-in artwork where the site has it, text brand otherwise.
 pub const SETTING_LOGO_IMAGE: &str = "logo_image";
 pub const SETTING_LOGO_DARK_IMAGE: &str = "logo_dark_image";
+/// Asset file name serving as the favicon (all sizes and /favicon.ico -
+/// browsers scale it); empty = compiled artwork, default-site fallback.
+pub const SETTING_FAVICON_IMAGE: &str = "favicon_image";
 /// Veil strength over the background photo, 0-100 percent; empty = 72.
 pub const SETTING_BG_VEIL: &str = "bg_veil";
 /// "1" = the background drifts opposite to the scroll direction.
@@ -2885,25 +3137,39 @@ pub async fn handle_sitemap_xml(
     headers: HeaderMap,
 ) -> impl IntoResponse {
     let mut xml = String::from(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n",
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\" xmlns:xhtml=\"http://www.w3.org/1999/xhtml\">\n",
     );
     if let Some(site) = sites::site_from_headers(&headers) {
         let pages = {
             let db = state.db.lock();
             visible_pages(db.list_website_pages(site.id).unwrap_or_default())
         };
-        let home_slug = first_default_slug(&pages).map(|s| s.to_string());
-        for (slug, _title, _parent, _ord, updated_at, _meta, _hidden, kind, _published, _author, _rd) in &pages {
-            let is_home = home_slug.as_deref() == Some(slug.as_str());
-            let loc = if kind == "post" {
-                canonical_post_url(site, slug)
+        let home_slug = first_default_slug(&pages_in_lang(&pages, "")).map(|s| s.to_string());
+        for (slug, _title, _parent, _ord, updated_at, _meta, _hidden, kind, _published, _author, _rd, lang, translation_of) in &pages {
+            let is_post_kind = kind == "post";
+            // Home detection: the default home, or a translation of it.
+            let is_home = if lang.is_empty() {
+                home_slug.as_deref() == Some(slug.as_str())
             } else {
-                canonical_page_url(site, slug, is_home)
+                !translation_of.is_empty() && home_slug.as_deref() == Some(translation_of.as_str())
+            };
+            let loc = if is_post_kind {
+                canonical_post_url(site, lang, slug)
+            } else {
+                canonical_page_url(site, lang, slug, is_home)
             };
             xml.push_str("  <url>\n");
             xml.push_str(&format!("    <loc>{}</loc>\n", xml_escape(&loc)));
             if !updated_at.is_empty() {
                 xml.push_str(&format!("    <lastmod>{}</lastmod>\n", xml_escape(&iso8601_z(updated_at))));
+            }
+            // hreflang alternates, mirroring the on-page link pairs.
+            for (code, href) in hreflang_pairs(site, &pages, lang, slug, is_post_kind) {
+                xml.push_str(&format!(
+                    "    <xhtml:link rel=\"alternate\" hreflang=\"{}\" href=\"{}\"/>\n",
+                    xml_escape(&code),
+                    xml_escape(&href),
+                ));
             }
             xml.push_str("  </url>\n");
         }
@@ -2930,9 +3196,10 @@ pub async fn handle_llms_txt(
     headers: HeaderMap,
 ) -> impl IntoResponse {
     let site = sites::site_from_headers(&headers).unwrap_or_else(sites::default_site);
+    // llms.txt lists the default language only - the canonical content.
     let pages = {
         let db = state.db.lock();
-        visible_pages(db.list_website_pages(site.id).unwrap_or_default())
+        pages_in_lang(&visible_pages(db.list_website_pages(site.id).unwrap_or_default()), "")
     };
     let home_slug = first_default_slug(&pages).map(|s| s.to_string());
 
@@ -2945,7 +3212,7 @@ pub async fn handle_llms_txt(
     ));
 
     body.push_str("## Pages\n");
-    for (slug, title, parent, _ord, _upd, meta, _hidden, kind, _published, _author, _rd) in &pages {
+    for (slug, title, parent, _ord, _upd, meta, _hidden, kind, _published, _author, _rd, _lang, _tr) in &pages {
         if kind == "post" {
             continue;
         }
@@ -2954,14 +3221,14 @@ pub async fn handle_llms_txt(
         } else {
             let row = {
                 let db = state.db.lock();
-                db.get_website_page(site.id, slug).unwrap_or(None)
+                db.get_website_page(site.id, "", slug).unwrap_or(None)
             };
             row.map(|(_t, body, ..)| derive_description(&body))
                 .unwrap_or_default()
         };
         let indent = if parent.is_some() { "  " } else { "" };
         let is_home = home_slug.as_deref() == Some(slug.as_str());
-        let url = canonical_page_url(site, slug, is_home);
+        let url = canonical_page_url(site, "", slug, is_home);
         if desc_source.is_empty() {
             body.push_str(&format!("{}- [{}]({})\n", indent, title, url));
         } else {
@@ -2973,7 +3240,7 @@ pub async fn handle_llms_txt(
         body.push_str("\n## Blog\n");
         for p in &posts {
             let excerpt = post_excerpt(&state, site, p);
-            let url = canonical_post_url(site, &p.0);
+            let url = canonical_post_url(site, "", &p.0);
             if excerpt.is_empty() {
                 body.push_str(&format!("- [{}]({}) ({})\n", p.1, url, p.8));
             } else {
@@ -3012,6 +3279,7 @@ const KNOWN_SITE_SETTING_KEYS: &[&str] = &[
     SETTING_SIDEBAR_LOGO,
     SETTING_LOGO_IMAGE,
     SETTING_LOGO_DARK_IMAGE,
+    SETTING_FAVICON_IMAGE,
 ];
 
 pub async fn handle_admin_get_site_settings(
@@ -3061,7 +3329,11 @@ pub async fn handle_admin_put_site_settings(
                     "nav_structure must be a JSON array of {\"title\", \"items\"} groups (max 4 KB)",
                 ));
             }
-        } else if k == SETTING_BG_IMAGE || k == SETTING_LOGO_IMAGE || k == SETTING_LOGO_DARK_IMAGE {
+        } else if k == SETTING_BG_IMAGE
+            || k == SETTING_LOGO_IMAGE
+            || k == SETTING_LOGO_DARK_IMAGE
+            || k == SETTING_FAVICON_IMAGE
+        {
             if !trimmed.is_empty() {
                 safe_filename(trimmed)?;
                 if !assets_dir(&state, site).join(trimmed).is_file() {
@@ -3167,6 +3439,24 @@ fn normalize_and_validate_site(
         def.social_links.iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
     def.area_served =
         def.area_served.iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+    // Language codes become URL path prefixes (/{lang}/), so they must be
+    // simple codes and must not shadow a real top-level path.
+    def.langs = def
+        .langs
+        .iter()
+        .map(|l| l.trim().to_ascii_lowercase())
+        .filter(|l| !l.is_empty())
+        .collect();
+    const RESERVED_LANG_PATHS: &[&str] = &[
+        "site", "shop", "api", "static", "docs", "blog", "newsletter", "health",
+    ];
+    for l in &def.langs {
+        let valid = (2..=8).contains(&l.len())
+            && l.chars().all(|c| c.is_ascii_lowercase() || c == '-');
+        if !valid || RESERVED_LANG_PATHS.contains(&l.as_str()) {
+            return Err(error_response(StatusCode::BAD_REQUEST, &format!("invalid language: {}", l)));
+        }
+    }
     Ok(())
 }
 
@@ -3316,6 +3606,27 @@ pub async fn handle_website_render_path(
         Ok(s) => s,
         Err(e) => return e.into_response(),
     };
+    // /site/{lang}/... serves the translation: the same URL space as the
+    // default language, one segment deeper. Deeper paths fall through to the
+    // redirect map (WordPress-era /ja/... permalinks).
+    if site.langs.contains(&head.as_str()) {
+        let rest = rest.trim_end_matches('/');
+        let sq2 = SiteQuery { site: sq.site.clone(), page: sq.page, lang: Some(head.clone()) };
+        if rest == "blog/rss.xml" {
+            return handle_blog_rss(State(state), headers, Query(sq2)).await.into_response();
+        }
+        if rest == "blog" {
+            return render_website(&state, &headers, &sq2, Some("blog".to_string()), false);
+        }
+        if let Some(post) = rest.strip_prefix("blog/") {
+            if !post.contains('/') {
+                return render_website(&state, &headers, &sq2, Some(post.to_string()), true);
+            }
+        }
+        if !rest.is_empty() && !rest.contains('/') {
+            return render_website(&state, &headers, &sq2, Some(rest.to_string()), false);
+        }
+    }
     let path = format!("{}/{}", head, rest);
     if let Some(to) = lookup_site_redirect(&state, site, &path) {
         let loc = redirect_map_location(&to, is_marketing_host(&headers));
@@ -3325,7 +3636,7 @@ pub async fn handle_website_render_path(
         "<title>{}</title>\n<meta name=\"robots\" content=\"noindex\">\n",
         html_escape(site.name),
     );
-    let html = render_shell(&state, site, &head, "<div class=\"empty-state\">Page not found</div>");
+    let html = render_shell(&state, site, "", &head, "<div class=\"empty-state\">Page not found</div>");
     (StatusCode::NOT_FOUND, build_html_headers(), html).into_response()
 }
 
@@ -3449,6 +3760,13 @@ pub struct ImportPageEntry {
     /// but keeps its content so it can be brought back.
     #[serde(default)]
     pub redirect_to: String,
+    /// Content language ("" = the site default); must be one the site
+    /// declares.
+    #[serde(default)]
+    pub lang: String,
+    /// For a translated page: the default-language slug it mirrors.
+    #[serde(default)]
+    pub translation_of: String,
 }
 
 pub async fn handle_import_pages(
@@ -3527,10 +3845,18 @@ pub async fn handle_import_pages(
         redirect_from: Vec<String>,
         hidden: bool,
         redirect_to: String,
+        lang: String,
+        translation_of: String,
     }
     let mut rows: Vec<ImportRow> = Vec::with_capacity(page_bodies.len());
     for (slug, body) in page_bodies {
         let entry = manifest.remove(&slug).unwrap_or_default();
+        if !entry.lang.is_empty() && !site.langs.contains(&entry.lang.as_str()) {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("{}: unknown language '{}' for this site", slug, entry.lang),
+            ));
+        }
         let page_kind = entry.page_kind.unwrap_or_else(|| "page".to_string());
         if page_kind != "page" && page_kind != "post" {
             return Err(error_response(
@@ -3553,9 +3879,9 @@ pub async fn handle_import_pages(
         }
         let mut redirect_from = Vec::with_capacity(entry.redirect_from.len());
         let canonical_path = if page_kind == "post" {
-            format!("/blog/{}", slug)
+            format!("{}/blog/{}", lang_prefix(&entry.lang), slug)
         } else {
-            format!("/{}", slug)
+            format!("{}/{}", lang_prefix(&entry.lang), slug)
         };
         for from in &entry.redirect_from {
             let (from, _to) = validate_redirect_pair(from, &canonical_path)?;
@@ -3578,6 +3904,8 @@ pub async fn handle_import_pages(
             redirect_from,
             hidden: entry.hidden,
             redirect_to,
+            lang: entry.lang,
+            translation_of: entry.translation_of,
         });
     }
 
@@ -3587,6 +3915,7 @@ pub async fn handle_import_pages(
         for r in &rows {
             db.upsert_website_page(
                 site.id,
+                &r.lang,
                 &r.slug,
                 &r.title,
                 &r.body,
@@ -3597,23 +3926,24 @@ pub async fn handle_import_pages(
                 &r.published_at,
                 "",
                 &r.redirect_to,
+                &r.translation_of,
                 Some(&principal.username),
             )
             .map_err(db_err)?;
-            db.set_website_page_hidden(site.id, &r.slug, r.hidden).map_err(db_err)?;
+            db.set_website_page_hidden(site.id, &r.lang, &r.slug, r.hidden).map_err(db_err)?;
             let canonical_path = if r.page_kind == "post" {
-                format!("/blog/{}", r.slug)
+                format!("{}/blog/{}", lang_prefix(&r.lang), r.slug)
             } else {
-                format!("/{}", r.slug)
+                format!("{}/{}", lang_prefix(&r.lang), r.slug)
             };
             for from in &r.redirect_from {
                 db.upsert_site_redirect(site.id, from, &canonical_path).map_err(db_err)?;
             }
             if !r.hidden && r.redirect_to.is_empty() {
                 urls.push(if r.page_kind == "post" {
-                    canonical_post_url(site, &r.slug)
+                    canonical_post_url(site, &r.lang, &r.slug)
                 } else {
-                    canonical_page_url(site, &r.slug, false)
+                    canonical_page_url(site, &r.lang, &r.slug, false)
                 });
             }
         }
@@ -3892,6 +4222,7 @@ mod tests {
         let page = |slug: &str, kind: &str| (
             slug.to_string(), "T".to_string(), None, 0, String::new(), String::new(),
             false, kind.to_string(), String::new(), String::new(), String::new(),
+            String::new(), String::new(),
         );
         let pages = vec![page("lpms-curs3", "page"), page("my-post", "post")];
 
@@ -4152,7 +4483,7 @@ mod tests {
 
     #[test]
     fn brand_site_honors_explicit_site_param() {
-        let q = |s: Option<&str>| SiteQuery { site: s.map(String::from), page: None };
+        let q = |s: Option<&str>| SiteQuery { site: s.map(String::from), page: None, lang: None };
         let bare = HeaderMap::new();
         assert_eq!(brand_site(&bare, &q(Some("lpr"))).id, "lpr");
         // Unknown or missing param falls back to Host resolution, then default.
@@ -4223,8 +4554,10 @@ mod tests {
 
     #[test]
     fn blog_index_hrefs_carry_page_state() {
-        assert_eq!(blog_index_href(1), "/blog");
-        assert_eq!(blog_index_href(3), "/blog?page=3");
+        assert_eq!(blog_index_href("", 1), "/blog");
+        assert_eq!(blog_index_href("", 3), "/blog?page=3");
+        assert_eq!(blog_index_href("ja", 1), "/ja/blog");
+        assert_eq!(blog_index_href("ja", 2), "/ja/blog?page=2");
     }
 
     #[test]

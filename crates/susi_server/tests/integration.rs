@@ -4610,6 +4610,190 @@ fn test_site_chrome_flags() {
     assert!(shell.contains(r#"<aside class="sidebar" id="sidebar"></aside>"#));
 }
 
+/// In-site i18n: translated pages live at /{lang}/{slug} with their own
+/// slugs, linked to their default-language partner; the shell, canonicals,
+/// hreflang pairs, sitemap, blog and llms.txt are language-aware.
+#[test]
+fn test_site_i18n() {
+    let server = TestServer::start();
+    let http = reqwest::blocking::Client::new();
+    let token = server.admin_token();
+
+    // English pages, then Japanese translations (one with a Japanese slug).
+    for (slug, title, ord) in [("home", "Home", 0), ("about", "About Us", 10)] {
+        let resp = http
+            .put(format!("{}/website/pages/{}?site=lpr", server.api_url, slug))
+            .bearer_auth(&token)
+            .json(&json!({ "title": title, "body_md": format!("# {}", title), "ord": ord }))
+            .send().expect("create en page");
+        assert_eq!(resp.status().as_u16(), 200);
+    }
+    let resp = http
+        .put(format!("{}/website/pages/home?site=lpr&lang=ja", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "title": "ホーム", "body_md": "# ホーム", "ord": 0, "translation_of": "home" }))
+        .send().expect("create ja home");
+    assert_eq!(resp.status().as_u16(), 200, "ja may reuse the en slug");
+    let resp = http
+        .put(format!("{}/website/pages/{}?site=lpr&lang=ja", server.api_url, urlencoding("会社情報")))
+        .bearer_auth(&token)
+        .json(&json!({ "title": "会社情報", "body_md": "# 会社情報\n\n日本語のページです。", "ord": 10, "translation_of": "about" }))
+        .send().expect("create ja about");
+    assert_eq!(resp.status().as_u16(), 200);
+
+    // Unknown languages and dangling translation links are rejected.
+    let resp = http
+        .put(format!("{}/website/pages/x?site=lpr&lang=xx", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "title": "X", "body_md": "# X" }))
+        .send().expect("bad lang");
+    assert_eq!(resp.status().as_u16(), 400);
+    let resp = http
+        .put(format!("{}/website/pages/y?site=lpr&lang=ja", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "title": "Y", "body_md": "# Y", "translation_of": "missing" }))
+        .send().expect("dangling translation");
+    assert_eq!(resp.status().as_u16(), 400);
+
+    // The Japanese home renders with the ja shell and hreflang pair.
+    let shell = http.get(format!("{}/site/ja", server.url))
+        .header("Host", "www.lp-research.com")
+        .send().expect("ja home").text().unwrap();
+    assert!(shell.contains(r#"<html lang="ja">"#), "ja shell must carry the document language");
+    assert!(shell.contains(r#""lang":"ja""#) && shell.contains(r#""langs":["ja"]"#));
+    assert!(shell.contains(r#"<link rel="canonical" href="https://www.lp-research.com/ja/">"#));
+    assert!(shell.contains(r#"hreflang="en" href="https://www.lp-research.com/">"#));
+    assert!(shell.contains(r#"hreflang="x-default" href="https://www.lp-research.com/">"#));
+    assert!(shell.contains("ホーム"), "the ja body must render");
+
+    // A Japanese-slug page under /ja/, requested percent-encoded.
+    let shell = http.get(format!("{}/site/ja/{}", server.url, urlencoding("会社情報")))
+        .header("Host", "www.lp-research.com")
+        .send().expect("ja about").text().unwrap();
+    assert!(shell.contains("日本語のページです"));
+    assert!(shell.contains(r#"<link rel="canonical" href="https://www.lp-research.com/ja/%E4%BC%9A%E7%A4%BE%E6%83%85%E5%A0%B1">"#));
+    assert!(shell.contains(r#"hreflang="en" href="https://www.lp-research.com/about">"#));
+
+    // The English partner links back.
+    let shell = http.get(format!("{}/site/about", server.url))
+        .header("Host", "www.lp-research.com")
+        .send().expect("en about").text().unwrap();
+    assert!(shell.contains(r#"<html lang="en">"#));
+    assert!(shell.contains(r#"hreflang="ja" href="https://www.lp-research.com/ja/%E4%BC%9A%E7%A4%BE%E6%83%85%E5%A0%B1">"#));
+
+    // Blog: a Japanese post appears on /ja/blog but not on /blog.
+    let resp = http
+        .put(format!("{}/website/pages/news-1?site=lpr&lang=ja", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "title": "翻訳記事マーカー", "body_md": "# 翻訳記事マーカー", "page_kind": "post", "published_at": "2026-08-01" }))
+        .send().expect("ja post");
+    assert_eq!(resp.status().as_u16(), 200);
+    let ja_blog = http.get(format!("{}/site/ja/blog", server.url))
+        .header("Host", "www.lp-research.com")
+        .send().expect("ja blog").text().unwrap();
+    assert!(ja_blog.contains("翻訳記事マーカー"), "ja blog must list the ja post");
+    let en_blog = http.get(format!("{}/site/blog", server.url))
+        .header("Host", "www.lp-research.com")
+        .send().expect("en blog").text().unwrap();
+    assert!(!en_blog.contains("翻訳記事マーカー"), "the en blog must not list ja posts");
+
+    // Sitemap carries both languages with hreflang alternates; llms.txt
+    // stays default-language.
+    let sitemap = http.get(format!("{}/sitemap.xml", server.url))
+        .header("Host", "www.lp-research.com")
+        .send().expect("sitemap").text().unwrap();
+    assert!(sitemap.contains("https://www.lp-research.com/ja/%E4%BC%9A%E7%A4%BE%E6%83%85%E5%A0%B1"));
+    assert!(sitemap.contains(r#"<xhtml:link rel="alternate" hreflang="ja""#));
+    let llms = http.get(format!("{}/llms.txt", server.url))
+        .header("Host", "www.lp-research.com")
+        .send().expect("llms").text().unwrap();
+    assert!(!llms.contains("会社情報"), "llms.txt lists the default language only");
+
+    // The other site declares no languages: /site/ja is a plain slug there.
+    let shell = http.get(format!("{}/site/ja", server.url))
+        .header("Host", "xikaku.com")
+        .send().expect("xikaku /ja").text().unwrap();
+    assert!(shell.contains(r#"<html lang="en">"#));
+}
+
+fn urlencoding(s: &str) -> String {
+    s.bytes().map(|b| format!("%{:02X}", b)).collect()
+}
+
+/// Per-site favicon: an uploaded asset chosen via the favicon_image setting
+/// serves on every icon route; clearing it restores the compiled artwork.
+#[test]
+fn test_site_favicon_upload() {
+    let server = TestServer::start();
+    let http = reqwest::blocking::Client::new();
+    let token = server.admin_token();
+
+    let compiled = http.get(format!("{}/favicon.ico", server.url))
+        .header("Host", "www.lp-research.com")
+        .send().expect("compiled favicon");
+    assert_eq!(compiled.headers()["content-type"].to_str().unwrap(), "image/x-icon");
+    let compiled_bytes = compiled.bytes().unwrap();
+
+    let boundary = "XFAVBOUNDARY";
+    let mut mp = Vec::new();
+    mp.extend_from_slice(format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"my-favicon.png\"\r\nContent-Type: image/png\r\n\r\n"
+    ).as_bytes());
+    mp.extend_from_slice(b"fake-favicon-png");
+    mp.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    let resp = http
+        .post(format!("{}/website/assets?site=lpr", server.api_url))
+        .bearer_auth(&token)
+        .header("content-type", format!("multipart/form-data; boundary={boundary}"))
+        .body(mp)
+        .send().expect("upload favicon asset");
+    assert!(resp.status().is_success(), "upload: {}", resp.text().unwrap_or_default());
+    let resp = http
+        .put(format!("{}/site/admin/settings?site=lpr", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "favicon_image": "my-favicon.png" }))
+        .send().expect("set favicon_image");
+    assert_eq!(resp.status().as_u16(), 200);
+
+    // Every icon route serves the upload, typed by its extension.
+    for path in ["/favicon.ico", "/static/favicon-32.png", "/static/favicon-180.png", "/static/icon.png"] {
+        let resp = http.get(format!("{}{}", server.url, path))
+            .header("Host", "www.lp-research.com")
+            .send().expect("custom favicon");
+        assert_eq!(resp.headers()["content-type"].to_str().unwrap(), "image/png", "{}", path);
+        assert_eq!(resp.bytes().unwrap().as_ref(), b"fake-favicon-png", "{}", path);
+    }
+    // The shell's icon links are re-versioned so browsers refetch at once.
+    let shell = http.get(format!("{}/site", server.url))
+        .header("Host", "www.lp-research.com")
+        .send().expect("shell").text().unwrap();
+    assert!(shell.contains("href=\"/favicon.ico?v="), "favicon.ico link must carry a version");
+    assert!(!shell.contains("/static/favicon-32.png?v=2"), "static version must be replaced");
+    // The other site keeps its compiled artwork.
+    let resp = http.get(format!("{}/favicon.ico", server.url))
+        .header("Host", "xikaku.com")
+        .send().expect("xikaku favicon");
+    assert_eq!(resp.headers()["content-type"].to_str().unwrap(), "image/x-icon");
+
+    // Unknown asset names are rejected; clearing restores the compiled icon.
+    let resp = http
+        .put(format!("{}/site/admin/settings?site=lpr", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "favicon_image": "missing.png" }))
+        .send().expect("set missing");
+    assert_eq!(resp.status().as_u16(), 400);
+    let resp = http
+        .put(format!("{}/site/admin/settings?site=lpr", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "favicon_image": "" }))
+        .send().expect("clear favicon");
+    assert_eq!(resp.status().as_u16(), 200);
+    let resp = http.get(format!("{}/favicon.ico", server.url))
+        .header("Host", "www.lp-research.com")
+        .send().expect("restored favicon");
+    assert_eq!(resp.bytes().unwrap(), compiled_bytes);
+}
+
 /// Dynamic site registry: a site created through the owner API serves on its
 /// host with scoped content and an uploaded logo; host collisions are
 /// rejected; edits apply live.
