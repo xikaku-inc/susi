@@ -89,7 +89,6 @@ pub struct CompiledBrand {
     pub favicon_32: &'static [u8],
     pub favicon_180: &'static [u8],
     pub favicon_ico: &'static [u8],
-    pub bg: &'static [u8],
 }
 
 static XIKAKU_BRAND: CompiledBrand = CompiledBrand {
@@ -99,7 +98,6 @@ static XIKAKU_BRAND: CompiledBrand = CompiledBrand {
     favicon_32: include_bytes!("assets/xikaku-favicon-32.png"),
     favicon_180: include_bytes!("assets/xikaku-favicon-180.png"),
     favicon_ico: include_bytes!("assets/favicon.ico"),
-    bg: include_bytes!("assets/site-bg.jpg"),
 };
 
 static LPR_BRAND: CompiledBrand = CompiledBrand {
@@ -111,7 +109,6 @@ static LPR_BRAND: CompiledBrand = CompiledBrand {
     favicon_32: include_bytes!("assets/lpr-favicon-32.png"),
     favicon_180: include_bytes!("assets/lpr-favicon-180.png"),
     favicon_ico: include_bytes!("assets/lpr-favicon.ico"),
-    bg: include_bytes!("assets/site-bg.jpg"),
 };
 
 pub fn compiled_brand(id: &str) -> Option<&'static CompiledBrand> {

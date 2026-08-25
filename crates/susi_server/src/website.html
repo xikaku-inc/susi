@@ -8,7 +8,10 @@
 <!--ANALYTICS-->
 <script>
 // Apply theme before paint to avoid a flash of the wrong colour scheme.
+// A theme-locked site ships the right palette from the server and stays put
+// (light = data-theme attribute, dark = the attribute-less default).
 (function () {
+    if (window.__SITE && window.__SITE.theme) return;
     const t = localStorage.getItem('susi_theme') || 'system';
     if (t === 'light') document.documentElement.setAttribute('data-theme', 'light');
     else if (t === 'system' && window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) {
@@ -184,8 +187,12 @@ body.has-bg .editor-toolbar { top: 0; }
 .sidebar {
     border-right: 1px solid var(--border);
     background: var(--bg);
-    padding: 16px 0;
+    /* Rails and content share a 24px top inset (.content, .toc-rail). */
+    padding: 24px 0;
     overflow-y: auto;
+    /* Reserve the scrollbar lane so the brand logo keeps one width whether
+       the nav overflows or not. */
+    scrollbar-gutter: stable;
     max-height: calc(100vh - 56px);
     position: sticky;
     top: 56px;
@@ -224,9 +231,40 @@ body.has-bg .editor-toolbar { top: 0; }
 .sidebar .sidebar-children.collapsed { display: none; }
 .sidebar .sidebar-children a { padding-left: 40px; }
 .sidebar .empty { padding: 16px; color: var(--text2); font-size: 14px; }
+.sidebar a.sidebar-brand {
+    display: block;
+    margin: 0 40px 22px 50px;
+    padding: 0;
+    border-left: none;
+    color: inherit; text-decoration: none;
+    font-size: 16px; font-weight: 600; letter-spacing: 0.02em;
+}
+.sidebar-brand img { display: block; max-width: 100%; height: auto; }
+.sidebar-brand img.logo-light { display: none; }
+:root[data-theme="light"] .sidebar-brand img.logo-dark { display: none; }
+:root[data-theme="light"] .sidebar-brand img.logo-light { display: block; }
+
+/* Topbar-less mode (SiteConfig.no_topbar): the header is hidden for
+   visitors (admins keep it - the edit controls live there). The sidebar
+   brand is its own flag (SiteConfig.sidebar_logo). */
+body.no-topbar .header { display: none; }
+body.no-topbar .layout { min-height: 100vh; }
+body.no-topbar .sidebar { top: 0; max-height: 100vh; }
+body.no-topbar .toc-rail { top: 0; max-height: 100vh; }
+body.no-topbar .nav-overlay { inset: 0; }
+body.no-topbar.has-bg .page-scroll { height: 100dvh; }
+.nav-toggle-float {
+    display: none;
+    position: fixed; top: 10px; left: 10px; z-index: 160;
+    width: 40px; height: 36px; padding: 0;
+    align-items: center; justify-content: center;
+    background: var(--bg); border: 1px solid var(--border); color: var(--text1);
+    border-radius: var(--radius); cursor: pointer;
+}
+.nav-toggle-float svg { width: 20px; height: 20px; display: block; stroke: currentColor; }
 
 .content {
-    padding: 40px 56px;
+    padding: 24px 56px 40px;
     max-width: 880px;
     margin-left: auto;
     margin-right: auto;
@@ -307,6 +345,7 @@ div.grid.cols-6 { --cols: 6; }
 .content a { color: var(--accent); text-decoration: none; }
 .content a:hover { text-decoration: underline; }
 .content img { max-width: 100%; height: auto; border-radius: var(--radius); display: block; margin: 16px auto; }
+.content video { max-width: 100%; height: auto; border-radius: var(--radius); display: block; margin: 16px auto; }
 .content img.no-radius, .EasyMDEContainer .editor-preview img.no-radius,
 .EasyMDEContainer .editor-preview-side img.no-radius { border-radius: 0; }
 .content hr { border: none; border-top: 1px solid var(--border); margin: 22px 0; }
@@ -621,7 +660,7 @@ div.grid.cols-6 { --cols: 6; }
 }
 @media (max-width: 900px) {
     :root { --sidebar-width: 200px; }
-    .content { padding: 32px 32px; }
+    .content { padding: 24px 32px 32px; }
 }
 @media (max-width: 720px) {
     .layout,
@@ -645,6 +684,11 @@ div.grid.cols-6 { --cols: 6; }
     .sidebar.open { transform: translateX(0); }
     .layout.no-sidebar .sidebar { display: none; }
     .nav-toggle { display: inline-flex; }
+    /* No header on mobile: a floating toggle opens the drawer; drawer and
+       content start below it. */
+    body.no-topbar .nav-toggle-float { display: inline-flex; }
+    body.no-topbar .sidebar { top: 0; height: 100vh; padding-top: 56px; }
+    body.no-topbar .content { padding-top: 56px; }
     .content { padding: 20px 16px; max-width: 100%; }
     /* The slide-in sidebar overlays content and needs its own backing. */
     body.has-bg .sidebar {
@@ -758,6 +802,14 @@ div.grid.cols-6 { --cols: 6; }
     </div>
 </div>
 
+<button class="nav-toggle-float" onclick="toggleSidebar()" aria-label="Open menu">
+    <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <line x1="3" y1="6" x2="21" y2="6"></line>
+        <line x1="3" y1="12" x2="21" y2="12"></line>
+        <line x1="3" y1="18" x2="21" y2="18"></line>
+    </svg>
+</button>
+
 <div class="page-scroll" id="pageScroll">
 <div class="layout no-sidebar no-toc" id="layout">
     <aside class="sidebar" id="sidebar"></aside>
@@ -797,7 +849,15 @@ div.grid.cols-6 { --cols: 6; }
 </div>
 
 <script>
+const THEME_LOCK = (window.__SITE && window.__SITE.theme) || '';
 function applyTheme(t) {
+    if (THEME_LOCK) {
+        if (THEME_LOCK === 'light') document.documentElement.setAttribute('data-theme', 'light');
+        else document.documentElement.removeAttribute('data-theme');
+        const b = document.getElementById('btnTheme');
+        if (b) b.style.display = 'none';
+        return;
+    }
     const root = document.documentElement;
     if (t === 'system') {
         root.removeAttribute('data-theme');
@@ -833,6 +893,7 @@ document.addEventListener('click', (e) => {
 });
 
 function cycleTheme() {
+    if (THEME_LOCK) return;
     const cur = localStorage.getItem('susi_theme') || 'system';
     const next = cur === 'dark' ? 'light' : cur === 'light' ? 'system' : 'dark';
     localStorage.setItem('susi_theme', next);
@@ -880,17 +941,49 @@ function siteQ(sep) { return (sep || '?') + 'site=' + encodeURIComponent(SITE.id
 const CANONICAL_HOSTS = SITE.hosts;
 const SITE_PATH_PREFIX = CANONICAL_HOSTS.includes(location.host) ? '' : '/site';
 
+// The brand/asset endpoints resolve the site from the Host header. Off the
+// canonical hosts (dashboard preview) that resolves to the default site, so
+// those URLs must carry ?site= explicitly to serve THIS site's files.
+function previewAssetUrl(u) {
+    if (!SITE_PATH_PREFIX || !u || !u.startsWith('/')) return u;
+    if (!u.startsWith('/static/') && !u.startsWith(API + '/website/assets/') && u !== '/favicon.ico') return u;
+    const p = new URL(u, location.origin);
+    if (!p.searchParams.has('site')) p.searchParams.set('site', SITE.id);
+    return p.pathname + p.search;
+}
+
+// Top-level paths that must NOT be intercepted as website slugs on xikaku.com.
+const RESERVED_TOP_PATHS = new Set(['site', 'shop', 'api', 'static', 'docs', 'robots.txt', 'sitemap.xml', 'llms.txt', 'favicon.ico', 'health', '.well-known']);
+
+// Root-relative links authored in page bodies use the clean-URL form; under
+// /site they need the prefix (and the site param, so open-in-new-tab and
+// reload keep the context) or they fall into the dashboard's namespace.
+function previewPageLink(u) {
+    if (!SITE_PATH_PREFIX) return u;
+    if (u.startsWith('/static/') || u.startsWith(API + '/')) return previewAssetUrl(u);
+    const head = u.split(/[\/?#]/).filter(Boolean)[0] || '';
+    if (RESERVED_TOP_PATHS.has(head)) return u;
+    const p = new URL(SITE_PATH_PREFIX + (u === '/' ? '' : u), location.origin);
+    if (!p.searchParams.has('site')) p.searchParams.set('site', SITE.id);
+    return p.pathname + p.search + p.hash;
+}
+
 // Apply per-site branding to the static header markup (authored for the
 // default site): logo images when the site has them, text brand otherwise.
 (function () {
+    // Restore the top bar for a likely admin before first paint; the async
+    // auth check in updateAdminChrome settles it either way.
+    if (SITE.no_topbar && localStorage.getItem('auth_token')) {
+        document.body.classList.remove('no-topbar');
+    }
     const brand = document.querySelector('.brand');
     if (!brand) return;
     brand.setAttribute('aria-label', SITE.name);
     const dark = brand.querySelector('.logo-dark');
     const light = brand.querySelector('.logo-light');
     if (SITE.brand_logo) {
-        if (dark) { dark.src = SITE.brand_logo_dark || SITE.brand_logo; dark.alt = SITE.name; }
-        if (light) { light.src = SITE.brand_logo; light.alt = SITE.name; }
+        if (dark) { dark.src = previewAssetUrl(SITE.brand_logo_dark || SITE.brand_logo); dark.alt = SITE.name; }
+        if (light) { light.src = previewAssetUrl(SITE.brand_logo); light.alt = SITE.name; }
     } else {
         brand.textContent = SITE.name;
     }
@@ -899,6 +992,42 @@ const SITE_PATH_PREFIX = CANONICAL_HOSTS.includes(location.host) ? '' : '/site';
         if (cart) cart.style.display = 'none';
     }
 })();
+
+// Same Host-resolution problem for the favicon links and the background
+// artwork the server injected into the shell; and SPA navigation writes
+// clean /site URLs that would lose the site context on reload - keep the
+// ?site= on every history write instead of threading it through each URL
+// builder.
+if (SITE_PATH_PREFIX) {
+    document.querySelectorAll('link[rel="icon"], link[rel="apple-touch-icon"]').forEach(l => {
+        l.href = previewAssetUrl(l.getAttribute('href'));
+    });
+    const bg = document.querySelector('.site-bg');
+    const bgm = bg && bg.style.backgroundImage.match(/url\(["']?([^"')]+)["']?\)/);
+    if (bgm) bg.style.backgroundImage = 'url("' + previewAssetUrl(bgm[1]) + '")';
+
+    // The SSR body is rendered host-agnostically too; patch it before first
+    // paint so the preview never flashes the default site's artwork while
+    // the SPA boots (this script runs before the browser renders).
+    document.querySelectorAll('#content img[src^="/"], #sidebar img[src^="/"]').forEach(el => {
+        el.src = previewAssetUrl(el.getAttribute('src'));
+    });
+    document.querySelectorAll('#content a[href^="/"]').forEach(el => {
+        el.setAttribute('href', previewPageLink(el.getAttribute('href')));
+    });
+
+    const keepSite = (url) => {
+        if (typeof url !== 'string') return url;
+        if (url !== '/site' && !/^\/site[\/?#]/.test(url)) return url;
+        const p = new URL(url, location.origin);
+        if (!p.searchParams.has('site')) p.searchParams.set('site', SITE.id);
+        return p.pathname + p.search + p.hash;
+    };
+    const rawPush = history.pushState.bind(history);
+    const rawReplace = history.replaceState.bind(history);
+    history.pushState = (s, t, url) => rawPush(s, t, keepSite(url));
+    history.replaceState = (s, t, url) => rawReplace(s, t, keepSite(url));
+}
 function pageHref(slug) {
     // Posts live under /blog/{slug}; everything else is /{slug}.
     const p = pages.find(x => x.slug === slug);
@@ -953,9 +1082,6 @@ function linkFirstHeading(html, href) {
     return html.slice(0, gt + 1) + '<a href="' + escHtml(href) + '">'
         + html.slice(gt + 1, close) + '</a>' + html.slice(close);
 }
-// Top-level paths that must NOT be intercepted as website slugs on xikaku.com.
-const RESERVED_TOP_PATHS = new Set(['site', 'shop', 'api', 'static', 'docs', 'robots.txt', 'sitemap.xml', 'llms.txt', 'favicon.ico', 'health', '.well-known']);
-
 let pages = [];
 let assets = [];
 // Sidebar group config from the "nav_structure" site setting (null = flat nav).
@@ -988,6 +1114,7 @@ async function resolveAdminStatus() {
 }
 
 function updateAdminChrome() {
+    if (SITE.no_topbar) document.body.classList.toggle('no-topbar', !isAdmin);
     document.getElementById('navLogoutBtn').style.display = isAdmin ? '' : 'none';
     document.getElementById('newPageBtn').style.display = isAdmin ? '' : 'none';
     document.getElementById('newPostBtn').style.display = isAdmin ? '' : 'none';
@@ -1068,11 +1195,16 @@ function renderInline(s) {
             const classes = [...attrs.matchAll(/\.([A-Za-z][\w-]*)/g)].map(m => m[1]);
             if (classes.length) extra += ' class="' + classes.join(' ') + '"';
         }
+        if (/\.(mp4|webm)([?#]|$)/i.test(url)) {
+            return '<video src="' + resolveAssetUrl(url) + '"' + extra
+                + ' autoplay muted loop playsinline></video>';
+        }
         return '<img alt="' + alt + '" src="' + resolveAssetUrl(url) + '"' + extra + '>';
     });
     out = out.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, text, url) => {
-        const safe = url.startsWith('http') || url.startsWith('#') || url.startsWith('/')
-            ? url : pageHref(url);
+        const safe = url.startsWith('http') || url.startsWith('#') ? url
+            : url.startsWith('/') ? previewPageLink(url)
+            : pageHref(url);
         return '<a href="' + safe + '">' + text + '</a>';
     });
     out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
@@ -1081,7 +1213,8 @@ function renderInline(s) {
 }
 
 function resolveAssetUrl(url) {
-    if (url.startsWith('http') || url.startsWith('/') || url.startsWith('data:')) return url;
+    if (url.startsWith('http') || url.startsWith('data:')) return url;
+    if (url.startsWith('/')) return previewAssetUrl(url);
     return API + '/website/assets/' + encodeURIComponent(url) + siteQ();
 }
 
@@ -1260,9 +1393,23 @@ async function loadPage(slug) {
 // Render
 // ---------------------------------------------------------------------------
 
+function sidebarBrandHtml() {
+    if (!SITE.sidebar_logo) return '';
+    const home = SITE_PATH_PREFIX ? SITE_PATH_PREFIX + siteQ() : '/';
+    let inner;
+    if (SITE.brand_logo) {
+        inner = '<img class="logo-dark" src="' + escHtml(previewAssetUrl(SITE.brand_logo_dark || SITE.brand_logo)) + '" alt="' + escHtml(SITE.name) + '">'
+            + '<img class="logo-light" src="' + escHtml(previewAssetUrl(SITE.brand_logo)) + '" alt="' + escHtml(SITE.name) + '">';
+    } else {
+        inner = escHtml(SITE.name);
+    }
+    return '<a href="' + escHtml(home) + '" class="sidebar-brand" aria-label="' + escHtml(SITE.name) + '">' + inner + '</a>';
+}
+
 function renderSidebar() {
     const sb = document.getElementById('sidebar');
     const layout = document.getElementById('layout');
+    const brand = sidebarBrandHtml();
     // Treat /shop as a non-empty sidebar context too - even when there are
     // no pages we still want to show the Shop link.
     const onShop = currentSlug === '__shop__';
@@ -1270,8 +1417,9 @@ function renderSidebar() {
     // The optional "blog" intro page is covered by the fixed Blog link below.
     const navPages = pages.filter(p => p.page_kind !== 'post' && p.slug !== 'blog');
     if (navPages.length <= 1 && !onShop) {
-        sb.innerHTML = '';
-        if (layout) layout.classList.add('no-sidebar');
+        // A site with a sidebar logo keeps the sidebar - the brand lives there.
+        sb.innerHTML = brand;
+        if (layout) layout.classList.toggle('no-sidebar', !brand);
         return;
     }
     if (layout) layout.classList.remove('no-sidebar');
@@ -1352,7 +1500,7 @@ function renderSidebar() {
             items.forEach(it => html += renderSidebarItem(it, false, false, false));
         }
     }
-    sb.innerHTML = html;
+    sb.innerHTML = brand + html;
 }
 
 function renderSidebarItem(p, isHead, hasChildren, expanded) {
@@ -1436,6 +1584,7 @@ async function renderBlogIndexView() {
     renderToc(headings);
     revealEmailObfs(c);
     mountContactForms(c);
+    startAmbientVideos(c);
 }
 
 // Public /newsletter view: optional intro from the "newsletter" page row,
@@ -1474,6 +1623,7 @@ async function renderNewsletterIndexView() {
     renderToc(headings);
     revealEmailObfs(c);
     mountContactForms(c);
+    startAmbientVideos(c);
 }
 
 function renderNoPages() {
@@ -1547,6 +1697,7 @@ function renderPage() {
     renderToc(headings);
     revealEmailObfs(c);
     mountContactForms(c);
+    startAmbientVideos(c);
     // Append a "buy" callout for sensor pages whose slug maps to live SKUs.
     if (currentSlug && SLUG_TO_SKU_PREFIXES[currentSlug]) {
         loadShopProducts().then(() => injectBuyCallout(currentSlug));
@@ -1781,7 +1932,7 @@ function initEasyMDE(initialBody) {
         uploadImage: true,
         imageUploadFunction: easymdeImageUpload,
         imageMaxSize: 100 * 1024 * 1024,
-        imageAccept: 'image/*',
+        imageAccept: 'image/*, video/mp4, video/webm',
         imageTexts: {
             sbInit: 'Attach images by drag-and-drop, paste, or the upload button.',
             sbOnDrop: 'Uploading #images_names#…',
@@ -1803,7 +1954,7 @@ function initEasyMDE(initialBody) {
             { name: 'table', action: EasyMDE.drawTable, text: '⊞', title: 'Insert table' },
             '|',
             { name: 'link', action: EasyMDE.drawLink, text: '🔗', title: 'Insert link' },
-            { name: 'upload-image', action: EasyMDE.drawUploadedImage, text: '🖼', title: 'Upload image' },
+            { name: 'upload-image', action: EasyMDE.drawUploadedImage, text: '🖼', title: 'Upload image or video' },
             { name: 'horizontal-rule', action: EasyMDE.drawHorizontalRule, text: '-', title: 'Horizontal rule' },
             '|',
             { name: 'preview', action: EasyMDE.togglePreview, text: '👁', title: 'Toggle preview', noDisable: true },
@@ -1841,7 +1992,7 @@ async function easymdeImageUpload(file, onSuccess, onError) {
 }
 
 function inferExtension(file) {
-    const m = (file.type || '').match(/^image\/(\w+)/);
+    const m = (file.type || '').match(/^(?:image|video)\/(\w+)/);
     if (!m) return 'png';
     const ext = m[1].toLowerCase();
     return ext === 'jpeg' ? 'jpg' : ext;
@@ -1944,6 +2095,7 @@ function renderPreviewView() {
     renderToc(headings);
     revealEmailObfs(c);
     mountContactForms(c);
+    startAmbientVideos(c);
     if (currentSlug && SLUG_TO_SKU_PREFIXES[currentSlug]) {
         loadShopProducts().then(() => injectBuyCallout(currentSlug));
     }
@@ -2807,6 +2959,16 @@ function injectBuyCallout(slug) {
     );
 }
 
+// Chrome ignores the muted attribute on innerHTML-inserted video when
+// deciding autoplay, so set the property and kick playback explicitly.
+function startAmbientVideos(root) {
+    root.querySelectorAll('video[autoplay]').forEach(v => {
+        v.muted = true;
+        const p = v.play();
+        if (p) p.catch(() => {});
+    });
+}
+
 // ---- Email obfuscation + contact form ----
 function revealEmailObfs(root) {
     const els = root.querySelectorAll('span.email-obf[data-u][data-d]');
@@ -2991,7 +3153,10 @@ function shopRouteFromLocation() {
 
 // Rewrite static "/site" home-links so on xikaku.com the brand and "Home"
 // links point to "/" directly instead of triggering a 301 hop through nginx.
-document.querySelectorAll('a[href="/site"]').forEach(a => { a.setAttribute('href', siteRootHref()); });
+// In the dashboard preview they navigate fully, so carry the site along.
+document.querySelectorAll('a[href="/site"]').forEach(a => {
+    a.setAttribute('href', SITE_PATH_PREFIX ? SITE_PATH_PREFIX + siteQ() : '/');
+});
 
 (async () => {
     await resolveAdminStatus();

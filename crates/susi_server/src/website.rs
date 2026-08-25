@@ -11,7 +11,7 @@ use std::sync::{Arc, LazyLock, RwLock};
 use std::time::{Duration, Instant};
 
 use axum::{
-    body::Bytes,
+    body::{Body, Bytes},
     extract::{Multipart, Path, Query, State},
     http::{header, HeaderMap, StatusCode},
     response::IntoResponse,
@@ -87,6 +87,8 @@ fn content_type_for(name: &str) -> &'static str {
     else if lower.ends_with(".gif") { "image/gif" }
     else if lower.ends_with(".svg") { "image/svg+xml" }
     else if lower.ends_with(".webp") { "image/webp" }
+    else if lower.ends_with(".mp4") { "video/mp4" }
+    else if lower.ends_with(".webm") { "video/webm" }
     else if lower.ends_with(".pdf") { "application/pdf" }
     else if lower.ends_with(".md") { "text/markdown; charset=utf-8" }
     else if lower.ends_with(".json") { "application/json" }
@@ -285,6 +287,55 @@ fn byline_suffix(author: Option<&str>) -> String {
     }
 }
 
+/// A `Range: bytes=...` request header resolved against a resource size.
+#[derive(Debug, PartialEq)]
+enum ByteRange {
+    /// No (or an ignorable) Range header: serve the whole file with 200.
+    Full,
+    /// Inclusive byte window to serve with 206.
+    Window(u64, u64),
+    /// Syntactically valid but beyond EOF: answer 416.
+    Unsatisfiable,
+}
+
+/// Multi-range and malformed specs fall back to `Full` - a server may ignore
+/// the Range header, and every real media client sends a single range.
+fn byte_range(headers: &HeaderMap, total: u64) -> ByteRange {
+    let Some(spec) = headers
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("bytes="))
+    else {
+        return ByteRange::Full;
+    };
+    if spec.contains(',') {
+        return ByteRange::Full;
+    }
+    let Some((a, b)) = spec.trim().split_once('-') else { return ByteRange::Full };
+    // (start, end) as a half-open window; clamp end to EOF per RFC 9110.
+    let (start, end) = if a.is_empty() {
+        match b.parse::<u64>() {
+            Ok(n) if n > 0 => (total.saturating_sub(n), total),
+            _ => return ByteRange::Full,
+        }
+    } else {
+        let Ok(start) = a.parse::<u64>() else { return ByteRange::Full };
+        let end = if b.is_empty() {
+            total
+        } else {
+            match b.parse::<u64>() {
+                Ok(e) if e >= start => e.saturating_add(1).min(total),
+                _ => return ByteRange::Full,
+            }
+        };
+        (start, end)
+    };
+    if start >= total {
+        return ByteRange::Unsatisfiable;
+    }
+    ByteRange::Window(start, end - 1)
+}
+
 pub async fn handle_get_asset(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -294,19 +345,59 @@ pub async fn handle_get_asset(
     let site = resolve_site(&headers, &sq)?;
     safe_filename(&file_name)?;
     let path = assets_dir(&state, site).join(&file_name);
-    if !path.exists() {
-        return Err(error_response(StatusCode::NOT_FOUND, "Asset not found"));
-    }
-    let bytes = tokio::fs::read(&path)
-        .await
-        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("Read: {}", e)))?;
+    let meta = match tokio::fs::metadata(&path).await {
+        Ok(m) if m.is_file() => m,
+        _ => return Err(error_response(StatusCode::NOT_FOUND, "Asset not found")),
+    };
+    let total = meta.len();
 
     let mut resp = HeaderMap::new();
     resp.insert(header::CONTENT_TYPE, content_type_for(&file_name).parse().unwrap());
-    resp.insert(header::CONTENT_LENGTH, bytes.len().into());
     resp.insert(header::CACHE_CONTROL, "public, max-age=300".parse().unwrap());
+    resp.insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
     harden_svg_response(&file_name, &mut resp);
-    Ok((resp, bytes))
+
+    // A validator lets browsers revalidate with a 304 after max-age instead
+    // of re-downloading - assets were fire-and-forget images before, but a
+    // hero video is tens of MB per miss.
+    if let Ok(modified) = meta.modified() {
+        let lm = chrono::DateTime::<chrono::Utc>::from(modified)
+            .format("%a, %d %b %Y %H:%M:%S GMT")
+            .to_string();
+        resp.insert(header::LAST_MODIFIED, lm.parse().unwrap());
+        let since = headers.get(header::IF_MODIFIED_SINCE).and_then(|v| v.to_str().ok());
+        if since == Some(lm.as_str()) {
+            return Ok((StatusCode::NOT_MODIFIED, resp, Body::empty()));
+        }
+    }
+
+    // Byte ranges are load-bearing for video: Safari refuses to play media
+    // from a server that answers a Range request with a plain 200.
+    let (status, start, len) = match byte_range(&headers, total) {
+        ByteRange::Full => (StatusCode::OK, 0, total),
+        ByteRange::Window(s, e) => {
+            resp.insert(
+                header::CONTENT_RANGE,
+                format!("bytes {}-{}/{}", s, e, total).parse().unwrap(),
+            );
+            (StatusCode::PARTIAL_CONTENT, s, e - s + 1)
+        }
+        ByteRange::Unsatisfiable => {
+            resp.insert(header::CONTENT_RANGE, format!("bytes */{}", total).parse().unwrap());
+            return Ok((StatusCode::RANGE_NOT_SATISFIABLE, resp, Body::empty()));
+        }
+    };
+    let io_err =
+        |e: std::io::Error| error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("Read: {}", e));
+    let mut file = tokio::fs::File::open(&path).await.map_err(io_err)?;
+    if start > 0 {
+        use tokio::io::AsyncSeekExt;
+        file.seek(std::io::SeekFrom::Start(start)).await.map_err(io_err)?;
+    }
+    resp.insert(header::CONTENT_LENGTH, len.into());
+    use tokio::io::AsyncReadExt;
+    let body = Body::from_stream(tokio_util::io::ReaderStream::new(file.take(len)));
+    Ok((status, resp, body))
 }
 
 // ---------------------------------------------------------------------------
@@ -947,9 +1038,15 @@ fn cached_image_owned(
 }
 
 /// Brand images are per site: the paths are shared, the bytes come from the
-/// site the Host header resolves to (the dashboard host gets the default).
-fn brand_site(headers: &HeaderMap) -> &'static SiteConfig {
-    sites::site_from_headers(headers).unwrap_or_else(sites::default_site)
+/// site an explicit `?site=` names (the dashboard preview host resolves to
+/// no site) or the Host header. Unknown values fall back to the default site
+/// rather than failing a favicon fetch.
+fn brand_site(headers: &HeaderMap, sq: &SiteQuery) -> &'static SiteConfig {
+    sq.site
+        .as_deref()
+        .and_then(sites::site_by_id)
+        .or_else(|| sites::site_from_headers(headers))
+        .unwrap_or_else(sites::default_site)
 }
 
 /// Compiled artwork for the resolved site, falling back to the default
@@ -977,8 +1074,9 @@ fn custom_asset(state: &AppState, site: &SiteConfig, setting: &str) -> Option<(S
 pub async fn handle_logo_png(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
 ) -> axum::response::Response {
-    let site = brand_site(&headers);
+    let site = brand_site(&headers, &sq);
     if let Some((name, bytes)) = custom_asset(&state, site, SETTING_LOGO_IMAGE) {
         return cached_image_owned(&headers, content_type_for(&name), bytes);
     }
@@ -990,8 +1088,9 @@ pub async fn handle_logo_png(
 pub async fn handle_logo_dark_png(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
 ) -> axum::response::Response {
-    let site = brand_site(&headers);
+    let site = brand_site(&headers, &sq);
     // A site with only a light upload uses it for both themes.
     if let Some((name, bytes)) = custom_asset(&state, site, SETTING_LOGO_DARK_IMAGE)
         .or_else(|| custom_asset(&state, site, SETTING_LOGO_IMAGE))
@@ -1006,25 +1105,22 @@ pub async fn handle_logo_dark_png(
 pub async fn handle_og_image_png(headers: HeaderMap) -> impl IntoResponse {
     cached_image(&headers, "image/png", OG_IMAGE_PNG)
 }
-pub async fn handle_icon_png(headers: HeaderMap) -> impl IntoResponse {
-    cached_image(&headers, "image/png", compiled_or_default_brand(brand_site(&headers)).icon)
+pub async fn handle_icon_png(headers: HeaderMap, Query(sq): Query<SiteQuery>) -> impl IntoResponse {
+    cached_image(&headers, "image/png", compiled_or_default_brand(brand_site(&headers, &sq)).icon)
 }
-pub async fn handle_favicon_32_png(headers: HeaderMap) -> impl IntoResponse {
-    cached_image(&headers, "image/png", compiled_or_default_brand(brand_site(&headers)).favicon_32)
+pub async fn handle_favicon_32_png(headers: HeaderMap, Query(sq): Query<SiteQuery>) -> impl IntoResponse {
+    cached_image(&headers, "image/png", compiled_or_default_brand(brand_site(&headers, &sq)).favicon_32)
 }
-pub async fn handle_favicon_180_png(headers: HeaderMap) -> impl IntoResponse {
-    cached_image(&headers, "image/png", compiled_or_default_brand(brand_site(&headers)).favicon_180)
+pub async fn handle_favicon_180_png(headers: HeaderMap, Query(sq): Query<SiteQuery>) -> impl IntoResponse {
+    cached_image(&headers, "image/png", compiled_or_default_brand(brand_site(&headers, &sq)).favicon_180)
 }
-pub async fn handle_favicon_ico(headers: HeaderMap) -> impl IntoResponse {
-    cached_image(&headers, "image/x-icon", compiled_or_default_brand(brand_site(&headers)).favicon_ico)
+pub async fn handle_favicon_ico(headers: HeaderMap, Query(sq): Query<SiteQuery>) -> impl IntoResponse {
+    cached_image(&headers, "image/x-icon", compiled_or_default_brand(brand_site(&headers, &sq)).favicon_ico)
 }
 
 /// Cache-busting version for an uploaded asset's URL: changes on any upload,
-/// re-upload, or revert. "0" = compiled-in artwork.
+/// re-upload, or revert.
 fn asset_version(state: &AppState, site: &SiteConfig, custom: &str) -> String {
-    if custom.is_empty() {
-        return "0".into();
-    }
     use sha2::{Digest, Sha256};
     let (len, mtime) = std::fs::metadata(assets_dir(state, site).join(custom))
         .map(|m| {
@@ -1086,13 +1182,11 @@ fn brand_logo_urls(state: &AppState, site: &SiteConfig) -> (String, String) {
 pub async fn handle_bg_jpg(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
 ) -> axum::response::Response {
-    let site = brand_site(&headers);
-    if let Some((name, bytes)) = custom_asset(&state, site, SETTING_BG_IMAGE) {
-        return cached_image_owned(&headers, content_type_for(&name), bytes);
-    }
-    match sites::compiled_brand(site.id) {
-        Some(b) => cached_image(&headers, "image/jpeg", b.bg),
+    let site = brand_site(&headers, &sq);
+    match custom_asset(&state, site, SETTING_BG_IMAGE) {
+        Some((name, bytes)) => cached_image_owned(&headers, content_type_for(&name), bytes),
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -1233,7 +1327,7 @@ fn first_image_url(site: &SiteConfig, body_md: &str) -> Option<String> {
     for ev in Parser::new(body_md) {
         if let Event::Start(Tag::Image { dest_url, .. }) = ev {
             let s = dest_url.into_string();
-            if s.is_empty() { continue; }
+            if s.is_empty() || is_video_file(&s) { continue; }
             if s.starts_with("http://") || s.starts_with("https://") {
                 return Some(s);
             }
@@ -1385,10 +1479,33 @@ pub(crate) fn rewrite_pandoc_images(
     out
 }
 
+/// An uploaded video file written in image syntax embeds as an ambient
+/// (autoplay/muted/loop) player instead of an `<img>`.
+pub(crate) fn is_video_file(url: &str) -> bool {
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    let lower = path.to_ascii_lowercase();
+    lower.ends_with(".mp4") || lower.ends_with(".webm")
+}
+
 /// Rewrite attribute spans into raw HTML `<img>` tags so the attributes
-/// survive into the SSR body.
+/// survive into the SSR body. Video files become ambient `<video>` loops;
+/// the client renderer in website.html emits the same markup.
 fn rewrite_pandoc_image_attrs(body_md: &str) -> String {
     rewrite_pandoc_images(body_md, &mut |img| {
+        if is_video_file(img.url) {
+            let mut html = format!(r#"<video src="{}""#, html_escape(img.url));
+            if let Some(w) = img.width {
+                html.push_str(&format!(r#" width="{}""#, html_escape(w)));
+            }
+            if let Some(h) = img.height {
+                html.push_str(&format!(r#" height="{}""#, html_escape(h)));
+            }
+            if !img.classes.is_empty() {
+                html.push_str(&format!(r#" class="{}""#, html_escape(&img.classes.join(" "))));
+            }
+            html.push_str(" autoplay muted loop playsinline></video>");
+            return html;
+        }
         if img.is_plain() {
             return img.markdown();
         }
@@ -1497,6 +1614,8 @@ pub(crate) fn render_body_html(body_md: &str) -> String {
     html::push_html(&mut out, events.into_iter());
     let clean = ammonia::Builder::default()
         .add_generic_attributes(&["class", "id"])
+        .add_tags(&["video"])
+        .add_tag_attributes("video", &["src", "autoplay", "muted", "loop", "playsinline", "width", "height"])
         .clean(&out)
         .to_string();
     absolutize_bare_img_srcs(&clean)
@@ -1935,7 +2054,7 @@ pub async fn handle_website_render_post(
 /// Per-site config injected into the shell so the client JS knows which site
 /// it renders: canonical hosts (clean-URL detection), brand imagery, and
 /// which fixed features exist.
-fn site_config_script(state: &AppState, site: &SiteConfig) -> String {
+fn site_config_script(state: &AppState, site: &SiteConfig, theme: &str, no_topbar: bool, sidebar_logo: bool) -> String {
     let (brand_logo, brand_logo_dark) = brand_logo_urls(state, site);
     format!(
         "<script>window.__SITE={};</script>",
@@ -1948,6 +2067,9 @@ fn site_config_script(state: &AppState, site: &SiteConfig) -> String {
             "has_shop": site.has_shop,
             "has_newsletter": site.has_newsletter,
             "has_blog": site.has_blog,
+            "theme": theme,
+            "no_topbar": no_topbar,
+            "sidebar_logo": sidebar_logo,
         }),
     )
 }
@@ -1956,30 +2078,92 @@ fn site_config_script(state: &AppState, site: &SiteConfig) -> String {
 /// artwork (uploaded or compiled-in) gets the photo layer and the veil
 /// styles keyed on it.
 pub(crate) fn render_shell(state: &Arc<AppState>, site: &SiteConfig, seo_head: &str, body_html: &str) -> Bytes {
-    let html = WEBSITE_HTML
-        .replacen("<!--SEO_HEAD-->", seo_head, 1)
-        .replacen("<!--SITE_CONFIG-->", &site_config_script(state, site), 1)
-        .replacen("<!--ANALYTICS-->", &analytics_head(state, site), 1)
-        .replacen("<!--BODY_CONTENT-->", body_html, 1);
-    let (custom_bg, veil, parallax) = {
+    let (custom_bg, veil, parallax, theme, no_topbar, sidebar_logo) = {
         let db = state.db.lock();
         let get = |k: &str| {
             db.get_site_setting(&sites::setting_key(site, k)).ok().flatten().unwrap_or_default()
         };
-        (get(SETTING_BG_IMAGE), get(SETTING_BG_VEIL), get(SETTING_BG_PARALLAX))
+        (
+            get(SETTING_BG_IMAGE),
+            get(SETTING_BG_VEIL),
+            get(SETTING_BG_PARALLAX),
+            get(SETTING_THEME_MODE),
+            get(SETTING_NO_TOPBAR) == "1",
+            get(SETTING_SIDEBAR_LOGO) == "1",
+        )
     };
-    if sites::compiled_brand(site.id).is_none() && custom_bg.is_empty() {
+    let theme = if matches!(theme.as_str(), "light" | "dark") { theme } else { String::new() };
+    let mut html = WEBSITE_HTML
+        .replacen("<!--SEO_HEAD-->", seo_head, 1)
+        .replacen("<!--SITE_CONFIG-->", &site_config_script(state, site, &theme, no_topbar, sidebar_logo), 1)
+        .replacen("<!--ANALYTICS-->", &analytics_head(state, site), 1)
+        .replacen("<!--BODY_CONTENT-->", body_html, 1);
+    // Pin the light palette before first paint; the client script sees the
+    // theme lock and never overrides it. Dark is the default palette, so a
+    // dark pin needs no attribute - the lock alone stops the light switch.
+    if theme == "light" {
+        html = html.replacen("<html lang=\"en\">", r#"<html lang="en" data-theme="light">"#, 1);
+    }
+    // The brand renders above the sidebar nav, and the sidebar column shows
+    // immediately instead of waiting for the client nav render.
+    if sidebar_logo {
+        let name = html_escape(site.name);
+        let (logo, logo_dark) = brand_logo_urls(state, site);
+        let brand = if logo.is_empty() {
+            name.clone()
+        } else {
+            format!(
+                r#"<img class="logo-dark" src="{}" alt="{}"><img class="logo-light" src="{}" alt="{}">"#,
+                html_escape(&logo_dark),
+                name,
+                html_escape(&logo),
+                name,
+            )
+        };
+        html = html
+            .replacen(
+                r#"<aside class="sidebar" id="sidebar"></aside>"#,
+                &format!(
+                    r#"<aside class="sidebar" id="sidebar"><a href="/site" class="sidebar-brand" aria-label="{}">{}</a></aside>"#,
+                    name, brand,
+                ),
+                1,
+            )
+            .replacen(
+                r#"<div class="layout no-sidebar no-toc" id="layout">"#,
+                r#"<div class="layout no-toc" id="layout">"#,
+                1,
+            );
+    }
+    let mut classes = Vec::new();
+    if !custom_bg.is_empty() {
+        classes.push("has-bg");
+        if parallax == "1" {
+            classes.push("bg-parallax");
+        }
+    }
+    if no_topbar {
+        classes.push("no-topbar");
+    }
+    if classes.is_empty() {
         return html.into();
     }
-    let veil = veil.parse::<u8>().ok().filter(|v| *v <= 100).unwrap_or(72);
-    // The versioned URL busts browser caches the moment the bg changes; the
-    // inline style overrides only background-image, keeping the CSS sizing.
-    let body = format!(
-        r#"<body class="has-bg{}" style="--bg-veil:{}%"><div class="site-bg" aria-hidden="true" style="background-image:url('/static/bg.jpg?v={}')"></div>"#,
-        if parallax == "1" { " bg-parallax" } else { "" },
-        veil,
-        asset_version(state, site, &custom_bg),
-    );
+    // No uploaded background = flat theme; the veil layer is only injected
+    // for sites that chose an image.
+    let body = if custom_bg.is_empty() {
+        format!(r#"<body class="{}">"#, classes.join(" "))
+    } else {
+        let veil = veil.parse::<u8>().ok().filter(|v| *v <= 100).unwrap_or(72);
+        // The versioned URL busts browser caches the moment the bg changes;
+        // the inline style overrides only background-image, keeping the CSS
+        // sizing.
+        format!(
+            r#"<body class="{}" style="--bg-veil:{}%"><div class="site-bg" aria-hidden="true" style="background-image:url('/static/bg.jpg?v={}')"></div>"#,
+            classes.join(" "),
+            veil,
+            asset_version(state, site, &custom_bg),
+        )
+    };
     html.replacen("<body>", &body, 1).into()
 }
 
@@ -2409,6 +2593,14 @@ pub const SETTING_LOGO_DARK_IMAGE: &str = "logo_dark_image";
 pub const SETTING_BG_VEIL: &str = "bg_veil";
 /// "1" = the background drifts opposite to the scroll direction.
 pub const SETTING_BG_PARALLAX: &str = "bg_parallax";
+/// "light" / "dark" = pin that palette and hide the theme toggle;
+/// empty = both themes with the visitor's toggle.
+pub const SETTING_THEME_MODE: &str = "theme_mode";
+/// "1" = drop the top bar for visitors. Admins keep it - the edit controls
+/// live there.
+pub const SETTING_NO_TOPBAR: &str = "no_topbar";
+/// "1" = the brand logo renders above the sidebar nav.
+pub const SETTING_SIDEBAR_LOGO: &str = "sidebar_logo";
 
 /// Sidebar nav config: JSON array of groups rendered between the ungrouped
 /// pages and nothing else. Items are page slugs, plus the pseudo-slugs
@@ -2815,6 +3007,9 @@ const KNOWN_SITE_SETTING_KEYS: &[&str] = &[
     SETTING_BG_IMAGE,
     SETTING_BG_VEIL,
     SETTING_BG_PARALLAX,
+    SETTING_THEME_MODE,
+    SETTING_NO_TOPBAR,
+    SETTING_SIDEBAR_LOGO,
     SETTING_LOGO_IMAGE,
     SETTING_LOGO_DARK_IMAGE,
 ];
@@ -2877,9 +3072,13 @@ pub async fn handle_admin_put_site_settings(
             if !trimmed.is_empty() && !trimmed.parse::<u8>().map_or(false, |v| v <= 100) {
                 return Err(error_response(StatusCode::BAD_REQUEST, "bg_veil must be 0-100"));
             }
-        } else if k == SETTING_BG_PARALLAX {
+        } else if k == SETTING_BG_PARALLAX || k == SETTING_NO_TOPBAR || k == SETTING_SIDEBAR_LOGO {
             if !matches!(trimmed, "" | "0" | "1") {
-                return Err(error_response(StatusCode::BAD_REQUEST, "bg_parallax must be \"1\" or empty"));
+                return Err(error_response(StatusCode::BAD_REQUEST, &format!("{} must be \"1\" or empty", k)));
+            }
+        } else if k == SETTING_THEME_MODE {
+            if !matches!(trimmed, "" | "light" | "dark") {
+                return Err(error_response(StatusCode::BAD_REQUEST, "theme_mode must be \"light\", \"dark\" or empty"));
             }
         } else if !trimmed.is_empty() && !is_valid_analytics_id(trimmed) {
             // The remaining site settings are analytics tag IDs / labels.
@@ -3618,6 +3817,63 @@ mod tests {
     }
 
     #[test]
+    fn first_image_url_skips_video_files() {
+        let md = "![film](showreel.mp4)\n\n![hero](/static/foo.png)";
+        assert_eq!(
+            first_image_url(sites::default_site(), md),
+            Some("https://xikaku.com/static/foo.png".to_string())
+        );
+    }
+
+    #[test]
+    fn mp4_in_image_syntax_renders_ambient_video() {
+        let html = render_body_html("![Showreel](showreel.mp4)\n");
+        assert!(html.contains("<video"), "no video tag: {html}");
+        assert!(
+            html.contains(r#"src="/api/v1/website/assets/showreel.mp4""#),
+            "bare name not absolutized: {html}"
+        );
+        for attr in ["autoplay", "muted", "loop", "playsinline"] {
+            assert!(html.contains(attr), "{attr} stripped: {html}");
+        }
+        assert!(!html.contains("<img"), "{html}");
+    }
+
+    #[test]
+    fn video_keeps_pandoc_size_and_class_attrs() {
+        let html = render_body_html("![x](/media/film.webm){width=1280 .wide}\n");
+        assert!(html.contains(r#"width="1280""#), "{html}");
+        assert!(html.contains(r#"class="wide""#), "{html}");
+        assert!(html.contains(r#"src="/media/film.webm""#), "{html}");
+    }
+
+    fn range_of(value: Option<&str>, total: u64) -> ByteRange {
+        let mut h = HeaderMap::new();
+        if let Some(v) = value {
+            h.insert(header::RANGE, v.parse().unwrap());
+        }
+        byte_range(&h, total)
+    }
+
+    #[test]
+    fn byte_range_parses_the_shapes_media_clients_send() {
+        assert_eq!(range_of(None, 10), ByteRange::Full);
+        // Safari probes with bytes=0-1 before streaming.
+        assert_eq!(range_of(Some("bytes=0-1"), 10), ByteRange::Window(0, 1));
+        assert_eq!(range_of(Some("bytes=0-"), 10), ByteRange::Window(0, 9));
+        assert_eq!(range_of(Some("bytes=4-"), 10), ByteRange::Window(4, 9));
+        assert_eq!(range_of(Some("bytes=-4"), 10), ByteRange::Window(6, 9));
+        // End clamps to EOF; start past EOF is unsatisfiable.
+        assert_eq!(range_of(Some("bytes=5-100"), 10), ByteRange::Window(5, 9));
+        assert_eq!(range_of(Some("bytes=10-"), 10), ByteRange::Unsatisfiable);
+        assert_eq!(range_of(Some("bytes=0-"), 0), ByteRange::Unsatisfiable);
+        // Malformed or multi-range specs fall back to the whole file.
+        assert_eq!(range_of(Some("bytes=3-1"), 10), ByteRange::Full);
+        assert_eq!(range_of(Some("bytes=0-1,5-6"), 10), ByteRange::Full);
+        assert_eq!(range_of(Some("lines=0-1"), 10), ByteRange::Full);
+    }
+
+    #[test]
     fn first_image_url_none_when_no_images() {
         assert_eq!(first_image_url(sites::default_site(), "# Just text\n\nNo images here."), None);
     }
@@ -3892,6 +4148,21 @@ mod tests {
     #[test]
     fn analytics_head_empty_when_unset() {
         assert_eq!(render_analytics_head(sites::default_site(), None, None, None, None, None), "");
+    }
+
+    #[test]
+    fn brand_site_honors_explicit_site_param() {
+        let q = |s: Option<&str>| SiteQuery { site: s.map(String::from), page: None };
+        let bare = HeaderMap::new();
+        assert_eq!(brand_site(&bare, &q(Some("lpr"))).id, "lpr");
+        // Unknown or missing param falls back to Host resolution, then default.
+        assert_eq!(brand_site(&bare, &q(Some("nope"))).id, "xikaku");
+        assert_eq!(brand_site(&bare, &q(None)).id, "xikaku");
+        let mut lpr_host = HeaderMap::new();
+        lpr_host.insert(header::HOST, "lp-research.com".parse().unwrap());
+        assert_eq!(brand_site(&lpr_host, &q(None)).id, "lpr");
+        // An explicit param wins over the Host header.
+        assert_eq!(brand_site(&lpr_host, &q(Some("xikaku"))).id, "xikaku");
     }
 
     #[test]

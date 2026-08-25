@@ -4345,6 +4345,75 @@ fn test_redirect_map_and_bulk_import() {
     assert_eq!(resp.status().as_u16(), 401);
 }
 
+/// Video assets serve with byte-range support - Safari refuses to stream
+/// media from a server that answers a Range request with a plain 200.
+#[test]
+fn test_video_asset_range_requests() {
+    let server = TestServer::start();
+    let http = reqwest::blocking::Client::new();
+    let token = server.admin_token();
+
+    let body = b"0123456789abcdef";
+    let boundary = "XVIDBOUNDARY";
+    let mut mp = Vec::new();
+    mp.extend_from_slice(format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"loop.mp4\"\r\nContent-Type: video/mp4\r\n\r\n"
+    ).as_bytes());
+    mp.extend_from_slice(body);
+    mp.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    let resp = http
+        .post(format!("{}/website/assets?site=xikaku", server.api_url))
+        .bearer_auth(&token)
+        .header("content-type", format!("multipart/form-data; boundary={boundary}"))
+        .body(mp)
+        .send().expect("upload video");
+    assert!(resp.status().is_success(), "upload: {}", resp.text().unwrap_or_default());
+
+    let get = |range: Option<&str>| {
+        let mut req = http
+            .get(format!("{}/website/assets/loop.mp4", server.api_url))
+            .header("Host", "xikaku.com");
+        if let Some(r) = range {
+            req = req.header("Range", r);
+        }
+        req.send().expect("get video")
+    };
+
+    // Plain GET: the whole file, advertising range support and a validator.
+    let resp = get(None);
+    assert_eq!(resp.status().as_u16(), 200);
+    assert_eq!(resp.headers()["content-type"].to_str().unwrap(), "video/mp4");
+    assert_eq!(resp.headers()["accept-ranges"].to_str().unwrap(), "bytes");
+    let last_modified = resp.headers()["last-modified"].to_str().unwrap().to_string();
+    assert_eq!(resp.bytes().unwrap().as_ref(), body);
+
+    // Revalidation answers 304 instead of re-shipping the file.
+    let resp = http
+        .get(format!("{}/website/assets/loop.mp4", server.api_url))
+        .header("Host", "xikaku.com")
+        .header("If-Modified-Since", &last_modified)
+        .send().expect("revalidate");
+    assert_eq!(resp.status().as_u16(), 304);
+    assert!(resp.bytes().unwrap().is_empty());
+
+    // Safari's opening probe.
+    let resp = get(Some("bytes=0-1"));
+    assert_eq!(resp.status().as_u16(), 206);
+    assert_eq!(resp.headers()["content-range"].to_str().unwrap(), "bytes 0-1/16");
+    assert_eq!(resp.bytes().unwrap().as_ref(), b"01");
+
+    // Open-ended tail read.
+    let resp = get(Some("bytes=10-"));
+    assert_eq!(resp.status().as_u16(), 206);
+    assert_eq!(resp.headers()["content-range"].to_str().unwrap(), "bytes 10-15/16");
+    assert_eq!(resp.bytes().unwrap().as_ref(), b"abcdef");
+
+    // Past EOF: unsatisfiable.
+    let resp = get(Some("bytes=16-"));
+    assert_eq!(resp.status().as_u16(), 416);
+    assert_eq!(resp.headers()["content-range"].to_str().unwrap(), "bytes */16");
+}
+
 /// Photo background theme: /static/bg.jpg serves the per-host artwork and the
 /// shell opts into the frosted-panel layer on both marketing hosts.
 #[test]
@@ -4352,23 +4421,20 @@ fn test_site_background_theme() {
     let server = TestServer::start();
     let http = reqwest::blocking::Client::new();
 
+    // No background configured: no image is served, the shell stays flat.
     for host in ["xikaku.com", "www.lp-research.com"] {
         let resp = http.get(format!("{}/static/bg.jpg", server.url))
             .header("Host", host)
             .send().expect("bg image");
-        assert_eq!(resp.status().as_u16(), 200, "{} must serve bg.jpg", host);
-        assert_eq!(resp.headers()["content-type"].to_str().unwrap(), "image/jpeg");
-
+        assert_eq!(resp.status().as_u16(), 404, "{} must serve no bg by default", host);
         let shell = http.get(format!("{}/site", server.url))
             .header("Host", host)
             .send().expect("shell").text().unwrap();
-        assert!(shell.contains(r#"<body class="has-bg" style="--bg-veil:72%">"#), "{} shell must carry the bg class with the default veil", host);
-        assert!(shell.contains(r#"class="site-bg""#), "{} shell must inject the bg layer", host);
-        assert!(shell.contains("/static/bg.jpg?v=0"), "{} default bg must be version 0", host);
+        assert!(!shell.contains(r#"<body class="has-bg"#), "{} shell must stay flat without a bg", host);
     }
 
-    // An uploaded asset chosen via the bg_image setting overrides the
-    // compiled-in default, per site.
+    // An uploaded asset chosen via the bg_image setting activates the theme,
+    // per site.
     let token = server.admin_token();
     let boundary = "XBGBOUNDARY";
     let mut mp = Vec::new();
@@ -4401,33 +4467,13 @@ fn test_site_background_theme() {
     let shell = http.get(format!("{}/site", server.url))
         .header("Host", "xikaku.com")
         .send().expect("shell").text().unwrap();
+    assert!(shell.contains(r#"<body class="has-bg" style="--bg-veil:72%">"#), "custom bg must activate the theme with the default veil");
     assert!(shell.contains("/static/bg.jpg?v="), "shell must reference a versioned bg URL");
-    assert!(!shell.contains("/static/bg.jpg?v=0"), "custom bg must not use the default version");
-    // The other site keeps its compiled-in default.
+    // The other site is untouched.
     let resp = http.get(format!("{}/static/bg.jpg", server.url))
         .header("Host", "www.lp-research.com")
         .send().expect("lpr bg");
-    assert!(resp.bytes().unwrap().len() > 100_000, "lpr must keep the default");
-
-    // A name that is not an uploaded asset is rejected.
-    let resp = http
-        .put(format!("{}/site/admin/settings?site=xikaku", server.api_url))
-        .bearer_auth(&token)
-        .json(&json!({ "bg_image": "missing.png" }))
-        .send().expect("set missing");
-    assert_eq!(resp.status().as_u16(), 400);
-
-    // Clearing the setting reverts to the compiled-in default.
-    let resp = http
-        .put(format!("{}/site/admin/settings?site=xikaku", server.api_url))
-        .bearer_auth(&token)
-        .json(&json!({ "bg_image": "" }))
-        .send().expect("clear bg_image");
-    assert_eq!(resp.status().as_u16(), 200);
-    let resp = http.get(format!("{}/static/bg.jpg", server.url))
-        .header("Host", "xikaku.com")
-        .send().expect("default bg");
-    assert!(resp.bytes().unwrap().len() > 100_000, "xikaku must be back on the default");
+    assert_eq!(resp.status().as_u16(), 404, "lpr must stay without a bg");
 
     // Veil strength and parallax reach the shell; invalid values are rejected.
     let resp = http
@@ -4448,6 +4494,120 @@ fn test_site_background_theme() {
             .send().expect("bad setting");
         assert_eq!(resp.status().as_u16(), 400, "{} must be rejected", bad);
     }
+
+    // A name that is not an uploaded asset is rejected.
+    let resp = http
+        .put(format!("{}/site/admin/settings?site=xikaku", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "bg_image": "missing.png" }))
+        .send().expect("set missing");
+    assert_eq!(resp.status().as_u16(), 400);
+
+    // Clearing the setting removes the background entirely.
+    let resp = http
+        .put(format!("{}/site/admin/settings?site=xikaku", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "bg_image": "" }))
+        .send().expect("clear bg_image");
+    assert_eq!(resp.status().as_u16(), 200);
+    let resp = http.get(format!("{}/static/bg.jpg", server.url))
+        .header("Host", "xikaku.com")
+        .send().expect("cleared bg");
+    assert_eq!(resp.status().as_u16(), 404, "cleared bg must serve nothing");
+    let shell = http.get(format!("{}/site", server.url))
+        .header("Host", "xikaku.com")
+        .send().expect("shell").text().unwrap();
+    assert!(!shell.contains(r#"<body class="has-bg"#), "cleared bg must return to the flat theme");
+}
+
+/// Per-site chrome flags: light_only pins the light palette, no_topbar drops
+/// the top bar and renders the brand above the sidebar nav.
+#[test]
+fn test_site_chrome_flags() {
+    let server = TestServer::start();
+    let http = reqwest::blocking::Client::new();
+    let token = server.admin_token();
+    let lpr_shell = || {
+        http.get(format!("{}/site", server.url))
+            .header("Host", "www.lp-research.com")
+            .send().expect("shell").text().unwrap()
+    };
+
+    // Defaults: dual theme, top bar, sidebar filled in by the client.
+    let shell = lpr_shell();
+    assert!(shell.contains(r#"<html lang="en">"#), "default shell must not pin a theme");
+    assert!(shell.contains("<body>"), "default shell must carry no body class");
+    assert!(shell.contains(r#"<aside class="sidebar" id="sidebar"></aside>"#));
+    assert!(shell.contains(r#""theme":"""#) && shell.contains(r#""no_topbar":false"#) && shell.contains(r#""sidebar_logo":false"#));
+
+    let resp = http
+        .put(format!("{}/site/admin/settings?site=lpr", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "theme_mode": "light", "no_topbar": "1", "sidebar_logo": "1" }))
+        .send().expect("set chrome flags");
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let shell = lpr_shell();
+    assert!(shell.contains(r#"<html lang="en" data-theme="light">"#), "theme_mode=light must pin the light theme before paint");
+    assert!(shell.contains(r#"<body class="no-topbar">"#), "no_topbar must reach the body class");
+    assert!(shell.contains(r#"class="sidebar-brand""#), "the brand must render inside the sidebar");
+    assert!(shell.contains(r#"<div class="layout no-toc" id="layout">"#), "the sidebar column must show immediately");
+    assert!(shell.contains(r#""theme":"light""#) && shell.contains(r#""no_topbar":true"#) && shell.contains(r#""sidebar_logo":true"#));
+    // lpr has compiled logo artwork; the sidebar brand must use it.
+    let brand = shell.split(r#"class="sidebar-brand""#).nth(1).unwrap();
+    assert!(brand[..200].contains("/static/logo.png?v="), "sidebar brand must carry the logo imgs");
+
+    // The flags are independent: dark-only keeps the attribute-less default
+    // palette, and dropping sidebar_logo keeps the topbar-less body class
+    // while the sidebar goes back to nav-only.
+    let resp = http
+        .put(format!("{}/site/admin/settings?site=lpr", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "theme_mode": "dark", "sidebar_logo": "" }))
+        .send().expect("set dark, clear sidebar logo");
+    assert_eq!(resp.status().as_u16(), 200);
+    let shell = lpr_shell();
+    assert!(shell.contains(r#"<html lang="en">"#), "dark pin needs no html attribute");
+    assert!(shell.contains(r#""theme":"dark""#), "the client must see the dark lock");
+    assert!(shell.contains(r#"<body class="no-topbar">"#));
+    assert!(shell.contains(r#"<aside class="sidebar" id="sidebar"></aside>"#), "no sidebar_logo = no SSR brand");
+
+    // The flags stay per-site.
+    let shell = http.get(format!("{}/site", server.url))
+        .header("Host", "xikaku.com")
+        .send().expect("shell").text().unwrap();
+    assert!(shell.contains(r#"<html lang="en">"#) && shell.contains("<body>"), "the other site is untouched");
+
+    // Round-trip through the settings API.
+    let resp = http
+        .get(format!("{}/site/admin/settings?site=lpr", server.api_url))
+        .bearer_auth(&token)
+        .send().expect("get settings");
+    let s: serde_json::Value = resp.json().unwrap();
+    assert_eq!(s["theme_mode"], "dark");
+    assert_eq!(s["no_topbar"], "1");
+    assert_eq!(s["sidebar_logo"], "");
+
+    // Invalid values are rejected.
+    for bad in [json!({ "theme_mode": "auto" }), json!({ "no_topbar": "2" }), json!({ "sidebar_logo": "yes" })] {
+        let resp = http
+            .put(format!("{}/site/admin/settings?site=lpr", server.api_url))
+            .bearer_auth(&token)
+            .json(&bad)
+            .send().expect("bad flag");
+        assert_eq!(resp.status().as_u16(), 400, "{} must be rejected", bad);
+    }
+
+    // Clearing restores the default chrome.
+    let resp = http
+        .put(format!("{}/site/admin/settings?site=lpr", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "theme_mode": "", "no_topbar": "" }))
+        .send().expect("clear chrome flags");
+    assert_eq!(resp.status().as_u16(), 200);
+    let shell = lpr_shell();
+    assert!(shell.contains(r#"<html lang="en">"#) && shell.contains("<body>"));
+    assert!(shell.contains(r#"<aside class="sidebar" id="sidebar"></aside>"#));
 }
 
 /// Dynamic site registry: a site created through the owner API serves on its

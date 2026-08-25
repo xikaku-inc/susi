@@ -1911,6 +1911,22 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                     <input type="checkbox" id="siteSetBgParallax">
                     <label for="siteSetBgParallax">Background parallax</label>
                 </div>
+                <div class="form-row">
+                    <label for="siteSetThemeMode">Theme</label>
+                    <select id="siteSetThemeMode" style="width:180px;">
+                        <option value="">Light and dark</option>
+                        <option value="light">Light only</option>
+                        <option value="dark">Dark only</option>
+                    </select>
+                </div>
+                <div class="toggle-row">
+                    <input type="checkbox" id="siteSetNoTopbar">
+                    <label for="siteSetNoTopbar">Hide top bar</label>
+                </div>
+                <div class="toggle-row">
+                    <input type="checkbox" id="siteSetSidebarLogo">
+                    <label for="siteSetSidebarLogo">Show logo above menu</label>
+                </div>
                 <div id="siteSetError" class="form-error" style="display:none;"></div>
             </div>
             <div class="form-footer">
@@ -6598,6 +6614,9 @@ async function loadSiteSettings() {
         renderSiteLogoRows();
         document.getElementById('siteSetBgVeil').value = s.bg_veil || '72';
         document.getElementById('siteSetBgParallax').checked = s.bg_parallax === '1';
+        document.getElementById('siteSetThemeMode').value = s.theme_mode || '';
+        document.getElementById('siteSetNoTopbar').checked = s.no_topbar === '1';
+        document.getElementById('siteSetSidebarLogo').checked = s.sidebar_logo === '1';
     } catch (e) {
         // Non-fatal - settings just won't pre-fill.
     }
@@ -6668,6 +6687,9 @@ async function saveSiteSettings() {
         bg_image: siteBgImage,
         bg_veil: document.getElementById('siteSetBgVeil').value.trim(),
         bg_parallax: document.getElementById('siteSetBgParallax').checked ? '1' : '',
+        theme_mode: document.getElementById('siteSetThemeMode').value,
+        no_topbar: document.getElementById('siteSetNoTopbar').checked ? '1' : '',
+        sidebar_logo: document.getElementById('siteSetSidebarLogo').checked ? '1' : '',
         logo_image: siteLogoImage,
         logo_dark_image: siteLogoDarkImage,
     };
@@ -8103,6 +8125,8 @@ async function saveSite() {
         const sel = document.getElementById('websiteSiteSelect');
         if (sel) sel.innerHTML = '';
         await loadWebsitePages();
+        await loadWebsiteAssets();
+        await loadWebsiteRedirects();
         await loadSiteSettings();
     } catch (e) { errEl.textContent = e.message; errEl.style.display = ''; }
 }
