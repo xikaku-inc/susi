@@ -1151,7 +1151,7 @@ JA_TITLE_OVERRIDES = {
     "lpms-ig1w": "LPMS-IG1W",
     "lpms-inc1": "LPMS-INC1",
     "lpms-b2-bluetooth-imu-sensor": "LPMS-B2",
-    "lpms-cu2-jp": "LPMS-CU2",
+    "lpms-cu2-jp": "LPMS-U2",
     "lpms-me1": "LPMS-ME1",
     "lpvr-cad": "LPVR-CAD",
     "lpvr-duo": "LPVR-DUO",
@@ -1233,6 +1233,11 @@ JA_LINK_ALIASES = {
     "/ja/inertial-measurement-unit-imu-series-2/lpms-al3-series": "/ja/lpms-al3-series",
     "/ja/inertial-measurement-unit-imu-series-2/lpms-ig1w": "/ja/lpms-ig1w",
 }
+# Hand-maintained Japanese page bodies (tools/wp_migrate/ja_pages/{slug}.md):
+# faithful translations of the English reference pages. When a file exists it
+# IS the page - the WordPress content and every transform are skipped.
+JA_PAGES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ja_pages")
+
 # Proofreading corrections applied to the converted markdown, slug -> list of
 # (exact old, new) replacements. Populated from the language review; a fix
 # that no longer matches is reported so silent drift gets noticed.
@@ -1447,30 +1452,38 @@ def cmd_build_ja(work):
         title = BeautifulSoup(p["title"]["rendered"], "html.parser").get_text().strip()
         if kind == "page":
             title = JA_TITLE_OVERRIDES.get(slug, title)
-        html = clean_html(p["content"]["rendered"], assets, media, report, slug)
-        md = normalize_heading_levels(rewrite_internal_links(to_markdown(html), link_map))
-        md = strip_heading_emphasis(md)
-        if kind == "page" and slug in JA_PAGE_BODY_OVERRIDES:
-            md = JA_PAGE_BODY_OVERRIDES[slug]
-        # Recurring English section headings -> Japanese, on heading lines only.
-        md = "\n".join(
-            re.sub(r"^(#{1,5}) (.+?)\s*$", lambda m: f"{m.group(1)} {JA_HEADING_MAP.get(m.group(2), m.group(2))}", line)
-            for line in md.split("\n")
-        )
-        if slug in en_product_grids:
-            md = product_grid(md, en_product_grids[slug])
-        if slug in en_logo_grids:
-            md = logo_grid(md, en_logo_grids[slug])
-        if slug in en_people_grids:
-            md = people_grid(md, en_people_grids[slug])
         en_slug = JA_TRANSLATION_OF.get(slug)
-        if (kind == "page" and en_slug and PAGE_LAYOUT.get(en_slug, (None,))[0]
-                and slug not in hidden_slugs):
-            md = people_grid(md, VARIANT_GRID_COLUMNS)
-        for old, new in JA_TEXT_FIXES.get(slug, []):
-            if old not in md:
-                report.append(f"ja fix no longer matches on {slug}: {old[:40]}")
-            md = md.replace(old, new)
+        override_path = os.path.join(JA_PAGES_DIR, f"{slug}.md")
+        if kind == "page" and os.path.exists(override_path):
+            # Hand-maintained translation of the English reference page - it
+            # IS the page; the WordPress content and every transform are
+            # skipped.
+            with open(override_path, encoding="utf-8") as f:
+                md = f.read()
+        else:
+            html = clean_html(p["content"]["rendered"], assets, media, report, slug)
+            md = normalize_heading_levels(rewrite_internal_links(to_markdown(html), link_map))
+            md = strip_heading_emphasis(md)
+            if kind == "page" and slug in JA_PAGE_BODY_OVERRIDES:
+                md = JA_PAGE_BODY_OVERRIDES[slug]
+            # Recurring English section headings -> Japanese, heading lines only.
+            md = "\n".join(
+                re.sub(r"^(#{1,5}) (.+?)\s*$", lambda m: f"{m.group(1)} {JA_HEADING_MAP.get(m.group(2), m.group(2))}", line)
+                for line in md.split("\n")
+            )
+            if slug in en_product_grids:
+                md = product_grid(md, en_product_grids[slug])
+            if slug in en_logo_grids:
+                md = logo_grid(md, en_logo_grids[slug])
+            if slug in en_people_grids:
+                md = people_grid(md, en_people_grids[slug])
+            if (kind == "page" and en_slug and PAGE_LAYOUT.get(en_slug, (None,))[0]
+                    and slug not in hidden_slugs):
+                md = people_grid(md, VARIANT_GRID_COLUMNS)
+            for old, new in JA_TEXT_FIXES.get(slug, []):
+                if old not in md:
+                    report.append(f"ja fix no longer matches on {slug}: {old[:40]}")
+                md = md.replace(old, new)
         if slug == front_slug or md.startswith("# "):
             body = md
         else:

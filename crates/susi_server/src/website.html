@@ -1603,7 +1603,7 @@ function renderEmptyState(msg) {
 const BLOG_POSTS_PER_PAGE = 3;
 
 function blogIndexHref(pageNum) {
-    return SITE_PATH_PREFIX + '/blog' + (pageNum > 1 ? '?page=' + pageNum : '');
+    return SITE_PATH_PREFIX + LANG_PREFIX + '/blog' + (pageNum > 1 ? '?page=' + pageNum : '');
 }
 
 async function renderBlogIndexView() {
@@ -1613,7 +1613,7 @@ async function renderBlogIndexView() {
     let html = currentPage
         ? renderMarkdown(currentPage.body_md || '')
         : '<h1>Blog</h1>';
-    const posts = pages.filter(p => p.page_kind === 'post')
+    const posts = langPages().filter(p => p.page_kind === 'post')
         .sort((a, b) => (b.published_at || '').localeCompare(a.published_at || '')
             || a.title.localeCompare(b.title));
     if (!posts.length) {
@@ -1977,7 +1977,7 @@ function buildAuthorOptions(selected) {
 
 function buildParentOptions(selected, excludeSlug) {
     const opts = ['<option value="">(none - top level)</option>'];
-    const sorted = [...pages].sort((a, b) => a.title.localeCompare(b.title));
+    const sorted = [...langPages()].sort((a, b) => a.title.localeCompare(b.title));
     const known = new Set();
     sorted.forEach(p => {
         if (p.slug === excludeSlug || p.page_kind === 'post') return;
