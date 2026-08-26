@@ -78,4 +78,4 @@ LP-Researchは、データの損失、使用機会の喪失、事業の中断、
 
 ## 11. パートナー経由の購入
 
-本規約は、当社の正規販売パートナーであるXikaku Inc.（[xikaku.com](https://www.xikaku.com)）を通じて販売されるLP-Research製品にも適用されます。Xikaku経由でLP-Research製品を購入された場合、LP-Researchから直接購入された場合と同じ保証・返品・キャンセル条件に同意いただいたものとみなされます。本製品に付属するソフトウェアは、[ソフトウェア使用許諾契約](/software-eula)に基づいてライセンスされます。
+本規約は、当社の正規販売パートナーであるXikaku Inc.（[xikaku.com](https://www.xikaku.com)）を通じて販売されるLP-Research製品にも適用されます。Xikaku経由でLP-Research製品を購入された場合、LP-Researchから直接購入された場合と同じ保証・返品・キャンセル条件に同意いただいたものとみなされます。本製品に付属するソフトウェアは、[ソフトウェア使用許諾契約](/ja/software-eula)に基づいてライセンスされます。

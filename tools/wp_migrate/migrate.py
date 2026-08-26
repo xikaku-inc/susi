@@ -1139,7 +1139,10 @@ JA_TITLE_OVERRIDES = {
     "contact-lp-research": "お問い合わせ",
     "lp-research-customers": "取引先一覧",
     "distributors-lp-research": "代理店",
-    "terms-of-service": "利用規約",
+    "terms-of-service": "ハードウェア利用規約",
+    "privacy": "プライバシーポリシー",
+    "imprint": "運営者情報",
+    "software-eula": "ソフトウェア使用許諾契約",
     "センサーフュージョンソリューション": "技術紹介",
     "lpms-hr-jp": "LPMS-HR",
     "lpms-curs3-oem-9-axis-imu-sensor": "LPMS-CURS3",
@@ -1232,6 +1235,13 @@ JA_LINK_ALIASES = {
         "/ja/blog/race-car-stabilization-imu-case-study",
     "/ja/inertial-measurement-unit-imu-series-2/lpms-al3-series": "/ja/lpms-al3-series",
     "/ja/inertial-measurement-unit-imu-series-2/lpms-ig1w": "/ja/lpms-ig1w",
+}
+# Japanese pages with no WordPress source at all - they exist only as
+# hand-maintained translations: slug -> (english partner slug, ord).
+JA_EXTRA_PAGES = {
+    "privacy": ("privacy", 910),
+    "imprint": ("imprint", 920),
+    "software-eula": ("software-eula", 50),
 }
 # Hand-maintained Japanese page bodies (tools/wp_migrate/ja_pages/{slug}.md):
 # faithful translations of the English reference pages. When a file exists it
@@ -1521,6 +1531,27 @@ def cmd_build_ja(work):
                 if parent_ja:
                     entry["parent_slug"] = parent_ja
         manifest[slug] = entry
+
+    # Pages that exist only as hand-maintained translations (the legal set)
+    # join the bundle straight from ja_pages/.
+    for slug, (tr, ordv) in JA_EXTRA_PAGES.items():
+        src = os.path.join(JA_PAGES_DIR, f"{slug}.md")
+        if not os.path.exists(src):
+            report.append(f"ja extra page missing: {slug}")
+            continue
+        with open(src, encoding="utf-8") as f:
+            body = f.read()
+        with open(os.path.join(pages_dir, f"{slug}.md"), "w", encoding="utf-8", newline="\n") as f:
+            f.write(body)
+        manifest[slug] = {
+            "title": JA_TITLE_OVERRIDES.get(slug, slug),
+            "ord": ordv,
+            "meta_description": "",
+            "page_kind": "page",
+            "lang": JA,
+            "translation_of": tr,
+            "redirect_from": [],
+        }
 
     with open(os.path.join(work, "manifest.json"), "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=1)

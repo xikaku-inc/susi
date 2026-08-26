@@ -1083,7 +1083,10 @@ function adClickQuery() {
 // labels follow the render language; the targets stay default-language until
 // those pages have translations.
 document.querySelectorAll('.site-footer a[data-site-link]').forEach(a => {
-    a.href = SITE_PATH_PREFIX + a.getAttribute('data-site-link');
+    a.href = SITE_PATH_PREFIX + LANG_PREFIX + a.getAttribute('data-site-link');
+    a.textContent = t(a.textContent);
+});
+document.querySelectorAll('.site-footer a[data-cookie-settings]').forEach(a => {
     a.textContent = t(a.textContent);
 });
 
