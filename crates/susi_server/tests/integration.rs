@@ -4707,7 +4707,10 @@ fn test_site_i18n() {
     let llms = http.get(format!("{}/llms.txt", server.url))
         .header("Host", "www.lp-research.com")
         .send().expect("llms").text().unwrap();
-    assert!(!llms.contains("会社情報"), "llms.txt lists the default language only");
+    assert!(llms.contains("## Pages (ja)"), "llms.txt must carry a section per language");
+    assert!(llms.contains("https://www.lp-research.com/ja/"), "ja entries use /ja/ URLs");
+    let en_section = llms.split("## Pages (ja)").next().unwrap();
+    assert!(!en_section.contains("会社情報"), "ja pages stay out of the default-language list");
 
     // The other site declares no languages: /site/ja is a plain slug there.
     let shell = http.get(format!("{}/site/ja", server.url))
@@ -4718,6 +4721,28 @@ fn test_site_i18n() {
 
 fn urlencoding(s: &str) -> String {
     s.bytes().map(|b| format!("%{:02X}", b)).collect()
+}
+
+/// An unknown slug is a real 404 (shell + noindex), not a soft-404 200; the
+/// home fallback and existing pages stay 200.
+#[test]
+fn test_unknown_slug_is_404() {
+    let server = TestServer::start();
+    let http = reqwest::blocking::Client::new();
+    let resp = http.get(format!("{}/site/definitely-not-a-page", server.url))
+        .header("Host", "xikaku.com")
+        .send().expect("unknown slug");
+    assert_eq!(resp.status().as_u16(), 404);
+    let body = resp.text().unwrap();
+    assert!(body.contains(r#"<meta name="robots" content="noindex">"#));
+    let resp = http.get(format!("{}/site", server.url))
+        .header("Host", "xikaku.com")
+        .send().expect("home");
+    assert_eq!(resp.status().as_u16(), 200);
+    let resp = http.get(format!("{}/site/imprint", server.url))
+        .header("Host", "xikaku.com")
+        .send().expect("imprint");
+    assert_eq!(resp.status().as_u16(), 200);
 }
 
 /// Per-site favicon: an uploaded asset chosen via the favicon_image setting

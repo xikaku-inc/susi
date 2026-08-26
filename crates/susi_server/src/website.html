@@ -1780,7 +1780,7 @@ function renderPage() {
     mountContactForms(c);
     startAmbientVideos(c);
     // Append a "buy" callout for sensor pages whose slug maps to live SKUs.
-    if (currentSlug && SLUG_TO_SKU_PREFIXES[currentSlug]) {
+    if (SITE.has_shop && currentSlug && SLUG_TO_SKU_PREFIXES[currentSlug]) {
         loadShopProducts().then(() => injectBuyCallout(currentSlug));
     }
 }
@@ -2177,7 +2177,7 @@ function renderPreviewView() {
     revealEmailObfs(c);
     mountContactForms(c);
     startAmbientVideos(c);
-    if (currentSlug && SLUG_TO_SKU_PREFIXES[currentSlug]) {
+    if (SITE.has_shop && currentSlug && SLUG_TO_SKU_PREFIXES[currentSlug]) {
         loadShopProducts().then(() => injectBuyCallout(currentSlug));
     }
 }
@@ -2377,8 +2377,7 @@ function navigateTo(slug) {
     if (location.hash) {
         history.replaceState({}, '', target);
     }
-    route();
-    resetScroll();
+    route().then(resetScroll);
 }
 
 async function route() {
@@ -2461,8 +2460,7 @@ document.addEventListener('click', (e) => {
             if (location.pathname + location.search !== href) {
                 history.pushState({}, '', href);
             }
-            route();
-            resetScroll();
+            route().then(resetScroll);
             return;
         }
         const m = stripped.match(/^\/([^\/\?#]+)$/);
@@ -2480,8 +2478,7 @@ document.addEventListener('click', (e) => {
         if (location.pathname + location.search !== href) {
             history.pushState({}, '', href);
         }
-        route();
-        resetScroll();
+        route().then(resetScroll);
         return;
     }
     // Blog post links: /blog/{slug} or /site/blog/{slug}. The RSS feed is a
@@ -2501,8 +2498,7 @@ document.addEventListener('click', (e) => {
         e.preventDefault();
         if (legacy[2]) {
             history.pushState({}, '', href);
-            route();
-            resetScroll();
+            route().then(resetScroll);
         } else {
             navigateTo(decodeURIComponent(legacy[1]));
         }
@@ -2515,8 +2511,7 @@ document.addEventListener('click', (e) => {
             e.preventDefault();
             if (clean[2]) {
                 history.pushState({}, '', href);
-                route();
-                resetScroll();
+                route().then(resetScroll);
             } else {
                 navigateTo(decodeURIComponent(clean[1]));
             }
@@ -3058,6 +3053,7 @@ function renderShopCancel() {
 
 // ---- Buy callout on sensor pages ----
 function injectBuyCallout(slug) {
+    if (!SITE.has_shop) return;
     const prefixes = SLUG_TO_SKU_PREFIXES[slug];
     if (!prefixes || !shopProducts.length) return;
     const matches = shopProducts

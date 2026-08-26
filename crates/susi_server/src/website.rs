@@ -2473,6 +2473,7 @@ fn render_website(
     // The home of a translation is the translated home page: the row that
     // mirrors the default language's home slug, else the language's first
     // top-level page.
+    let had_requested_slug = requested_slug.is_some();
     let slug_owned: Option<String> = requested_slug.or_else(|| {
         if lang.is_empty() {
             first_default_slug(&pages).map(|s| s.to_string())
@@ -2520,6 +2521,10 @@ fn render_website(
             (site.name.to_string(), site.tagline.to_string(), String::new(), None, String::new(), None, None)
         };
 
+    // A requested slug that resolves to no page is a real 404: rendered as
+    // the shell (the SPA shows "Page not found") but with the right status
+    // and a noindex, and never cached - a cache hit would revive it as 200.
+    let not_found = had_requested_slug && valid_slug.is_none();
     let og_image = first_image_url(site, &body_md);
     let injected = match valid_slug.as_deref() {
         Some(s) => {
@@ -2531,9 +2536,10 @@ fn render_website(
             )
         }
         None => format!(
-            "<title>{}</title>\n<meta name=\"description\" content=\"{}\">\n",
+            "<title>{}</title>\n<meta name=\"description\" content=\"{}\">\n{}",
             html_escape(site.name),
             html_escape(site.tagline),
+            if not_found { "<meta name=\"robots\" content=\"noindex\">\n" } else { "" },
         ),
     };
 
@@ -2553,6 +2559,9 @@ fn render_website(
     };
 
     let html = render_shell(state, site, &lang, &injected, &body_html);
+    if not_found {
+        return (StatusCode::NOT_FOUND, build_html_headers(), html).into_response();
+    }
     page_cache_put(cache_key, html.clone());
     (build_html_headers(), html).into_response()
 }
@@ -3196,11 +3205,13 @@ pub async fn handle_llms_txt(
     headers: HeaderMap,
 ) -> impl IntoResponse {
     let site = sites::site_from_headers(&headers).unwrap_or_else(sites::default_site);
-    // llms.txt lists the default language only - the canonical content.
-    let pages = {
+    // The default language is the canonical content; translations follow in
+    // their own section so language-aware AI crawlers find them too.
+    let all_pages = {
         let db = state.db.lock();
-        pages_in_lang(&visible_pages(db.list_website_pages(site.id).unwrap_or_default()), "")
+        visible_pages(db.list_website_pages(site.id).unwrap_or_default())
     };
+    let pages = pages_in_lang(&all_pages, "");
     let home_slug = first_default_slug(&pages).map(|s| s.to_string());
 
     let mut body = String::new();
@@ -3245,6 +3256,26 @@ pub async fn handle_llms_txt(
                 body.push_str(&format!("- [{}]({}) ({})\n", p.1, url, p.8));
             } else {
                 body.push_str(&format!("- [{}]({}) ({}): {}\n", p.1, url, p.8, excerpt));
+            }
+        }
+    }
+    // Translated pages, one section per declared language.
+    for l in site.langs {
+        let lang_rows: Vec<&PageRow> = all_pages
+            .iter()
+            .filter(|p| p.11 == *l && p.7 != "post")
+            .collect();
+        if lang_rows.is_empty() {
+            continue;
+        }
+        body.push_str(&format!("\n## Pages ({})\n", l));
+        for p in lang_rows {
+            let is_home = !p.12.is_empty() && home_slug.as_deref() == Some(p.12.as_str());
+            let url = canonical_page_url(site, l, &p.0, is_home);
+            if p.5.trim().is_empty() {
+                body.push_str(&format!("- [{}]({})\n", p.1, url));
+            } else {
+                body.push_str(&format!("- [{}]({}): {}\n", p.1, url, p.5.trim()));
             }
         }
     }
