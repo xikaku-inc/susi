@@ -1236,6 +1236,35 @@ JA_LINK_ALIASES = {
     "/ja/inertial-measurement-unit-imu-series-2/lpms-al3-series": "/ja/lpms-al3-series",
     "/ja/inertial-measurement-unit-imu-series-2/lpms-ig1w": "/ja/lpms-ig1w",
 }
+# Meta descriptions, translated from the English pages' metas (kept in sync
+# with the reference; pages whose English meta is empty fall back to the
+# body-derived description, same as English).
+JA_META = {
+    "lp-research": "LP-Researchは、先進のセンサーフュージョン技術による高精度IMUセンサーの開発・製造と、VR/ARおよびAGVシステム向けの産業ソリューションを提供しています。",
+    "inertial-measurement-unit-imu-series-2": "LPMS IMUは高精度・高速な姿勢・位置計測を行います。多彩な通信インターフェースと筐体オプションをご用意しています。",
+    "vrトラッキング-ハイブリッドシステム": "LP-Researchの高性能VR/ARトラッキング・ソリューション。産業環境で低遅延かつ応答性の高いトラッキングを実現するLPVR-CAD、DUO、AIRをご紹介します。",
+    "lpms-hr-jp": "LPMS-HRは、移動ロボット、ヒューマノイド、自律プラットフォーム向けに設計されたコンパクトな高分解能MEMS IMUです。USB、RS232、TTLによるリアルタイム6DoFセンシング。仕様と活用事例をご覧ください。",
+    "lpms-curs3-oem-9-axis-imu-sensor": "LPMS-CURS3 OEMセンサーは産業用の9軸IMU/AHRSです。USB、CAN、UARTを備え、ハードウェアへのスムーズな組み込みが可能です。",
+    "lpms-ig1p-jp": "GPS受信機搭載のこの9軸IMUは、高精度・高速な姿勢・位置計測を行います。USB、CAN、RS232インターフェースで通信します。",
+    "lpms-nav3-robot-navigation-imu-sensor": "LPMS-NAV3は、RS232/TTL/RS422/RS485通信インターフェースを備えた6軸の高性能慣性計測装置（IMU）です。",
+    "lpms-al3-series": "LP-ResearchモーションセンサーLPMS-AL3シリーズは、CAN、RS232、TTL、USBなど多彩な接続方式に対応した9軸防水IMU/AHRSです。",
+    "lpms-u3-9-axis-imu": "USB・CANバス対応のこの9軸IMUは、高精度・高速な姿勢・位置計測を行います。コンパクトなサイズで幅広い用途に最適です。",
+    "lpms-ig1-9-axis-imu-sensor": "LPMS-IG1シリーズは、IP67準拠筐体でUSB/CAN/RS232接続に対応した高精度9軸慣性計測装置（IMU）/AHRSシステムです。",
+    "lpms-ig1w": "LPMS-IG1Wは、姿勢と加速度を非常に高い精度で検出するコンパクトな高精度9軸IMUセンサーです。Wi-Fi接続により、インターネット接続なしで高速かつ安全なデータ伝送を実現します。",
+    "lpms-inc1": "LPMS-INC1は、産業用途における正確な傾斜計測のために設計された高精度2軸傾斜計センサーです。",
+    "lpms-b2-bluetooth-imu-sensor": "LPMS-B2シリーズは、9軸Bluetooth IMU（慣性計測装置）/姿勢方位基準システム（AHRS）です。",
+    "lpms-cu2-jp": "LPMS U2シリーズの9軸IMUは、USB、CANバス、RS232、TTLインターフェースによる高速データ出力で、高精度な姿勢・位置トラッキングを提供します。",
+    "lpvr-cad": "頭部運動モデルに基づく独自の予測アルゴリズムで慣性計測データを融合する、ロケーションベースのVRトラッキングシステムです。",
+    "lpvr-duo": "IMUと光学トラッキングデータを融合する、ゲーム・デザイン・コンセプト開発向けの車載VRトラッキングシステム。ARアプリケーションにも対応します。",
+    "lpvr-air": "LPVR-AIRは、Meta QuestなどのVRヘッドセットにワイヤレスで低遅延のトラッキングを提供します。複合現実、シミュレーション、車載用途に最適です。",
+    "lpvr-pos": "グローバル座標系のAR/VRコンテンツのための車載AR/VR姿勢トラッキング・ローカライゼーションシステム。ガイダンス、シミュレーター、エンターテインメントなどに対応します。",
+    "lp-researchについて": "LP-Researchチームは、VR、AR、IoT、新興技術など無限に広がる用途に向けて、センシングシステムとセンサーフュージョン・ソリューションを研究開発しています。",
+    "contact-lp-research": "株式会社LP-RESEARCHへのお問い合わせ。所在地: 〒106-0046 東京都港区元麻布3-10-4 RE-FLAT #201、電話: +81-3-6804-1610。",
+    "lp-research-customers": "LP-Researchの製品は、教育から医療、自動車産業まで、さまざまな分野で使用されています。",
+    "distributors-lp-research": "LP-Researchのセンサー・トラッキングシステムの世界各地の販売代理店をご紹介します。",
+    "terms-of-service": "LP-Researchハードウェア製品の保証・返品・注文キャンセルに関する規約です。",
+    "software-eula": "LPVR-CAD、LPVR-DUO、LPVR-AIR、LPMS-ControlなどのLP-Researchソフトウェア製品の使用許諾契約です。",
+}
 # Japanese pages with no WordPress source at all - they exist only as
 # hand-maintained translations: slug -> (english partner slug, ord).
 JA_EXTRA_PAGES = {
@@ -1500,7 +1529,7 @@ def cmd_build_ja(work):
             body = f"# {title}\n\n{md}"
         with open(os.path.join(pages_dir, f"{slug}.md"), "w", encoding="utf-8", newline="\n") as f:
             f.write(body)
-        meta = (p.get("yoast_head_json") or {}).get("description") or ""
+        meta = JA_META.get(slug) or (p.get("yoast_head_json") or {}).get("description") or ""
         old_path = link_path(p["link"])
         hidden = kind == "page" and slug in hidden_slugs
         new_path = path_map[old_path]
@@ -1546,7 +1575,7 @@ def cmd_build_ja(work):
         manifest[slug] = {
             "title": JA_TITLE_OVERRIDES.get(slug, slug),
             "ord": ordv,
-            "meta_description": "",
+            "meta_description": JA_META.get(slug, ""),
             "page_kind": "page",
             "lang": JA,
             "translation_of": tr,
