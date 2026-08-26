@@ -1070,9 +1070,472 @@ def cmd_push(work, susi, site, all_assets=False):
     print(f"settings: {sorted(settings)}")
 
 
+# ---------------------------------------------------------------------------
+# Japanese site (fetch-ja / build-ja): the /ja/ translation of the site,
+# mirroring the English curation. Every Japanese page is linked to the final
+# susi slug of its English partner (translation_of), which drives hreflang
+# pairs and the translated sidebar. Slugs are kept verbatim - including
+# Japanese-character slugs - so today's ranking /ja/ URLs survive.
+# ---------------------------------------------------------------------------
+
+JA = "ja"
+# ja slug -> final English susi slug. Only 1:1 partners are listed; ja-only
+# legacy pages stay unlinked (and hidden).
+JA_TRANSLATION_OF = {
+    "lp-research": "lp-research",
+    "inertial-measurement-unit-imu-series-2": "inertial-measurement-units-imu",
+    "vrトラッキング-ハイブリッドシステム": "vr-ar-tracking-solutions-lpvr",
+    "lpms-hr-jp": "lpms-hr",
+    "lpms-curs3-oem-9-axis-imu-sensor": "lpms-curs3-oem-9-axis-imu-ahrs-usb-can-uart",
+    "lpms-ig1p-jp": "lpms-ig1p",
+    "lpms-nav3-robot-navigation-imu-sensor": "lpms-nav3",
+    "lpms-al3-series": "lpms-al3-9-axis-imu-sensor",
+    "lpms-u3-9-axis-imu": "lpms-u3-usb-and-can-bus-imu",
+    "lpms-ig1-9-axis-imu-sensor": "lpms-ig1",
+    "lpms-ig1w": "lpms-ig1w",
+    "lpms-inc1": "lpms-inc1",
+    "lpms-b2-bluetooth-imu-sensor": "lpms-b2",
+    "lpms-cu2-jp": "9-axis-usb-and-can-bus-imu-lpmsu2-series",
+    "lpms-me1": "lpms-me1",
+    "lpvr-cad": "lpvr-cad",
+    "lpvr-duo": "lpvr-duo",
+    "lpvr-air": "lpvr-air",
+    "lpvr-pos": "lpvr-pos",
+    "lpnav": "lpnav",
+    "モーションキャプチャ-システム-lpmocap": "motion-capture-system-lpmocap",
+    "lpiotsolution-industrial-monitoring-automation": "lpiotsolution",
+    "高精度rs422対応imuセンサー": "lpms-nav2-rs422",
+    "lpms-nav2-rs232": "lpms-nav2-rs232",
+    "lpms-usbal2": "lpms-usbal",
+    "lpms-rs232al2-9-axis-imu-ahrs-motion-sensor-with-rs232-connectivity-and-waterproof-housing":
+        "9-axis-waterproof-imu-lpms-al2-series",
+    "lp-researchについて": "about-us-lp-research",
+    "contact-lp-research": "contact",
+    "lp-research-customers": "customers",
+    "distributors-lp-research": "distributors",
+    "terms-of-service": "hardware-terms",
+    "センサーフュージョンソリューション": "sensor-fusion-solutions",
+}
+# Empty WordPress container pages, ja slug -> redirect target (mirrors the
+# English DROPPED decisions; targets are percent-encoded for the 301 header).
+JA_DROPPED = {
+    "product": "/ja",
+    "技術紹介": "/ja/blog",
+    "注文": "/ja/distributors-lp-research",
+    "会社情報": "/ja/lp-research%E3%81%AB%E3%81%A4%E3%81%84%E3%81%A6",
+}
+# Hidden beyond the mirrored English state: the stale duplicate of the about
+# page and untranslated legacy product pages with no 1:1 English partner.
+JA_HIDDEN_EXTRA = {"about-us", "lpms-uttl2", "lpms-urs2"}
+# The Technology cluster is retired like its English partner: content kept,
+# URL 301s to the blog.
+JA_RETIRED = {"センサーフュージョンソリューション": "/ja/blog"}
+# Nav labels (the body keeps its own keyword-rich heading).
+JA_TITLE_OVERRIDES = {
+    "lp-research": "ホーム",
+    "inertial-measurement-unit-imu-series-2": "慣性計測装置（IMU）",
+    "vrトラッキング-ハイブリッドシステム": "VR/ARトラッキング",
+    "lp-researchについて": "会社概要",
+    "contact-lp-research": "お問い合わせ",
+    "lp-research-customers": "取引先一覧",
+    "distributors-lp-research": "代理店",
+    "terms-of-service": "利用規約",
+    "センサーフュージョンソリューション": "技術紹介",
+    "lpms-hr-jp": "LPMS-HR",
+    "lpms-curs3-oem-9-axis-imu-sensor": "LPMS-CURS3",
+    "lpms-ig1p-jp": "LPMS-IG1P",
+    "lpms-nav3-robot-navigation-imu-sensor": "LPMS-NAV3",
+    "lpms-al3-series": "LPMS-AL3",
+    "lpms-u3-9-axis-imu": "LPMS-U3",
+    "lpms-ig1-9-axis-imu-sensor": "LPMS-IG1",
+    "lpms-ig1w": "LPMS-IG1W",
+    "lpms-inc1": "LPMS-INC1",
+    "lpms-b2-bluetooth-imu-sensor": "LPMS-B2",
+    "lpms-cu2-jp": "LPMS-CU2",
+    "lpms-me1": "LPMS-ME1",
+    "lpvr-cad": "LPVR-CAD",
+    "lpvr-duo": "LPVR-DUO",
+    "lpvr-air": "LPVR-AIR",
+    "lpvr-pos": "LPVR-POS",
+    "lpnav": "LPNAV",
+    "モーションキャプチャ-システム-lpmocap": "LPMOCAP",
+    "lpiotsolution-industrial-monitoring-automation": "LPIOT",
+}
+# The Japanese home, rebuilt like the English one (the WP original is a
+# Slider Revolution hero markdown cannot carry).
+JA_HOME_MD = """\
+![LP-Research](/static/logo-dark.png?v=2){width=380px .logo-dark} \
+![LP-Research](/static/logo.png?v=2){width=380px .logo-light}
+
+**LP-RESEARCHは、慣性計測装置（IMU）と、そのデータを信頼性の高い姿勢・位置情報に変える\
+センサーフュージョン・ソフトウェアを開発しています。**
+
+当社のセンサーとアルゴリズムは、自動車、航空宇宙、ロボティクス、産業機器、\
+複合現実（MR）など、世界中のさまざまな分野で採用されています。単体のOEMモジュールから\
+完全なトラッキングシステムまで、一貫した技術サポートとともにワンストップでご提供します。
+
+[**ブログで最新の研究開発情報を読む**](/ja/blog)
+
+## 製品
+
+|  |  |
+| --- | --- |
+| ![慣性計測装置（IMU）](Sensor-whiteBG.png){width=100%} \
+**[慣性計測装置（IMU）](/ja/inertial-measurement-unit-imu-series-2)** - \
+高速かつ高精度な3D姿勢センシング。OEMボードからGNSS搭載のIP67筐体まで、\
+多彩な通信インターフェースと筐体オプションをご用意しています。 | \
+![VR/ARトラッキング](LP-Webpage-img-etc.png){width=100%} \
+**[VR/ARトラッキング](/ja/vrトラッキング-ハイブリッドシステム)** - \
+車載、大空間、モーションシミュレーター向けの低遅延LPVRトラッキング。 |
+
+## [お問い合わせ](/ja/contact-lp-research)
+
+サポートに関するご相談や直接のご注文など、いつでもお気軽にお問い合わせください。\
+お客様の用途に最適なセンサーシステムをご提案します。
+
+## [サポート](https://lp-research.atlassian.net/wiki/spaces/LKB/overview)
+
+お客様とのつながりは、製品の納品で終わりではありません。製品とサービスへの充実した\
+サポートこそが重要だと考えています。
+
+## [ご注文](/ja/distributors-lp-research)
+
+お近くの販売代理店は代理店一覧をご覧ください。Zenshin Techオンラインショップから\
+直接ご注文いただくことも可能です。
+"""
+JA_PAGE_BODY_OVERRIDES = {"lp-research": JA_HOME_MD}
+# Recurring English section headings on the Japanese pages, translated
+# globally (exact heading-line matches).
+JA_HEADING_MAP = {
+    "Downloads": "ダウンロード",
+    "Specifications": "仕様",
+    "Specification": "仕様",
+    "Order": "ご注文",
+    "System manual": "システムマニュアル",
+    "Applications": "活用事例",
+    "Download brochures": "資料ダウンロード",
+}
+# Old ja URL paths that appear in content links but were never REST-visible
+# (WP alias permalinks); mapped for link rewriting AND emitted as redirects.
+JA_LINK_ALIASES = {
+    "/ja/distributors": "/ja/distributors-lp-research",
+    "/ja/contact": "/ja/contact-lp-research",
+    "/ja/product/lpvr/lpvr-air": "/ja/lpvr-air",
+    "/ja/product/lpmocap": "/ja/inertial-measurement-unit-imu-series-2",
+    "/ja/lpiotsolution": "/ja/inertial-measurement-unit-imu-series-2",
+    "/ja/vr-large-room-scale-tracking": "/ja/blog/large-scale-vr-tracking-steamvr",
+    "/ja/control-of-autonomous-drone-ihsmd": "/ja/blog/control-of-autonomous-drone-ihsmd",
+    "/ja/middleware-full-solution-ar-vr": "/ja/blog/middleware-full-solution-ar-vr",
+    "/ja/context-analysis": "/ja/blog/context-analysis",
+    "/ja/machine-learning-for-context-analysis": "/ja/blog/context-analysis",
+    "/ja/lpms-cu-in-eth-zuerich-formula-student-race-car-fluelela":
+        "/ja/blog/race-car-stabilization-imu-case-study",
+    "/ja/inertial-measurement-unit-imu-series-2/lpms-al3-series": "/ja/lpms-al3-series",
+    "/ja/inertial-measurement-unit-imu-series-2/lpms-ig1w": "/ja/lpms-ig1w",
+}
+# Proofreading corrections applied to the converted markdown, slug -> list of
+# (exact old, new) replacements. Populated from the language review; a fix
+# that no longer matches is reported so silent drift gets noticed.
+JA_TEXT_FIXES = {
+    "lp-researchについて": [
+        ("## The LP-Research Team", "## LP-Researchチーム"),
+        ("## With Team Alubi", "## チームAlubiと共に"),
+        ("## Leadership Team", "## 経営陣"),
+        ("## Scientific Advisors", "## 学術アドバイザー"),
+        ("### Prof. Massimiliano Zecca", "### Massimiliano Zecca教授"),
+        ("### Prof. Atsuo Takanishi", "### 高西淳夫教授"),
+        # A '|' inside these titles split the three-column leadership grid.
+        (" - Chief Financial Officer | Co-CEO", " - 最高財務責任者（CFO）／共同CEO"),
+        (" - Chief Technology Officer | Co-CEO", " - 最高技術責任者（CTO）／共同CEO"),
+        (" - Head of Software Engineering", " - ソフトウェア開発責任者"),
+        ("車内VRトラッキングシステムの当機能が、ユーザーに没入感のある体験を提供するために必要不可欠です",
+         "車載VRトラッキングシステムのこの機能が、ユーザーに没入感のある体験を提供するうえで欠かせません"),
+    ],
+    "inertial-measurement-unit-imu-series-2": [
+        ("# Inertial Measurement Unit (IMU) Devices", "# 慣性計測装置（IMU）"),
+        ("LPMS慣性測定ユニットは、高速で正確な3D方向検知が可能です。",
+         "LPMS慣性計測装置（IMU）は、高速かつ高精度な3D姿勢計測が可能です。"),
+    ],
+    "vrトラッキング-ハイブリッドシステム": [
+        ("## Virtual Reality / Augmented Reality Tracking Solutions",
+         "## VR・ARトラッキング・ソリューション"),
+    ],
+    "lpvr-cad": [
+        ("トラッキング・　ソリューション", "トラッキング・ソリューション"),
+        ("そこで画像処理と信号ルーティングは、さらなる遅延をもたらす可能性があります。",
+         "また、画像処理や信号ルーティングによって、さらなる遅延が生じる可能性があります。"),
+        ("慣性測定データ", "慣性計測データ"),
+    ],
+    "terms-of-service": [
+        ("## 利用規約\n\n## Refund Policy\n\n**保証及び返品ポリシー**", "## 保証及び返品ポリシー"),
+        ("30歴日", "30暦日"),
+        ("info  at lp-research.com", "info at lp-research.com"),
+        ("国・地域にとよっては", "国・地域によっては"),
+        ("梱包しなればなりません", "梱包しなければなりません"),
+    ],
+    "contact-lp-research": [
+        ("〒 106-0046", "〒106-0046"),
+    ],
+    "distributors-lp-research": [
+        ("Last/RM A27", "Flat/RM A27"),
+        ("United State of America", "United States of America"),
+        ("### アメリカ合衆国/ カナダ/ メキシコ", "### アメリカ合衆国・カナダ・メキシコ"),
+        ("Email: <http://www.cyan-rs.com/publics/index/5/>",
+         "お問い合わせ: <http://www.cyan-rs.com/publics/index/5/>"),
+    ],
+    "lp-research-customers": [
+        ("# 顧客一覧", "# 取引先一覧"),
+    ],
+}
+
+
+def enc_path(path):
+    """Percent-encode a path for use in a redirect target (Location header
+    values must stay ASCII); already-encoded input passes through."""
+    return urllib.parse.quote(urllib.parse.unquote(path), safe="/%?=&")
+
+
+def wp_session_ja():
+    """Like wp_session, but the ja content endpoints are public - fall back
+    to an anonymous session when no credentials are set."""
+    if os.environ.get("WP_USER") and os.environ.get("WP_APP_PASSWORD"):
+        return wp_session()
+    s = requests.Session()
+    s.headers["User-Agent"] = "susi-migrator/1.0"
+    return s
+
+
+def fetch_all_ja(s, endpoint):
+    out = []
+    page = 1
+    while True:
+        r = s.get(
+            f"{WP_BASE}/wp-json/wp/v2/{endpoint}",
+            params={"per_page": 100, "page": page, "status": "publish", "lang": JA},
+            timeout=60,
+        )
+        if r.status_code == 400:
+            break
+        r.raise_for_status()
+        batch = r.json()
+        out.extend(batch)
+        if len(batch) < 100:
+            break
+        page += 1
+    return out
+
+
+def cmd_fetch_ja(work):
+    s = wp_session_ja()
+    os.makedirs(work, exist_ok=True)
+    pages = fetch_all_ja(s, "pages")
+    posts = fetch_all_ja(s, "posts")
+    # English post slugs pair the ja posts (75 of 76 share the slug).
+    en_posts = fetch_all(s, "posts")
+    print(f"fetched {len(pages)} ja pages, {len(posts)} ja posts, {len(en_posts)} en posts")
+    with open(os.path.join(work, "wp_pages_ja.json"), "w", encoding="utf-8") as f:
+        json.dump(pages, f)
+    with open(os.path.join(work, "wp_posts_ja.json"), "w", encoding="utf-8") as f:
+        json.dump(posts, f)
+    with open(os.path.join(work, "wp_posts_en_slugs.json"), "w", encoding="utf-8") as f:
+        json.dump(sorted(p["slug"] for p in en_posts), f)
+
+
+def cmd_build_ja(work):
+    report = []
+    s = wp_session_ja()
+    with open(os.path.join(work, "wp_pages_ja.json"), encoding="utf-8") as f:
+        wp_pages = json.load(f)
+    with open(os.path.join(work, "wp_posts_ja.json"), encoding="utf-8") as f:
+        wp_posts = json.load(f)
+    with open(os.path.join(work, "wp_posts_en_slugs.json"), encoding="utf-8") as f:
+        en_post_slugs = set(json.load(f))
+
+    def deslug(p):
+        return urllib.parse.unquote(p["slug"])
+
+    by_id = {p["id"]: p for p in wp_pages}
+    pages = [p for p in wp_pages if not is_excluded(p, by_id) and deslug(p) not in JA_DROPPED]
+    report.append(f"dropped ja container pages: {', '.join(sorted(JA_DROPPED))}")
+
+    # Mirror the English visibility: a ja page whose partner is hidden in the
+    # English curation is hidden too.
+    hidden_slugs = set(JA_HIDDEN_EXTRA)
+    for ja_slug, en_slug in JA_TRANSLATION_OF.items():
+        if en_slug in HIDDEN_SLUGS:
+            hidden_slugs.add(ja_slug)
+
+    # Reverse map for parent mirroring: en slug -> ja slug.
+    ja_of = {en: ja for ja, en in JA_TRANSLATION_OF.items()}
+
+    front_slug = "lp-research"
+
+    used = {}
+    def claim(slug, kind):
+        base, n = slug, 2
+        while slug in used:
+            slug = f"{base}-{n}"
+            n += 1
+        used[slug] = kind
+        if slug != base:
+            report.append(f"ja slug collision: {base} ({kind}) -> {slug}")
+        return slug
+
+    items = []
+    for p in pages:
+        items.append(("page", p, claim(deslug(p), "page")))
+    for p in wp_posts:
+        items.append(("post", p, claim(deslug(p), "post")))
+
+    # Old ja path -> new /ja/ layout, for link rewriting and redirects.
+    path_map = {}
+    for kind, p, slug in items:
+        new = f"/ja/blog/{slug}" if kind == "post" else ("/ja/" if slug == front_slug else f"/ja/{slug}")
+        path_map[link_path(p["link"])] = new
+
+    redirects = []
+    for c in CATEGORY_SLUGS:
+        redirects.append({"from_path": f"/ja/category/{c}", "to_path": "/ja/blog"})
+    for p in wp_pages:
+        if deslug(p) in JA_DROPPED:
+            old = link_path(p["link"])
+            path_map[old] = urllib.parse.unquote(JA_DROPPED[deslug(p)])
+            redirects.append({"from_path": old, "to_path": JA_DROPPED[deslug(p)]})
+    diverted = {}
+    for kind, p, slug in items:
+        if kind != "page":
+            continue
+        if slug in hidden_slugs:
+            en = JA_TRANSLATION_OF.get(slug)
+            parent_en = PAGE_LAYOUT.get(en, (None,))[0] if en else None
+            parent_ja = ja_of.get(parent_en) if parent_en else None
+            target = f"/ja/{parent_ja}" if parent_ja else "/ja"
+        elif slug in JA_RETIRED:
+            target = JA_RETIRED[slug]
+        else:
+            continue
+        diverted[f"/ja/{slug}"] = urllib.parse.unquote(target)
+        old = link_path(p["link"])
+        if old not in ("/", "/ja"):
+            path_map[old] = urllib.parse.unquote(target)
+            redirects.append({"from_path": old, "to_path": enc_path(target)})
+
+    for src, dst in JA_LINK_ALIASES.items():
+        redirects.append({"from_path": src, "to_path": enc_path(dst)})
+
+    link_map = {r["from_path"]: r["to_path"] for r in redirects}
+    link_map.update({new: new for new in path_map.values()})
+    link_map.update(path_map)
+    link_map.update(diverted)
+    link_map.update(JA_LINK_ALIASES)
+
+    assets = AssetStore(s, work, report)
+    media = MediaResolver(s, work)
+    pages_dir = os.path.join(work, "pages")
+    os.makedirs(pages_dir, exist_ok=True)
+    for n in os.listdir(pages_dir):
+        if n.endswith(".md"):
+            os.remove(os.path.join(pages_dir, n))
+
+    # Grid treatments mirror the English partner pages.
+    en_product_grids = {ja_of.get(en): c for en, c in PRODUCT_GRID_PAGES.items() if ja_of.get(en)}
+    en_logo_grids = {ja_of.get(en): c for en, c in LOGO_GRID_PAGES.items() if ja_of.get(en)}
+    en_people_grids = {ja_of.get(en): c for en, c in PEOPLE_GRID_PAGES.items() if ja_of.get(en)}
+
+    manifest = {}
+    for kind, p, slug in items:
+        title = BeautifulSoup(p["title"]["rendered"], "html.parser").get_text().strip()
+        if kind == "page":
+            title = JA_TITLE_OVERRIDES.get(slug, title)
+        html = clean_html(p["content"]["rendered"], assets, media, report, slug)
+        md = normalize_heading_levels(rewrite_internal_links(to_markdown(html), link_map))
+        md = strip_heading_emphasis(md)
+        if kind == "page" and slug in JA_PAGE_BODY_OVERRIDES:
+            md = JA_PAGE_BODY_OVERRIDES[slug]
+        # Recurring English section headings -> Japanese, on heading lines only.
+        md = "\n".join(
+            re.sub(r"^(#{1,5}) (.+?)\s*$", lambda m: f"{m.group(1)} {JA_HEADING_MAP.get(m.group(2), m.group(2))}", line)
+            for line in md.split("\n")
+        )
+        if slug in en_product_grids:
+            md = product_grid(md, en_product_grids[slug])
+        if slug in en_logo_grids:
+            md = logo_grid(md, en_logo_grids[slug])
+        if slug in en_people_grids:
+            md = people_grid(md, en_people_grids[slug])
+        en_slug = JA_TRANSLATION_OF.get(slug)
+        if (kind == "page" and en_slug and PAGE_LAYOUT.get(en_slug, (None,))[0]
+                and slug not in hidden_slugs):
+            md = people_grid(md, VARIANT_GRID_COLUMNS)
+        for old, new in JA_TEXT_FIXES.get(slug, []):
+            if old not in md:
+                report.append(f"ja fix no longer matches on {slug}: {old[:40]}")
+            md = md.replace(old, new)
+        if slug == front_slug or md.startswith("# "):
+            body = md
+        else:
+            body = f"# {title}\n\n{md}"
+        with open(os.path.join(pages_dir, f"{slug}.md"), "w", encoding="utf-8", newline="\n") as f:
+            f.write(body)
+        meta = (p.get("yoast_head_json") or {}).get("description") or ""
+        old_path = link_path(p["link"])
+        hidden = kind == "page" and slug in hidden_slugs
+        new_path = path_map[old_path]
+        entry = {
+            "title": title,
+            "ord": 0 if slug == front_slug else (p.get("menu_order") or 0) + 1,
+            "meta_description": meta,
+            "page_kind": kind,
+            "lang": JA,
+            # The home serves at /ja/ AND its own slug - no self redirect.
+            "redirect_from": [] if (hidden or slug in JA_RETIRED or slug == front_slug)
+                             else ([old_path] if old_path not in ("/", "/ja", new_path) else []),
+        }
+        if hidden:
+            entry["hidden"] = True
+        if kind == "page" and slug in JA_RETIRED:
+            entry["redirect_to"] = JA_RETIRED[slug]
+        if kind == "post":
+            entry["published_at"] = p["date"][:10]
+            if slug in en_post_slugs:
+                entry["translation_of"] = slug
+        if kind == "page" and en_slug:
+            entry["translation_of"] = en_slug
+            if en_slug in PAGE_LAYOUT:
+                parent_en, ordv = PAGE_LAYOUT[en_slug]
+                entry["ord"] = ordv
+                parent_ja = ja_of.get(parent_en) if parent_en else None
+                if parent_ja:
+                    entry["parent_slug"] = parent_ja
+        manifest[slug] = entry
+
+    with open(os.path.join(work, "manifest.json"), "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=1)
+    with open(os.path.join(work, "redirects.json"), "w", encoding="utf-8") as f:
+        json.dump(redirects, f, indent=1)
+    # No settings for the ja run - nav_structure is shared with English.
+    with open(os.path.join(work, "settings.json"), "w", encoding="utf-8") as f:
+        json.dump({}, f)
+
+    assets.save()
+    media.save()
+    n_hidden = sum(1 for _, e in manifest.items() if e.get("hidden"))
+    n_linked = sum(1 for _, e in manifest.items() if e.get("translation_of"))
+    summary = (
+        f"ja pages: {sum(1 for k, _, _ in items if k == 'page')} ({n_hidden} hidden), "
+        f"ja posts: {sum(1 for k, _, _ in items if k == 'post')}, "
+        f"linked to en: {n_linked}, "
+        f"assets: {len(assets.names)}, redirects: {len(redirects)} standalone"
+    )
+    print(summary)
+    with open(os.path.join(work, "report.txt"), "w", encoding="utf-8") as f:
+        f.write(summary + "\n\n" + "\n".join(report) + "\n")
+    print(f"report: {os.path.join(work, 'report.txt')} ({len(report)} notes)")
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("step", choices=["fetch", "build", "push"])
+    ap.add_argument("step", choices=["fetch", "build", "push", "fetch-ja", "build-ja"])
     ap.add_argument("--work", default="wp_migrate_out")
     ap.add_argument("--susi", default="http://127.0.0.1:3199")
     ap.add_argument("--site", default="lpr")
@@ -1081,8 +1544,12 @@ def main():
     args = ap.parse_args()
     if args.step == "fetch":
         cmd_fetch(args.work)
+    elif args.step == "fetch-ja":
+        cmd_fetch_ja(args.work)
     elif args.step == "build":
         cmd_build(args.work)
+    elif args.step == "build-ja":
+        cmd_build_ja(args.work)
     else:
         cmd_push(args.work, args.susi.rstrip("/"), args.site, args.all_assets)
 
