@@ -72,9 +72,8 @@ LPMS-HRは、既存のシステムアーキテクチャに変換ハードウェ�
 
 ### 仕様
 
-|  |  |  |  |
-| --- | --- | --- | --- |
 | 型番 | LPMS-HR USB | LPMS-HR RS232 | LPMS-HR TTL |
+| --- | --- | --- | --- |
 | インターフェース | USB | RS232 | TTL |
 | 通信プロトコル | LP-BUS/ ASCII | LP-BUS/ ASCII | LP-BUS/ ASCII |
 | サイズ | 22.4 × 22.4 × 11 mm | | |

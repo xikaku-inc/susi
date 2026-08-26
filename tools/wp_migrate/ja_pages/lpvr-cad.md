@@ -36,9 +36,8 @@ LPVR-CADはロケーションベースのVRトラッキングシステムです�
 
 ### 仕様
 
-|  |  |
-| --- | --- |
 | 製品名 | LPVR-CAD |
+| --- | --- |
 | 対応HMD | 上記参照 |
 | 対応光学トラッキングシステム | ART、Optitrack、VICON、VRPNベースのトラッキングソリューション |
 | 対応ソフトウェア | Unity、Unreal、Autodesk VRED、すべてのSteamVR対応アプリケーション |

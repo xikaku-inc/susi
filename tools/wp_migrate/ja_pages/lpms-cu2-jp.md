@@ -40,9 +40,8 @@ LPMS-U2センサーシリーズは、USB、RS232、TTL、CANバスといった�
 
 ## 仕様
 
-|  |  |  |  |
+| 型番 | LPMS-CU2 | LPMS-URS2 | LPMS-UTTL2 |
 | --- | --- | --- | --- |
-| 型番 | **LPMS-CU2** | **LPMS-URS2** | **LPMS-UTTL2** |
 | 通信インターフェース | CANバス、USB 2.0 | RS232、USB 2.0 | TTL、USB 2.0 |
 | 通信プロトコル | LpCAN / CANOpen | LpBUS | LpBUS |
 | サイズ | 34 x 34.5 x 15.7 mm | | |

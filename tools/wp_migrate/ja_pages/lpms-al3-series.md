@@ -38,9 +38,8 @@ LP-ResearchモーションセンサーLPMS-AL3シリーズは、CAN、RS232、TT
 
 ### 仕様
 
-|  |  |  |  |
+| 型番 | LPMS-CANAL3 | LPMS-RS232AL3 | LPMS-TTLAL3 |
 | --- | --- | --- | --- |
-| 型番 | **LPMS-CANAL3** | **LPMS-RS232AL3** | **LPMS-TTLAL3** |
 | 通信インターフェース | CANバス / USB | RS232 | TTL（UART） |
 | 最大ボーレート | 1Mbps | 921600bps | 921600bps |
 | 通信プロトコル | CANOpen / SequentialCAN | LPBUS/ASCII | LPBUS/ASCII |

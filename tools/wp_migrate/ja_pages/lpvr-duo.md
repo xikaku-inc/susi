@@ -50,9 +50,8 @@ VR・AR向けLPVRミドルウェア・ソリューションのトラッキング
 
 ### 仕様
 
-|  |  |
-| --- | --- |
 | 製品名 | LPVR-DUO |
+| --- | --- |
 | 対応HMD | 上記参照 |
 | 対応光学トラッキングシステム | ART、OptiTrack、VICON、VRPNベースのトラッキングソリューション |
 | 対応ソフトウェア | Unity、Unreal、Autodesk VRED、すべてのSteamVR対応アプリケーション、Varjo Base |

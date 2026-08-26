@@ -60,9 +60,8 @@ GPSと多彩な接続方式を備えたコンパクトな防水IMUをお探し�
 
 ### 仕様
 
-|  |  |  |  |
+| 型番 | LPMS-IG1P RS232 | LPMS-IG1P CAN | LPMS-IG1P RS485 |
 | --- | --- | --- | --- |
-| 型番 | **LPMS-IG1P RS232** | **LPMS-IG1P CAN** | **LPMS-IG1P RS485** |
 | インターフェース | USB + RS232 | USB + CAN | USB + RS485 |
 | 通信プロトコル | LP-BUS | LP-CAN/ CANopen | LP-BUS |
 | 最大ボーレート | 921.6 Kbps | 1M bps | 256 Kbps |

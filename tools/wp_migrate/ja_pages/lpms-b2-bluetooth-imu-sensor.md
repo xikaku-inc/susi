@@ -32,9 +32,8 @@ LPMS-B2シリーズは、Bluetooth Classic 2.1またはLow Energy 4.1接続で�
 
 ### 仕様
 
-|  |  |  |
+| 型番 | LPMS-B2 | LPMS-B2 OEM |
 | --- | --- | --- |
-| 型番 | **LPMS-B2** | **LPMS-B2 OEM** |
 | サイズ | 39×39×8mm | 16×31×4mm |
 | 重量 | 12g | 2g |
 | Bluetooth | 2.1 + EDR / Low Energy (LE) 4.1 | |

@@ -29,9 +29,8 @@ LPVR-AIRの最新情報と、優れた複合現実（MR）機能については�
 
 ### 仕様
 
-|  |  |
-| --- | --- |
 | 製品名 | LPVR-AIR |
+| --- | --- |
 | 対応HMD | Meta Quest 3、HTC Vive Focus Vision、Pico 4 Ultra、Apple Vision Pro |
 | 対応光学トラッキングシステム | ART、Optitrack、VICON、VRPNベースのトラッキングソリューション |
 | 対応ソフトウェア | Unity、Unreal、Autodesk VRED、すべてのSteamVR対応アプリケーション |

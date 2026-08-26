@@ -40,9 +40,8 @@ LPMS-IG1シリーズは、USB通信に加え、オプションでCANバス、RS2
 
 ### 仕様
 
-|  |  |  |  |
+| 型番 | LPMS-IG1 RS232 | LPMS-IG1 CAN | LPMS-IG1 RS485 |
 | --- | --- | --- | --- |
-| 型番 | **LPMS-IG1 RS232** | **LPMS-IG1 CAN** | **LPMS-IG1 RS485** |
 | インターフェース | USB + RS232 | USB + CANバス | USB + RS485 |
 | 通信プロトコル | LP-BUS/ ASCII | LP-BUS/CANopen/  Sequential CAN | LP-BUS/ ASCII |
 | サイズ | 51 x 45 x 24 mm | | |

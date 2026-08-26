@@ -39,9 +39,8 @@ LPMS-U3センサーシリーズは、USB、RS232、TTL、CANバスといった�
 
 ### 仕様
 
-|  |  |  |  |
+| 型番 | LPMS-CU3 | LPMS-URS3 | LPMS-UTTL3 |
 | --- | --- | --- | --- |
-| 型番 | **LPMS-CU3** | **LPMS-URS3** | **LPMS-UTTL3** |
 | 通信インターフェース | CANバス、USB 2.0 | RS232、USB 2.0 | TTL、USB 2.0 |
 | 通信プロトコル | LPCAN/ CANOpen/ SequentialCAN | LpBUS/ASCII | LpBUS/ASCII |
 | サイズ | 34 x 34.5 x 15.7 mm | | |

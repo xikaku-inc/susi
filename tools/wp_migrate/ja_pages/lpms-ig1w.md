@@ -32,9 +32,8 @@ LPMS-IG1Wは、高精度かつ低遅延の計測が求められる[IoTアプリ�
 
 ### 仕様
 
-|  |  |  |  |
+| 型番 |  | LPMS-IG1W |  |
 | --- | --- | --- | --- |
-| 型番 |  | **LPMS-IG1W** |  |
 | インターフェース | Wi-Fi + USB | | |
 | 通信プロトコル | LPBUS/CANopen/Sequential CAN | | |
 | サイズ | 51 x 45 x 24 mm | | |
