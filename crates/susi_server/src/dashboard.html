@@ -8099,8 +8099,7 @@ function fillSiteIdentity(id, def) {
     document.getElementById('siteFieldSocial').value = (def.social_links || []).join('\n');
     document.getElementById('siteFieldArea').value = (def.area_served || []).join('\n');
     document.getElementById('siteFieldBlurb').value = def.llms_blurb || '';
-    document.getElementById('siteFieldLangs').value = (def.langs || []).join('
-');
+    document.getElementById('siteFieldLangs').value = (def.langs || []).join('\n');
     document.getElementById('siteFieldBlog').checked = def.has_blog !== false;
     document.getElementById('siteFieldShop').checked = !!def.has_shop;
     document.getElementById('siteFieldNewsletter').checked = !!def.has_newsletter;
