@@ -6,7 +6,8 @@
 // transitions to paid, so it always shows a "Pay online" CTA and an
 // "Amount due" line that don't make sense for a post-payment receipt.
 
-use std::sync::OnceLock;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{Context, Result};
 use chrono::{TimeZone, Utc};
@@ -14,41 +15,34 @@ use printpdf::image_crate::{self, imageops::FilterType, DynamicImage, GenericIma
 use printpdf::*;
 use serde_json::Value;
 
-const LOGO_PNG: &[u8] = include_bytes!("assets/xikaku-logo.png");
 const LOGO_TARGET_WIDTH_MM: f32 = 28.0;
 
-/// Cache the decoded + Lanczos3-resized brand logo. Decoding+resizing is
-/// expensive (~tens of ms) and the result is identical for every invoice;
-/// pay it once and reuse the `DynamicImage` for the lifetime of the process.
+/// Cache the decoded + Lanczos3-resized brand logos (one per site). Decoding
+/// and resizing is expensive (~tens of ms) and the result is identical for
+/// every invoice from the same shop; pay it once per logo.
 struct CachedLogo {
     image: DynamicImage,
     orig_w: u32,
     orig_h: u32,
 }
-static LOGO_CACHE: OnceLock<CachedLogo> = OnceLock::new();
+static LOGO_CACHE: OnceLock<Mutex<HashMap<usize, Arc<CachedLogo>>>> = OnceLock::new();
 
-fn cached_logo() -> Result<&'static CachedLogo> {
-    if let Some(c) = LOGO_CACHE.get() {
-        return Ok(c);
+fn cached_logo(logo_png: &'static [u8]) -> Result<Arc<CachedLogo>> {
+    let cache = LOGO_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = logo_png.as_ptr() as usize;
+    if let Some(c) = cache.lock().unwrap().get(&key) {
+        return Ok(Arc::clone(c));
     }
-    let img = image_crate::load_from_memory_with_format(LOGO_PNG, ImageFormat::Png)
+    let img = image_crate::load_from_memory_with_format(logo_png, ImageFormat::Png)
         .context("png decode")?;
     let (orig_w, orig_h) = img.dimensions();
     let target_w_px = (LOGO_TARGET_WIDTH_MM / 25.4 * 300.0).round() as u32;
     let target_h_px = (orig_h as f32 * target_w_px as f32 / orig_w as f32).round() as u32;
     let resized = img.resize(target_w_px, target_h_px, FilterType::Lanczos3);
-    let _ = LOGO_CACHE.set(CachedLogo { image: resized, orig_w, orig_h });
-    Ok(LOGO_CACHE.get().expect("just set"))
+    let entry = Arc::new(CachedLogo { image: resized, orig_w, orig_h });
+    cache.lock().unwrap().insert(key, Arc::clone(&entry));
+    Ok(entry)
 }
-
-const COMPANY_NAME: &str = "Xikaku, Inc.";
-const COMPANY_LINES: &[&str] = &[
-    "4136 Del Rey Ave",
-    "Marina Del Rey, California 90292",
-    "United States",
-    "+1 310-916-4636",
-    "info@xikaku.com",
-];
 
 const PAGE_W: f32 = 215.9;
 const PAGE_H: f32 = 279.4;
@@ -56,10 +50,13 @@ const LEFT: f32 = 18.0;
 const RIGHT: f32 = PAGE_W - 18.0;
 
 pub fn generate(
+    company_name: &str,
+    company_lines: &[String],
+    logo_png: &'static [u8],
+    fallback_number: &str,
     event: &Value,
     line_items: &[Value],
     invoice: &Value,
-    order_id: Option<i64>,
 ) -> Result<Vec<u8>> {
     let obj = event.pointer("/data/object").cloned().unwrap_or(Value::Null);
     let currency = obj.get("currency").and_then(|v| v.as_str()).unwrap_or("usd").to_uppercase();
@@ -73,7 +70,7 @@ pub fn generate(
     let invoice_number = invoice
         .get("number").and_then(|v| v.as_str())
         .map(String::from)
-        .unwrap_or_else(|| order_id.map(|i| format!("XK-{:04}", i)).unwrap_or_else(|| "-".into()));
+        .unwrap_or_else(|| fallback_number.to_string());
 
     let date = invoice.get("created").and_then(|v| v.as_i64())
         .or_else(|| obj.get("created").and_then(|v| v.as_i64()))
@@ -100,11 +97,11 @@ pub fn generate(
     // ---------- Header ----------
     l.set_fill_color(dark.clone());
     l.use_text("Invoice", 24.0, Mm(LEFT), Mm(263.0), &bold);
-    if let Err(e) = draw_logo(&l, RIGHT, 261.0) {
+    if let Err(e) = draw_logo(&l, logo_png, RIGHT, 261.0) {
         // Fall back to a text wordmark if the PNG decode ever fails.
         log::warn!("logo embed failed, falling back to text: {}", e);
-        let cw = text_w(COMPANY_NAME, 14.0);
-        l.use_text(COMPANY_NAME, 14.0, Mm(RIGHT - cw), Mm(266.0), &bold);
+        let cw = text_w(company_name, 14.0);
+        l.use_text(company_name, 14.0, Mm(RIGHT - cw), Mm(266.0), &bold);
     }
 
     // ---------- Meta block ----------
@@ -126,9 +123,8 @@ pub fn generate(
     let col_y_top: f32 = 228.0;
     let col_x = [LEFT, LEFT + col_w, LEFT + 2.0 * col_w];
 
-    let company: Vec<String> = COMPANY_LINES.iter().map(|s| s.to_string()).collect();
     draw_address_column(&l, &bold, &regular, &dark, &muted,
-        col_x[0], col_y_top, COMPANY_NAME, &company);
+        col_x[0], col_y_top, company_name, company_lines);
     draw_address_column(&l, &bold, &regular, &dark, &muted,
         col_x[1], col_y_top, "Bill to", &bill_to);
     // Always render the Ship-to column when shipping details are present, even
@@ -210,13 +206,13 @@ pub fn generate(
     Ok(bytes)
 }
 
-// Embed the Xikaku PNG with its top-right corner at (right_mm, top_mm).
+// Embed the brand PNG with its top-right corner at (right_mm, top_mm).
 // We resize the source down to the on-page pixel count first, because
 // printpdf 0.7 stores images as raw uncompressed bytes - a 1200×402 RGBA
 // source balloons the PDF to ~1.9 MB, while a 400×134 resize keeps it
 // under 200 KB without visibly degrading the print at 28 mm wide.
-fn draw_logo(layer: &PdfLayerReference, right_mm: f32, top_mm: f32) -> Result<()> {
-    let cached = cached_logo()?;
+fn draw_logo(layer: &PdfLayerReference, logo_png: &'static [u8], right_mm: f32, top_mm: f32) -> Result<()> {
+    let cached = cached_logo(logo_png)?;
     let drawn_w_mm = LOGO_TARGET_WIDTH_MM;
     let drawn_h_mm = cached.orig_h as f32 * LOGO_TARGET_WIDTH_MM / cached.orig_w as f32;
     let image = Image::from_dynamic_image(&cached.image);
@@ -377,7 +373,11 @@ mod tests {
             json!({"quantity": 1, "description": "LPMS-NAV3-CAN - Industrial 6-Axis IMU (CAN)", "amount_total": 49900, "currency": "usd"}),
         ];
         let invoice = json!({"number": "9VRGWXU6-0001", "created": 1745625600i64});
-        let bytes = generate(&event, &line_items, &invoice, Some(7)).expect("generate");
+        static LOGO: &[u8] = include_bytes!("assets/xikaku-logo.png");
+        let lines: Vec<String> = ["4136 Del Rey Ave", "Marina Del Rey, California 90292", "United States"]
+            .iter().map(|s| s.to_string()).collect();
+        let bytes = generate("Xikaku, Inc.", &lines, LOGO, "XK-0007", &event, &line_items, &invoice)
+            .expect("generate");
         let out = std::env::temp_dir().join("sample-invoice.pdf");
         std::fs::write(&out, &bytes).unwrap();
         eprintln!("wrote {} ({} bytes)", out.display(), bytes.len());

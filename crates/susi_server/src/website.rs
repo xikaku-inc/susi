@@ -73,6 +73,14 @@ pub struct SiteQuery {
     lang: Option<String>,
 }
 
+impl SiteQuery {
+    /// A query carrying only the ?site= value, for handlers that parse
+    /// their query string by hand.
+    pub fn for_site(site: Option<String>) -> Self {
+        SiteQuery { site, page: None, lang: None }
+    }
+}
+
 /// The effective content language of a request: one of the site's declared
 /// extra languages, or "" for the default.
 fn resolve_lang(site: &SiteConfig, sq: &SiteQuery) -> String {
@@ -2422,7 +2430,7 @@ fn render_website(
         let db = state.db.lock();
         (
             visible_pages(db.list_website_pages(site.id).unwrap_or_default()),
-            if site.has_shop { db.list_products(true).unwrap_or_default() } else { Vec::new() },
+            if site.has_shop { db.list_products(site.id, true).unwrap_or_default() } else { Vec::new() },
         )
     };
     let lang_pages = pages_in_lang(&pages, &lang);

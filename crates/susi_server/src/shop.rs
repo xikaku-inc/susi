@@ -9,13 +9,14 @@
 //! Stripe Checkout with `automatic_tax: true`. Stripe collects address +
 //! payment, computes tax, and redirects to success_url / cancel_url.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use axum::{
     body::Bytes,
-    extract::{ConnectInfo, Path, State},
-    http::{HeaderMap, StatusCode},
+    extract::{ConnectInfo, Path, Query, State},
+    http::{header, HeaderMap, StatusCode},
     Json,
 };
 use hmac::{Hmac, Mac};
@@ -27,6 +28,8 @@ use susi_core::error::LicenseError;
 use crate::countries;
 use crate::email::{EmailAttachment, InlineImage};
 use crate::invoice_pdf;
+use crate::sites::{self, SiteConfig, DEFAULT_SITE_ID};
+use crate::website::{resolve_site, SiteQuery};
 use crate::{
     check_checkout_rate_limit, check_webhook_rate_limit, client_ip, error_response,
     require_admin_full, validate_principal, AppState, ErrorResponse,
@@ -35,19 +38,93 @@ use crate::{
 /// Brand logo embedded in the binary so it ships with every customer email
 /// without depending on remote-image fetches (most clients block those).
 /// Wide horizontal logo; constrain via CSS height in the HTML.
-const LOGO_PNG: &[u8] = include_bytes!("assets/xikaku-logo.png");
-const LOGO_CID: &str = "xikaku-logo";
+const LOGO_CID: &str = "shop-logo";
 
-// Wrap the embedded PNG once into an `Arc<[u8]>`. Each `logo_inline_image()`
-// call then bumps the refcount instead of copying ~30 KB of bytes.
-static LOGO_PNG_ARC: LazyLock<Arc<[u8]>> = LazyLock::new(|| Arc::from(LOGO_PNG));
+// One `Arc<[u8]>` per site logo. Each `logo_inline_image()` call then bumps
+// the refcount instead of copying ~30 KB of bytes per email.
+static LOGO_ARCS: LazyLock<Mutex<HashMap<String, Arc<[u8]>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
-fn logo_inline_image() -> InlineImage {
+fn site_logo_png(site: &SiteConfig) -> &'static [u8] {
+    sites::compiled_brand(site.id)
+        .map(|b| b.logo)
+        .unwrap_or(sites::compiled_brand(DEFAULT_SITE_ID).expect("default brand").logo)
+}
+
+fn logo_inline_image(site: &SiteConfig) -> InlineImage {
+    let bytes = {
+        let mut m = LOGO_ARCS.lock().unwrap();
+        Arc::clone(m.entry(site.id.to_string()).or_insert_with(|| Arc::from(site_logo_png(site))))
+    };
     InlineImage {
         content_id: LOGO_CID.into(),
         mime_type: "image/png".into(),
-        bytes: Arc::clone(&LOGO_PNG_ARC),
+        bytes,
     }
+}
+
+/// Per-site Stripe credentials. The default site keeps the classic
+/// STRIPE_SECRET_KEY / STRIPE_WEBHOOK_SECRET config; every other site reads
+/// STRIPE_SECRET_KEY_{SITE} / STRIPE_WEBHOOK_SECRET_{SITE} from the
+/// environment (site id uppercased, '-' becoming '_'). Empty = shop disabled
+/// for checkout on that site.
+fn stripe_env(site_id: &str, base: &str) -> String {
+    let suffix = site_id.to_uppercase().replace('-', "_");
+    std::env::var(format!("{}_{}", base, suffix)).unwrap_or_default()
+}
+
+fn stripe_secret_for(state: &AppState, site: &SiteConfig) -> String {
+    if site.id == DEFAULT_SITE_ID {
+        state.stripe_secret_key.clone()
+    } else {
+        stripe_env(site.id, "STRIPE_SECRET_KEY")
+    }
+}
+
+fn stripe_webhook_secret_for(state: &AppState, site: &SiteConfig) -> String {
+    if site.id == DEFAULT_SITE_ID {
+        state.stripe_webhook_secret.clone()
+    } else {
+        stripe_env(site.id, "STRIPE_WEBHOOK_SECRET")
+    }
+}
+
+/// Shop settings share one table across sites: the default site keeps its
+/// bare keys (stored data predates multi-shop), other sites use
+/// '{site}/{key}' - the same convention as site_settings.
+fn shop_setting_key(site: &SiteConfig, key: &str) -> String {
+    if site.id == DEFAULT_SITE_ID {
+        key.to_string()
+    } else {
+        format!("{}/{}", site.id, key)
+    }
+}
+
+fn require_shop(site: &SiteConfig) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    if !site.has_shop {
+        return Err(error_response(StatusCode::NOT_FOUND, "This site has no shop"));
+    }
+    Ok(())
+}
+
+/// Where Stripe sends the customer back to. The default site keeps the
+/// configured shop_base_url; other sites return to the requesting host when
+/// it belongs to the site (so staging checkouts land on staging), and the
+/// canonical base otherwise.
+fn shop_base_for(state: &AppState, site: &SiteConfig, headers: &HeaderMap) -> String {
+    if site.id == DEFAULT_SITE_ID {
+        return state.shop_base_url.clone();
+    }
+    if let Some(host) = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(|h| h.split(':').next().unwrap_or("").to_string())
+    {
+        if site.hosts.iter().any(|h| *h == host) {
+            return format!("https://{}", host);
+        }
+    }
+    site.public_base.trim_end_matches('/').to_string()
 }
 
 type HmacSha256 = Hmac<Sha256>;
@@ -61,8 +138,8 @@ fn db_err(e: LicenseError) -> (StatusCode, Json<ErrorResponse>) {
     error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string())
 }
 
-fn shop_configured(state: &AppState) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
-    if state.stripe_secret_key.is_empty() {
+fn shop_configured(state: &AppState, site: &SiteConfig) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    if stripe_secret_for(state, site).is_empty() {
         return Err(error_response(
             StatusCode::SERVICE_UNAVAILABLE,
             "Shop checkout is not configured on this server",
@@ -114,10 +191,14 @@ fn rate_to_json(
 
 pub async fn handle_list_products(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
+    let site = resolve_site(&headers, &sq)?;
+    require_shop(site)?;
     let rows = {
         let db = state.db.lock();
-        db.list_products(true).map_err(db_err)?
+        db.list_products(site.id, true).map_err(db_err)?
     };
     let products: Vec<Value> = rows.into_iter().map(product_to_json).collect();
     Ok(Json(json!({ "products": products })))
@@ -125,11 +206,15 @@ pub async fn handle_list_products(
 
 pub async fn handle_get_product(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
     Path(sku): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
+    let site = resolve_site(&headers, &sq)?;
+    require_shop(site)?;
     let row = {
         let db = state.db.lock();
-        db.get_product(&sku).map_err(db_err)?
+        db.get_product(site.id, &sku).map_err(db_err)?
     }
     .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Product not found"))?;
     if !row.7 {
@@ -142,8 +227,11 @@ pub async fn handle_get_product(
 /// Ordered by display name so the dropdown reads naturally.
 pub async fn handle_list_shipping_countries(
     State(state): State<Arc<AppState>>,
-) -> Json<Value> {
-    let mut list: Vec<Value> = enabled_shipping_countries(&state)
+    headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
+    let site = resolve_site(&headers, &sq)?;
+    let mut list: Vec<Value> = enabled_shipping_countries(&state, site)
         .into_iter()
         .map(|code| {
             let name = countries::name(&code).unwrap_or("");
@@ -151,7 +239,7 @@ pub async fn handle_list_shipping_countries(
         })
         .collect();
     list.sort_by(|a, b| a["name"].as_str().unwrap_or("").cmp(b["name"].as_str().unwrap_or("")));
-    Json(json!({ "countries": list }))
+    Ok(Json(json!({ "countries": list })))
 }
 
 /// Full catalogue of shippable destinations, for the admin picker.
@@ -239,10 +327,13 @@ fn parse_shipping_countries(raw: &str) -> Vec<String> {
     list
 }
 
-fn enabled_shipping_countries(state: &AppState) -> Vec<String> {
+fn enabled_shipping_countries(state: &AppState, site: &SiteConfig) -> Vec<String> {
     let raw = {
         let db = state.db.lock();
-        db.get_shop_setting(SETTING_SHIPPING_COUNTRIES).ok().flatten().unwrap_or_default()
+        db.get_shop_setting(&shop_setting_key(site, SETTING_SHIPPING_COUNTRIES))
+            .ok()
+            .flatten()
+            .unwrap_or_default()
     };
     parse_shipping_countries(&raw)
 }
@@ -268,11 +359,14 @@ pub async fn handle_create_checkout_session(
     State(state): State<Arc<AppState>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
     Json(req): Json<CheckoutRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
     let ip = client_ip(peer, &headers);
     check_checkout_rate_limit(&state, ip)?;
-    shop_configured(&state)?;
+    let site = resolve_site(&headers, &sq)?;
+    require_shop(site)?;
+    shop_configured(&state, site)?;
 
     if req.items.is_empty() {
         return Err(error_response(StatusCode::BAD_REQUEST, "Cart is empty"));
@@ -283,7 +377,7 @@ pub async fn handle_create_checkout_session(
     // ISO-3166-1 alpha-2 country codes are 2 letters; allow empty (initial
     // page load before the country selector is rendered). Reject destinations
     // the admin has not enabled.
-    let enabled = enabled_shipping_countries(&state);
+    let enabled = enabled_shipping_countries(&state, site);
     if !req.destination_country.is_empty() {
         if req.destination_country.len() != 2
             || !req.destination_country.chars().all(|c| c.is_ascii_alphabetic())
@@ -321,7 +415,7 @@ pub async fn handle_create_checkout_session(
     let skus: Vec<String> = req.items.iter().map(|i| i.sku.clone()).collect();
     let products = {
         let db = state.db.lock();
-        db.get_products_by_skus(&skus).map_err(db_err)?
+        db.get_products_by_skus(site.id, &skus).map_err(db_err)?
     };
 
     // Look up each SKU, never trust client-supplied price.
@@ -352,7 +446,7 @@ pub async fn handle_create_checkout_session(
     // the currency must still match.
     let active_rates = {
         let db = state.db.lock();
-        db.list_shipping_rates(true).map_err(db_err)?
+        db.list_shipping_rates(site.id, true).map_err(db_err)?
     };
     let applicable: Vec<_> = active_rates
         .into_iter()
@@ -367,9 +461,13 @@ pub async fn handle_create_checkout_session(
     // Build Stripe Checkout Session form body.
     let mut form: Vec<(String, String)> = Vec::with_capacity(64);
     form.push(("mode".into(), "payment".into()));
+    // Stamp the owning site so the order stays attributable in the Stripe
+    // dashboard even across exports.
+    form.push(("metadata[site]".into(), site.id.to_string()));
 
-    let success = format!("{}/shop/success?session_id={{CHECKOUT_SESSION_ID}}", state.shop_base_url.trim_end_matches('/'));
-    let cancel = format!("{}/shop/cancel", state.shop_base_url.trim_end_matches('/'));
+    let base = shop_base_for(&state, site, &headers);
+    let success = format!("{}/shop/success?session_id={{CHECKOUT_SESSION_ID}}", base.trim_end_matches('/'));
+    let cancel = format!("{}/shop/cancel", base.trim_end_matches('/'));
     form.push(("success_url".into(), success));
     form.push(("cancel_url".into(), cancel));
 
@@ -385,11 +483,14 @@ pub async fn handle_create_checkout_session(
     form.push(("invoice_creation[enabled]".into(), "true".into()));
     form.push((
         "invoice_creation[invoice_data][description]".into(),
-        "Thanks for your order from Xikaku.".into(),
+        format!("Thanks for your order from {}.", site.name),
     ));
     form.push((
         "invoice_creation[invoice_data][footer]".into(),
-        "LP-Research Inc. - Tokyo, Japan. Questions? support@lp-research.com".into(),
+        format!(
+            "{} - {}, {}. Questions? {}",
+            site.org_legal_name, site.addr_locality, site.addr_country, site.contact_email,
+        ),
     ));
 
     for (i, (sku, title, price_cents, currency, tax_code, qty)) in resolved.iter().enumerate() {
@@ -441,7 +542,7 @@ pub async fn handle_create_checkout_session(
     let resp = state
         .http
         .post(format!("{}/checkout/sessions", STRIPE_API_BASE))
-        .basic_auth(&state.stripe_secret_key, Some(""))
+        .basic_auth(stripe_secret_for(&state, site), Some(""))
         .form(&form)
         .send()
         .await
@@ -539,17 +640,33 @@ pub async fn handle_stripe_webhook(
 ) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
     let ip = client_ip(peer, &headers);
     check_webhook_rate_limit(&state, ip)?;
-    if state.stripe_webhook_secret.is_empty() {
-        return Err(error_response(StatusCode::SERVICE_UNAVAILABLE, "Webhook not configured"));
-    }
     let sig = headers
         .get("stripe-signature")
         .and_then(|v| v.to_str().ok())
         .ok_or_else(|| error_response(StatusCode::BAD_REQUEST, "Missing Stripe-Signature"))?;
 
+    // Each site's shop runs on its own Stripe account, and every account
+    // posts to this one endpoint. The signing secret that verifies the
+    // payload identifies the site the event belongs to.
     let now = chrono::Utc::now().timestamp();
-    verify_stripe_signature(&state.stripe_webhook_secret, sig, &body, now).map_err(|e| {
-        log::warn!("Stripe webhook signature verify failed: {}", e);
+    let mut any_secret = false;
+    let mut matched: Option<&'static SiteConfig> = None;
+    for site in sites::all_sites() {
+        let secret = stripe_webhook_secret_for(&state, site);
+        if secret.is_empty() {
+            continue;
+        }
+        any_secret = true;
+        if verify_stripe_signature(&secret, sig, &body, now).is_ok() {
+            matched = Some(site);
+            break;
+        }
+    }
+    if !any_secret {
+        return Err(error_response(StatusCode::SERVICE_UNAVAILABLE, "Webhook not configured"));
+    }
+    let site = matched.ok_or_else(|| {
+        log::warn!("Stripe webhook signature verify failed for every configured site");
         error_response(StatusCode::BAD_REQUEST, "Invalid signature")
     })?;
 
@@ -572,7 +689,7 @@ pub async fn handle_stripe_webhook(
                 .unwrap_or("");
             let settled = matches!(payment_status, "paid" | "no_payment_required");
             let status = if settled { "paid" } else { "pending_payment" };
-            let persisted = persist_order_from_event(&state, &event, status).await;
+            let persisted = persist_order_from_event(&state, site, &event, status).await;
             if !settled {
                 log::info!(
                     "Checkout session completed with payment_status={} - order recorded as pending_payment, awaiting settlement",
@@ -589,14 +706,14 @@ pub async fn handle_stripe_webhook(
                 log::info!("Stripe webhook retry for already-recorded session - skipping emails");
                 return Ok(Json(json!({ "received": true, "duplicate": true })));
             }
-            send_order_notifications(&state, &event, order_id).await;
+            send_order_notifications(&state, site, &event, order_id).await;
         }
         "checkout.session.async_payment_succeeded" => {
             // A delayed payment settled. The conditional pending->paid
             // transition makes the email side effects run exactly once across
             // retries; insert-if-absent first covers a session whose
             // completed event was never delivered.
-            let persisted = persist_order_from_event(&state, &event, "paid").await;
+            let persisted = persist_order_from_event(&state, site, &event, "paid").await;
             let order_id = persisted.map(|(id, _)| id);
             let inserted = persisted.map(|(_, ins)| ins).unwrap_or(false);
             let session_id = event
@@ -609,7 +726,7 @@ pub async fn handle_stripe_webhook(
                     .unwrap_or(false)
             };
             if inserted || flipped {
-                send_order_notifications(&state, &event, order_id).await;
+                send_order_notifications(&state, site, &event, order_id).await;
             } else {
                 log::info!("async_payment_succeeded retry for already-paid session - skipping emails");
             }
@@ -640,10 +757,16 @@ pub async fn handle_stripe_webhook(
 /// Fetch line items + invoice and send the admin notification and customer
 /// confirmation for a settled order. Callers must guarantee at-most-once
 /// delivery (fresh insert or a conditional status transition).
-async fn send_order_notifications(state: &Arc<AppState>, event: &Value, order_id: Option<i64>) {
+async fn send_order_notifications(
+    state: &Arc<AppState>,
+    site: &'static SiteConfig,
+    event: &Value,
+    order_id: Option<i64>,
+) {
     {
         // Fetch line items + invoice PDF in parallel - both via Stripe API,
         // both best-effort (we still send emails even if one is unavailable).
+        let secret = stripe_secret_for(state, site);
         let session_id = event
             .pointer("/data/object/id")
             .and_then(|v| v.as_str())
@@ -657,7 +780,7 @@ async fn send_order_notifications(state: &Arc<AppState>, event: &Value, order_id
 
         let (line_items, invoice_obj, invoice_number) = {
             let li_fut = async {
-                if session_id.is_empty() { Vec::new() } else { fetch_line_items(&state, &session_id).await }
+                if session_id.is_empty() { Vec::new() } else { fetch_line_items(&state, &secret, &session_id).await }
             };
             let inv_fut = async {
                 if invoice_id.is_empty() {
@@ -666,7 +789,7 @@ async fn send_order_notifications(state: &Arc<AppState>, event: &Value, order_id
                     // We need the Stripe invoice for its number + creation
                     // timestamp, but we render the PDF ourselves below - see
                     // invoice_pdf::generate for why.
-                    let inv = fetch_invoice(&state, &invoice_id).await;
+                    let inv = fetch_invoice(&state, &secret, &invoice_id).await;
                     let number = inv.get("number").and_then(|v| v.as_str()).unwrap_or("").to_string();
                     (inv, number)
                 }
@@ -679,7 +802,19 @@ async fn send_order_notifications(state: &Arc<AppState>, event: &Value, order_id
         // invoices is rendered once at finalization (status=open) and never
         // refreshed, so it always carries a "Pay online" CTA - useless for
         // a post-payment receipt.
-        let pdf_bytes = match invoice_pdf::generate(&event, &line_items, &invoice_obj, order_id) {
+        let (from_name, from_lines) = invoice_from(state, site);
+        let fallback_number = order_id
+            .map(|i| format!("{}-{:04}", invoice_prefix(site), i))
+            .unwrap_or_else(|| "-".into());
+        let pdf_bytes = match invoice_pdf::generate(
+            &from_name,
+            &from_lines,
+            site_logo_png(site),
+            &fallback_number,
+            &event,
+            &line_items,
+            &invoice_obj,
+        ) {
             Ok(b) => b,
             Err(e) => { log::error!("invoice PDF generation failed: {}", e); Vec::new() }
         };
@@ -688,7 +823,7 @@ async fn send_order_notifications(state: &Arc<AppState>, event: &Value, order_id
             None
         } else {
             let fname = if invoice_number.is_empty() {
-                format!("invoice-xikaku-{}.pdf", order_id.map(|i| i.to_string()).unwrap_or_else(|| "order".into()))
+                format!("invoice-{}-{}.pdf", site.id, order_id.map(|i| i.to_string()).unwrap_or_else(|| "order".into()))
             } else {
                 format!("invoice-{}.pdf", invoice_number)
             };
@@ -699,18 +834,21 @@ async fn send_order_notifications(state: &Arc<AppState>, event: &Value, order_id
             })
         };
 
+        let sender = format!("{} Shop", site.name);
+
         // ----- Admin notification (one or more recipients) -----
-        let admin_recipients = effective_admin_recipients(&state);
+        let admin_recipients = effective_admin_recipients(&state, site);
         if let Some(svc) = &state.email {
             if !admin_recipients.is_empty() {
                 let summary = format_order_summary(&event, &line_items, order_id);
-                let subject = format!("[Xikaku] New order - {}", summary.0);
+                let subject = format!("[{}] New order - {}", site.name, summary.0);
                 let body = summary.1;
                 for to in admin_recipients {
                     let svc = svc.clone();
                     let to = to.clone();
                     let subject = subject.clone();
                     let body = body.clone();
+                    let sender = sender.clone();
                     // Refcount-bump clone - `bytes: Arc<[u8]>`, no PDF copy.
                     let attach = pdf_attachment.as_ref().map(|a| EmailAttachment {
                         file_name: a.file_name.clone(),
@@ -725,7 +863,7 @@ async fn send_order_notifications(state: &Arc<AppState>, event: &Value, order_id
                             "<pre style=\"font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;white-space:pre-wrap;margin:0;\">{}</pre>",
                             html_escape_local(&body),
                         );
-                        let res = svc.send_html_rich(&to, &subject, &body, &html, &[], &attachments, Some("Xikaku Shop")).await;
+                        let res = svc.send_html_rich(&to, &subject, &body, &html, &[], &attachments, Some(&sender)).await;
                         if let Err(e) = res {
                             log::error!("Failed to send admin notification to {}: {}", to, e);
                         }
@@ -735,7 +873,7 @@ async fn send_order_notifications(state: &Arc<AppState>, event: &Value, order_id
         }
 
         // ----- Customer order confirmation -----
-        if customer_email_enabled(&state) {
+        if customer_email_enabled(&state, site) {
             let customer_email = event
                 .pointer("/data/object/customer_details/email")
                 .and_then(|v| v.as_str())
@@ -744,11 +882,11 @@ async fn send_order_notifications(state: &Arc<AppState>, event: &Value, order_id
             if let Some(svc) = state.email.clone() {
                 if !customer_email.is_empty() {
                     let (subject, text, html) =
-                        build_customer_confirmation(&state, &event, &line_items, order_id);
-                    let inline = vec![logo_inline_image()];
+                        build_customer_confirmation(&state, site, &event, &line_items, order_id);
+                    let inline = vec![logo_inline_image(site)];
                     let attachments: Vec<EmailAttachment> = pdf_attachment.into_iter().collect();
                     tokio::spawn(async move {
-                        let res = svc.send_html_rich(&customer_email, &subject, &text, &html, &inline, &attachments, Some("Xikaku Shop")).await;
+                        let res = svc.send_html_rich(&customer_email, &subject, &text, &html, &inline, &attachments, Some(&sender)).await;
                         if let Err(e) = res {
                             log::error!("Failed to send customer confirmation to {}: {}", customer_email, e);
                         }
@@ -756,6 +894,52 @@ async fn send_order_notifications(state: &Arc<AppState>, event: &Value, order_id
                 }
             }
         }
+    }
+}
+
+/// The invoice "From" block: the per-shop `invoice_from` setting (first line
+/// company name, rest address lines) or a per-site default.
+fn invoice_from(state: &AppState, site: &SiteConfig) -> (String, Vec<String>) {
+    let raw = get_setting_str(state, site, SETTING_INVOICE_FROM);
+    let mut lines: Vec<String> = raw
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    if lines.is_empty() {
+        if site.id == DEFAULT_SITE_ID {
+            return (
+                "Xikaku, Inc.".into(),
+                [
+                    "4136 Del Rey Ave",
+                    "Marina Del Rey, California 90292",
+                    "United States",
+                    "+1 310-916-4636",
+                    "info@xikaku.com",
+                ]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            );
+        }
+        return (
+            site.org_legal_name.to_string(),
+            vec![
+                format!("{}, {}", site.addr_locality, site.addr_country),
+                site.contact_email.to_string(),
+            ],
+        );
+    }
+    let name = lines.remove(0);
+    (name, lines)
+}
+
+/// Prefix for locally generated invoice numbers when Stripe's is unavailable.
+fn invoice_prefix(site: &SiteConfig) -> String {
+    if site.id == DEFAULT_SITE_ID {
+        "XK".into()
+    } else {
+        site.id.to_uppercase().replace('-', "")
     }
 }
 
@@ -768,6 +952,7 @@ const SETTING_CUSTOMER_EMAIL_ENABLED: &str = "customer_email_enabled";
 const SETTING_CUSTOMER_THANK_YOU: &str = "customer_thank_you_html";
 const SETTING_SUPPORT_CONTACT: &str = "support_contact";
 const SETTING_SHIPPING_COUNTRIES: &str = "shipping_countries";
+const SETTING_INVOICE_FROM: &str = "invoice_from";
 
 /// Comma-or-whitespace-split a recipients string, trim, and dedupe.
 fn split_recipients(s: &str) -> Vec<String> {
@@ -783,25 +968,28 @@ fn split_recipients(s: &str) -> Vec<String> {
     out
 }
 
-/// Resolve admin recipients: DB-stored setting wins; falls back to the
-/// SUSI_SHOP_NOTIFY_ADDR env var (kept for back-compat with the bootstrap
-/// install that hasn't visited the Settings tab yet).
-fn effective_admin_recipients(state: &AppState) -> Vec<String> {
+/// Resolve admin recipients: DB-stored setting wins; the default site also
+/// falls back to the SUSI_SHOP_NOTIFY_ADDR env var (kept for back-compat with
+/// the bootstrap install that hasn't visited the Settings tab yet).
+fn effective_admin_recipients(state: &AppState, site: &SiteConfig) -> Vec<String> {
     let from_db = {
         let db = state.db.lock();
-        db.get_shop_setting(SETTING_NOTIFY_EMAILS).ok().flatten().unwrap_or_default()
+        db.get_shop_setting(&shop_setting_key(site, SETTING_NOTIFY_EMAILS))
+            .ok()
+            .flatten()
+            .unwrap_or_default()
     };
     let mut list = split_recipients(&from_db);
-    if list.is_empty() && !state.shop_notify_addr.is_empty() {
+    if list.is_empty() && site.id == DEFAULT_SITE_ID && !state.shop_notify_addr.is_empty() {
         list = split_recipients(&state.shop_notify_addr);
     }
     list
 }
 
-fn customer_email_enabled(state: &AppState) -> bool {
+fn customer_email_enabled(state: &AppState, site: &SiteConfig) -> bool {
     let v = {
         let db = state.db.lock();
-        db.get_shop_setting(SETTING_CUSTOMER_EMAIL_ENABLED).ok().flatten()
+        db.get_shop_setting(&shop_setting_key(site, SETTING_CUSTOMER_EMAIL_ENABLED)).ok().flatten()
     };
     // Default ON when unset - most shops want customer confirmations.
     match v.as_deref() {
@@ -810,13 +998,14 @@ fn customer_email_enabled(state: &AppState) -> bool {
     }
 }
 
-fn get_setting_str(state: &AppState, key: &str) -> String {
+fn get_setting_str(state: &AppState, site: &SiteConfig, key: &str) -> String {
     let db = state.db.lock();
-    db.get_shop_setting(key).ok().flatten().unwrap_or_default()
+    db.get_shop_setting(&shop_setting_key(site, key)).ok().flatten().unwrap_or_default()
 }
 
 fn build_customer_confirmation(
     state: &AppState,
+    site: &SiteConfig,
     event: &Value,
     line_items: &[Value],
     order_id: Option<i64>,
@@ -832,12 +1021,15 @@ fn build_customer_confirmation(
 
     let order_label = order_id.map(|i| format!("#{}", i)).unwrap_or_else(|| "-".into());
 
-    let support = get_setting_str(state, SETTING_SUPPORT_CONTACT);
-    let extra_html = get_setting_str(state, SETTING_CUSTOMER_THANK_YOU);
+    let support = get_setting_str(state, site, SETTING_SUPPORT_CONTACT);
+    let extra_html = get_setting_str(state, site, SETTING_CUSTOMER_THANK_YOU);
 
-    let subject = format!("Thanks for your order - Xikaku {}", order_label);
+    let subject = format!("Thanks for your order - {} {}", site.name, order_label);
 
     let has_preorder = line_items_have_preorder(line_items);
+    // The default site ships from the Los Angeles office; other shops keep
+    // the generic phrasing until they get copy of their own.
+    let ship_origin = if site.id == DEFAULT_SITE_ID { " from our Los Angeles office" } else { "" };
 
     // -------- Plain text --------
     let mut text = String::new();
@@ -884,14 +1076,14 @@ fn build_customer_confirmation(
 
     text.push_str("A PDF invoice is attached for your records.\n\n");
     if has_preorder {
-        text.push_str("Your order includes a pre-order item and will ship within the window shown next to the item. We'll send another email with your tracking number as soon as it ships from our Los Angeles office.\n\n");
+        text.push_str(&format!("Your order includes a pre-order item and will ship within the window shown next to the item. We'll send another email with your tracking number as soon as it ships{}.\n\n", ship_origin));
     } else {
-        text.push_str("We'll send another email with your tracking number once your order ships from our Los Angeles office.\n\n");
+        text.push_str(&format!("We'll send another email with your tracking number once your order ships{}.\n\n", ship_origin));
     }
     if !support.is_empty() {
         text.push_str(&format!("Questions? Reach us at {}.\n\n", support));
     }
-    text.push_str("- The Xikaku team\n");
+    text.push_str(&format!("- The {} team\n", site.name));
 
     // -------- HTML --------
     let mut item_rows = String::new();
@@ -971,21 +1163,21 @@ fn build_customer_confirmation(
     };
 
     let intro_html = if has_preorder {
-        "Thanks for your purchase from Xikaku - we've received your order."
+        format!("Thanks for your purchase from {} - we've received your order.", site.name)
     } else {
-        "Thanks for your purchase from Xikaku - we've received your order and are getting it ready."
+        format!("Thanks for your purchase from {} - we've received your order and are getting it ready.", site.name)
     };
     let shipping_html = if has_preorder {
-        "Your order includes a pre-order item and will ship within the window shown next to the item. You'll get a second email with your tracking number as soon as it ships from our Los Angeles office."
+        format!("Your order includes a pre-order item and will ship within the window shown next to the item. You'll get a second email with your tracking number as soon as it ships{}.", ship_origin)
     } else {
-        "We're processing your order now. You'll get a second email with your tracking number once it ships from our Los Angeles office."
+        format!("We're processing your order now. You'll get a second email with your tracking number once it ships{}.", ship_origin)
     };
 
     let html = format!(
         "<!doctype html><html><body style=\"margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#ffffff;color:#1a1d23;\">\
          <div style=\"max-width:600px;margin:0 auto;padding:32px 24px;\">\
            <div style=\"text-align:left;margin-bottom:24px;\">\
-             <img src=\"cid:{logo_cid}\" alt=\"Xikaku\" style=\"height:36px;display:inline-block;\">\
+             <img src=\"cid:{logo_cid}\" alt=\"{brand}\" style=\"height:36px;display:inline-block;\">\
            </div>\
            <h1 style=\"font-size:22px;margin:0 0 6px;\">Thank you for your order</h1>\
            <p style=\"color:#5c6470;margin:0 0 20px;\">Order {order} · {date}</p>\
@@ -1008,9 +1200,10 @@ fn build_customer_confirmation(
            </p>\
            <p style=\"color:#5c6470;font-size:12px;margin-top:18px;\">A PDF invoice is attached to this email for your records.</p>\
            {support_block}\
-           <p style=\"color:#5c6470;font-size:12px;margin-top:32px;\">- The Xikaku team</p>\
+           <p style=\"color:#5c6470;font-size:12px;margin-top:32px;\">- The {brand} team</p>\
          </div></body></html>",
         logo_cid = LOGO_CID,
+        brand = html_escape_local(site.name),
         order = order_label,
         date = chrono::Utc::now().format("%Y-%m-%d"),
         name_html = html_escape_local(if name.is_empty() { "there" } else { name }),
@@ -1092,12 +1285,12 @@ fn address_block_html(details: Option<&Value>, fallback_name: &str) -> String {
 
 /// Fetch a Stripe Invoice object so we can extract its hosted PDF URL.
 /// Returns Value::Null on any error so callers can degrade gracefully.
-async fn fetch_invoice(state: &AppState, invoice_id: &str) -> Value {
-    if state.stripe_secret_key.is_empty() || invoice_id.is_empty() {
+async fn fetch_invoice(state: &AppState, secret: &str, invoice_id: &str) -> Value {
+    if secret.is_empty() || invoice_id.is_empty() {
         return Value::Null;
     }
     let url = format!("{}/invoices/{}", STRIPE_API_BASE, invoice_id);
-    match state.http.get(url).basic_auth(&state.stripe_secret_key, Some("")).send().await {
+    match state.http.get(url).basic_auth(secret, Some("")).send().await {
         Ok(resp) if resp.status().is_success() => match resp.text().await {
             Ok(b) => serde_json::from_str(&b).unwrap_or(Value::Null),
             Err(e) => { log::warn!("invoice fetch read body: {}", e); Value::Null }
@@ -1109,10 +1302,10 @@ async fn fetch_invoice(state: &AppState, invoice_id: &str) -> Value {
 
 /// Pull line items from the Stripe API (the webhook payload doesn't include
 /// them - Stripe explicitly omits expandable fields on webhook events).
-async fn fetch_line_items(state: &AppState, session_id: &str) -> Vec<Value> {
-    if state.stripe_secret_key.is_empty() { return Vec::new(); }
+async fn fetch_line_items(state: &AppState, secret: &str, session_id: &str) -> Vec<Value> {
+    if secret.is_empty() { return Vec::new(); }
     let url = format!("{}/checkout/sessions/{}/line_items?limit=100", STRIPE_API_BASE, session_id);
-    match state.http.get(url).basic_auth(&state.stripe_secret_key, Some("")).send().await {
+    match state.http.get(url).basic_auth(secret, Some("")).send().await {
         Ok(resp) if resp.status().is_success() => {
             match resp.text().await {
                 Ok(body) => match serde_json::from_str::<Value>(&body) {
@@ -1134,6 +1327,7 @@ async fn fetch_line_items(state: &AppState, session_id: &str) -> Vec<Value> {
 /// error (still ack 200 so Stripe stops retrying after the first DB success).
 async fn persist_order_from_event(
     state: &AppState,
+    site: &SiteConfig,
     event: &Value,
     status: &str,
 ) -> Option<(i64, bool)> {
@@ -1153,13 +1347,13 @@ async fn persist_order_from_event(
         .unwrap_or(Value::Null);
     let ship_to_json = serde_json::to_string(&ship_to).unwrap_or_else(|_| "{}".into());
 
-    let line_items = fetch_line_items(state, session_id).await;
+    let line_items = fetch_line_items(state, &stripe_secret_for(state, site), session_id).await;
     let line_items_json = serde_json::to_string(&line_items).unwrap_or_else(|_| "[]".into());
 
     let now = chrono::Utc::now().to_rfc3339();
     let res = {
         let db = state.db.lock();
-        db.insert_order_if_absent(session_id, &now, email, name, amount, currency, status, &ship_to_json, &line_items_json)
+        db.insert_order_if_absent(site.id, session_id, &now, email, name, amount, currency, status, &ship_to_json, &line_items_json)
     };
     match res {
         Ok((id, inserted)) => Some((id, inserted)),
@@ -1283,12 +1477,14 @@ fn line_items_have_preorder(line_items: &[Value]) -> bool {
 pub async fn handle_admin_list_products(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
+    let site = resolve_site(&headers, &sq)?;
     let p = validate_principal(&headers, &state)?;
     require_admin_full(&state, &p)?;
     let rows = {
         let db = state.db.lock();
-        db.list_products(false).map_err(db_err)?
+        db.list_products(site.id, false).map_err(db_err)?
     };
     let products: Vec<Value> = rows.into_iter().map(product_to_json).collect();
     Ok(Json(json!({ "products": products })))
@@ -1329,9 +1525,11 @@ fn validate_sku(sku: &str) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
 pub async fn handle_upsert_product(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
     Path(sku): Path<String>,
     Json(req): Json<UpsertProductRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
+    let site = resolve_site(&headers, &sq)?;
     let p = validate_principal(&headers, &state)?;
     require_admin_full(&state, &p)?;
     validate_sku(&sku)?;
@@ -1344,7 +1542,7 @@ pub async fn handle_upsert_product(
     {
         let db = state.db.lock();
         if let Some(asset) = req.image_asset.as_deref() {
-            if !asset.is_empty() && !db.website_asset_exists(crate::sites::default_site().id, asset).map_err(db_err)? {
+            if !asset.is_empty() && !db.website_asset_exists(site.id, asset).map_err(db_err)? {
                 return Err(error_response(
                     StatusCode::BAD_REQUEST,
                     &format!("Unknown image_asset: {}", asset),
@@ -1352,6 +1550,7 @@ pub async fn handle_upsert_product(
             }
         }
         db.upsert_product(
+            site.id,
             &sku,
             &req.title,
             &req.description_md,
@@ -1365,39 +1564,43 @@ pub async fn handle_upsert_product(
         .map_err(db_err)?;
     }
     crate::website::invalidate_page_cache();
-    crate::audit(&state, &p.username, "shop.product_upsert", &sku, "");
+    crate::audit(&state, &p.username, "shop.product_upsert", &sku, site.id);
     Ok(Json(json!({ "sku": sku })))
 }
 
 pub async fn handle_delete_product(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
     Path(sku): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
+    let site = resolve_site(&headers, &sq)?;
     let p = validate_principal(&headers, &state)?;
     require_admin_full(&state, &p)?;
     validate_sku(&sku)?;
     let removed = {
         let db = state.db.lock();
-        db.delete_product(&sku).map_err(db_err)?
+        db.delete_product(site.id, &sku).map_err(db_err)?
     };
     if !removed {
         return Err(error_response(StatusCode::NOT_FOUND, "Product not found"));
     }
     crate::website::invalidate_page_cache();
-    crate::audit(&state, &p.username, "shop.product_delete", &sku, "");
+    crate::audit(&state, &p.username, "shop.product_delete", &sku, site.id);
     Ok(Json(json!({ "status": "OK" })))
 }
 
 pub async fn handle_list_shipping_rates_admin(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
+    let site = resolve_site(&headers, &sq)?;
     let p = validate_principal(&headers, &state)?;
     require_admin_full(&state, &p)?;
     let rows = {
         let db = state.db.lock();
-        db.list_shipping_rates(false).map_err(db_err)?
+        db.list_shipping_rates(site.id, false).map_err(db_err)?
     };
     let rates: Vec<Value> = rows.into_iter().map(rate_to_json).collect();
     Ok(Json(json!({ "rates": rates })))
@@ -1456,14 +1659,17 @@ fn validate_rate_body(
 pub async fn handle_create_shipping_rate(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
     Json(req): Json<ShippingRateRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
+    let site = resolve_site(&headers, &sq)?;
     let p = validate_principal(&headers, &state)?;
     require_admin_full(&state, &p)?;
-    let regions_json = validate_rate_body(&req, &enabled_shipping_countries(&state))?;
+    let regions_json = validate_rate_body(&req, &enabled_shipping_countries(&state, site))?;
     let id = {
         let db = state.db.lock();
         db.insert_shipping_rate(
+            site.id,
             &req.label,
             req.amount_cents,
             &req.currency.to_lowercase(),
@@ -1480,15 +1686,18 @@ pub async fn handle_create_shipping_rate(
 pub async fn handle_update_shipping_rate(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
     Path(id): Path<i64>,
     Json(req): Json<ShippingRateRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
+    let site = resolve_site(&headers, &sq)?;
     let p = validate_principal(&headers, &state)?;
     require_admin_full(&state, &p)?;
-    let regions_json = validate_rate_body(&req, &enabled_shipping_countries(&state))?;
+    let regions_json = validate_rate_body(&req, &enabled_shipping_countries(&state, site))?;
     let ok = {
         let db = state.db.lock();
         db.update_shipping_rate(
+            site.id,
             id,
             &req.label,
             req.amount_cents,
@@ -1509,13 +1718,15 @@ pub async fn handle_update_shipping_rate(
 pub async fn handle_delete_shipping_rate(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
     Path(id): Path<i64>,
 ) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
+    let site = resolve_site(&headers, &sq)?;
     let p = validate_principal(&headers, &state)?;
     require_admin_full(&state, &p)?;
     let removed = {
         let db = state.db.lock();
-        db.delete_shipping_rate(id).map_err(db_err)?
+        db.delete_shipping_rate(site.id, id).map_err(db_err)?
     };
     if !removed {
         return Err(error_response(StatusCode::NOT_FOUND, "Shipping rate not found"));
@@ -1531,13 +1742,15 @@ pub async fn handle_delete_shipping_rate(
 pub async fn handle_admin_delete_order(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
     Path(id): Path<i64>,
 ) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
+    let site = resolve_site(&headers, &sq)?;
     let p = validate_principal(&headers, &state)?;
     require_admin_full(&state, &p)?;
     let removed = {
         let db = state.db.lock();
-        let removed = db.delete_order(id).map_err(db_err)?;
+        let removed = db.delete_order(site.id, id).map_err(db_err)?;
         if removed {
             crate::audit_db(&db, &p.username, "shop.order_delete", &id.to_string(), "");
         }
@@ -1617,12 +1830,16 @@ pub async fn handle_admin_list_orders(
     headers: HeaderMap,
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
+    // The status filter shares the query string with ?site=, so resolve the
+    // site from the same map instead of a second Query extractor.
+    let sq = SiteQuery::for_site(q.get("site").cloned());
+    let site = resolve_site(&headers, &sq)?;
     let p = validate_principal(&headers, &state)?;
     require_admin_full(&state, &p)?;
     let status = q.get("status").map(|s| s.as_str());
     let rows = {
         let db = state.db.lock();
-        db.list_orders(status).map_err(db_err)?
+        db.list_orders(site.id, status).map_err(db_err)?
     };
     let orders: Vec<Value> = rows.into_iter().map(order_to_json).collect();
     Ok(Json(json!({ "orders": orders })))
@@ -1631,13 +1848,15 @@ pub async fn handle_admin_list_orders(
 pub async fn handle_admin_get_order(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
     Path(id): Path<i64>,
 ) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
+    let site = resolve_site(&headers, &sq)?;
     let p = validate_principal(&headers, &state)?;
     require_admin_full(&state, &p)?;
     let row = {
         let db = state.db.lock();
-        db.get_order(id).map_err(db_err)?
+        db.get_order(site.id, id).map_err(db_err)?
     }.ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Order not found"))?;
     Ok(Json(order_to_json(row)))
 }
@@ -1654,9 +1873,11 @@ fn default_true() -> bool { true }
 pub async fn handle_admin_mark_shipped(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
     Path(id): Path<i64>,
     Json(req): Json<ShipOrderRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
+    let site = resolve_site(&headers, &sq)?;
     let p = validate_principal(&headers, &state)?;
     require_admin_full(&state, &p)?;
     let carrier = req.carrier.trim();
@@ -1667,9 +1888,9 @@ pub async fn handle_admin_mark_shipped(
     let now = chrono::Utc::now().to_rfc3339();
     let order = {
         let db = state.db.lock();
-        let ok = db.mark_order_shipped(id, carrier, tracking, &now).map_err(db_err)?;
+        let ok = db.mark_order_shipped(site.id, id, carrier, tracking, &now).map_err(db_err)?;
         if !ok { return Err(error_response(StatusCode::NOT_FOUND, "Order not found")); }
-        db.get_order(id).map_err(db_err)?
+        db.get_order(site.id, id).map_err(db_err)?
     };
     let order = order.ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Order vanished"))?;
 
@@ -1677,10 +1898,11 @@ pub async fn handle_admin_mark_shipped(
         let email = order.3.clone();
         if !email.is_empty() {
             if let Some(svc) = state.email.clone() {
-                let body = build_shipped_email(&order);
-                let subject = format!("Your Xikaku order #{} has shipped", order.0);
+                let body = build_shipped_email(site, &order);
+                let subject = format!("Your {} order #{} has shipped", site.name, order.0);
+                let sender = format!("{} Shop", site.name);
                 tokio::spawn(async move {
-                    if let Err(e) = svc.send_html_as("Xikaku Shop", &email, &subject, &body.0, &body.1).await {
+                    if let Err(e) = svc.send_html_as(&sender, &email, &subject, &body.0, &body.1).await {
                         log::error!("Failed to send shipped email to {}: {}", email, e);
                     }
                 });
@@ -1706,14 +1928,16 @@ pub struct UpdateOrderNotesRequest {
 pub async fn handle_admin_update_order_notes(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
     Path(id): Path<i64>,
     Json(req): Json<UpdateOrderNotesRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
+    let site = resolve_site(&headers, &sq)?;
     let p = validate_principal(&headers, &state)?;
     require_admin_full(&state, &p)?;
     let ok = {
         let db = state.db.lock();
-        db.update_order_notes(id, &req.notes).map_err(db_err)?
+        db.update_order_notes(site.id, id, &req.notes).map_err(db_err)?
     };
     if !ok { return Err(error_response(StatusCode::NOT_FOUND, "Order not found")); }
     crate::audit(&state, &p.username, "order.notes", &id.to_string(), "");
@@ -1722,6 +1946,7 @@ pub async fn handle_admin_update_order_notes(
 
 #[allow(clippy::type_complexity)]
 fn build_shipped_email(
+    site: &SiteConfig,
     order: &(i64, String, String, String, String, i64, String, String, String, String, String, String, Option<String>, String),
 ) -> (String, String) {
     let (id, _sid, _created, _email, name, amount, currency, _status, _ship, line_items_json, carrier, tracking, _shipped, _notes) = order;
@@ -1730,7 +1955,7 @@ fn build_shipped_email(
 
     let mut text = String::new();
     text.push_str(&format!("Hi {},\n\n", if name.is_empty() { "there" } else { name.as_str() }));
-    text.push_str(&format!("Your Xikaku order #{} has shipped.\n\n", id));
+    text.push_str(&format!("Your {} order #{} has shipped.\n\n", site.name, id));
     text.push_str(&format!("Carrier:  {}\n", carrier));
     text.push_str(&format!("Tracking: {}\n", tracking));
     if let Some(u) = &url { text.push_str(&format!("Track:    {}\n", u)); }
@@ -1745,7 +1970,7 @@ fn build_shipped_email(
             }
         }
     }
-    text.push_str("\nThanks for buying from Xikaku!\n- The Xikaku team\n");
+    text.push_str(&format!("\nThanks for buying from {0}!\n- The {0} team\n", site.name));
 
     let track_btn = match &url {
         Some(u) => format!(
@@ -1777,9 +2002,10 @@ fn build_shipped_email(
            </table>\
            {track_btn}\
            {items_block}\
-           <p style=\"color:#5c6470;font-size:13px;margin-top:32px;\">Thanks for buying from Xikaku!<br>- The Xikaku team</p>\
+           <p style=\"color:#5c6470;font-size:13px;margin-top:32px;\">Thanks for buying from {brand}!<br>- The {brand} team</p>\
          </div></body></html>",
         id = id,
+        brand = html_escape_local(site.name),
         carrier_html = html_escape_local(carrier),
         tracking_html = html_escape_local(tracking),
         track_btn = track_btn,
@@ -1821,6 +2047,7 @@ const KNOWN_SETTING_KEYS: &[&str] = &[
     SETTING_CUSTOMER_THANK_YOU,
     SETTING_SUPPORT_CONTACT,
     SETTING_SHIPPING_COUNTRIES,
+    SETTING_INVOICE_FROM,
 ];
 
 /// Normalize a submitted shipping-country list to canonical, sorted, deduped
@@ -1850,7 +2077,9 @@ fn normalize_shipping_countries(raw: &str) -> Result<String, (StatusCode, Json<E
 pub async fn handle_admin_get_settings(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
+    let site = resolve_site(&headers, &sq)?;
     let p = validate_principal(&headers, &state)?;
     require_admin_full(&state, &p)?;
     let pairs = {
@@ -1867,14 +2096,25 @@ pub async fn handle_admin_get_settings(
         SETTING_SHIPPING_COUNTRIES.into(),
         Value::String(DEFAULT_SHIPPING_COUNTRIES.join(",")),
     );
+    // One table holds every site's settings; keep only this site's rows and
+    // strip the prefix so the client sees bare keys either way.
     for (k, v) in pairs {
-        out.insert(k, Value::String(v));
+        let bare = if site.id == DEFAULT_SITE_ID {
+            if k.contains('/') { continue; }
+            k
+        } else {
+            match k.strip_prefix(&format!("{}/", site.id)) {
+                Some(rest) => rest.to_string(),
+                None => continue,
+            }
+        };
+        out.insert(bare, Value::String(v));
     }
     // Also surface the env-var fallback so the UI can hint at the
     // bootstrap default when notification_emails is unset.
     out.insert(
         "notification_emails_fallback".into(),
-        Value::String(state.shop_notify_addr.clone()),
+        Value::String(if site.id == DEFAULT_SITE_ID { state.shop_notify_addr.clone() } else { String::new() }),
     );
     Ok(Json(Value::Object(out)))
 }
@@ -1888,8 +2128,10 @@ pub struct UpdateSettingsRequest {
 pub async fn handle_admin_put_settings(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
     Json(req): Json<UpdateSettingsRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
+    let site = resolve_site(&headers, &sq)?;
     let p = validate_principal(&headers, &state)?;
     require_admin_full(&state, &p)?;
 
@@ -1919,9 +2161,9 @@ pub async fn handle_admin_put_settings(
             _ => v.clone(),
         };
         let db = state.db.lock();
-        db.set_shop_setting(k, &normalized).map_err(db_err)?;
+        db.set_shop_setting(&shop_setting_key(site, k), &normalized).map_err(db_err)?;
     }
-    crate::audit(&state, &p.username, "shop.settings_update", "", "");
+    crate::audit(&state, &p.username, "shop.settings_update", "", site.id);
     Ok(Json(json!({ "status": "OK" })))
 }
 
@@ -1933,22 +2175,47 @@ pub async fn handle_admin_put_settings(
 // detects a `/shop` path and renders product views into the content area.
 // ---------------------------------------------------------------------------
 
-pub async fn handle_shop_page(State(state): State<Arc<AppState>>) -> axum::response::Html<String> {
-    // The shop belongs to the default site.
-    let site = crate::sites::default_site();
-    let head = "<title>Shop - Xikaku</title>\n\
-                <meta name=\"description\" content=\"Order Xikaku IMU and inertial sensors directly. Shipped from our Los Angeles office.\">\n\
-                <meta property=\"og:title\" content=\"Shop - Xikaku\">\n\
-                <meta property=\"og:type\" content=\"website\">\n";
+pub async fn handle_shop_page(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let site = match resolve_site(&headers, &sq) {
+        Ok(s) => s,
+        Err(e) => return e.into_response(),
+    };
+    if !site.has_shop {
+        let head = format!(
+            "<title>{}</title>\n<meta name=\"robots\" content=\"noindex\">\n",
+            crate::website::html_escape(site.name),
+        );
+        let html = crate::website::render_shell(&state, site, "", &head, "<div class=\"empty-state\">Page not found</div>");
+        return (StatusCode::NOT_FOUND, axum::response::Html(String::from_utf8_lossy(&html).into_owned())).into_response();
+    }
+    let esc_name = crate::website::html_escape(site.name);
+    let desc = if site.id == DEFAULT_SITE_ID {
+        format!("Order {} IMU and inertial sensors directly. Shipped from our Los Angeles office.", esc_name)
+    } else {
+        format!("Order {} products directly.", esc_name)
+    };
+    let head = format!(
+        "<title>Shop - {name}</title>\n\
+         <meta name=\"description\" content=\"{desc}\">\n\
+         <meta property=\"og:title\" content=\"Shop - {name}\">\n\
+         <meta property=\"og:type\" content=\"website\">\n",
+        name = esc_name,
+        desc = desc,
+    );
     let html = String::from_utf8_lossy(&crate::website::render_shell(
         &state,
         site,
         "",
-        head,
+        &head,
         "<div class=\"empty-state\">Loading…</div>",
     ))
     .into_owned();
-    axum::response::Html(html)
+    axum::response::Html(html).into_response()
 }
 
 #[cfg(test)]

@@ -2808,7 +2808,7 @@ let shopCountriesPromise = null;
 function loadShopCountries() {
     if (shopCountries) return Promise.resolve(shopCountries);
     if (!shopCountriesPromise) {
-        shopCountriesPromise = fetch(SHOP_API + '/shipping_countries')
+        shopCountriesPromise = fetch(SHOP_API + '/shipping_countries' + siteQ())
             .then(r => r.json())
             .then(d => { shopCountries = d.countries || []; return shopCountries; })
             .catch(() => { shopCountriesPromise = null; return []; });
@@ -2931,7 +2931,7 @@ async function checkout() {
     btn.disabled = true;
     btn.textContent = 'Redirecting…';
     try {
-        const resp = await fetch(SHOP_API + '/checkout', {
+        const resp = await fetch(SHOP_API + '/checkout' + siteQ(), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ items: cart, destination_country: country }),
@@ -2952,7 +2952,7 @@ async function checkout() {
 async function loadShopProducts() {
     if (shopProducts.length) return; // cache: products rarely change in a session
     try {
-        const resp = await fetch(SHOP_API + '/products');
+        const resp = await fetch(SHOP_API + '/products' + siteQ());
         if (!resp.ok) return;
         const data = await resp.json();
         shopProducts = data.products || [];
@@ -2968,7 +2968,7 @@ function renderShopGrid() {
     const c = document.getElementById('content');
     const layout = document.getElementById('layout');
     if (layout) layout.classList.add('no-toc');
-    document.title = 'Shop - Xikaku';
+    document.title = 'Shop - ' + SITE.name;
     renderSidebar();
     if (!shopProducts.length) {
         c.innerHTML = '<h1>Shop</h1><div class="empty-state"><p>Coming soon.</p></div>';
@@ -2987,8 +2987,11 @@ function renderShopGrid() {
             + '</div>'
             + '</a>';
     }).join('');
+    const intro = SITE.id === 'xikaku'
+        ? 'Order Xikaku sensors directly. Shipped from our Los Angeles office.'
+        : 'Order ' + SITE.name + ' products directly.';
     c.innerHTML = '<h1>Shop</h1>'
-        + '<p style="color:var(--text2);">Order Xikaku sensors directly. Shipped from our Los Angeles office.</p>'
+        + '<p style="color:var(--text2);">' + escHtml(intro) + '</p>'
         + '<div class="shop-grid">' + cards + '</div>';
 }
 
@@ -3002,7 +3005,7 @@ function renderShopDetail(sku) {
         c.innerHTML = '<h1>Product not found</h1><p><a href="/shop">&larr; Back to shop</a></p>';
         return;
     }
-    document.title = p.title + ' - Xikaku';
+    document.title = p.title + ' - ' + SITE.name;
     renderSidebar();
     const img = p.image_url ? '<img src="' + escHtml(p.image_url) + '" alt="">' : 'no image';
     const desc = renderMarkdown(p.description_md || '');
@@ -3027,7 +3030,7 @@ function renderShopSuccess() {
     const c = document.getElementById('content');
     const layout = document.getElementById('layout');
     if (layout) layout.classList.add('no-toc');
-    document.title = 'Order placed - Xikaku';
+    document.title = 'Order placed - ' + SITE.name;
     renderSidebar();
     const params = new URLSearchParams(location.search);
     const sid = params.get('session_id') || '';
@@ -3052,7 +3055,7 @@ function renderShopCancel() {
     const c = document.getElementById('content');
     const layout = document.getElementById('layout');
     if (layout) layout.classList.add('no-toc');
-    document.title = 'Checkout cancelled - Xikaku';
+    document.title = 'Checkout cancelled - ' + SITE.name;
     renderSidebar();
     c.innerHTML =
         '<div class="empty-state" style="padding:80px 20px;">'

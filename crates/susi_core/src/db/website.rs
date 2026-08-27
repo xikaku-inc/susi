@@ -175,7 +175,7 @@ impl LicenseDb {
                         ) AS pages_csv,
                         COALESCE(
                           (SELECT GROUP_CONCAT(s.sku, ',') FROM shop_products s
-                             WHERE a.site = 'xikaku' AND s.image_asset = a.file_name),
+                             WHERE s.site = a.site AND s.image_asset = a.file_name),
                           ''
                         ) AS products_csv
                  FROM website_assets a
@@ -249,14 +249,11 @@ impl LicenseDb {
                 params![brace_old, brace_new, paren_old, paren_new, site, old_name],
             )
             .map_err(|e| LicenseError::Other(format!("DB rewrite body_md: {}", e)))?;
-        // Shop products reference assets from the default site only.
-        if site == "xikaku" {
-            tx.execute(
-                "UPDATE shop_products SET image_asset = ?1 WHERE image_asset = ?2",
-                params![new_name, old_name],
-            )
-            .map_err(|e| LicenseError::Other(format!("DB rewrite product image: {}", e)))?;
-        }
+        tx.execute(
+            "UPDATE shop_products SET image_asset = ?1 WHERE site = ?3 AND image_asset = ?2",
+            params![new_name, old_name, site],
+        )
+        .map_err(|e| LicenseError::Other(format!("DB rewrite product image: {}", e)))?;
         tx.commit()
             .map_err(|e| LicenseError::Other(format!("DB tx commit: {}", e)))?;
         Ok((true, n_pages))

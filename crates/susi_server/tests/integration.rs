@@ -2253,6 +2253,146 @@ fn test_shipping_countries_are_admin_managed() {
     );
 }
 
+/// Each site runs its own shop: catalog, shipping rates, orders and settings
+/// are scoped per site, storefront endpoints resolve by Host, sites without a
+/// shop 404, and the webhook books an order under the site whose Stripe
+/// account signed the event.
+#[test]
+fn test_shop_site_scoping() {
+    let server = TestServer::start_with_env(&[
+        ("STRIPE_WEBHOOK_SECRET", "whsec_xk"),
+        ("STRIPE_WEBHOOK_SECRET_SHOPTWO", "whsec_two"),
+    ]);
+    let admin = server.admin_token();
+    let client = server.http();
+
+    // A second site with its own shop.
+    let resp = client
+        .post(format!("{}/sites", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({
+            "id": "shoptwo",
+            "name": "Shop Two",
+            "hosts": ["shoptwo.example.com"],
+            "public_base": "https://shoptwo.example.com",
+            "has_shop": true,
+        }))
+        .send()
+        .expect("create site");
+    assert_eq!(resp.status().as_u16(), 200, "create: {}", resp.text().unwrap_or_default());
+
+    // One product per shop; the same SKU may exist in both.
+    for (site, title, price) in [("xikaku", "Widget (X)", 1000), ("shoptwo", "Widget (Two)", 2000)] {
+        let resp = client
+            .put(format!("{}/shop/admin/products/widget?site={}", server.api_url, site))
+            .bearer_auth(&admin)
+            .json(&json!({ "title": title, "price_cents": price }))
+            .send()
+            .expect("upsert product");
+        assert_eq!(resp.status().as_u16(), 200, "{}: {}", site, resp.text().unwrap_or_default());
+    }
+    let titles = |host: &str| -> Vec<String> {
+        client
+            .get(format!("{}/shop/products", server.api_url))
+            .header("Host", host)
+            .send()
+            .expect("list products")
+            .json::<Value>()
+            .unwrap()["products"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .map(|p| p["title"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(titles("xikaku.com"), vec!["Widget (X)".to_string()]);
+    assert_eq!(titles("shoptwo.example.com"), vec!["Widget (Two)".to_string()]);
+
+    // A site without a shop has no storefront.
+    let resp = client
+        .get(format!("{}/shop/products?site=lpr", server.api_url))
+        .send()
+        .expect("shopless site");
+    assert_eq!(resp.status().as_u16(), 404);
+
+    // Settings scope per site: enabling JP for the new shop leaves the
+    // default site's out-of-the-box US+CA untouched.
+    let resp = client
+        .put(format!("{}/shop/admin/settings?site=shoptwo", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({ "shipping_countries": "US,JP" }))
+        .send()
+        .expect("put settings");
+    assert!(resp.status().is_success());
+    let codes = |host: &str| -> Vec<String> {
+        client
+            .get(format!("{}/shop/shipping_countries", server.api_url))
+            .header("Host", host)
+            .send()
+            .expect("countries")
+            .json::<Value>()
+            .unwrap()["countries"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .map(|c| c["code"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(codes("shoptwo.example.com"), vec!["JP".to_string(), "US".to_string()]);
+    assert_eq!(codes("xikaku.com"), vec!["CA".to_string(), "US".to_string()]);
+
+    // So do shipping rates: a JP-scoped rate is valid for the new shop only.
+    let post_rate = |site: &str| {
+        client
+            .post(format!("{}/shop/admin/shipping_rates?site={}", server.api_url, site))
+            .bearer_auth(&admin)
+            .json(&json!({ "label": "Air", "amount_cents": 2500, "regions": ["JP"] }))
+            .send()
+            .expect("post rate")
+    };
+    assert!(post_rate("shoptwo").status().is_success());
+    assert_eq!(post_rate("xikaku").status().as_u16(), 400);
+
+    // The webhook books the order under the site whose Stripe account
+    // signed the event.
+    let event = json!({
+        "type": "checkout.session.completed",
+        "data": { "object": {
+            "id": "cs_two_1",
+            "payment_status": "paid",
+            "amount_total": 2000,
+            "currency": "usd",
+            "customer_details": { "email": "b@example.com", "name": "B" },
+        }}
+    });
+    let payload = event.to_string();
+    let sig = stripe_sig("whsec_two", &payload, chrono_now());
+    let resp = client
+        .post(format!("{}/shop/webhook", server.api_url))
+        .header("Stripe-Signature", sig)
+        .header("Content-Type", "application/json")
+        .body(payload)
+        .send()
+        .expect("post webhook");
+    assert!(resp.status().is_success());
+    let orders = |site: &str| {
+        client
+            .get(format!("{}/shop/admin/orders?site={}", server.api_url, site))
+            .bearer_auth(&admin)
+            .send()
+            .expect("list orders")
+            .json::<Value>()
+            .unwrap()["orders"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    };
+    assert_eq!(orders("shoptwo").len(), 1, "signed with the shoptwo secret");
+    assert!(orders("xikaku").is_empty(), "xikaku must not see the other shop's order");
+}
+
 fn chrono_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

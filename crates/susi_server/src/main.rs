@@ -197,6 +197,9 @@ struct Cli {
     //
     // Both empty ⇒ shop checkout + webhook endpoints respond with 503.
     // Product listing remains available so product pages still render.
+    // These two configure the DEFAULT site's Stripe account; every other
+    // site's shop reads STRIPE_SECRET_KEY_{SITE} / STRIPE_WEBHOOK_SECRET_{SITE}
+    // from the environment (site id uppercased, '-' → '_', e.g. _LPR).
 
     /// Stripe secret key (sk_live_… or sk_test_…). Empty disables checkout.
     #[arg(long, env = "STRIPE_SECRET_KEY", default_value = "")]

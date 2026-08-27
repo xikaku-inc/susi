@@ -10,6 +10,7 @@ impl LicenseDb {
 
     pub fn list_products(
         &self,
+        site: &str,
         active_only: bool,
     ) -> Result<
         Vec<(
@@ -28,17 +29,17 @@ impl LicenseDb {
     > {
         let sql = if active_only {
             "SELECT sku, title, description_md, price_cents, currency, image_asset, tax_code, active, ord, updated_at
-             FROM shop_products WHERE active = 1 ORDER BY ord, title"
+             FROM shop_products WHERE site = ?1 AND active = 1 ORDER BY ord, title"
         } else {
             "SELECT sku, title, description_md, price_cents, currency, image_asset, tax_code, active, ord, updated_at
-             FROM shop_products ORDER BY ord, title"
+             FROM shop_products WHERE site = ?1 ORDER BY ord, title"
         };
         let mut stmt = self
             .conn
             .prepare(sql)
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
         let rows = stmt
-            .query_map([], |r| {
+            .query_map(params![site], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
@@ -63,6 +64,7 @@ impl LicenseDb {
     /// `get_product` loop would issue one round-trip per item under the lock.
     pub fn get_products_by_skus(
         &self,
+        site: &str,
         skus: &[String],
     ) -> Result<
         std::collections::HashMap<
@@ -93,15 +95,15 @@ impl LicenseDb {
             .join(",");
         let sql = format!(
             "SELECT sku, title, description_md, price_cents, currency, image_asset, tax_code, active, ord, updated_at
-             FROM shop_products WHERE sku IN ({})",
+             FROM shop_products WHERE site = ? AND sku IN ({})",
             placeholders,
         );
         let mut stmt = self
             .conn
             .prepare(&sql)
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
-        let params_iter: Vec<&dyn rusqlite::ToSql> =
-            skus.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        let mut params_iter: Vec<&dyn rusqlite::ToSql> = vec![&site as &dyn rusqlite::ToSql];
+        params_iter.extend(skus.iter().map(|s| s as &dyn rusqlite::ToSql));
         let rows = stmt
             .query_map(&params_iter[..], |r| {
                 Ok((
@@ -126,6 +128,7 @@ impl LicenseDb {
 
     pub fn get_product(
         &self,
+        site: &str,
         sku: &str,
     ) -> Result<
         Option<(
@@ -144,8 +147,8 @@ impl LicenseDb {
     > {
         match self.conn.query_row(
             "SELECT sku, title, description_md, price_cents, currency, image_asset, tax_code, active, ord, updated_at
-             FROM shop_products WHERE sku = ?1",
-            params![sku],
+             FROM shop_products WHERE site = ?1 AND sku = ?2",
+            params![site, sku],
             |r| Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
@@ -168,6 +171,7 @@ impl LicenseDb {
     #[allow(clippy::too_many_arguments)]
     pub fn upsert_product(
         &self,
+        site: &str,
         sku: &str,
         title: &str,
         description_md: &str,
@@ -181,9 +185,9 @@ impl LicenseDb {
         let now = Utc::now().to_rfc3339();
         self.conn.execute(
             "INSERT INTO shop_products
-               (sku, title, description_md, price_cents, currency, image_asset, tax_code, active, ord, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-             ON CONFLICT(sku) DO UPDATE SET
+               (site, sku, title, description_md, price_cents, currency, image_asset, tax_code, active, ord, updated_at)
+             VALUES (?11, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(site, sku) DO UPDATE SET
                title = excluded.title,
                description_md = excluded.description_md,
                price_cents = excluded.price_cents,
@@ -195,17 +199,17 @@ impl LicenseDb {
                updated_at = excluded.updated_at",
             params![
                 sku, title, description_md, price_cents, currency,
-                image_asset, tax_code, active as i64, ord, now,
+                image_asset, tax_code, active as i64, ord, now, site,
             ],
         )
         .map_err(|e| LicenseError::Other(format!("DB upsert product: {}", e)))?;
         Ok(())
     }
 
-    pub fn delete_product(&self, sku: &str) -> Result<bool, LicenseError> {
+    pub fn delete_product(&self, site: &str, sku: &str) -> Result<bool, LicenseError> {
         let n = self
             .conn
-            .execute("DELETE FROM shop_products WHERE sku = ?1", params![sku])
+            .execute("DELETE FROM shop_products WHERE site = ?1 AND sku = ?2", params![site, sku])
             .map_err(|e| LicenseError::Other(format!("DB delete product: {}", e)))?;
         Ok(n > 0)
     }
@@ -219,6 +223,7 @@ impl LicenseDb {
 
     pub fn list_shipping_rates(
         &self,
+        site: &str,
         active_only: bool,
     ) -> Result<
         Vec<(
@@ -236,17 +241,17 @@ impl LicenseDb {
     > {
         let sql = if active_only {
             "SELECT id, label, amount_cents, currency, delivery_min_days, delivery_max_days, regions, active, ord
-             FROM shop_shipping_rates WHERE active = 1 ORDER BY ord, amount_cents"
+             FROM shop_shipping_rates WHERE site = ?1 AND active = 1 ORDER BY ord, amount_cents"
         } else {
             "SELECT id, label, amount_cents, currency, delivery_min_days, delivery_max_days, regions, active, ord
-             FROM shop_shipping_rates ORDER BY ord, amount_cents"
+             FROM shop_shipping_rates WHERE site = ?1 ORDER BY ord, amount_cents"
         };
         let mut stmt = self
             .conn
             .prepare(sql)
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
         let rows = stmt
-            .query_map([], |r| {
+            .query_map(params![site], |r| {
                 Ok((
                     r.get::<_, i64>(0)?,
                     r.get::<_, String>(1)?,
@@ -268,6 +273,7 @@ impl LicenseDb {
     #[allow(clippy::too_many_arguments)]
     pub fn insert_shipping_rate(
         &self,
+        site: &str,
         label: &str,
         amount_cents: i64,
         currency: &str,
@@ -279,12 +285,12 @@ impl LicenseDb {
     ) -> Result<i64, LicenseError> {
         self.conn.execute(
             "INSERT INTO shop_shipping_rates
-               (label, amount_cents, currency, delivery_min_days, delivery_max_days, regions, active, ord)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+               (site, label, amount_cents, currency, delivery_min_days, delivery_max_days, regions, active, ord)
+             VALUES (?9, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 label, amount_cents, currency,
                 delivery_min_days, delivery_max_days, regions_json,
-                active as i64, ord,
+                active as i64, ord, site,
             ],
         )
         .map_err(|e| LicenseError::Other(format!("DB insert shipping rate: {}", e)))?;
@@ -294,6 +300,7 @@ impl LicenseDb {
     #[allow(clippy::too_many_arguments)]
     pub fn update_shipping_rate(
         &self,
+        site: &str,
         id: i64,
         label: &str,
         amount_cents: i64,
@@ -311,7 +318,7 @@ impl LicenseDb {
                SET label = ?2, amount_cents = ?3, currency = ?4,
                    delivery_min_days = ?5, delivery_max_days = ?6,
                    regions = ?7, active = ?8, ord = ?9
-             WHERE id = ?1",
+             WHERE id = ?1 AND site = ?10",
                 params![
                     id,
                     label,
@@ -322,16 +329,17 @@ impl LicenseDb {
                     regions_json,
                     active as i64,
                     ord,
+                    site,
                 ],
             )
             .map_err(|e| LicenseError::Other(format!("DB update shipping rate: {}", e)))?;
         Ok(n > 0)
     }
 
-    pub fn delete_shipping_rate(&self, id: i64) -> Result<bool, LicenseError> {
+    pub fn delete_shipping_rate(&self, site: &str, id: i64) -> Result<bool, LicenseError> {
         let n = self
             .conn
-            .execute("DELETE FROM shop_shipping_rates WHERE id = ?1", params![id])
+            .execute("DELETE FROM shop_shipping_rates WHERE id = ?1 AND site = ?2", params![id, site])
             .map_err(|e| LicenseError::Other(format!("DB delete shipping rate: {}", e)))?;
         Ok(n > 0)
     }
@@ -352,6 +360,7 @@ impl LicenseDb {
     /// payment methods still awaiting settlement.
     pub fn insert_order_if_absent(
         &self,
+        site: &str,
         stripe_session_id: &str,
         created_at: &str,
         customer_email: &str,
@@ -366,9 +375,9 @@ impl LicenseDb {
             .conn
             .execute(
                 "INSERT OR IGNORE INTO shop_orders
-               (stripe_session_id, created_at, customer_email, customer_name,
+               (site, stripe_session_id, created_at, customer_email, customer_name,
                 amount_total_cents, currency, status, ship_to_json, line_items_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             VALUES (?10, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     stripe_session_id,
                     created_at,
@@ -379,6 +388,7 @@ impl LicenseDb {
                     status,
                     ship_to_json,
                     line_items_json,
+                    site,
                 ],
             )
             .map_err(|e| LicenseError::Other(format!("DB insert order: {}", e)))?;
@@ -417,6 +427,7 @@ impl LicenseDb {
     #[allow(clippy::type_complexity)]
     pub fn list_orders(
         &self,
+        site: &str,
         status_filter: Option<&str>,
     ) -> Result<
         Vec<(
@@ -442,7 +453,7 @@ impl LicenseDb {
                 "SELECT id, stripe_session_id, created_at, customer_email, customer_name,
                         amount_total_cents, currency, status, ship_to_json, line_items_json,
                         tracking_carrier, tracking_number, shipped_at, notes
-                 FROM shop_orders WHERE status = ?1 ORDER BY created_at DESC, id DESC",
+                 FROM shop_orders WHERE site = ?1 AND status = ?2 ORDER BY created_at DESC, id DESC",
                 true,
             )
         } else {
@@ -450,7 +461,7 @@ impl LicenseDb {
                 "SELECT id, stripe_session_id, created_at, customer_email, customer_name,
                         amount_total_cents, currency, status, ship_to_json, line_items_json,
                         tracking_carrier, tracking_number, shipped_at, notes
-                 FROM shop_orders ORDER BY created_at DESC, id DESC",
+                 FROM shop_orders WHERE site = ?1 ORDER BY created_at DESC, id DESC",
                 false,
             )
         };
@@ -477,12 +488,12 @@ impl LicenseDb {
             ))
         };
         let rows: Vec<_> = if has_filter {
-            stmt.query_map(params![status_filter.unwrap()], row_map)
+            stmt.query_map(params![site, status_filter.unwrap()], row_map)
                 .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
                 .filter_map(|r| r.ok())
                 .collect()
         } else {
-            stmt.query_map([], row_map)
+            stmt.query_map(params![site], row_map)
                 .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
                 .filter_map(|r| r.ok())
                 .collect()
@@ -493,6 +504,7 @@ impl LicenseDb {
     #[allow(clippy::type_complexity)]
     pub fn get_order(
         &self,
+        site: &str,
         id: i64,
     ) -> Result<
         Option<(
@@ -517,8 +529,8 @@ impl LicenseDb {
             "SELECT id, stripe_session_id, created_at, customer_email, customer_name,
                     amount_total_cents, currency, status, ship_to_json, line_items_json,
                     tracking_carrier, tracking_number, shipped_at, notes
-             FROM shop_orders WHERE id = ?1",
-            params![id],
+             FROM shop_orders WHERE site = ?1 AND id = ?2",
+            params![site, id],
             |r| {
                 Ok((
                     r.get::<_, i64>(0)?,
@@ -545,10 +557,10 @@ impl LicenseDb {
     }
 
     /// Erasure (GDPR Art 17): delete an order row entirely.
-    pub fn delete_order(&self, id: i64) -> Result<bool, LicenseError> {
+    pub fn delete_order(&self, site: &str, id: i64) -> Result<bool, LicenseError> {
         let n = self
             .conn
-            .execute("DELETE FROM shop_orders WHERE id = ?1", params![id])
+            .execute("DELETE FROM shop_orders WHERE site = ?1 AND id = ?2", params![site, id])
             .map_err(|e| LicenseError::Other(format!("DB delete order: {}", e)))?;
         Ok(n > 0)
     }
@@ -602,6 +614,7 @@ impl LicenseDb {
     /// Sets shipped_at to the provided RFC3339 timestamp.
     pub fn mark_order_shipped(
         &self,
+        site: &str,
         id: i64,
         carrier: &str,
         tracking_number: &str,
@@ -615,19 +628,19 @@ impl LicenseDb {
                    tracking_carrier = ?2,
                    tracking_number  = ?3,
                    shipped_at       = ?4
-             WHERE id = ?1",
-                params![id, carrier, tracking_number, shipped_at],
+             WHERE id = ?1 AND site = ?5",
+                params![id, carrier, tracking_number, shipped_at, site],
             )
             .map_err(|e| LicenseError::Other(format!("DB mark shipped: {}", e)))?;
         Ok(n > 0)
     }
 
-    pub fn update_order_notes(&self, id: i64, notes: &str) -> Result<bool, LicenseError> {
+    pub fn update_order_notes(&self, site: &str, id: i64, notes: &str) -> Result<bool, LicenseError> {
         let n = self
             .conn
             .execute(
-                "UPDATE shop_orders SET notes = ?2 WHERE id = ?1",
-                params![id, notes],
+                "UPDATE shop_orders SET notes = ?2 WHERE id = ?1 AND site = ?3",
+                params![id, notes, site],
             )
             .map_err(|e| LicenseError::Other(format!("DB update notes: {}", e)))?;
         Ok(n > 0)

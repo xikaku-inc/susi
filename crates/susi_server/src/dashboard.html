@@ -1308,7 +1308,11 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
 
 <!-- Shop page -->
 <div id="page-shop" class="dash-page">
-    <div style="margin-top:32px;margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
+    <div style="margin-top:8px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
+        <h2 style="font-size:16px;font-weight:600;">Shop</h2>
+        <select id="shopSiteSelect" onchange="switchShopSite()"></select>
+    </div>
+    <div style="margin-top:24px;margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
         <h2 style="font-size:16px;font-weight:600;">Orders</h2>
         <select id="ordersStatusFilter" onchange="loadShopOrders()" style="padding:6px 10px;">
             <option value="">All statuses</option>
@@ -1422,6 +1426,10 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                 <div class="form-row">
                     <label for="shopSetThankYou">Optional thank-you message (HTML)</label>
                     <textarea id="shopSetThankYou" rows="3"></textarea>
+                </div>
+                <div class="form-row">
+                    <label for="shopSetInvoiceFrom">Invoice sender (company name, then address lines)</label>
+                    <textarea id="shopSetInvoiceFrom" rows="4"></textarea>
                 </div>
                 <div id="shopSetError" class="form-error" style="display:none;"></div>
             </div>
@@ -6502,7 +6510,40 @@ let editingRateId = null;      // null = create mode
 
 async function loadShop() {
     if (!roleIsAdmin(userRole)) return;
+    await ensureShopSiteSelect();
     await Promise.all([loadShopProducts(), loadShopRates(), loadShopOrders(), loadShopSettings(), loadShopCountryCatalogue()]);
+}
+
+// The shop page shares the website section's active site (websiteSite);
+// each page carries its own selector, kept in sync with the other.
+async function ensureShopSiteSelect() {
+    const sel = document.getElementById('shopSiteSelect');
+    if (!sel) return;
+    if (!sel.options.length) {
+        const wsSel = document.getElementById('websiteSiteSelect');
+        if (wsSel && wsSel.options.length) {
+            sel.innerHTML = wsSel.innerHTML;
+        } else {
+            try {
+                const resp = await fetch(API + '/website/pages' + wsQ(), { headers: authHeaders() });
+                if (resp.ok) {
+                    const data = await resp.json();
+                    if (Array.isArray(data.sites)) {
+                        sel.innerHTML = data.sites.map(s =>
+                            '<option value="' + escHtml(s.id) + '">' + escHtml(s.name) + '</option>').join('');
+                    }
+                }
+            } catch (e) { /* selector stays empty; calls fall back to xikaku */ }
+        }
+    }
+    if (sel.options.length) sel.value = websiteSite;
+}
+
+function switchShopSite() {
+    websiteSite = document.getElementById('shopSiteSelect').value;
+    const wsSel = document.getElementById('websiteSiteSelect');
+    if (wsSel && wsSel.options.length) wsSel.value = websiteSite;
+    loadShop();
 }
 
 // ----- Shipping countries -----
@@ -6547,7 +6588,7 @@ async function saveShopCountries() {
     errEl.style.display = 'none';
     if (!shopCountrySel.size) { errEl.textContent = 'Select at least one shipping country'; errEl.style.display = ''; return; }
     try {
-        const resp = await fetch(API + '/shop/admin/settings', {
+        const resp = await fetch(API + '/shop/admin/settings' + wsQ(), {
             method: 'PUT',
             headers: { ...authHeaders(), 'Content-Type': 'application/json' },
             body: JSON.stringify({ shipping_countries: [...shopCountrySel].sort().join(',') }),
@@ -6561,7 +6602,7 @@ async function saveShopCountries() {
 
 async function loadShopSettings() {
     try {
-        const resp = await fetch(API + '/shop/admin/settings', { headers: authHeaders() });
+        const resp = await fetch(API + '/shop/admin/settings' + wsQ(), { headers: authHeaders() });
         if (!resp.ok) return;
         const s = await resp.json();
         document.getElementById('shopSetEmails').value = s.notification_emails || '';
@@ -6570,6 +6611,7 @@ async function loadShopSettings() {
         document.getElementById('shopSetCustomerEnabled').checked = (ce === '' || ce === '1' || ce === 'true' || ce == null);
         document.getElementById('shopSetSupport').value = s.support_contact || '';
         document.getElementById('shopSetThankYou').value = s.customer_thank_you_html || '';
+        document.getElementById('shopSetInvoiceFrom').value = s.invoice_from || '';
         shopCountrySel = new Set((s.shipping_countries || '').split(',').map(c => c.trim()).filter(Boolean));
         renderShopCountryPicker();
         const hint = document.getElementById('shopSetEmailsHint');
@@ -6594,9 +6636,10 @@ async function saveShopSettings() {
         customer_email_enabled: document.getElementById('shopSetCustomerEnabled').checked ? '1' : '0',
         support_contact: document.getElementById('shopSetSupport').value,
         customer_thank_you_html: document.getElementById('shopSetThankYou').value,
+        invoice_from: document.getElementById('shopSetInvoiceFrom').value,
     };
     try {
-        const resp = await fetch(API + '/shop/admin/settings', {
+        const resp = await fetch(API + '/shop/admin/settings' + wsQ(), {
             method: 'PUT',
             headers: { ...authHeaders(), 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
@@ -6746,7 +6789,7 @@ async function saveSiteSettings() {
 async function loadShopProducts() {
     const tbody = document.getElementById('shopProductsBody');
     try {
-        const resp = await fetch(API + '/shop/admin/products', { headers: authHeaders() });
+        const resp = await fetch(API + '/shop/admin/products' + wsQ(), { headers: authHeaders() });
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
         shopProducts = (await resp.json()).products || [];
         renderShopProducts();
@@ -6843,7 +6886,7 @@ async function saveProduct() {
         active: document.getElementById('productActive').checked,
     };
     try {
-        const resp = await fetch(API + '/shop/admin/products/' + encodeURIComponent(sku), {
+        const resp = await fetch(API + '/shop/admin/products/' + encodeURIComponent(sku) + wsQ(), {
             method: 'PUT',
             headers: { ...authHeaders(), 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
@@ -6859,7 +6902,7 @@ async function saveProduct() {
 async function deleteShopProduct(sku) {
     if (!confirm('Delete product "' + sku + '"? This cannot be undone.')) return;
     try {
-        const resp = await fetch(API + '/shop/admin/products/' + encodeURIComponent(sku), {
+        const resp = await fetch(API + '/shop/admin/products/' + encodeURIComponent(sku) + wsQ(), {
             method: 'DELETE', headers: authHeaders(),
         });
         if (!resp.ok) { const d = await resp.json().catch(() => ({})); toast('Error: ' + (d.error || resp.status), 'error'); return; }
@@ -6873,7 +6916,7 @@ async function deleteShopProduct(sku) {
 async function loadShopRates() {
     const tbody = document.getElementById('shopRatesBody');
     try {
-        const resp = await fetch(API + '/shop/admin/shipping_rates', { headers: authHeaders() });
+        const resp = await fetch(API + '/shop/admin/shipping_rates' + wsQ(), { headers: authHeaders() });
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
         shopRates = (await resp.json()).rates || [];
         renderShopRates();
@@ -6966,9 +7009,9 @@ async function saveRate() {
         active: document.getElementById('rateActive').checked,
     };
     try {
-        const url = editingRateId
+        const url = (editingRateId
             ? API + '/shop/admin/shipping_rates/' + editingRateId
-            : API + '/shop/admin/shipping_rates';
+            : API + '/shop/admin/shipping_rates') + wsQ();
         const method = editingRateId ? 'PUT' : 'POST';
         const resp = await fetch(url, {
             method,
@@ -6986,7 +7029,7 @@ async function saveRate() {
 async function deleteShopRate(id) {
     if (!confirm('Delete this shipping rate?')) return;
     try {
-        const resp = await fetch(API + '/shop/admin/shipping_rates/' + id, {
+        const resp = await fetch(API + '/shop/admin/shipping_rates/' + id + wsQ(), {
             method: 'DELETE', headers: authHeaders(),
         });
         if (!resp.ok) { const d = await resp.json().catch(() => ({})); toast('Error: ' + (d.error || resp.status), 'error'); return; }
@@ -7761,7 +7804,7 @@ async function loadShopOrders() {
     const tbody = document.getElementById('shopOrdersBody');
     if (!tbody) return;
     const filter = (document.getElementById('ordersStatusFilter') || {}).value || '';
-    const url = API + '/shop/admin/orders' + (filter ? '?status=' + encodeURIComponent(filter) : '');
+    const url = API + '/shop/admin/orders' + wsQ() + (filter ? '&status=' + encodeURIComponent(filter) : '');
     try {
         const resp = await fetch(url, { headers: authHeaders() });
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
@@ -7889,7 +7932,7 @@ async function submitMarkShipped() {
     errEl.style.display = 'none';
     if (!tracking) { errEl.textContent = 'Tracking number required'; errEl.style.display = ''; return; }
     try {
-        const resp = await fetch(API + '/shop/admin/orders/' + viewingOrderId + '/ship', {
+        const resp = await fetch(API + '/shop/admin/orders/' + viewingOrderId + '/ship' + wsQ(), {
             method: 'POST',
             headers: { ...authHeaders(), 'Content-Type': 'application/json' },
             body: JSON.stringify({ carrier, tracking_number: tracking, notify_customer: notify }),
@@ -7918,6 +7961,8 @@ function wsQ(sep) { return (sep || '?') + 'site=' + encodeURIComponent(websiteSi
 
 function switchWebsiteSite() {
     websiteSite = document.getElementById('websiteSiteSelect').value;
+    const shopSel = document.getElementById('shopSiteSelect');
+    if (shopSel && shopSel.options.length) shopSel.value = websiteSite;
     loadWebsitePages();
     loadWebsiteAssets();
     loadWebsiteRedirects();

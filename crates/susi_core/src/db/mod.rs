@@ -668,7 +668,8 @@ impl LicenseDb {
             CREATE INDEX IF NOT EXISTS idx_api_tokens_user ON api_tokens(username);
 
             CREATE TABLE IF NOT EXISTS shop_products (
-                sku             TEXT PRIMARY KEY,
+                site            TEXT NOT NULL DEFAULT 'xikaku',
+                sku             TEXT NOT NULL,
                 title           TEXT NOT NULL,
                 description_md  TEXT NOT NULL DEFAULT '',
                 price_cents     INTEGER NOT NULL,
@@ -677,13 +678,15 @@ impl LicenseDb {
                 tax_code        TEXT NOT NULL DEFAULT 'txcd_99999999',
                 active          INTEGER NOT NULL DEFAULT 1,
                 ord             INTEGER NOT NULL DEFAULT 0,
-                updated_at      TEXT NOT NULL
+                updated_at      TEXT NOT NULL,
+                UNIQUE(site, sku)
             );
             CREATE INDEX IF NOT EXISTS idx_shop_products_active_ord
                 ON shop_products(active, ord);
 
             CREATE TABLE IF NOT EXISTS shop_shipping_rates (
                 id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                site              TEXT NOT NULL DEFAULT 'xikaku',
                 label             TEXT NOT NULL,
                 amount_cents      INTEGER NOT NULL,
                 currency          TEXT NOT NULL DEFAULT 'usd',
@@ -703,6 +706,7 @@ impl LicenseDb {
             -- (shipped_at, tracking_number, ...).
             CREATE TABLE IF NOT EXISTS shop_orders (
                 id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                site                TEXT NOT NULL DEFAULT 'xikaku',
                 stripe_session_id   TEXT NOT NULL UNIQUE,
                 created_at          TEXT NOT NULL,
                 customer_email      TEXT NOT NULL DEFAULT '',
@@ -1301,6 +1305,56 @@ impl LicenseDb {
         }
         let _ = self.conn.execute_batch(
             "ALTER TABLE website_page_revisions ADD COLUMN lang TEXT NOT NULL DEFAULT '';",
+        );
+
+        // The shop gains a `site` dimension so each public site runs its own
+        // shop (catalog, rates, orders, settings, Stripe account). The old
+        // schema's PRIMARY KEY on sku can't be altered away, so products are
+        // rebuilt once (existing rows become 'xikaku'); rates and orders only
+        // need the column. Settings stay one table - non-default sites use
+        // '{site}/{key}' keys, mirroring site_settings.
+        let sp_sql: String = self
+            .conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='shop_products'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or_default();
+        if !sp_sql.contains("UNIQUE(site, sku)") {
+            self.conn
+                .execute_batch(
+                    "PRAGMA foreign_keys=OFF;
+                     BEGIN;
+                     CREATE TABLE shop_products_new (
+                         site            TEXT NOT NULL DEFAULT 'xikaku',
+                         sku             TEXT NOT NULL,
+                         title           TEXT NOT NULL,
+                         description_md  TEXT NOT NULL DEFAULT '',
+                         price_cents     INTEGER NOT NULL,
+                         currency        TEXT NOT NULL DEFAULT 'usd',
+                         image_asset     TEXT,
+                         tax_code        TEXT NOT NULL DEFAULT 'txcd_99999999',
+                         active          INTEGER NOT NULL DEFAULT 1,
+                         ord             INTEGER NOT NULL DEFAULT 0,
+                         updated_at      TEXT NOT NULL,
+                         UNIQUE(site, sku)
+                     );
+                     INSERT INTO shop_products_new (site, sku, title, description_md, price_cents, currency, image_asset, tax_code, active, ord, updated_at)
+                         SELECT 'xikaku', sku, title, description_md, price_cents, currency, image_asset, tax_code, active, ord, updated_at FROM shop_products;
+                     DROP TABLE shop_products;
+                     ALTER TABLE shop_products_new RENAME TO shop_products;
+                     CREATE INDEX IF NOT EXISTS idx_shop_products_active_ord ON shop_products(active, ord);
+                     COMMIT;
+                     PRAGMA foreign_keys=ON;",
+                )
+                .map_err(|e| LicenseError::Other(format!("DB shop_products rebuild: {}", e)))?;
+        }
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE shop_shipping_rates ADD COLUMN site TEXT NOT NULL DEFAULT 'xikaku';",
+        );
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE shop_orders ADD COLUMN site TEXT NOT NULL DEFAULT 'xikaku';",
         );
 
         // >> Add new migrations as own execute_batch statements here <<
@@ -3794,7 +3848,7 @@ mod tests {
         db.upsert_website_asset("xikaku", "sensor.png", 123).unwrap();
         db.upsert_website_page("xikaku", "", "intro", "Intro", "![img](sensor.png)", None, 0, "", "page", "", "", "", "", None)
             .unwrap();
-        db.upsert_product("lpms-b2", "LPMS-B2", "", 34900, "usd", Some("sensor.png"), "txcd", true, 0)
+        db.upsert_product("xikaku", "lpms-b2", "LPMS-B2", "", 34900, "usd", Some("sensor.png"), "txcd", true, 0)
             .unwrap();
 
         let rows = db.list_website_assets_with_usage("xikaku").unwrap();
@@ -3974,6 +4028,60 @@ mod tests {
             .unwrap();
         assert_eq!(db.list_website_pages("xikaku").unwrap().len(), 1);
         assert_eq!(db.list_website_pages("lpr").unwrap().len(), 1);
+
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A pre-scoping shop database (sku PRIMARY KEY, no site on rates/orders)
+    /// must migrate: rows land under 'xikaku' and each site sees only its own
+    /// catalog, rates and orders afterwards.
+    #[test]
+    fn test_shop_site_migration_rebuilds_tables() {
+        let path = std::env::temp_dir()
+            .join(format!("susi_shop_mig_{}.db", std::process::id()));
+        let p = path.to_str().unwrap().to_string();
+        let _ = std::fs::remove_file(&path);
+        {
+            let db = LicenseDb::open(&p).unwrap();
+            db.conn
+                .execute_batch(
+                    "DROP TABLE shop_products;
+                     CREATE TABLE shop_products (
+                         sku             TEXT PRIMARY KEY,
+                         title           TEXT NOT NULL,
+                         description_md  TEXT NOT NULL DEFAULT '',
+                         price_cents     INTEGER NOT NULL,
+                         currency        TEXT NOT NULL DEFAULT 'usd',
+                         image_asset     TEXT,
+                         tax_code        TEXT NOT NULL DEFAULT 'txcd_99999999',
+                         active          INTEGER NOT NULL DEFAULT 1,
+                         ord             INTEGER NOT NULL DEFAULT 0,
+                         updated_at      TEXT NOT NULL
+                     );
+                     ALTER TABLE shop_shipping_rates DROP COLUMN site;
+                     ALTER TABLE shop_orders DROP COLUMN site;
+                     INSERT INTO shop_products (sku, title, price_cents, updated_at)
+                         VALUES ('lpms-b2', 'LPMS-B2', 34900, '2020-01-01T00:00:00Z');
+                     INSERT INTO shop_shipping_rates (label, amount_cents) VALUES ('Std', 1500);
+                     INSERT INTO shop_orders (stripe_session_id, created_at) VALUES ('cs_old', '2020-01-01T00:00:00Z');",
+                )
+                .unwrap();
+        }
+
+        // Reopen: rows survive under 'xikaku' and the same SKU can now exist
+        // per site.
+        let db = LicenseDb::open(&p).unwrap();
+        assert_eq!(db.get_product("xikaku", "lpms-b2").unwrap().unwrap().1, "LPMS-B2");
+        assert!(db.get_product("lpr", "lpms-b2").unwrap().is_none());
+        db.upsert_product("lpr", "lpms-b2", "LPMS-B2 (LP)", "", 39900, "usd", None, "txcd", true, 0)
+            .unwrap();
+        assert_eq!(db.list_products("xikaku", false).unwrap().len(), 1);
+        assert_eq!(db.list_products("lpr", false).unwrap().len(), 1);
+        assert_eq!(db.list_shipping_rates("xikaku", false).unwrap().len(), 1);
+        assert!(db.list_shipping_rates("lpr", false).unwrap().is_empty());
+        assert_eq!(db.list_orders("xikaku", None).unwrap().len(), 1);
+        assert!(db.list_orders("lpr", None).unwrap().is_empty());
 
         drop(db);
         let _ = std::fs::remove_file(&path);
