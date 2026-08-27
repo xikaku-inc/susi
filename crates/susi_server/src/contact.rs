@@ -16,13 +16,15 @@ use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
 use axum::{
-    extract::{ConnectInfo, State},
+    extract::{ConnectInfo, Query, State},
     http::{HeaderMap, StatusCode},
     Json,
 };
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::sites::SiteConfig;
+use crate::website::{resolve_site, SiteQuery};
 use crate::{
     check_ip_rate_limit, client_ip, error_response, AppState, ErrorResponse,
 };
@@ -58,10 +60,26 @@ pub struct ContactRequest {
     pub turnstile_token: String,
 }
 
+/// The recipient for a site's contact form: the site's configured
+/// contact_email, or the global SUSI_CONTACT_TO_ADDR when unset.
+fn to_addr_for(state: &AppState, site: &SiteConfig) -> String {
+    if site.contact_email.is_empty() {
+        state.contact_to_addr.clone()
+    } else {
+        site.contact_email.to_string()
+    }
+}
+
 pub async fn handle_get_config(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
 ) -> Json<serde_json::Value> {
-    let enabled = !state.contact_to_addr.is_empty() && state.email.is_some();
+    let to_addr = match resolve_site(&headers, &sq) {
+        Ok(site) => to_addr_for(&state, site),
+        Err(_) => state.contact_to_addr.clone(),
+    };
+    let enabled = !to_addr.is_empty() && state.email.is_some();
     Json(json!({
         "enabled": enabled,
         "turnstile_site_key": state.turnstile_site_key,
@@ -72,9 +90,12 @@ pub async fn handle_submit(
     State(state): State<Arc<AppState>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
     Json(req): Json<ContactRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    if state.contact_to_addr.is_empty() || state.email.is_none() {
+    let site = resolve_site(&headers, &sq)?;
+    let to_addr = to_addr_for(&state, site);
+    if to_addr.is_empty() || state.email.is_none() {
         return Err(error_response(
             StatusCode::SERVICE_UNAVAILABLE,
             "Contact form is not configured on this server",
@@ -138,8 +159,7 @@ pub async fn handle_submit(
     }
 
     let email_service = state.email.clone().expect("checked above");
-    let to_addr = state.contact_to_addr.clone();
-    let mail_subject = format!("[Xikaku] {}", subject);
+    let mail_subject = format!("[{}] {}", site.name, subject);
     let body = format!(
         "New contact-form submission\n\
          ---------------------------\n\
@@ -162,8 +182,9 @@ pub async fn handle_submit(
     // Also set Reply-To indirectly by passing the visitor email in the body;
     // we keep the actual From as the configured server address so SPF/DKIM
     // are valid (visitor's domain wouldn't authorize us as a sender).
+    let sender_name = format!("{} Contact", site.name);
     if let Err(e) = email_service
-        .send_html_as("Xikaku Contact", &to_addr, &mail_subject, &body, &html_escape(&body).replace('\n', "<br>\n"))
+        .send_html_as(&sender_name, &to_addr, &mail_subject, &body, &html_escape(&body).replace('\n', "<br>\n"))
         .await
     {
         log::error!("Contact form email send failed: {:#}", e);
@@ -175,7 +196,7 @@ pub async fn handle_submit(
 
     // No PII in the log line - name/company/email live in the delivered mail,
     // and container logs have no retention story for personal data.
-    log::info!("Contact form submission delivered");
+    log::info!("Contact form submission delivered (site {})", site.id);
     Ok(Json(json!({ "status": "ok" })))
 }
 

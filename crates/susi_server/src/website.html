@@ -778,7 +778,11 @@ div.grid.cols-6 { --cols: 6; }
 .contact-form .status { font-size: 13px; }
 .contact-form .status.ok { color: #4caf75; }
 .contact-form .status.err { color: #e2615e; }
+.contact-success { margin: 24px 0; max-width: 560px; padding: 28px 24px; text-align: center; border: 1px solid #4caf75; border-radius: var(--radius); background: color-mix(in srgb, #4caf75 10%, transparent); }
+.contact-success .mark { font-size: 34px; line-height: 1; color: #4caf75; }
+.contact-success .msg { margin-top: 10px; font-size: 16px; font-weight: 600; color: var(--text1); }
 .contact-form .turnstile-slot { min-height: 65px; }
+.content table td a { white-space: nowrap; }
 .email-obf { cursor: pointer; color: var(--accent); text-decoration: underline; }
 </style>
 </head>
@@ -952,6 +956,10 @@ const L10N = {
         'Product': '製品', 'Technology': '技術情報', 'Order': 'ご注文',
         'Company': '会社情報', 'Legal': '規約・ポリシー',
         'Online Shop': 'オンラインショップ',
+        'Support': 'サポート', 'Documentation': 'ドキュメント',
+        'Customer Area': 'カスタマーエリア',
+        'Thanks - your message is on its way.': 'お問い合わせありがとうございます。メッセージを送信しました。',
+        'show email': 'メールを表示',
     },
 };
 function t(s) { return (LANG && L10N[LANG] && L10N[LANG][s]) || s; }
@@ -982,7 +990,7 @@ function previewAssetUrl(u) {
 }
 
 // Top-level paths that must NOT be intercepted as website slugs on xikaku.com.
-const RESERVED_TOP_PATHS = new Set(['site', 'shop', 'api', 'static', 'docs', 'robots.txt', 'sitemap.xml', 'llms.txt', 'favicon.ico', 'health', '.well-known']);
+const RESERVED_TOP_PATHS = new Set(['site', 'shop', 'api', 'static', 'docs', 'robots.txt', 'sitemap.xml', 'llms.txt', 'favicon.ico', 'health', '.well-known', 'customer-area', 'login']);
 LANGS.forEach(l => RESERVED_TOP_PATHS.add(l));
 
 // Root-relative links authored in page bodies use the clean-URL form; under
@@ -1248,13 +1256,16 @@ function videoEmbedSrc(url) {
 
 function renderInline(s) {
     let out = escHtml(s);
+    // Allow explicit <br> line breaks (needed for multi-line table cells);
+    // the SSR renderer passes them through as inline HTML too.
+    out = out.replace(/&lt;br\s*\/?&gt;/gi, '<br>');
     out = out.replace(/`([^`]+)`/g, (_, c) => '<code>' + c + '</code>');
     out = out.replace(/\{\{email:([^\s}]+)\}\}/g, (_, addr) => {
         const at = addr.indexOf('@');
         if (at <= 0 || at === addr.length - 1) return escHtml(addr);
         const u = addr.slice(0, at);
         const d = addr.slice(at + 1);
-        return '<span class="email-obf" data-u="' + btoa(u) + '" data-d="' + btoa(d) + '" tabindex="0" role="button">show email</span>';
+        return '<span class="email-obf" data-u="' + btoa(u) + '" data-d="' + btoa(d) + '" tabindex="0" role="button">' + t('show email') + '</span>';
     });
     out = out.replace(/!\[([^\]]*)\]\(([^)]+)\)(\{[^}]*\})?/g, (_, alt, url, attrs) => {
         const vsrc = videoEmbedSrc(url);
@@ -3118,7 +3129,7 @@ function revealEmailObfs(root) {
 let contactConfigPromise = null;
 function loadContactConfig() {
     if (!contactConfigPromise) {
-        contactConfigPromise = fetch(API + '/contact/config')
+        contactConfigPromise = fetch(API + '/contact/config' + siteQ())
             .then(r => r.ok ? r.json() : { enabled: false, turnstile_site_key: '' })
             .catch(() => ({ enabled: false, turnstile_site_key: '' }));
     }
@@ -3226,22 +3237,18 @@ function buildContactForm(slot, cfg) {
         const submitBtn = form.querySelector('button[type=submit]');
         submitBtn.disabled = true;
         try {
-            const resp = await fetch(API + '/contact', {
+            const resp = await fetch(API + '/contact' + siteQ(), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload),
             });
             if (resp.ok) {
-                form.reset();
-                if (tsWidgetId !== null && window.turnstile) {
-                    try { window.turnstile.reset(tsWidgetId); } catch (e) {}
-                }
-                tsToken = '';
-                status.className = 'status ok';
-                status.textContent = 'Thanks - your message is on its way.';
                 if (window.gtag && window.__adsConv && window.__adsConv.contact) {
                     gtag('event', 'conversion', { send_to: window.__adsConv.contact });
                 }
+                slot.innerHTML = '<div class="contact-success"><div class="mark">✓</div>'
+                    + '<div class="msg">' + t('Thanks - your message is on its way.') + '</div></div>';
+                return;
             } else {
                 const d = await resp.json().catch(() => ({}));
                 status.className = 'status err';

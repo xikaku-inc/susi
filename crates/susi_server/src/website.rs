@@ -95,7 +95,7 @@ fn require_lang(
     }
 }
 
-fn resolve_site(
+pub fn resolve_site(
     headers: &HeaderMap,
     q: &SiteQuery,
 ) -> Result<&'static SiteConfig, (StatusCode, Json<ErrorResponse>)> {
@@ -1798,7 +1798,7 @@ pub(crate) fn render_body_html(body_md: &str) -> String {
         .add_tag_attributes("video", &["src", "autoplay", "muted", "loop", "playsinline", "width", "height"])
         .clean(&out)
         .to_string();
-    absolutize_bare_img_srcs(&clean)
+    obfuscate_email_shortcodes(&absolutize_bare_img_srcs(&clean))
 }
 
 /// Rewrite tables whose header cells are all empty - the "grid table"
@@ -2692,6 +2692,44 @@ fn absolutize_bare_img_srcs(html: &str) -> String {
         {
             out.push_str("/api/v1/website/assets/");
         }
+    }
+    out.push_str(&html[i..]);
+    out
+}
+
+/// Replace {{email:user@domain}} shortcodes with the same click-to-reveal
+/// span the client renderer emits, so the SSR HTML never carries the plain
+/// address. Runs after ammonia (which would strip the data-* attributes).
+fn obfuscate_email_shortcodes(html: &str) -> String {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let mut out = String::with_capacity(html.len());
+    let mut i = 0;
+    while let Some(p) = html[i..].find("{{email:") {
+        let start = i + p;
+        out.push_str(&html[i..start]);
+        let addr_start = start + 8;
+        let Some(e) = html[addr_start..].find("}}") else {
+            out.push_str(&html[start..]);
+            return out;
+        };
+        let addr = &html[addr_start..addr_start + e];
+        let at = addr.find('@');
+        match at {
+            Some(at)
+                if at > 0
+                    && at < addr.len() - 1
+                    && !addr.contains(['<', '>', '&', ' ', '"']) =>
+            {
+                out.push_str(&format!(
+                    "<span class=\"email-obf\" data-u=\"{}\" data-d=\"{}\" tabindex=\"0\" role=\"button\">show email</span>",
+                    b64.encode(&addr[..at]),
+                    b64.encode(&addr[at + 1..])
+                ));
+            }
+            _ => out.push_str(&html[start..addr_start + e + 2]),
+        }
+        i = addr_start + e + 2;
     }
     out.push_str(&html[i..]);
     out
@@ -4589,6 +4627,18 @@ mod tests {
         assert_eq!(blog_index_href("", 3), "/blog?page=3");
         assert_eq!(blog_index_href("ja", 1), "/ja/blog");
         assert_eq!(blog_index_href("ja", 2), "/ja/blog?page=2");
+    }
+
+    #[test]
+    fn email_shortcode_obfuscates_ssr_html() {
+        let html = render_body_html("Write to {{email:info@lp-research.com}} today.");
+        assert!(!html.contains("info@lp-research.com"), "plain address must not survive SSR");
+        assert!(!html.contains("{{email:"), "shortcode literal must not survive SSR");
+        assert!(html.contains("class=\"email-obf\""));
+        assert!(html.contains("data-u=\"aW5mbw==\""));
+        // Malformed shortcode stays literal.
+        let bad = render_body_html("{{email:not-an-address}}");
+        assert!(bad.contains("{{email:not-an-address}}"));
     }
 
     #[test]
