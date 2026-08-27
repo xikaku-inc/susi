@@ -55,6 +55,9 @@ HIDDEN_SLUGS = {
 # Retired pages keep their content but 301 to a replacement and drop out of
 # nav, sitemap and llms.txt. The Technology page was a link list into the blog.
 RETIRED = {"sensor-fusion-solutions": "/blog"}
+# Hidden pages whose legacy URLs refer to a successor product instead of the
+# overview page their parent would give them.
+HIDDEN_REDIRECT_TO = {"lpms-b": "/lpms-b2"}
 # Images dropped outright, by file name: a 10 MB photo that sat among the
 # customer logos.
 DROP_IMAGES = {"Siemens.png"}
@@ -240,6 +243,9 @@ EXTRA_REDIRECTS = [
     {"from_path": "/imu", "to_path": "/blog/imu-based-dead-reckoning-displacement-tracking-revisited"},
     {"from_path": "/imu/lpms-al3", "to_path": "/lpms-al3-9-axis-imu-sensor"},
     {"from_path": "/imu/lpms-b2", "to_path": "/lpms-b2"},
+    # Google still indexes this alias of the discontinued LPMS-B; refer
+    # searchers to the successor product.
+    {"from_path": "/products/lpms-b", "to_path": "/lpms-b2"},
     {"from_path": "/imu/lpms-ig1", "to_path": "/lpms-ig1"},
     {"from_path": "/imu/lpms-ig1w", "to_path": "/lpms-ig1w"},
     {"from_path": "/imu/lpms-nav3", "to_path": "/lpms-nav3"},
@@ -801,7 +807,7 @@ def cmd_build(work):
             continue
         if slug in HIDDEN_SLUGS:
             parent = PAGE_LAYOUT[slug][0]
-            target = f"/{parent}" if parent else "/"
+            target = HIDDEN_REDIRECT_TO.get(slug) or (f"/{parent}" if parent else "/")
         elif slug in RETIRED:
             target = RETIRED[slug]
         elif slug in MERGED_SOURCES:
@@ -908,6 +914,8 @@ def cmd_build(work):
         }
         if hidden:
             entry["hidden"] = True
+            if slug in HIDDEN_REDIRECT_TO:
+                entry["redirect_to"] = HIDDEN_REDIRECT_TO[slug]
         if kind == "page" and slug in RETIRED:
             entry["redirect_to"] = RETIRED[slug]
         if kind == "post":
