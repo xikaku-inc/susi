@@ -7,7 +7,6 @@
 | ![LPMS-IG1P-CAN](IG1P-bright.png){width=100%} | ![LPMS-IG1P-RS232](LPMS-IG1P-RS232-3.png){width=100%} |
 | **LPMS-IG1P-CAN** | **LPMS-IG1P-RS232** |
 
-
 ### 製品説明
 
 LPMS-IG1Pは、GPS受信機を統合した高性能9軸慣性計測装置（IMU）/AHRSで、信頼性の高いリアルタイムの姿勢・位置データを提供します。IP67準拠の頑丈な防水筐体を採用しており、過酷な環境や要求の厳しい産業・屋外用途に対応します。
@@ -90,13 +89,3 @@ GPSと多彩な接続方式を備えたコンパクトな防水IMUをお探し�
 7.0未満のバージョンでは一部の機能をご利用いただけない場合があります。詳細はお問い合わせください。
 
 ### ご注文
-
-| 製品 | パッケージ内容 | 価格 |
-| --- | --- | --- |
-| LPMS-IG1P-RS232 | LPMS-IG1P-RS232センサー ×1  防水ケーブル ×1  GPSアンテナ ×1  保証サービス（1年） ×1 | [オンラインで注文](https://zenshin-tech.com/product/lpms-ig1p-rs232/)  [代理店を探す](/ja/distributors-lp-research "代理店") |
-| LPMS-IG1P-CAN | LPMS-IG1P-CANセンサー ×1  防水ケーブル ×1  GPSアンテナ ×1  保証サービス（1年） ×1 | [オンラインで注文](https://zenshin-tech.com/product/lpms-ig1p-can/)  [代理店を探す](/ja/distributors-lp-research "代理店") |
-| LPMS-IG1P-RS485 | LPMS-IG1P-RS485センサー ×1  防水ケーブル ×1  GPSアンテナ ×1  保証サービス（1年） ×1 | [オンラインで注文](https://zenshin-tech.com/product/lpms-ig1p-rs485/)  [代理店を探す](/ja/distributors-lp-research "代理店") |
-
-![](LpmsIG1P-CAN_Box_1024_683_2.png)
-
-![](LPMS-IG1P-RS232-box-.png)

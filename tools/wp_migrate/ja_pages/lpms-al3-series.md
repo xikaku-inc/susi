@@ -7,12 +7,10 @@
 | ![LPMS-CANAL3](LpmsCANAL3_1024_683_20210803.jpg){width=100%} | ![LPMS-RS232AL3](LpmsRS232AL3_1024_683_20210803.jpg){width=100%} |
 | **LPMS-CANAL3** | **LPMS-RS232AL3** |
 
-
 |  |  |
 | --- | --- |
 | ![LPMS-TTLAL3](LPMS-TTLAL3_1024_683_20210803.jpg){width=100%} |  |
 | **LPMS-TTLAL3** |  |
-
 
 ### 製品説明
 
@@ -63,15 +61,3 @@ LP-ResearchモーションセンサーLPMS-AL3シリーズは、CAN、RS232、TT
 | 防水性能 | アルミニウム合金、IP67 | | |
 
 ### ご注文
-
-| 製品 | パッケージ内容 | 価格 |
-| --- | --- | --- |
-| LPMS-CANAL3 | LPMS-CANAL3センサー ×1  ケーブル（M12コネクター～オープンワイヤー） ×1  ユーザーガイドカード ×1  保証サービス（1年） ×1 | [オンラインで注文](https://zenshin-tech.com/product/lpms-canal3/)  [代理店を探す](/ja/distributors-lp-research "代理店") |
-| LPMS-RS232AL3 | LPMS-RS232AL3センサー ×1  ケーブル（M12コネクター～オープンワイヤー） ×1  ユーザーガイドカード ×1  保証サービス（1年） ×1 | [オンラインで注文](https://zenshin-tech.com/product/lpms-rs232al3/)  [代理店を探す](/ja/distributors-lp-research "代理店") |
-| LPMS-TTLAL3 | LPMS-TTLAL3センサー ×1  ケーブル（M12コネクター～オープンワイヤー） ×1  ユーザーガイドカード ×1  保証サービス（1年） ×1 | [オンラインで注文](https://zenshin-tech.com/product/lpms-ttlal3-compact-9-axis-imu-ahrs-with-ttl-serial-interface/)  [代理店を探す](/ja/distributors-lp-research "代理店") |
-
-![](LpmsCANAL3_Box_1024_683_20210803.jpg)
-
-![](LpmsRS232AL3_Box_1024_683_20210803.jpg)
-
-![](LpmsTTLAL3_Box_1024_683_20210803.jpg)

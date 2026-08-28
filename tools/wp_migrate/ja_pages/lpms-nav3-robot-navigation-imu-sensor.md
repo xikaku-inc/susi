@@ -7,12 +7,10 @@
 | ![LPMS-NAV3-TTL](2604_LPMS-NAV3-TTL.png){width=100%} | ![LPMS-NAV3-RS232](L2604_PMS-NAV3-RS232.png){width=100%} |
 | **LPMS-NAV3-TTL** | **LPMS-NAV3-RS232** |
 
-
 |  |  |
 | --- | --- |
 | ![LPMS-NAV3-RS485](2604_LPMS-NAV3-RS485.png){width=100%} | ![LPMS-NAV3-CAN](LPMS-NAV3-CAN_1024x683.png){width=100%} |
 | **LPMS-NAV3-RS485** | **LPMS-NAV3-CAN** |
-
 
 ### 製品説明
 
@@ -55,13 +53,3 @@ LPMS-NAV3は、RS232/TTL/RS485/CAN/RS422通信インターフェースを備え�
 | 防水性能 | IP67 | | | | |
 
 ### ご注文
-
-| 製品 | パッケージ内容 | 価格 |
-| --- | --- | --- |
-| LPMS-NAV3-TTL | LPMS-NAV3-TTLセンサー ×1  防水ケーブル ×1  ユーザーガイドカード ×1  保証サービス（1年） ×1 | [オンラインで注文](https://zenshin-tech.com/product/lpms-nav3-ttl-6-axis-imu-ahrs-with-ttl-serial-interface/)  [代理店を探す](/ja/distributors-lp-research "代理店") |
-| LPMS-NAV3-RS232 | LPMS-NAV3-RS232センサー ×1  防水ケーブル ×1  ユーザーガイドカード ×1  保証サービス（1年） ×1 | [オンラインで注文](https://zenshin-tech.com/product/lpms-nav3-rs232/)  [代理店を探す](/ja/distributors-lp-research "代理店") |
-| LPMS-NAV3-RS485 | LPMS-NAV3-RS485センサー ×1  防水ケーブル ×1  ユーザーガイドカード ×1  保証サービス（1年） ×1 | [オンラインで注文](https://zenshin-tech.com/product/lpms-nav3-rs485-motion-sensor-for-navigation-water-proof-housing-with-rs485-interface/)  [代理店を探す](/ja/distributors-lp-research "代理店") |
-| LPMS-NAV3-CAN | LPMS-NAV3-CANセンサー ×1  防水ケーブル ×1  ユーザーガイドカード ×1  保証サービス（1年） ×1 | [オンラインで注文](https://zenshin-tech.com/product/lpms-nav3-can-6-axis-imu-ahrs-with-can-bus-interface/)  [代理店を探す](/ja/distributors-lp-research "代理店") |
-| LPMS-NAV3-RS422 | LPMS-NAV3-RS422センサー ×1  防水ケーブル ×1  ユーザーガイドカード ×1  保証サービス（1年） ×1 | [オンラインで注文](https://zenshin-tech.com/product/lpms-nav3-rs422-6-axis-industrial-imu-with-rs422-interface/)  [代理店を探す](/ja/distributors-lp-research "代理店") |
-
-![](LpmsNAV3-RS232_Box_1024_683_20210906.jpg)

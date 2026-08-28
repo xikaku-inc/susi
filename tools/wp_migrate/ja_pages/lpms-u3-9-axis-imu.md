@@ -7,12 +7,10 @@
 | ![LPMS-CU3](LpmsCU3_1024_683-20211224.jpg){width=100%} | ![LPMS-URS3](LpmsURS3_1024_683-20211224.jpg){width=100%} |
 | **LPMS-CU3** | **LPMS-URS3** |
 
-
 |  |  |
 | --- | --- |
 | ![LPMS-UTTL3](LpmsUTTL3_1024_683-20211224.jpg){width=100%} |  |
 | **LPMS-UTTL3** |  |
-
 
 ### 製品説明
 
@@ -63,15 +61,3 @@ LPMS-U3センサーシリーズは、USB、RS232、TTL、CANバスといった�
 | ソフトウェア | Windows用C++ライブラリ、LpmsControl2ソフトウェア | | |
 
 ### ご注文
-
-| 製品 | パッケージ内容 | 価格 |
-| --- | --- | --- |
-| LPMS-CU3 | LPMS-CU3センサー ×1  Micro USBケーブル ×1  ユーザーガイドカード ×1  保証サービス（1年） ×1 | [オンラインで注文](https://zenshin-tech.com/product/lpms-cu3-9-axis-inertial-measurement-unit-imu-with-can-and-usb-connectivity/)  [代理店を探す](/ja/distributors-lp-research "代理店") |
-| LPMS-URS3 | LPMS-URS3センサー ×1  Micro USBケーブル ×1  ユーザーガイドカード ×1  保証サービス（1年） ×1 | [オンラインで注文](https://zenshin-tech.com/product/lpms-urs3-9-axis-inertial-measurement-unit-imu-with-usb-and-rs232-connectivity/)  [代理店を探す](/ja/distributors-lp-research "代理店") |
-| LPMS-UTTL3 | LPMS-UTTL3センサー ×1  Micro USBケーブル ×1  ユーザーガイドカード ×1  保証サービス（1年） ×1 | [オンラインで注文](https://zenshin-tech.com/product/lpms-uttl3-9-axis-imu-ahrs-with-ttl-uart-interface/)  [代理店を探す](/ja/distributors-lp-research "代理店") |
-
-![](LpmsCU3_Box_1024_683-20211224.jpg)
-
-![](LpmsURS3_Box_1024_683-20211224.jpg)
-
-![](LpmsUTTL3_Box_1024_683-20211224.jpg)

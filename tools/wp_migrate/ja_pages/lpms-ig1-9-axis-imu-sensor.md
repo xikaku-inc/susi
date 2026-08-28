@@ -7,12 +7,10 @@
 | ![高精度9軸IMU](LpmsIG1-RS232_1024_683_20190214.jpg){width=100%} | ![高精度9軸IMU](LpmsIG1-CAN_1024_683_20190214.jpg){width=100%} |
 | **LPMS-IG1 RS232** | **LPMS-IG1 CAN** |
 
-
 |  |  |
 | --- | --- |
 | ![LPMS-IG1 RS485 IMU 高精度姿勢センサー](LpmsIG1-RS485_1024_683_20200604.jpg){width=100%} |  |
 | **LPMS-IG1 RS485** |  |
-
 
 ### 製品説明
 
@@ -64,13 +62,3 @@ LPMS-IG1シリーズは、USB通信に加え、オプションでCANバス、RS2
 | ソフトウェア | IG1-Controlソフトウェア、C++ APIライブラリ | | |
 
 ### ご注文
-
-| 製品 | パッケージ内容 | 価格 |
-| --- | --- | --- |
-| LPMS-IG1-RS232 | LPMS-IG1-RS232センサー ×1  防水ケーブル ×2  ユーザーガイドカード ×1  保証サービス（1年） ×1 | [オンラインで注文](https://www.zenshin-tech.com/product/lpms-ig1-rs232/ "オンラインで注文")  [代理店を探す](/ja/distributors-lp-research "代理店") |
-| LPMS-IG1-CAN | LPMS-IG1-CANセンサー ×1  防水ケーブル ×2  ユーザーガイドカード ×1  保証サービス（1年） ×1 | [オンラインで注文](https://www.zenshin-tech.com/product/lpms-ig1-can/ "オンラインで注文")  [代理店を探す](/ja/distributors-lp-research "代理店") |
-| LPMS-IG1-RS485 | LPMS-IG1-RS485センサー ×1  防水ケーブル ×2  ユーザーガイドカード ×1  保証サービス（1年） ×1 | [オンラインで注文](https://www.zenshin-tech.com/product/lpms-ig1-rs485/ "オンラインで注文")  [代理店を探す](/ja/distributors-lp-research "代理店") |
-
-![高精度9軸IMU](LpmsIG1-CAN_Box_1024_683_20200301.jpg)
-
-![高精度9軸IMU](LpmsIG1-RS232_Box_1024_683_20200301.jpg)

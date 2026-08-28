@@ -7,7 +7,6 @@
 | ![LPMS-B2](H-LPMS-B2.png){width=100%} | ![LPMS-B2 OEM ワイヤレス慣性計測装置（IMU / AHRS）](LpmsB2Oem_1024_683.jpg){width=100%} |
 | **LPMS-B2** | **LPMS-B2 OEM** |
 
-
 ### 製品説明
 
 LP-Researchモーションセンサー Bluetoothバージョン2（LPMS-B2）シリーズは、9軸Bluetooth IMU（慣性計測装置）/姿勢方位基準システム（AHRS）です。非常に汎用性が高く、高精度・高速な姿勢計測と相対変位計測を行います。
@@ -56,12 +55,3 @@ LPMS-B2シリーズは、Bluetooth Classic 2.1またはLow Energy 4.1接続で�
 | ソフトウェア | Windows用C++ライブラリ、Android用Javaライブラリ、Windows用LpmsControlソフトウェアおよびOpen Motion Analysis Toolkit（OpenMAT） | |
 
 ### ご注文
-
-| 製品 | パッケージ内容 | 価格 |
-| --- | --- | --- |
-| LPMS-B2 | LPMS-B2センサー ×1  Micro USBケーブル ×1  ユーザーガイドカード ×1  保証・サポート（1年） ×1 | [オンラインで注文](https://www.zenshin-tech.com/product/lpms-b2/ "ご注文")  [代理店を探す](/ja/distributors-lp-research "代理店") |
-| LPMS-B2 OEM | LPMS-B2 OEMセンサー ×1  Micro USBケーブル ×1  ユーザーガイドカード ×1  保証・サポート（1年） ×1 | [オンラインで注文](/ja/contact-lp-research "お問い合わせ")  [代理店を探す](/ja/distributors-lp-research "代理店") |
-
-![](H-package-LPMS-B2.png)
-
-![](LpmsB2Oem_Box_1024_683_20170524.jpg)

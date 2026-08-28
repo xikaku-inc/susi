@@ -52,11 +52,3 @@ LPMS-CURS3のCANバスインターフェースは、より大規模なCANバス�
 | コネクター | BM08B 1.25mm | Micro USB-B | | |
 
 ### ご注文
-
-| 製品 | パッケージ内容 | 価格 |
-| --- | --- | --- |
-| LPMS-CURS3-CAN | LPMS-CURS3-CANセンサー ×1  ケーブル（1.27mmピッチコネクター） ×1  ユーザーガイドカード ×1  保証サービス（1年） ×1 | [オンラインで注文](https://zenshin-tech.com/product/lpms-curs3-can-oem-version-9-axis-inertial-measurement-unit-imu-with-usb-and-can-bus/)  [代理店を探す](/ja/distributors-lp-research "代理店") |
-| LPMS-CURS3-RS232 | LPMS-CURS3-RS232センサー ×1  ケーブル（1.27mmピッチコネクター） ×1  ユーザーガイドカード ×1  保証サービス（1年） ×1 | [オンラインで注文](https://zenshin-tech.com/product/lpms-curs3-rs232-oem-version-9-axis-inertial-measurement-unit-imu-with-usb-and-rs232-connectivity/)  [代理店を探す](/ja/distributors-lp-research "代理店") |
-| LPMS-CURS3-TTL | LPMS-CURS3-TTLセンサー ×1  ケーブル（1.27mmピッチコネクター） ×1  ユーザーガイドカード ×1  保証サービス（1年） ×1 | [オンラインで注文](https://zenshin-tech.com/product/lpms-curs3-ttl-oem-version-9-axis-inertial-measurement-unit-imu-with-usb-and-ttl/)  [代理店を探す](/ja/distributors-lp-research "代理店") |
-
-![](LpmsCURS3_Box_1024_683_20210111.jpg)

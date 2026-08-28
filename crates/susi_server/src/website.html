@@ -125,7 +125,7 @@ body.has-bg .editor-toolbar { top: 0; }
 :root[data-theme="light"] .content img.logo-dark { display: none; }
 :root[data-theme="light"] .header .brand img.logo-light { display: block; }
 :root[data-theme="light"] .content img.logo-light { display: block; }
-.header-right { display: flex; gap: 10px; align-items: center; }
+.header-right { display: flex; gap: 10px; align-items: center; margin-left: auto; }
 .btn {
     padding: 6px 12px;
     border-radius: var(--radius);
@@ -249,6 +249,8 @@ body.has-bg .editor-toolbar { top: 0; }
    visitors (admins keep it - the edit controls live there). The sidebar
    brand is its own flag (SiteConfig.sidebar_logo). */
 body.no-topbar .header { display: none; }
+/* The sidebar carries the brand - don't repeat it in the top bar. */
+body.sidebar-logo .header .brand { display: none; }
 /* The admin's restored top bar skips the brand - the sidebar carries it. */
 body.admin-topbar .header .brand { display: none; }
 body.admin-topbar .header { justify-content: flex-end; }
@@ -1215,6 +1217,7 @@ function updateAdminChrome() {
     if (SITE.no_topbar) {
         document.body.classList.toggle('no-topbar', !isAdmin);
         document.body.classList.toggle('admin-topbar', isAdmin);
+        renderCartBadge();
     }
     document.getElementById('navLogoutBtn').style.display = isAdmin ? '' : 'none';
     document.getElementById('newPageBtn').style.display = isAdmin ? '' : 'none';
@@ -2824,7 +2827,12 @@ const SLUG_TO_SKU_PREFIXES = {
     'lpms-nav3': ['lpms-nav3'],
     'lpms-curs3': ['lpms-curs3'],
     'lpms-inc1': ['lpms-inc1'],
+    'lpms-hr': ['lpms-hr'],
     'xicap-vision-pro-spatial-accessory': ['xicap-avp'],
+    // The lp-research pages kept their WordPress-era slugs.
+    'lpms-u3-usb-and-can-bus-imu': ['lpms-cu3', 'lpms-urs3', 'lpms-uttl3'],
+    'lpms-al3-9-axis-imu-sensor': ['lpms-canal3', 'lpms-rs232al3', 'lpms-ttlal3'],
+    'lpms-curs3-oem-9-axis-imu-ahrs-usb-can-uart': ['lpms-curs3'],
 };
 
 // Shop links keep the render language (and the /site prefix in preview).
@@ -2904,8 +2912,19 @@ function removeFromCart(sku) { setCart(getCart().filter(r => r.sku !== sku)); }
 function renderCartBadge() {
     const total = getCart().reduce((s, r) => s + r.qty, 0);
     const b = document.getElementById('cartBadge');
-    if (!b) return;
-    if (total > 0) { b.style.display = ''; b.textContent = total; } else { b.style.display = 'none'; }
+    if (b) {
+        if (total > 0) { b.style.display = ''; b.textContent = total; } else { b.style.display = 'none'; }
+    }
+    updateTopbarVisibility(total);
+}
+
+// A topbar-less shop site surfaces the header once the cart has items - the
+// cart button lives there; admins keep the header either way.
+function updateTopbarVisibility(cartCount) {
+    if (!SITE.no_topbar) return;
+    if (document.body.classList.contains('admin-topbar')) return;
+    const show = !!SITE.has_shop && cartCount > 0;
+    document.body.classList.toggle('no-topbar', !show);
 }
 function renderCart() {
     const cart = getCart();
@@ -3147,12 +3166,26 @@ function injectBuyCallout(slug) {
             + '</div>'
             + '</a>';
     }).join('');
-    c.insertAdjacentHTML('beforeend',
-        '<div class="buy-callout">'
-        + '<h2>' + escHtml(t('Available variants')) + '</h2>'
-        + '<div class="buy-grid">' + cards + '</div>'
-        + '</div>'
-    );
+    // The cards live inside the page's own Order section when it has one;
+    // pages without one get the callout appended with its own heading.
+    const orderHead = [...c.querySelectorAll('h2, h3, h4')].find(h => {
+        const txt = h.textContent.trim();
+        return txt === 'Order' || txt === 'ご注文';
+    });
+    if (orderHead) {
+        orderHead.insertAdjacentHTML('afterend',
+            '<div class="buy-callout" style="margin-top:0;padding-top:6px;border-top:none;">'
+            + '<div class="buy-grid">' + cards + '</div>'
+            + '</div>'
+        );
+    } else {
+        c.insertAdjacentHTML('beforeend',
+            '<div class="buy-callout">'
+            + '<h2>' + escHtml(t('Available variants')) + '</h2>'
+            + '<div class="buy-grid">' + cards + '</div>'
+            + '</div>'
+        );
+    }
 }
 
 // Chrome ignores the muted attribute on innerHTML-inserted video when

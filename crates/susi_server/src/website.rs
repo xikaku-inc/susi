@@ -2408,6 +2408,9 @@ pub(crate) fn render_shell(state: &Arc<AppState>, site: &SiteConfig, lang: &str,
     if no_topbar {
         classes.push("no-topbar");
     }
+    if sidebar_logo {
+        classes.push("sidebar-logo");
+    }
     if classes.is_empty() {
         return html.into();
     }

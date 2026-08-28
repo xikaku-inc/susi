@@ -7,7 +7,6 @@
 | ![LPMS-INC1 RS232](inc1-rs232.png){width=100%} | ![LPMS-INC1 CAN](inc1-can.png){width=100%} |
 | **LPMS-INC1 RS232** | **LPMS-INC1 CAN** |
 
-
 #### 製品説明
 
 LPMS-INC1は、産業用途における正確な傾斜計測のために設計された高精度2軸傾斜計センサーです。先進のMEMS技術を採用し、過酷な環境でも安定した高精度の計測値を提供します。センサーは、統合されたフィルタリング・キャリブレーションアルゴリズムで加速度センサーのデータを処理し、リアルタイムで信頼性の高い計測を実現します。
@@ -71,10 +70,3 @@ LPMS-INC1は、生の加速度データ、キャリブレーション済み加�
 \*\*\* 性能パラメーターは室温+25℃でのものであり、その他の温度では基準値が変わります。
 
 ### ご注文
-
-| 製品 | パッケージ内容 | 価格 |
-| --- | --- | --- |
-| LPMS-INC1-CAN | LPMS-INC1-CANセンサー ×1  防水データケーブル ×1  パッケージボックス ×1  ユーザーガイドカード ×1  保証（1年） ×1 | [ご注文](https://zenshin-tech.com/product/lpms-inc1-can/)  [代理店を探す](/ja/distributors-lp-research) |
-| LPMS-INC1-RS232 | LPMS-INC1-RS232センサー ×1  防水データケーブル ×1  パッケージボックス ×1  ユーザーガイドカード ×1  保証（1年） ×1 | [ご注文](https://zenshin-tech.com/product/lpms-inc1-RS232/)  [代理店を探す](/ja/distributors-lp-research) |
-
-![](lQDPJxufK25lPWHNAqvNBACwtc1oU9E4JCgHknpLXUnGAA_1024_683-2.jpg)
