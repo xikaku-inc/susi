@@ -635,6 +635,20 @@ impl LicenseDb {
         Ok(())
     }
 
+    /// Store a shop setting sealed with the at-rest key (Stripe credentials).
+    /// Empty value stores empty (= cleared).
+    pub fn set_shop_secret_setting(&self, key: &str, value: &str) -> Result<(), LicenseError> {
+        let sealed = if value.is_empty() { String::new() } else { self.seal_secret(value)? };
+        self.set_shop_setting(key, &sealed)
+    }
+
+    pub fn get_shop_secret_setting(&self, key: &str) -> Result<Option<String>, LicenseError> {
+        match self.get_shop_setting(key)? {
+            Some(v) if !v.is_empty() => Ok(Some(self.open_secret(&v)?)),
+            other => Ok(other),
+        }
+    }
+
     pub fn list_shop_settings(&self) -> Result<Vec<(String, String)>, LicenseError> {
         let mut stmt = self
             .conn

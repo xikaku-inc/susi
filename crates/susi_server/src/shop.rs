@@ -63,17 +63,29 @@ fn logo_inline_image(site: &SiteConfig) -> InlineImage {
     }
 }
 
-/// Per-site Stripe credentials. The default site keeps the classic
-/// STRIPE_SECRET_KEY / STRIPE_WEBHOOK_SECRET config; every other site reads
-/// STRIPE_SECRET_KEY_{SITE} / STRIPE_WEBHOOK_SECRET_{SITE} from the
-/// environment (site id uppercased, '-' becoming '_'). Empty = shop disabled
-/// for checkout on that site.
+/// Per-site Stripe credentials. The dashboard-entered per-shop setting
+/// (sealed with the at-rest key) wins; the environment stays as a fallback:
+/// the default site's classic STRIPE_SECRET_KEY / STRIPE_WEBHOOK_SECRET, and
+/// STRIPE_SECRET_KEY_{SITE} / STRIPE_WEBHOOK_SECRET_{SITE} for other sites
+/// (site id uppercased, '-' becoming '_'). Empty = checkout disabled.
 fn stripe_env(site_id: &str, base: &str) -> String {
     let suffix = site_id.to_uppercase().replace('-', "_");
     std::env::var(format!("{}_{}", base, suffix)).unwrap_or_default()
 }
 
+fn stripe_stored_secret(state: &AppState, site: &SiteConfig, key: &str) -> String {
+    let db = state.db.lock();
+    db.get_shop_secret_setting(&shop_setting_key(site, key))
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+}
+
 fn stripe_secret_for(state: &AppState, site: &SiteConfig) -> String {
+    let stored = stripe_stored_secret(state, site, SETTING_STRIPE_SECRET_KEY);
+    if !stored.is_empty() {
+        return stored;
+    }
     if site.id == DEFAULT_SITE_ID {
         state.stripe_secret_key.clone()
     } else {
@@ -82,10 +94,26 @@ fn stripe_secret_for(state: &AppState, site: &SiteConfig) -> String {
 }
 
 fn stripe_webhook_secret_for(state: &AppState, site: &SiteConfig) -> String {
+    let stored = stripe_stored_secret(state, site, SETTING_STRIPE_WEBHOOK_SECRET);
+    if !stored.is_empty() {
+        return stored;
+    }
     if site.id == DEFAULT_SITE_ID {
         state.stripe_webhook_secret.clone()
     } else {
         stripe_env(site.id, "STRIPE_WEBHOOK_SECRET")
+    }
+}
+
+/// The masked form shown in the dashboard: bullets plus the trailing four
+/// characters. A submitted value in this form is "unchanged".
+fn mask_secret(v: &str) -> String {
+    if v.is_empty() {
+        String::new()
+    } else if v.len() > 4 && v.is_ascii() {
+        format!("••••••••{}", &v[v.len() - 4..])
+    } else {
+        "••••••••".into()
     }
 }
 
@@ -1172,6 +1200,10 @@ const SETTING_CUSTOMER_EMAIL_ENABLED: &str = "customer_email_enabled";
 const SETTING_SUPPORT_CONTACT: &str = "support_contact";
 const SETTING_SHIPPING_COUNTRIES: &str = "shipping_countries";
 const SETTING_INVOICE_FROM: &str = "invoice_from";
+// Stored sealed (at-rest key); the settings API only ever returns the mask.
+const SETTING_STRIPE_SECRET_KEY: &str = "stripe_secret_key";
+const SETTING_STRIPE_WEBHOOK_SECRET: &str = "stripe_webhook_secret";
+const SECRET_SETTING_KEYS: &[&str] = &[SETTING_STRIPE_SECRET_KEY, SETTING_STRIPE_WEBHOOK_SECRET];
 
 /// Comma-or-whitespace-split a recipients string, trim, and dedupe.
 fn split_recipients(s: &str) -> Vec<String> {
@@ -2025,6 +2057,8 @@ const KNOWN_SETTING_KEYS: &[&str] = &[
     SETTING_SUPPORT_CONTACT,
     SETTING_SHIPPING_COUNTRIES,
     SETTING_INVOICE_FROM,
+    SETTING_STRIPE_SECRET_KEY,
+    SETTING_STRIPE_WEBHOOK_SECRET,
     SETTING_TPL_CONFIRMATION,
     SETTING_TPL_CONFIRMATION_JA,
     SETTING_TPL_SHIPPED,
@@ -2097,6 +2131,16 @@ pub async fn handle_admin_get_settings(
         "notification_emails_fallback".into(),
         Value::String(if site.id == DEFAULT_SITE_ID { state.shop_notify_addr.clone() } else { String::new() }),
     );
+    // Stripe credentials never leave the server: show the mask of whatever
+    // key is effective (dashboard-entered or environment fallback).
+    out.insert(
+        SETTING_STRIPE_SECRET_KEY.into(),
+        Value::String(mask_secret(&stripe_secret_for(&state, site))),
+    );
+    out.insert(
+        SETTING_STRIPE_WEBHOOK_SECRET.into(),
+        Value::String(mask_secret(&stripe_webhook_secret_for(&state, site))),
+    );
     Ok(Json(Value::Object(out)))
 }
 
@@ -2120,6 +2164,16 @@ pub async fn handle_admin_put_settings(
     for (k, v) in &req.fields {
         if !KNOWN_SETTING_KEYS.contains(&k.as_str()) {
             return Err(error_response(StatusCode::BAD_REQUEST, &format!("Unknown setting: {}", k)));
+        }
+        // Stripe credentials: sealed storage; the mask coming back from the
+        // form means unchanged, empty clears (env fallback takes over).
+        if SECRET_SETTING_KEYS.contains(&k.as_str()) {
+            if v.contains('•') {
+                continue;
+            }
+            let db = state.db.lock();
+            db.set_shop_secret_setting(&shop_setting_key(site, k), v.trim()).map_err(db_err)?;
+            continue;
         }
         let normalized = match k.as_str() {
             SETTING_NOTIFY_EMAILS => {

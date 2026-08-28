@@ -2391,6 +2391,78 @@ fn test_shop_site_scoping() {
     };
     assert_eq!(orders("shoptwo").len(), 1, "signed with the shoptwo secret");
     assert!(orders("xikaku").is_empty(), "xikaku must not see the other shop's order");
+
+    // Stripe credentials entered per shop in the dashboard: shoptwo has no
+    // env secret key, so checkout starts out unconfigured (503). Storing a
+    // key via settings enables it (the dummy key then fails only at the
+    // Stripe API call, 502), the API returns only a mask, and submitting the
+    // mask back leaves the stored key untouched.
+    let checkout2 = || {
+        client
+            .post(format!("{}/shop/checkout", server.api_url))
+            .header("Host", "shoptwo.example.com")
+            .json(&json!({ "items": [{"sku": "widget", "qty": 1}], "destination_country": "US" }))
+            .send()
+            .expect("checkout")
+    };
+    assert_eq!(checkout2().status().as_u16(), 503, "no key configured yet");
+    let resp = client
+        .put(format!("{}/shop/admin/settings?site=shoptwo", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({ "stripe_secret_key": "sk_test_dbkey" }))
+        .send()
+        .expect("store key");
+    assert!(resp.status().is_success());
+    assert_eq!(checkout2().status().as_u16(), 502, "stored key reaches Stripe");
+    let settings = client
+        .get(format!("{}/shop/admin/settings?site=shoptwo", server.api_url))
+        .bearer_auth(&admin)
+        .send()
+        .expect("get settings")
+        .json::<Value>()
+        .unwrap();
+    let masked = settings["stripe_secret_key"].as_str().unwrap().to_string();
+    assert!(!masked.contains("sk_test"), "full key must never be returned: {}", masked);
+    assert!(masked.ends_with("bkey"), "mask keeps the last four: {}", masked);
+    let resp = client
+        .put(format!("{}/shop/admin/settings?site=shoptwo", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({ "stripe_secret_key": masked }))
+        .send()
+        .expect("resubmit mask");
+    assert!(resp.status().is_success());
+    assert_eq!(checkout2().status().as_u16(), 502, "mask round-trip must not clobber the key");
+
+    // A dashboard-entered webhook secret verifies events too (and wins over
+    // the env fallback).
+    let resp = client
+        .put(format!("{}/shop/admin/settings?site=shoptwo", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({ "stripe_webhook_secret": "whsec_db2" }))
+        .send()
+        .expect("store webhook secret");
+    assert!(resp.status().is_success());
+    let event = json!({
+        "type": "checkout.session.completed",
+        "data": { "object": {
+            "id": "cs_two_2",
+            "payment_status": "paid",
+            "amount_total": 1000,
+            "currency": "usd",
+            "customer_details": { "email": "c@example.com", "name": "C" },
+        }}
+    });
+    let payload = event.to_string();
+    let sig = stripe_sig("whsec_db2", &payload, chrono_now());
+    let resp = client
+        .post(format!("{}/shop/webhook", server.api_url))
+        .header("Stripe-Signature", sig)
+        .header("Content-Type", "application/json")
+        .body(payload)
+        .send()
+        .expect("webhook with db secret");
+    assert!(resp.status().is_success());
+    assert_eq!(orders("shoptwo").len(), 2, "db-secret-signed event books the order");
 }
 
 /// The bilingual shop: Japanese fields round-trip through the admin API, the

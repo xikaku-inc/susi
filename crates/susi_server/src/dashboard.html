@@ -1437,6 +1437,14 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                     <label for="shopSetInvoiceFrom">Invoice sender (company name, then address lines)</label>
                     <textarea id="shopSetInvoiceFrom" rows="4"></textarea>
                 </div>
+                <div class="form-row">
+                    <label for="shopSetStripeKey">Stripe secret key</label>
+                    <input type="text" id="shopSetStripeKey" autocomplete="off" spellcheck="false" readonly onfocus="this.removeAttribute('readonly')">
+                </div>
+                <div class="form-row">
+                    <label for="shopSetStripeWebhook">Stripe webhook signing secret</label>
+                    <input type="text" id="shopSetStripeWebhook" autocomplete="off" spellcheck="false" readonly onfocus="this.removeAttribute('readonly')">
+                </div>
                 <div id="shopSetError" class="form-error" style="display:none;"></div>
             </div>
             <div class="form-footer">
@@ -6762,6 +6770,8 @@ async function loadShopSettings() {
         document.getElementById('shopSetCustomerEnabled').checked = (ce === '' || ce === '1' || ce === 'true' || ce == null);
         document.getElementById('shopSetSupport').value = s.support_contact || '';
         document.getElementById('shopSetInvoiceFrom').value = s.invoice_from || '';
+        document.getElementById('shopSetStripeKey').value = s.stripe_secret_key || '';
+        document.getElementById('shopSetStripeWebhook').value = s.stripe_webhook_secret || '';
         shopCountrySel = new Set((s.shipping_countries || '').split(',').map(c => c.trim()).filter(Boolean));
         renderShopCountryPicker();
         const hint = document.getElementById('shopSetEmailsHint');
@@ -6786,6 +6796,8 @@ async function saveShopSettings() {
         customer_email_enabled: document.getElementById('shopSetCustomerEnabled').checked ? '1' : '0',
         support_contact: document.getElementById('shopSetSupport').value,
         invoice_from: document.getElementById('shopSetInvoiceFrom').value,
+        stripe_secret_key: document.getElementById('shopSetStripeKey').value,
+        stripe_webhook_secret: document.getElementById('shopSetStripeWebhook').value,
     };
     try {
         const resp = await fetch(API + '/shop/admin/settings' + wsQ(), {
