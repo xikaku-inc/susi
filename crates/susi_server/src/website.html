@@ -184,6 +184,9 @@ body.has-bg .editor-toolbar { top: 0; }
 }
 .site-footer a { color: var(--text2); text-decoration: none; }
 .site-footer #langSwitch span { color: var(--text2); }
+.lang-switch-top { font-size: 13px; white-space: nowrap; }
+.lang-switch-top span { color: var(--text2); }
+.lang-switch-top a { color: var(--accent); text-decoration: none; }
 .site-footer a:hover { color: var(--text1); }
 .sidebar {
     border-right: 1px solid var(--border);
@@ -806,6 +809,7 @@ div.grid.cols-6 { --cols: 6; }
         <button id="editBtn" class="btn" onclick="enterEditMode()" style="display:none;">Edit</button>
         <button id="newPageBtn" class="btn" onclick="newPage()" style="display:none;">+ Page</button>
         <button id="newPostBtn" class="btn" onclick="newPost()" style="display:none;">+ Post</button>
+        <span id="langSwitchTop" class="lang-switch-top" style="display:none;"></span>
         <button id="btnCart" class="btn cart-btn" onclick="openCart()">Cart<span id="cartBadge" class="cart-badge" style="display:none;">0</span></button>
         <button id="btnTheme" class="btn" onclick="cycleTheme()" title="Toggle theme">🌓</button>
         <button id="navLogoutBtn" class="btn" onclick="logoutFromSite()" style="display:none;">Logout</button>
@@ -1121,6 +1125,8 @@ document.querySelectorAll('.site-footer a[data-cookie-settings]').forEach(a => {
 function renderLangSwitch() {
     const el = document.getElementById('langSwitch');
     if (!el || !LANGS.length) return;
+    // The same switcher also lives in the top bar, next to the cart.
+    const elTop = document.getElementById('langSwitchTop');
     const names = { ja: '日本語' };
     const hrefFor = (l, p) => {
         const seg = p ? (p.page_kind === 'post' ? '/blog/' : '/') + encodeURIComponent(p.slug) : '';
@@ -1148,8 +1154,13 @@ function renderLangSwitch() {
             : null;
         parts.push('<a href="' + escHtml(hrefFor(l, tr)) + '">' + escHtml(label) + '</a>');
     });
-    el.innerHTML = parts.join(' <span class="lang-sep">·</span> ');
+    const html = parts.join(' <span class="lang-sep">·</span> ');
+    el.innerHTML = html;
     el.style.display = '';
+    if (elTop) {
+        elTop.innerHTML = html;
+        elTop.style.display = '';
+    }
 }
 // Send a visitor to a retired page's replacement. Mirrors the server's 301
 // target rules: full URL, site-root path, or a bare slug.
