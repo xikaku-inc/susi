@@ -960,6 +960,21 @@ const L10N = {
         'Customer Area': 'カスタマーエリア',
         'Thanks - your message is on its way.': 'お問い合わせありがとうございます。メッセージを送信しました。',
         'show email': 'メールを表示',
+        // Shop storefront chrome.
+        'Your cart': 'カート', 'Ship to': 'お届け先', 'Subtotal': '小計',
+        'Tax + shipping calculated at checkout.': '税金と送料はチェックアウト時に計算されます。',
+        'Checkout': 'レジに進む', 'Redirecting…': 'リダイレクト中…',
+        'Your cart is empty.': 'カートは空です。',
+        'Added to cart': 'カートに追加しました', 'Add to cart': 'カートに追加',
+        'remove': '削除', 'no image': '画像なし', 'Coming soon.': '近日公開。',
+        'Back to shop': 'ショップに戻る', 'Product not found': '製品が見つかりません',
+        'Continue shopping': '買い物を続ける', 'Home': 'ホーム',
+        'Thank you!': 'ありがとうございます！',
+        'Your order has been placed. A receipt will arrive in your inbox shortly.': 'ご注文を承りました。まもなく確認メールが届きます。',
+        'Checkout cancelled': 'チェックアウトはキャンセルされました',
+        'Your cart is still saved. No charge was made.': 'カートの内容は保存されています。請求は発生していません。',
+        'Review cart': 'カートを確認', 'Available variants': '製品バリエーション',
+        'Order %s products directly.': '%sの製品を直接ご注文いただけます。',
     },
 };
 function t(s) { return (LANG && L10N[LANG] && L10N[LANG][s]) || s; }
@@ -1547,7 +1562,7 @@ function renderSidebar() {
             : '<a class="section-head' + blogActive + '" href="' + SITE_PATH_PREFIX + LANG_PREFIX + '/blog">' + escHtml(t('Blog')) + '</a>')
         + (SITE.has_newsletter && !LANG ? '<a class="section-head' + newsletterActive + '" href="' + SITE_PATH_PREFIX + '/newsletter">Newsletter</a>' : '');
     const shopActive = currentSlug === '__shop__' ? ' active' : '';
-    const shopLink = SITE.has_shop ? '<a class="section-head' + shopActive + '" href="/shop">Shop</a>' : '';
+    const shopLink = SITE.has_shop ? '<a class="section-head' + shopActive + '" href="' + shopHref() + '">' + escHtml(t('Shop')) + '</a>' : '';
     const bySlug = new Map(topLevel.map(p => [LANG ? (p.translation_of || p.slug) : p.slug, p]));
     let html = '';
     if (navStructure && navStructure.length) {
@@ -1790,9 +1805,11 @@ function renderPage() {
     revealEmailObfs(c);
     mountContactForms(c);
     startAmbientVideos(c);
-    // Append a "buy" callout for sensor pages whose slug maps to live SKUs.
-    if (SITE.has_shop && currentSlug && SLUG_TO_SKU_PREFIXES[currentSlug]) {
-        loadShopProducts().then(() => injectBuyCallout(currentSlug));
+    // Append a "buy" callout for sensor pages whose slug maps to live SKUs
+    // (translated pages resolve through the page they mirror).
+    const skuSlug = SITE.has_shop && currentSlug ? skuSlugFor(currentSlug) : null;
+    if (skuSlug) {
+        loadShopProducts().then(() => injectBuyCallout(skuSlug));
     }
 }
 
@@ -2188,8 +2205,9 @@ function renderPreviewView() {
     revealEmailObfs(c);
     mountContactForms(c);
     startAmbientVideos(c);
-    if (SITE.has_shop && currentSlug && SLUG_TO_SKU_PREFIXES[currentSlug]) {
-        loadShopProducts().then(() => injectBuyCallout(currentSlug));
+    const skuSlug = SITE.has_shop && currentSlug ? skuSlugFor(currentSlug) : null;
+    if (skuSlug) {
+        loadShopProducts().then(() => injectBuyCallout(skuSlug));
     }
 }
 
@@ -2459,6 +2477,14 @@ document.addEventListener('click', (e) => {
         const lp = new RegExp('^(?:\\/site)?\\/' + LANG + '(?=\\/|$)');
         if (!lp.test(href)) return;
         const stripped = href.replace(lp, '') || '/';
+        if (/^\/shop(\/|$|\?)/.test(stripped)) {
+            e.preventDefault();
+            if (location.pathname + location.search !== href) {
+                history.pushState({}, '', href);
+            }
+            route().then(resetScroll);
+            return;
+        }
         const post = stripped.match(/^\/blog\/([^\/\?#]+)$/);
         if (post) {
             if (post[1] === 'rss.xml') return;
@@ -2481,10 +2507,10 @@ document.addEventListener('click', (e) => {
         }
         return;
     }
-    if (href.startsWith('/shop')) {
-        // Same-origin /shop, /shop/, /shop/{sku}, /shop/success, /shop/cancel.
-        // Skip /shop#... (fragment-only) so anchors still work.
-        if (href.startsWith('/shop#')) return;
+    if (/^(?:\/site)?\/shop(\/|$|\?)/.test(href)) {
+        // Same-origin /shop, /shop/, /shop/{sku}, /shop/success, /shop/cancel
+        // (with the /site prefix in preview). Fragment-only /shop#... links
+        // stay in-page anchors.
         e.preventDefault();
         if (location.pathname + location.search !== href) {
             history.pushState({}, '', href);
@@ -2801,6 +2827,34 @@ const SLUG_TO_SKU_PREFIXES = {
     'xicap-vision-pro-spatial-accessory': ['xicap-avp'],
 };
 
+// Shop links keep the render language (and the /site prefix in preview).
+function shopHref(sub) { return SITE_PATH_PREFIX + LANG_PREFIX + '/shop' + (sub || ''); }
+
+// The Japanese storefront shows JPY (whole yen) when a product carries a yen
+// price and falls back to the base USD price otherwise; content follows the
+// same rule for title/description.
+function shopPrice(p) {
+    if (LANG === 'ja' && p.price_jpy > 0) return { amount: p.price_jpy, currency: 'jpy' };
+    return { amount: p.price_cents, currency: p.currency };
+}
+function shopTitle(p) { return (LANG === 'ja' && p.title_ja) ? p.title_ja : p.title; }
+function shopDesc(p) { return (LANG === 'ja' && p.description_md_ja) ? p.description_md_ja : p.description_md; }
+
+// One currency per cart: JPY only when every line item has a yen price.
+function cartCurrencyFor(cart) {
+    const rows = cart.map(r => shopProductBySku.get(r.sku)).filter(Boolean);
+    if (LANG === 'ja' && rows.length && rows.every(p => p.price_jpy > 0)) return 'jpy';
+    return rows[0] ? rows[0].currency : 'usd';
+}
+
+// SKU prefixes key on default-language slugs; a translated page reaches its
+// callout through the page it mirrors.
+function skuSlugFor(slug) {
+    if (SLUG_TO_SKU_PREFIXES[slug]) return slug;
+    const p = pages.find(x => x.slug === slug && (x.lang || '') === LANG);
+    return (p && p.translation_of && SLUG_TO_SKU_PREFIXES[p.translation_of]) ? p.translation_of : null;
+}
+
 // Destinations come from the shop's admin-managed list, fetched once per page.
 let shopCountries = null;
 let shopCountriesPromise = null;
@@ -2816,11 +2870,13 @@ function loadShopCountries() {
     return shopCountriesPromise;
 }
 
-function shopFmtMoney(cents, currency) {
-    const amount = (cents / 100).toFixed(2);
+function shopFmtMoney(amount, currency) {
     const cur = (currency || 'usd').toUpperCase();
-    const sym = { USD: '$', EUR: '€', GBP: '£', JPY: '¥' }[cur] || '';
-    return sym ? sym + amount : amount + ' ' + cur;
+    // JPY amounts are whole yen (zero-decimal), everything else hundredths.
+    if (cur === 'JPY') return '¥' + Math.round(amount).toLocaleString('en-US');
+    const val = (amount / 100).toFixed(2);
+    const sym = { USD: '$', EUR: '€', GBP: '£' }[cur] || '';
+    return sym ? sym + val : val + ' ' + cur;
 }
 
 // ---- Cart state ----
@@ -2834,7 +2890,7 @@ function addToCart(sku, qty) {
     const row = cart.find(r => r.sku === sku);
     if (row) row.qty += qty; else cart.push({ sku, qty });
     setCart(cart);
-    toast('Added to cart', 'success');
+    toast(t('Added to cart'), 'success');
 }
 function setCartQty(sku, qty) {
     qty = parseInt(qty, 10);
@@ -2857,8 +2913,8 @@ function renderCart() {
     const btn = document.getElementById('checkoutBtn');
     if (!body || !btn) return;
     if (!cart.length) {
-        body.innerHTML = '<div class="empty-state" style="padding:32px 12px;">Your cart is empty.</div>';
-        document.getElementById('cartTotal').textContent = shopFmtMoney(0, 'usd');
+        body.innerHTML = '<div class="empty-state" style="padding:32px 12px;">' + escHtml(t('Your cart is empty.')) + '</div>';
+        document.getElementById('cartTotal').textContent = shopFmtMoney(0, LANG === 'ja' ? 'jpy' : 'usd');
         btn.disabled = true;
         const ship = document.getElementById('cartShipRow');
         if (ship) ship.style.display = 'none';
@@ -2866,25 +2922,25 @@ function renderCart() {
     }
     btn.disabled = false;
     let subtotal = 0;
-    let currency = 'usd';
+    const currency = cartCurrencyFor(cart);
     const html = cart.map(r => {
         const p = shopProductBySku.get(r.sku);
         if (!p) {
-            return '<div class="cart-item"><div></div><div>Unknown SKU: ' + escHtml(r.sku) + ' <a href="#" onclick="removeFromCart(\'' + escHtml(r.sku) + '\');return false;">remove</a></div><div></div></div>';
+            return '<div class="cart-item"><div></div><div>Unknown SKU: ' + escHtml(r.sku) + ' <a href="#" onclick="removeFromCart(\'' + escHtml(r.sku) + '\');return false;">' + escHtml(t('remove')) + '</a></div><div></div></div>';
         }
-        subtotal += p.price_cents * r.qty;
-        currency = p.currency;
+        const amount = currency === 'jpy' ? p.price_jpy : p.price_cents;
+        subtotal += amount * r.qty;
         const img = p.image_url ? '<img src="' + escHtml(p.image_url) + '" alt="">' : '';
         return '<div class="cart-item">'
             + '<div class="cart-item-img">' + img + '</div>'
             + '<div>'
-            +   '<div class="cart-item-title">' + escHtml(p.title) + '</div>'
+            +   '<div class="cart-item-title">' + escHtml(shopTitle(p)) + '</div>'
             +   '<div class="cart-item-meta">'
             +     '<input type="number" min="1" value="' + r.qty + '" onchange="setCartQty(\'' + escHtml(r.sku) + '\', this.value)">'
-            +     '<button class="btn danger" onclick="removeFromCart(\'' + escHtml(r.sku) + '\')" style="padding:3px 8px;font-size:12px;">remove</button>'
+            +     '<button class="btn danger" onclick="removeFromCart(\'' + escHtml(r.sku) + '\')" style="padding:3px 8px;font-size:12px;">' + escHtml(t('remove')) + '</button>'
             +   '</div>'
             + '</div>'
-            + '<div class="cart-item-price">' + escHtml(shopFmtMoney(p.price_cents * r.qty, p.currency)) + '</div>'
+            + '<div class="cart-item-price">' + escHtml(shopFmtMoney(amount * r.qty, currency)) + '</div>'
             + '</div>';
     }).join('');
     body.innerHTML = html;
@@ -2929,12 +2985,12 @@ async function checkout() {
     const err = document.getElementById('cartError');
     err.style.display = 'none';
     btn.disabled = true;
-    btn.textContent = 'Redirecting…';
+    btn.textContent = t('Redirecting…');
     try {
         const resp = await fetch(SHOP_API + '/checkout' + siteQ(), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ items: cart, destination_country: country }),
+            body: JSON.stringify({ items: cart, destination_country: country, currency: cartCurrencyFor(cart) }),
         });
         const data = await resp.json().catch(() => ({}));
         if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status));
@@ -2944,7 +3000,7 @@ async function checkout() {
         err.textContent = e.message || 'Checkout failed';
         err.style.display = '';
         btn.disabled = false;
-        btn.textContent = 'Checkout';
+        btn.textContent = t('Checkout');
     }
 }
 
@@ -2968,29 +3024,32 @@ function renderShopGrid() {
     const c = document.getElementById('content');
     const layout = document.getElementById('layout');
     if (layout) layout.classList.add('no-toc');
-    document.title = 'Shop - ' + SITE.name;
+    document.title = t('Shop') + ' - ' + SITE.name;
     renderSidebar();
     if (!shopProducts.length) {
-        c.innerHTML = '<h1>Shop</h1><div class="empty-state"><p>Coming soon.</p></div>';
+        c.innerHTML = '<h1>' + escHtml(t('Shop')) + '</h1><div class="empty-state"><p>' + escHtml(t('Coming soon.')) + '</p></div>';
         return;
     }
     const cards = shopProducts.map(p => {
-        const img = p.image_url ? '<img src="' + escHtml(p.image_url) + '" alt="">' : '<div>no image</div>';
-        return '<a class="shop-card" href="/shop/' + encodeURIComponent(p.sku) + '">'
+        const pr = shopPrice(p);
+        const img = p.image_url ? '<img src="' + escHtml(p.image_url) + '" alt="">' : '<div>' + escHtml(t('no image')) + '</div>';
+        return '<a class="shop-card" href="' + shopHref('/' + encodeURIComponent(p.sku)) + '">'
             + '<div class="shop-card-img">' + img + '</div>'
             + '<div class="shop-card-body">'
-            +   '<div class="shop-card-title">' + escHtml(p.title) + '</div>'
-            +   '<div class="shop-card-price">' + escHtml(shopFmtMoney(p.price_cents, p.currency)) + '</div>'
+            +   '<div class="shop-card-title">' + escHtml(shopTitle(p)) + '</div>'
+            +   '<div class="shop-card-price">' + escHtml(shopFmtMoney(pr.amount, pr.currency)) + '</div>'
             +   '<div class="shop-card-actions">'
-            +     '<button class="btn primary" onclick="event.stopPropagation();event.preventDefault();addToCart(\'' + escHtml(p.sku) + '\', 1)">Add to cart</button>'
+            +     '<button class="btn primary" onclick="event.stopPropagation();event.preventDefault();addToCart(\'' + escHtml(p.sku) + '\', 1)">' + escHtml(t('Add to cart')) + '</button>'
             +   '</div>'
             + '</div>'
             + '</a>';
     }).join('');
-    const intro = SITE.id === 'xikaku'
-        ? 'Order Xikaku sensors directly. Shipped from our Los Angeles office.'
-        : 'Order ' + SITE.name + ' products directly.';
-    c.innerHTML = '<h1>Shop</h1>'
+    const intro = LANG === 'ja'
+        ? t('Order %s products directly.').replace('%s', SITE.name)
+        : (SITE.id === 'xikaku'
+            ? 'Order Xikaku sensors directly. Shipped from our Los Angeles office.'
+            : 'Order ' + SITE.name + ' products directly.');
+    c.innerHTML = '<h1>' + escHtml(t('Shop')) + '</h1>'
         + '<p style="color:var(--text2);">' + escHtml(intro) + '</p>'
         + '<div class="shop-grid">' + cards + '</div>';
 }
@@ -3002,24 +3061,25 @@ function renderShopDetail(sku) {
     if (layout) layout.classList.add('no-toc');
     const p = shopProductBySku.get(sku);
     if (!p) {
-        c.innerHTML = '<h1>Product not found</h1><p><a href="/shop">&larr; Back to shop</a></p>';
+        c.innerHTML = '<h1>' + escHtml(t('Product not found')) + '</h1><p><a href="' + shopHref() + '">&larr; ' + escHtml(t('Back to shop')) + '</a></p>';
         return;
     }
-    document.title = p.title + ' - ' + SITE.name;
+    document.title = shopTitle(p) + ' - ' + SITE.name;
     renderSidebar();
-    const img = p.image_url ? '<img src="' + escHtml(p.image_url) + '" alt="">' : 'no image';
-    const desc = renderMarkdown(p.description_md || '');
+    const pr = shopPrice(p);
+    const img = p.image_url ? '<img src="' + escHtml(p.image_url) + '" alt="">' : escHtml(t('no image'));
+    const desc = renderMarkdown(shopDesc(p) || '');
     c.innerHTML =
-        '<p style="margin-top:0;"><a href="/shop">&larr; Back to shop</a></p>'
+        '<p style="margin-top:0;"><a href="' + shopHref() + '">&larr; ' + escHtml(t('Back to shop')) + '</a></p>'
         + '<div class="shop-detail">'
         +   '<div class="shop-detail-img">' + img + '</div>'
         +   '<div>'
-        +     '<h1 style="margin-top:0;">' + escHtml(p.title) + '</h1>'
-        +     '<p style="font-size:18px;color:var(--text1);margin:0 0 16px;">' + escHtml(shopFmtMoney(p.price_cents, p.currency)) + '</p>'
+        +     '<h1 style="margin-top:0;">' + escHtml(shopTitle(p)) + '</h1>'
+        +     '<p style="font-size:18px;color:var(--text1);margin:0 0 16px;">' + escHtml(shopFmtMoney(pr.amount, pr.currency)) + '</p>'
         +     '<div class="content">' + desc + '</div>'
         +     '<div class="shop-detail-buy">'
         +       '<input id="detailQty" type="number" min="1" value="1">'
-        +       '<button class="btn primary" onclick="addToCart(\'' + escHtml(p.sku) + '\', document.getElementById(\'detailQty\').value)">Add to cart</button>'
+        +       '<button class="btn primary" onclick="addToCart(\'' + escHtml(p.sku) + '\', document.getElementById(\'detailQty\').value)">' + escHtml(t('Add to cart')) + '</button>'
         +     '</div>'
         +   '</div>'
         + '</div>';
@@ -3030,7 +3090,7 @@ function renderShopSuccess() {
     const c = document.getElementById('content');
     const layout = document.getElementById('layout');
     if (layout) layout.classList.add('no-toc');
-    document.title = 'Order placed - ' + SITE.name;
+    document.title = t('Thank you!') + ' - ' + SITE.name;
     renderSidebar();
     const params = new URLSearchParams(location.search);
     const sid = params.get('session_id') || '';
@@ -3043,10 +3103,10 @@ function renderShopSuccess() {
     }
     c.innerHTML =
         '<div class="empty-state" style="padding:80px 20px;">'
-        +   '<h1>Thank you!</h1>'
-        +   '<p>Your order has been placed. A receipt will arrive in your inbox shortly.</p>'
+        +   '<h1>' + escHtml(t('Thank you!')) + '</h1>'
+        +   '<p>' + escHtml(t('Your order has been placed. A receipt will arrive in your inbox shortly.')) + '</p>'
         +   (sid ? '<p style="color:var(--text2);font-size:12px;">Ref: ' + escHtml(sid) + '</p>' : '')
-        +   '<p><a href="/shop">Continue shopping</a> &middot; <a href="/site">Home</a></p>'
+        +   '<p><a href="' + shopHref() + '">' + escHtml(t('Continue shopping')) + '</a> &middot; <a href="' + siteRootHref() + '">' + escHtml(t('Home')) + '</a></p>'
         + '</div>';
 }
 
@@ -3055,13 +3115,13 @@ function renderShopCancel() {
     const c = document.getElementById('content');
     const layout = document.getElementById('layout');
     if (layout) layout.classList.add('no-toc');
-    document.title = 'Checkout cancelled - ' + SITE.name;
+    document.title = t('Checkout cancelled') + ' - ' + SITE.name;
     renderSidebar();
     c.innerHTML =
         '<div class="empty-state" style="padding:80px 20px;">'
-        +   '<h1>Checkout cancelled</h1>'
-        +   '<p>Your cart is still saved. No charge was made.</p>'
-        +   '<p><button class="btn primary" onclick="openCart()">Review cart</button> &nbsp; <a href="/shop">Back to shop</a></p>'
+        +   '<h1>' + escHtml(t('Checkout cancelled')) + '</h1>'
+        +   '<p>' + escHtml(t('Your cart is still saved. No charge was made.')) + '</p>'
+        +   '<p><button class="btn primary" onclick="openCart()">' + escHtml(t('Review cart')) + '</button> &nbsp; <a href="' + shopHref() + '">' + escHtml(t('Back to shop')) + '</a></p>'
         + '</div>';
 }
 
@@ -3077,18 +3137,19 @@ function injectBuyCallout(slug) {
     const c = document.getElementById('content');
     if (!c) return;
     const cards = matches.map(p => {
+        const pr = shopPrice(p);
         const img = p.image_url ? '<img src="' + escHtml(p.image_url) + '" alt="">' : '';
-        return '<a class="buy-card" href="/shop/' + encodeURIComponent(p.sku) + '">'
+        return '<a class="buy-card" href="' + shopHref('/' + encodeURIComponent(p.sku)) + '">'
             + '<div class="buy-card-img">' + img + '</div>'
             + '<div class="buy-card-body">'
-            +   '<div class="buy-card-title">' + escHtml(p.title) + '</div>'
-            +   '<div class="buy-card-price">' + escHtml(shopFmtMoney(p.price_cents, p.currency)) + '</div>'
+            +   '<div class="buy-card-title">' + escHtml(shopTitle(p)) + '</div>'
+            +   '<div class="buy-card-price">' + escHtml(shopFmtMoney(pr.amount, pr.currency)) + '</div>'
             + '</div>'
             + '</a>';
     }).join('');
     c.insertAdjacentHTML('beforeend',
         '<div class="buy-callout">'
-        + '<h2>Available variants</h2>'
+        + '<h2>' + escHtml(t('Available variants')) + '</h2>'
         + '<div class="buy-grid">' + cards + '</div>'
         + '</div>'
     );
@@ -3273,7 +3334,11 @@ function buildContactForm(slot, cfg) {
 // ---- Routing for shop ----
 function shopRouteFromLocation() {
     if (!SITE.has_shop) return null;
-    const path = location.pathname || '';
+    let path = location.pathname || '';
+    // The shop lives at /shop under the render language, and under /site in
+    // the dashboard preview - strip both before matching.
+    if (SITE_PATH_PREFIX && path.startsWith(SITE_PATH_PREFIX)) path = path.slice(SITE_PATH_PREFIX.length);
+    if (LANG_PREFIX && (path === LANG_PREFIX || path.startsWith(LANG_PREFIX + '/'))) path = path.slice(LANG_PREFIX.length);
     if (path === '/shop' || path === '/shop/') return { kind: 'grid' };
     if (path === '/shop/success') return { kind: 'success' };
     if (path === '/shop/cancel') return { kind: 'cancel' };
@@ -3288,6 +3353,16 @@ function shopRouteFromLocation() {
 document.querySelectorAll('a[href="/site"]').forEach(a => {
     a.setAttribute('href', SITE_PATH_PREFIX ? SITE_PATH_PREFIX + LANG_PREFIX + siteQ() : (LANG_PREFIX || '/'));
 });
+
+// Localize the static cart-drawer chrome on translated renders.
+if (LANG) {
+    const set = (sel, s) => { const el = document.querySelector(sel); if (el) el.textContent = t(s); };
+    set('#cartDrawer .cart-head h3', 'Your cart');
+    set('#cartShipRow label', 'Ship to');
+    set('#cartDrawer .cart-total span', 'Subtotal');
+    set('#cartDrawer .cart-hint', 'Tax + shipping calculated at checkout.');
+    set('#checkoutBtn', 'Checkout');
+}
 
 (async () => {
     await resolveAdminStatus();

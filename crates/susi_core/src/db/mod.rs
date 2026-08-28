@@ -679,6 +679,9 @@ impl LicenseDb {
                 active          INTEGER NOT NULL DEFAULT 1,
                 ord             INTEGER NOT NULL DEFAULT 0,
                 updated_at      TEXT NOT NULL,
+                title_ja           TEXT NOT NULL DEFAULT '',
+                description_md_ja  TEXT NOT NULL DEFAULT '',
+                price_jpy          INTEGER NOT NULL DEFAULT 0,
                 UNIQUE(site, sku)
             );
             CREATE INDEX IF NOT EXISTS idx_shop_products_active_ord
@@ -719,7 +722,8 @@ impl LicenseDb {
                 tracking_carrier    TEXT NOT NULL DEFAULT '',
                 tracking_number     TEXT NOT NULL DEFAULT '',
                 shipped_at          TEXT,
-                notes               TEXT NOT NULL DEFAULT ''
+                notes               TEXT NOT NULL DEFAULT '',
+                lang                TEXT NOT NULL DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS idx_shop_orders_status_created
                 ON shop_orders(status, created_at DESC);
@@ -1357,6 +1361,24 @@ impl LicenseDb {
             "ALTER TABLE shop_orders ADD COLUMN site TEXT NOT NULL DEFAULT 'xikaku';",
         );
 
+        // Bilingual shop: Japanese title/description plus a JPY price (whole
+        // yen - JPY is a zero-decimal currency). The Japanese storefront
+        // charges price_jpy; 0 = not offered in JPY, falls back to USD.
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE shop_products ADD COLUMN title_ja TEXT NOT NULL DEFAULT '';",
+        );
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE shop_products ADD COLUMN description_md_ja TEXT NOT NULL DEFAULT '';",
+        );
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE shop_products ADD COLUMN price_jpy INTEGER NOT NULL DEFAULT 0;",
+        );
+        // The storefront language the order was placed in ('' = default);
+        // order emails follow it.
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE shop_orders ADD COLUMN lang TEXT NOT NULL DEFAULT '';",
+        );
+
         // >> Add new migrations as own execute_batch statements here <<
         Ok(())
     }
@@ -1811,6 +1833,7 @@ mod license_listing;
 mod docs;
 mod website;
 mod shop;
+pub use shop::ShopProductRow;
 mod sites;
 mod sessions;
 mod audit;
@@ -3848,7 +3871,7 @@ mod tests {
         db.upsert_website_asset("xikaku", "sensor.png", 123).unwrap();
         db.upsert_website_page("xikaku", "", "intro", "Intro", "![img](sensor.png)", None, 0, "", "page", "", "", "", "", None)
             .unwrap();
-        db.upsert_product("xikaku", "lpms-b2", "LPMS-B2", "", 34900, "usd", Some("sensor.png"), "txcd", true, 0)
+        db.upsert_product("xikaku", "lpms-b2", "LPMS-B2", "", 34900, "usd", Some("sensor.png"), "txcd", true, 0, "", "", 0)
             .unwrap();
 
         let rows = db.list_website_assets_with_usage("xikaku").unwrap();
@@ -4074,8 +4097,9 @@ mod tests {
         let db = LicenseDb::open(&p).unwrap();
         assert_eq!(db.get_product("xikaku", "lpms-b2").unwrap().unwrap().1, "LPMS-B2");
         assert!(db.get_product("lpr", "lpms-b2").unwrap().is_none());
-        db.upsert_product("lpr", "lpms-b2", "LPMS-B2 (LP)", "", 39900, "usd", None, "txcd", true, 0)
+        db.upsert_product("lpr", "lpms-b2", "LPMS-B2 (LP)", "", 39900, "usd", None, "txcd", true, 0, "LPMS-B2（LP）", "", 58000)
             .unwrap();
+        assert_eq!(db.get_product("lpr", "lpms-b2").unwrap().unwrap().12, 58000);
         assert_eq!(db.list_products("xikaku", false).unwrap().len(), 1);
         assert_eq!(db.list_products("lpr", false).unwrap().len(), 1);
         assert_eq!(db.list_shipping_rates("xikaku", false).unwrap().len(), 1);

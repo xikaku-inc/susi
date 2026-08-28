@@ -1,58 +1,64 @@
 use super::*;
 
+/// (sku, title, description_md, price_cents, currency, image_asset, tax_code,
+///  active, ord, updated_at, title_ja, description_md_ja, price_jpy)
+pub type ShopProductRow = (
+    String,
+    String,
+    String,
+    i64,
+    String,
+    Option<String>,
+    String,
+    bool,
+    i64,
+    String,
+    String,
+    String,
+    i64,
+);
+
+const PRODUCT_COLS: &str = "sku, title, description_md, price_cents, currency, image_asset, tax_code, active, ord, updated_at, title_ja, description_md_ja, price_jpy";
+
+fn product_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ShopProductRow> {
+    Ok((
+        r.get::<_, String>(0)?,
+        r.get::<_, String>(1)?,
+        r.get::<_, String>(2)?,
+        r.get::<_, i64>(3)?,
+        r.get::<_, String>(4)?,
+        r.get::<_, Option<String>>(5)?,
+        r.get::<_, String>(6)?,
+        r.get::<_, i64>(7).map(|v| v != 0)?,
+        r.get::<_, i64>(8)?,
+        r.get::<_, String>(9)?,
+        r.get::<_, String>(10)?,
+        r.get::<_, String>(11)?,
+        r.get::<_, i64>(12)?,
+    ))
+}
+
 impl LicenseDb {
     // ---------------------------------------------------------------------
-    // Shop: products
-    //
-    // Tuple layout: (sku, title, description_md, price_cents, currency,
-    //                image_asset, tax_code, active, ord, updated_at)
+    // Shop: products (row layout: see ShopProductRow)
     // ---------------------------------------------------------------------
 
     pub fn list_products(
         &self,
         site: &str,
         active_only: bool,
-    ) -> Result<
-        Vec<(
-            String,
-            String,
-            String,
-            i64,
-            String,
-            Option<String>,
-            String,
-            bool,
-            i64,
-            String,
-        )>,
-        LicenseError,
-    > {
-        let sql = if active_only {
-            "SELECT sku, title, description_md, price_cents, currency, image_asset, tax_code, active, ord, updated_at
-             FROM shop_products WHERE site = ?1 AND active = 1 ORDER BY ord, title"
-        } else {
-            "SELECT sku, title, description_md, price_cents, currency, image_asset, tax_code, active, ord, updated_at
-             FROM shop_products WHERE site = ?1 ORDER BY ord, title"
-        };
+    ) -> Result<Vec<ShopProductRow>, LicenseError> {
+        let sql = format!(
+            "SELECT {} FROM shop_products WHERE site = ?1{} ORDER BY ord, title",
+            PRODUCT_COLS,
+            if active_only { " AND active = 1" } else { "" },
+        );
         let mut stmt = self
             .conn
-            .prepare(sql)
+            .prepare(&sql)
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
         let rows = stmt
-            .query_map(params![site], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, i64>(3)?,
-                    r.get::<_, String>(4)?,
-                    r.get::<_, Option<String>>(5)?,
-                    r.get::<_, String>(6)?,
-                    r.get::<_, i64>(7).map(|v| v != 0)?,
-                    r.get::<_, i64>(8)?,
-                    r.get::<_, String>(9)?,
-                ))
-            })
+            .query_map(params![site], |r| product_row(r))
             .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
             .filter_map(|r| r.ok())
             .collect();
@@ -66,24 +72,7 @@ impl LicenseDb {
         &self,
         site: &str,
         skus: &[String],
-    ) -> Result<
-        std::collections::HashMap<
-            String,
-            (
-                String,
-                String,
-                String,
-                i64,
-                String,
-                Option<String>,
-                String,
-                bool,
-                i64,
-                String,
-            ),
-        >,
-        LicenseError,
-    > {
+    ) -> Result<std::collections::HashMap<String, ShopProductRow>, LicenseError> {
         let mut out = std::collections::HashMap::with_capacity(skus.len());
         if skus.is_empty() {
             return Ok(out);
@@ -94,9 +83,8 @@ impl LicenseDb {
             .collect::<Vec<_>>()
             .join(",");
         let sql = format!(
-            "SELECT sku, title, description_md, price_cents, currency, image_asset, tax_code, active, ord, updated_at
-             FROM shop_products WHERE site = ? AND sku IN ({})",
-            placeholders,
+            "SELECT {} FROM shop_products WHERE site = ? AND sku IN ({})",
+            PRODUCT_COLS, placeholders,
         );
         let mut stmt = self
             .conn
@@ -105,20 +93,7 @@ impl LicenseDb {
         let mut params_iter: Vec<&dyn rusqlite::ToSql> = vec![&site as &dyn rusqlite::ToSql];
         params_iter.extend(skus.iter().map(|s| s as &dyn rusqlite::ToSql));
         let rows = stmt
-            .query_map(&params_iter[..], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, i64>(3)?,
-                    r.get::<_, String>(4)?,
-                    r.get::<_, Option<String>>(5)?,
-                    r.get::<_, String>(6)?,
-                    r.get::<_, i64>(7).map(|v| v != 0)?,
-                    r.get::<_, i64>(8)?,
-                    r.get::<_, String>(9)?,
-                ))
-            })
+            .query_map(&params_iter[..], |r| product_row(r))
             .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?;
         for row in rows.flatten() {
             out.insert(row.0.clone(), row);
@@ -130,37 +105,11 @@ impl LicenseDb {
         &self,
         site: &str,
         sku: &str,
-    ) -> Result<
-        Option<(
-            String,
-            String,
-            String,
-            i64,
-            String,
-            Option<String>,
-            String,
-            bool,
-            i64,
-            String,
-        )>,
-        LicenseError,
-    > {
+    ) -> Result<Option<ShopProductRow>, LicenseError> {
         match self.conn.query_row(
-            "SELECT sku, title, description_md, price_cents, currency, image_asset, tax_code, active, ord, updated_at
-             FROM shop_products WHERE site = ?1 AND sku = ?2",
+            &format!("SELECT {} FROM shop_products WHERE site = ?1 AND sku = ?2", PRODUCT_COLS),
             params![site, sku],
-            |r| Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, i64>(3)?,
-                r.get::<_, String>(4)?,
-                r.get::<_, Option<String>>(5)?,
-                r.get::<_, String>(6)?,
-                r.get::<_, i64>(7).map(|v| v != 0)?,
-                r.get::<_, i64>(8)?,
-                r.get::<_, String>(9)?,
-            )),
+            |r| product_row(r),
         ) {
             Ok(row) => Ok(Some(row)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -181,12 +130,15 @@ impl LicenseDb {
         tax_code: &str,
         active: bool,
         ord: i64,
+        title_ja: &str,
+        description_md_ja: &str,
+        price_jpy: i64,
     ) -> Result<(), LicenseError> {
         let now = Utc::now().to_rfc3339();
         self.conn.execute(
             "INSERT INTO shop_products
-               (site, sku, title, description_md, price_cents, currency, image_asset, tax_code, active, ord, updated_at)
-             VALUES (?11, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+               (site, sku, title, description_md, price_cents, currency, image_asset, tax_code, active, ord, updated_at, title_ja, description_md_ja, price_jpy)
+             VALUES (?11, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?12, ?13, ?14)
              ON CONFLICT(site, sku) DO UPDATE SET
                title = excluded.title,
                description_md = excluded.description_md,
@@ -196,10 +148,14 @@ impl LicenseDb {
                tax_code = excluded.tax_code,
                active = excluded.active,
                ord = excluded.ord,
-               updated_at = excluded.updated_at",
+               updated_at = excluded.updated_at,
+               title_ja = excluded.title_ja,
+               description_md_ja = excluded.description_md_ja,
+               price_jpy = excluded.price_jpy",
             params![
                 sku, title, description_md, price_cents, currency,
                 image_asset, tax_code, active as i64, ord, now, site,
+                title_ja, description_md_ja, price_jpy,
             ],
         )
         .map_err(|e| LicenseError::Other(format!("DB upsert product: {}", e)))?;
@@ -361,6 +317,7 @@ impl LicenseDb {
     pub fn insert_order_if_absent(
         &self,
         site: &str,
+        lang: &str,
         stripe_session_id: &str,
         created_at: &str,
         customer_email: &str,
@@ -375,9 +332,9 @@ impl LicenseDb {
             .conn
             .execute(
                 "INSERT OR IGNORE INTO shop_orders
-               (site, stripe_session_id, created_at, customer_email, customer_name,
+               (site, lang, stripe_session_id, created_at, customer_email, customer_name,
                 amount_total_cents, currency, status, ship_to_json, line_items_json)
-             VALUES (?10, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             VALUES (?10, ?11, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     stripe_session_id,
                     created_at,
@@ -389,6 +346,7 @@ impl LicenseDb {
                     ship_to_json,
                     line_items_json,
                     site,
+                    lang,
                 ],
             )
             .map_err(|e| LicenseError::Other(format!("DB insert order: {}", e)))?;
@@ -445,6 +403,7 @@ impl LicenseDb {
             String,
             Option<String>,
             String,
+            String,
         )>,
         LicenseError,
     > {
@@ -452,7 +411,7 @@ impl LicenseDb {
             (
                 "SELECT id, stripe_session_id, created_at, customer_email, customer_name,
                         amount_total_cents, currency, status, ship_to_json, line_items_json,
-                        tracking_carrier, tracking_number, shipped_at, notes
+                        tracking_carrier, tracking_number, shipped_at, notes, lang
                  FROM shop_orders WHERE site = ?1 AND status = ?2 ORDER BY created_at DESC, id DESC",
                 true,
             )
@@ -460,7 +419,7 @@ impl LicenseDb {
             (
                 "SELECT id, stripe_session_id, created_at, customer_email, customer_name,
                         amount_total_cents, currency, status, ship_to_json, line_items_json,
-                        tracking_carrier, tracking_number, shipped_at, notes
+                        tracking_carrier, tracking_number, shipped_at, notes, lang
                  FROM shop_orders WHERE site = ?1 ORDER BY created_at DESC, id DESC",
                 false,
             )
@@ -485,6 +444,7 @@ impl LicenseDb {
                 r.get::<_, String>(11)?,
                 r.get::<_, Option<String>>(12)?,
                 r.get::<_, String>(13)?,
+                r.get::<_, String>(14)?,
             ))
         };
         let rows: Vec<_> = if has_filter {
@@ -522,13 +482,14 @@ impl LicenseDb {
             String,
             Option<String>,
             String,
+            String,
         )>,
         LicenseError,
     > {
         match self.conn.query_row(
             "SELECT id, stripe_session_id, created_at, customer_email, customer_name,
                     amount_total_cents, currency, status, ship_to_json, line_items_json,
-                    tracking_carrier, tracking_number, shipped_at, notes
+                    tracking_carrier, tracking_number, shipped_at, notes, lang
              FROM shop_orders WHERE site = ?1 AND id = ?2",
             params![site, id],
             |r| {
@@ -547,6 +508,7 @@ impl LicenseDb {
                     r.get::<_, String>(11)?,
                     r.get::<_, Option<String>>(12)?,
                     r.get::<_, String>(13)?,
+                    r.get::<_, String>(14)?,
                 ))
             },
         ) {

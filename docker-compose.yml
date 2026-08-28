@@ -49,9 +49,14 @@ services:
       # Empty disables the relay (members fall back to FUSIONHUB_RELAY_URL
       # set locally on each member, or direct TCP only).
       - SUSI_RELAY_URL=${SUSI_RELAY_URL:-}
-      # Shop / Stripe (keys live in /opt/susi/.env on the host)
+      # Shop / Stripe (keys live in /opt/susi/.env on the host). Bare keys =
+      # the default site (xikaku); the LPR shop runs on its own Stripe account.
       - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY:-}
       - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET:-}
+      # The shared .env carries _LIVE and _TEST variants so the sandbox key
+      # can never reach production (staging maps the _TEST ones).
+      - STRIPE_SECRET_KEY_LPR=${STRIPE_SECRET_KEY_LPR_LIVE:-}
+      - STRIPE_WEBHOOK_SECRET_LPR=${STRIPE_WEBHOOK_SECRET_LPR_LIVE:-}
       - SUSI_SHOP_BASE_URL=${SUSI_SHOP_BASE_URL:-}
       - SUSI_SHOP_NOTIFY_ADDR=${SUSI_SHOP_NOTIFY_ADDR:-}
       # Contact form (empty contact-to-addr disables; turnstile keys optional)

@@ -3,6 +3,7 @@ mod docs;
 mod sites;
 mod website;
 mod email;
+mod email_md;
 mod shop;
 mod invoice_pdf;
 mod contact;
@@ -3603,7 +3604,8 @@ async fn main() -> Result<()> {
         .route("/shop", get(shop::handle_shop_page))
         .route("/shop/success", get(shop::handle_shop_page))
         .route("/shop/cancel", get(shop::handle_shop_page))
-        .route("/shop/{sku}", get(shop::handle_shop_page))
+        .route("/shop/feed.xml", get(shop::handle_shop_feed))
+        .route("/shop/{sku}", get(shop::handle_shop_product_page))
         // Public JSON API
         .route("/api/v1/shop/products", get(shop::handle_list_products))
         .route("/api/v1/shop/shipping_countries", get(shop::handle_list_shipping_countries))
@@ -3646,6 +3648,14 @@ async fn main() -> Result<()> {
             "/api/v1/shop/admin/settings",
             get(shop::handle_admin_get_settings)
                 .put(shop::handle_admin_put_settings),
+        )
+        .route(
+            "/api/v1/shop/admin/email_preview",
+            post(shop::handle_admin_email_preview),
+        )
+        .route(
+            "/api/v1/shop/admin/email_test",
+            post(shop::handle_admin_email_test),
         )
         // Site-wide settings (JWT) - analytics IDs and other site-level config.
         .route(

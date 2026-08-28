@@ -86,8 +86,10 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 - No explanatory text in the UI. Don't add a sentence under a form, a dialog, or a setting explaining what it does or where the value shows up. Only add one when I explicitly ask for it.
 - No placeholder hint text inside form inputs. The label already says what the field is. An edit dialog still loads the record's current values - that is the value, not a hint.
 
-# Customer-facing email style (all transactional email from susi)
-- Sign emails with "Xikaku / LP-Research", not "Susi".
+# Customer-facing email style (all transactional email from susi, except newsletter)
+- Sign emails with "Xikaku / LP-Research", not "Susi". Shop order emails sign as "- The {site name} team".
 - Refer to the product as "Susi by LP-Research" where the context could otherwise leave a customer thinking Susi is a separate company.
 - Keep body text in a single black color. Avoid grey (#5c6470 etc.) on paragraphs and table labels - it reads as a third tier the customer doesn't need.
+- One standard font size (14px) for everything except the single top heading (22px). No small print sizes.
+- Brand logo centered at the top, large (72px tall) - small logos render the LP-Research wordmark illegible.
 - Match the sign-in-code email layout (centered heading, table for key/value pairs, primary CTA button, fallback paste-link) for new transactional emails.

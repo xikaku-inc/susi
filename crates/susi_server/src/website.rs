@@ -83,7 +83,7 @@ impl SiteQuery {
 
 /// The effective content language of a request: one of the site's declared
 /// extra languages, or "" for the default.
-fn resolve_lang(site: &SiteConfig, sq: &SiteQuery) -> String {
+pub(crate) fn resolve_lang(site: &SiteConfig, sq: &SiteQuery) -> String {
     match sq.lang.as_deref() {
         Some(l) if site.langs.contains(&l) => l.to_string(),
         _ => String::new(),
@@ -2005,7 +2005,7 @@ fn render_seo_head(
     updated_at: &str,
     og_image_override: Option<&str>,
     pages: &[PageRow],
-    products: &[(String, String, String, i64, String, Option<String>, String, bool, i64, String)],
+    products: &[susi_core::db::ShopProductRow],
     post_published: Option<&str>,
     post_author: Option<&str>,
 ) -> String {
@@ -2100,7 +2100,7 @@ fn render_seo_head(
     // like `lpms-curs3` matches every shop product whose SKU starts with the
     // slug (e.g., lpms-curs3-can, lpms-curs3-rs232) so the page describes the
     // family with one Offer per variant.
-    let product_blocks = build_product_jsonld(site, slug, products);
+    let product_blocks = build_product_jsonld(site, lang, slug, products);
 
     // Per-page hero image keeps standard 1200x630 dimensions only when we
     // fall back to the bundled site card; for body-derived images we omit
@@ -2178,44 +2178,76 @@ fn render_seo_head(
 /// so non-product pages render no extra schema.
 fn build_product_jsonld(
     site: &SiteConfig,
+    lang: &str,
     slug: &str,
-    products: &[(String, String, String, i64, String, Option<String>, String, bool, i64, String)],
+    products: &[susi_core::db::ShopProductRow],
 ) -> Vec<String> {
     let mut out = Vec::new();
     if !site.has_shop {
         return out;
     }
-    for (sku, title, desc_md, price_cents, currency, image_url, _tax, active, _ord, _upd) in products {
-        if !active { continue; }
-        let sku_lc = sku.to_lowercase();
+    for row in products {
+        if !row.7 { continue; }
+        let sku_lc = row.0.to_lowercase();
         let slug_lc = slug.to_lowercase();
         if sku_lc != slug_lc && !sku_lc.starts_with(&format!("{}-", slug_lc)) { continue; }
-        let price = format!("{}.{:02}", price_cents / 100, (price_cents % 100).abs());
-        let cur_upper = currency.to_uppercase();
-        let desc = derive_description(desc_md);
-        let img = image_url.as_deref().filter(|s| !s.is_empty()).map(|s| {
-            if s.starts_with("http://") || s.starts_with("https://") {
-                s.to_string()
-            } else if s.starts_with('/') {
-                format!("{}{}", site.public_base, s)
-            } else {
-                format!("{}/{}", site.public_base, s)
-            }
-        }).unwrap_or_else(|| site.og_image_url.to_string());
-        out.push(format!(
-            r#"{{"@context":"https://schema.org","@type":"Product","name":"{name}","description":"{desc}","sku":"{sku}","brand":{{"@type":"Brand","name":"{brand}"}},"image":"{img}","offers":{{"@type":"Offer","price":"{price}","priceCurrency":"{cur}","availability":"https://schema.org/InStock","url":"{url}","seller":{{"@type":"Organization","name":"{brand}","url":"{base}"}}}}}}"#,
-            name = html_escape(title),
-            desc = html_escape(&desc),
-            sku = html_escape(sku),
-            brand = html_escape(site.name),
-            img = html_escape(&img),
-            price = price,
-            cur = html_escape(&cur_upper),
-            url = html_escape(&format!("{}/shop/{}", site.public_base, sku)),
-            base = html_escape(site.public_base),
-        ));
+        if let Some(block) = product_jsonld_block(site, lang, row) {
+            out.push(block);
+        }
     }
     out
+}
+
+/// One Product JSON-LD block in the given content language: ja uses the
+/// Japanese title/description and the JPY price. Returns None when the
+/// product has no price in the language's currency.
+pub(crate) fn product_jsonld_block(
+    site: &SiteConfig,
+    lang: &str,
+    row: &susi_core::db::ShopProductRow,
+) -> Option<String> {
+    let (sku, title_en, desc_md_en, price_cents, currency, image_asset, _tax, _active, _ord, _upd, title_ja, desc_md_ja, price_jpy) = row;
+    let ja = lang == "ja";
+    let title = if ja && !title_ja.trim().is_empty() { title_ja } else { title_en };
+    let desc_md = if ja && !desc_md_ja.trim().is_empty() { desc_md_ja } else { desc_md_en };
+    let (price, cur) = if ja {
+        if *price_jpy <= 0 { return None; }
+        (price_jpy.to_string(), "JPY".to_string())
+    } else {
+        if *price_cents <= 0 { return None; }
+        (format!("{}.{:02}", price_cents / 100, (price_cents % 100).abs()), currency.to_uppercase())
+    };
+    let avail = if title_en.to_ascii_lowercase().contains("pre-order") {
+        "https://schema.org/PreOrder"
+    } else {
+        "https://schema.org/InStock"
+    };
+    let img = product_image_abs_url(site, image_asset.as_deref());
+    Some(format!(
+        r#"{{"@context":"https://schema.org","@type":"Product","name":"{name}","description":"{desc}","sku":"{sku}","brand":{{"@type":"Brand","name":"{brand}"}},"image":"{img}","offers":{{"@type":"Offer","price":"{price}","priceCurrency":"{cur}","availability":"{avail}","url":"{url}","seller":{{"@type":"Organization","name":"{brand}","url":"{base}"}}}}}}"#,
+        name = html_escape(title),
+        desc = html_escape(&derive_description(desc_md)),
+        sku = html_escape(sku),
+        brand = html_escape(site.name),
+        img = html_escape(&img),
+        price = price,
+        cur = html_escape(&cur),
+        avail = avail,
+        url = html_escape(&format!("{}{}/shop/{}", site.public_base, lang_prefix(lang), sku)),
+        base = html_escape(site.public_base),
+    ))
+}
+
+/// Absolute product image URL: pass through absolute URLs, resolve rooted
+/// paths against the site base, and treat a bare name as an uploaded website
+/// asset. Falls back to the site's OG card when the product has no image.
+pub(crate) fn product_image_abs_url(site: &SiteConfig, image_asset: Option<&str>) -> String {
+    match image_asset.filter(|s| !s.is_empty()) {
+        Some(s) if s.starts_with("http://") || s.starts_with("https://") => s.to_string(),
+        Some(s) if s.starts_with('/') => format!("{}{}", site.public_base, s),
+        Some(s) => format!("{}/api/v1/website/assets/{}", site.public_base, s),
+        None => site.og_image_url.to_string(),
+    }
 }
 
 pub async fn handle_website_render_root(
@@ -2232,11 +2264,15 @@ pub async fn handle_website_render_slug(
     Query(sq): Query<SiteQuery>,
     Path(slug): Path<String>,
 ) -> axum::response::Response {
-    // /site/{lang} is a translation's home page, not a slug.
+    // /site/{lang} is a translation's home page, not a slug; /site/shop is
+    // the storefront (the marketing nginx rewrites clean /shop here).
     if let Ok(site) = resolve_site(&headers, &sq) {
         if site.langs.contains(&slug.as_str()) {
             let sq2 = SiteQuery { site: sq.site.clone(), page: sq.page, lang: Some(slug) };
             return render_website(&state, &headers, &sq2, None, false);
+        }
+        if slug == "shop" && site.has_shop {
+            return crate::shop::shop_shell_response(&state, site, "", "");
         }
     }
     render_website(&state, &headers, &sq, Some(slug), false)
@@ -2589,7 +2625,7 @@ fn render_blog_index(
     site: &SiteConfig,
     lang: &str,
     pages: &[PageRow],
-    products: &[(String, String, String, i64, String, Option<String>, String, bool, i64, String)],
+    products: &[susi_core::db::ShopProductRow],
     page_num: usize,
 ) -> Bytes {
     let row = {
@@ -2760,7 +2796,7 @@ fn render_newsletter_index(
     state: &Arc<AppState>,
     site: &SiteConfig,
     pages: &[PageRow],
-    products: &[(String, String, String, i64, String, Option<String>, String, bool, i64, String)],
+    products: &[susi_core::db::ShopProductRow],
 ) -> Bytes {
     let (row, issues) = {
         let db = state.db.lock();
@@ -3683,12 +3719,27 @@ pub async fn handle_website_render_path(
         Ok(s) => s,
         Err(e) => return e.into_response(),
     };
+    // The nginx catch-all rewrites clean marketing URLs into /site/..., so
+    // shop paths (and their /{lang}/ translations) surface here rather than
+    // on the top-level /shop routes.
+    if site.has_shop && head == "shop" && rest == "feed.xml" {
+        return crate::shop::shop_feed_response(&state, site, "");
+    }
+    if site.has_shop && (head == "shop" && !rest.contains('/')) {
+        return crate::shop::shop_shell_response(&state, site, "", &rest);
+    }
     // /site/{lang}/... serves the translation: the same URL space as the
     // default language, one segment deeper. Deeper paths fall through to the
     // redirect map (WordPress-era /ja/... permalinks).
     if site.langs.contains(&head.as_str()) {
         let rest = rest.trim_end_matches('/');
         let sq2 = SiteQuery { site: sq.site.clone(), page: sq.page, lang: Some(head.clone()) };
+        if site.has_shop && rest == "shop/feed.xml" {
+            return crate::shop::shop_feed_response(&state, site, &head);
+        }
+        if site.has_shop && (rest == "shop" || (rest.strip_prefix("shop/").is_some_and(|s| !s.contains('/')))) {
+            return crate::shop::shop_shell_response(&state, site, &head, rest.strip_prefix("shop/").unwrap_or(""));
+        }
         if rest == "blog/rss.xml" {
             return handle_blog_rss(State(state), headers, Query(sq2)).await.into_response();
         }

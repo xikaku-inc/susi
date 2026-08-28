@@ -148,10 +148,8 @@ fn shop_configured(state: &AppState, site: &SiteConfig) -> Result<(), (StatusCod
     Ok(())
 }
 
-fn product_to_json(
-    row: (String, String, String, i64, String, Option<String>, String, bool, i64, String),
-) -> Value {
-    let (sku, title, description_md, price_cents, currency, image_asset, tax_code, active, ord, updated_at) = row;
+fn product_to_json(row: susi_core::db::ShopProductRow) -> Value {
+    let (sku, title, description_md, price_cents, currency, image_asset, tax_code, active, ord, updated_at, title_ja, description_md_ja, price_jpy) = row;
     json!({
         "sku": sku,
         "title": title,
@@ -164,6 +162,9 @@ fn product_to_json(
         "active": active,
         "ord": ord,
         "updated_at": updated_at,
+        "title_ja": title_ja,
+        "description_md_ja": description_md_ja,
+        "price_jpy": price_jpy,
     })
 }
 
@@ -273,6 +274,15 @@ pub struct CheckoutRequest {
     pub items: Vec<CheckoutItem>,
     #[serde(default)]
     pub destination_country: String,
+    // "jpy" charges each item's price_jpy (Japanese storefront); anything
+    // else charges the base price in the product's own currency.
+    #[serde(default)]
+    pub currency: String,
+}
+
+/// Whole-unit currencies: Stripe amounts are NOT in hundredths for these.
+fn zero_decimal(currency: &str) -> bool {
+    currency.eq_ignore_ascii_case("jpy")
 }
 
 /// Region match - `*` is a wildcard for "any country".
@@ -418,26 +428,44 @@ pub async fn handle_create_checkout_session(
         db.get_products_by_skus(site.id, &skus).map_err(db_err)?
     };
 
-    // Look up each SKU, never trust client-supplied price.
-    let mut resolved: Vec<(String, String, i64, String, String, i64)> = Vec::with_capacity(req.items.len()); // sku, title, price_cents, currency, tax_code, qty
+    // Look up each SKU, never trust client-supplied price. The client only
+    // picks the currency ("jpy" on the Japanese storefront); prices always
+    // come from the DB. Line items keep the English title - Stripe's checkout
+    // chrome localizes via `locale`, and the invoice PDF's built-in fonts
+    // cannot render Japanese.
+    let want_jpy = req.currency.eq_ignore_ascii_case("jpy");
+    let mut resolved: Vec<(String, String, i64, String, String, i64)> = Vec::with_capacity(req.items.len()); // sku, title, amount, currency, tax_code, qty
     let mut cart_currency: Option<String> = None;
     for item in &req.items {
         let row = products
             .get(&item.sku)
             .ok_or_else(|| error_response(StatusCode::BAD_REQUEST, &format!("Unknown SKU: {}", item.sku)))?;
-        let (sku, title, _desc, price_cents, currency, _img, tax_code, active, _ord, _upd) = row;
+        let (sku, title, _desc, price_cents, currency, _img, tax_code, active, _ord, _upd, _tja, _dja, price_jpy) = row;
         if !*active {
             return Err(error_response(StatusCode::BAD_REQUEST, &format!("Product is unavailable: {}", sku)));
         }
+        let (amount, cur) = if want_jpy {
+            if *price_jpy <= 0 {
+                return Err(error_response(
+                    StatusCode::BAD_REQUEST,
+                    &format!("Not available in JPY: {}", sku),
+                ));
+            }
+            // price_jpy is whole yen; JPY is zero-decimal, so it goes to
+            // Stripe as-is.
+            (*price_jpy, "jpy".to_string())
+        } else {
+            (*price_cents, currency.clone())
+        };
         match &cart_currency {
-            None => cart_currency = Some(currency.clone()),
-            Some(c) if c.eq_ignore_ascii_case(currency) => {}
+            None => cart_currency = Some(cur.clone()),
+            Some(c) if c.eq_ignore_ascii_case(&cur) => {}
             Some(c) => return Err(error_response(
                 StatusCode::BAD_REQUEST,
-                &format!("Mixed currencies in cart: {} vs {}", c, currency),
+                &format!("Mixed currencies in cart: {} vs {}", c, cur),
             )),
         }
-        resolved.push((sku.clone(), title.clone(), *price_cents, currency.clone(), tax_code.clone(), item.qty));
+        resolved.push((sku.clone(), title.clone(), amount, cur, tax_code.clone(), item.qty));
     }
     let cart_currency = cart_currency.unwrap_or_else(|| "usd".to_string());
 
@@ -464,10 +492,18 @@ pub async fn handle_create_checkout_session(
     // Stamp the owning site so the order stays attributable in the Stripe
     // dashboard even across exports.
     form.push(("metadata[site]".into(), site.id.to_string()));
+    // A translated storefront localizes the Stripe checkout chrome too.
+    let lang = crate::website::resolve_lang(site, &sq);
+    if !lang.is_empty() {
+        form.push(("locale".into(), lang.clone()));
+        form.push(("metadata[lang]".into(), lang.clone()));
+    }
 
+    // Return the customer to the storefront in the language they bought in.
     let base = shop_base_for(&state, site, &headers);
-    let success = format!("{}/shop/success?session_id={{CHECKOUT_SESSION_ID}}", base.trim_end_matches('/'));
-    let cancel = format!("{}/shop/cancel", base.trim_end_matches('/'));
+    let lang_seg = if lang.is_empty() { String::new() } else { format!("/{}", lang) };
+    let success = format!("{}{}/shop/success?session_id={{CHECKOUT_SESSION_ID}}", base.trim_end_matches('/'), lang_seg);
+    let cancel = format!("{}{}/shop/cancel", base.trim_end_matches('/'), lang_seg);
     form.push(("success_url".into(), success));
     form.push(("cancel_url".into(), cancel));
 
@@ -674,6 +710,12 @@ pub async fn handle_stripe_webhook(
         .map_err(|e| error_response(StatusCode::BAD_REQUEST, &format!("Bad JSON: {}", e)))?;
     let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
     log::info!("Stripe webhook received: {}", event_type);
+    // The storefront language the order was placed in (checkout stamps it).
+    let meta_lang = event
+        .pointer("/data/object/metadata/lang")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let lang = order_email_lang(site, meta_lang).to_string();
 
     match event_type {
         "checkout.session.completed" => {
@@ -689,7 +731,7 @@ pub async fn handle_stripe_webhook(
                 .unwrap_or("");
             let settled = matches!(payment_status, "paid" | "no_payment_required");
             let status = if settled { "paid" } else { "pending_payment" };
-            let persisted = persist_order_from_event(&state, site, &event, status).await;
+            let persisted = persist_order_from_event(&state, site, &lang, &event, status).await;
             if !settled {
                 log::info!(
                     "Checkout session completed with payment_status={} - order recorded as pending_payment, awaiting settlement",
@@ -706,14 +748,14 @@ pub async fn handle_stripe_webhook(
                 log::info!("Stripe webhook retry for already-recorded session - skipping emails");
                 return Ok(Json(json!({ "received": true, "duplicate": true })));
             }
-            send_order_notifications(&state, site, &event, order_id).await;
+            send_order_notifications(&state, site, &lang, &event, order_id).await;
         }
         "checkout.session.async_payment_succeeded" => {
             // A delayed payment settled. The conditional pending->paid
             // transition makes the email side effects run exactly once across
             // retries; insert-if-absent first covers a session whose
             // completed event was never delivered.
-            let persisted = persist_order_from_event(&state, site, &event, "paid").await;
+            let persisted = persist_order_from_event(&state, site, &lang, &event, "paid").await;
             let order_id = persisted.map(|(id, _)| id);
             let inserted = persisted.map(|(_, ins)| ins).unwrap_or(false);
             let session_id = event
@@ -726,7 +768,7 @@ pub async fn handle_stripe_webhook(
                     .unwrap_or(false)
             };
             if inserted || flipped {
-                send_order_notifications(&state, site, &event, order_id).await;
+                send_order_notifications(&state, site, &lang, &event, order_id).await;
             } else {
                 log::info!("async_payment_succeeded retry for already-paid session - skipping emails");
             }
@@ -760,6 +802,7 @@ pub async fn handle_stripe_webhook(
 async fn send_order_notifications(
     state: &Arc<AppState>,
     site: &'static SiteConfig,
+    lang: &str,
     event: &Value,
     order_id: Option<i64>,
 ) {
@@ -881,12 +924,13 @@ async fn send_order_notifications(
                 .to_string();
             if let Some(svc) = state.email.clone() {
                 if !customer_email.is_empty() {
-                    let (subject, text, html) =
-                        build_customer_confirmation(&state, site, &event, &line_items, order_id);
+                    let (subject, md) =
+                        build_customer_confirmation(&state, site, &event, &line_items, order_id, lang);
+                    let doc = crate::email_md::render(&md, Some((LOGO_CID, site.name)));
                     let inline = vec![logo_inline_image(site)];
                     let attachments: Vec<EmailAttachment> = pdf_attachment.into_iter().collect();
                     tokio::spawn(async move {
-                        let res = svc.send_html_rich(&customer_email, &subject, &text, &html, &inline, &attachments, Some(&sender)).await;
+                        let res = svc.send_html_rich(&customer_email, &subject, &doc.text, &doc.html, &inline, &attachments, Some(&sender)).await;
                         if let Err(e) = res {
                             log::error!("Failed to send customer confirmation to {}: {}", customer_email, e);
                         }
@@ -947,9 +991,184 @@ fn invoice_prefix(site: &SiteConfig) -> String {
 // Settings - well-known keys and lookup helpers
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Email templates
+//
+// The customer-facing shop emails are markdown templates (email_md): a
+// per-shop override lives in shop_settings (email_order_confirmation[_ja],
+// email_order_shipped[_ja]); an empty override falls back to the built-in
+// default below. Variables are {name} tokens; a line whose variable resolves
+// empty is dropped (email_md::apply_template).
+// ---------------------------------------------------------------------------
+
+const SETTING_TPL_CONFIRMATION: &str = "email_order_confirmation";
+const SETTING_TPL_CONFIRMATION_JA: &str = "email_order_confirmation_ja";
+const SETTING_TPL_SHIPPED: &str = "email_order_shipped";
+const SETTING_TPL_SHIPPED_JA: &str = "email_order_shipped_ja";
+
+const VARS_CONFIRMATION: &[&str] = &["order", "date", "name", "site", "items", "totals", "addresses", "shipping_note", "support"];
+const VARS_SHIPPED: &[&str] = &["order", "name", "site", "shipment", "tracking_button", "items", "total"];
+
+const TPL_CONFIRMATION_EN: &str = "# Thank you for your order\n\nOrder {order} · {date}\n\nHi {name},\n\nThanks for your purchase from {site} - we've received your order and are getting it ready.\n\n## Items\n\n{items}\n\n{totals}\n\n{addresses}\n\nA PDF invoice is attached to this email for your records.\n\n{shipping_note}\n\nQuestions? Reach us at [{support}](mailto:{support}).\n\n\\- The {site} team\n";
+
+const TPL_CONFIRMATION_JA: &str = "# ご注文ありがとうございます\n\nご注文 {order} · {date}\n\n{name} 様\n\n{site}をご利用いただきありがとうございます。ご注文を承りました。\n\n## ご注文内容\n\n{items}\n\n{totals}\n\n{addresses}\n\n請求書（PDF）をこのメールに添付しています。\n\n{shipping_note}\n\nご不明な点は [{support}](mailto:{support}) までお問い合わせください。\n\n\\- {site}チーム\n";
+
+const TPL_SHIPPED_EN: &str = "# Your order has shipped\n\nOrder {order}\n\nHi {name},\n\n{shipment}\n\n{tracking_button}\n\n## Items shipped\n\n{items}\n\nOrder total: {total}\n\nThanks for buying from {site}!\n\n\\- The {site} team\n";
+
+const TPL_SHIPPED_JA: &str = "# 商品を発送しました\n\nご注文 {order}\n\n{name} 様\n\n{shipment}\n\n{tracking_button}\n\n## 発送した商品\n\n{items}\n\nご注文合計: {total}\n\n{site}をご利用いただきありがとうございます！\n\n\\- {site}チーム\n";
+
+/// Chrome strings the template variables carry, localized per order language.
+fn tr(lang: &str, en: &'static str) -> &'static str {
+    if lang != "ja" {
+        return en;
+    }
+    match en {
+        "Subtotal" => "小計",
+        "Shipping" => "送料",
+        "Tax" => "税金",
+        "Total" => "合計",
+        "Ship to" => "お届け先",
+        "Bill to" => "請求先",
+        "Carrier" => "配送業者",
+        "Tracking" => "追跡番号",
+        "Track shipment" => "荷物を追跡",
+        "there" => "お客様",
+        "(item details unavailable)" => "（商品明細を取得できませんでした）",
+        _ => en,
+    }
+}
+
+fn template_key(base: &str, lang: &str) -> &'static str {
+    match (base, lang) {
+        (SETTING_TPL_CONFIRMATION, "ja") => SETTING_TPL_CONFIRMATION_JA,
+        (SETTING_TPL_CONFIRMATION, _) => SETTING_TPL_CONFIRMATION,
+        (_, "ja") => SETTING_TPL_SHIPPED_JA,
+        _ => SETTING_TPL_SHIPPED,
+    }
+}
+
+fn default_template(base: &str, lang: &str) -> &'static str {
+    match (base, lang) {
+        (SETTING_TPL_CONFIRMATION, "ja") => TPL_CONFIRMATION_JA,
+        (SETTING_TPL_CONFIRMATION, _) => TPL_CONFIRMATION_EN,
+        (_, "ja") => TPL_SHIPPED_JA,
+        _ => TPL_SHIPPED_EN,
+    }
+}
+
+fn effective_template(state: &AppState, site: &SiteConfig, base: &str, lang: &str) -> String {
+    let stored = get_setting_str(state, site, template_key(base, lang));
+    if stored.trim().is_empty() {
+        default_template(base, lang).to_string()
+    } else {
+        stored
+    }
+}
+
+/// The language an order's emails are written in: one the site declares, or
+/// the default.
+fn order_email_lang<'a>(site: &SiteConfig, lang: &'a str) -> &'a str {
+    if site.langs.iter().any(|l| *l == lang) {
+        lang
+    } else {
+        ""
+    }
+}
+
+fn shipping_note(site: &SiteConfig, lang: &str, has_preorder: bool) -> String {
+    if lang == "ja" {
+        if has_preorder {
+            "ご注文には予約商品が含まれており、商品欄に記載の時期に発送予定です。発送が完了しましたら、追跡番号をお知らせするメールをお送りします。".into()
+        } else {
+            "ただいま発送の準備を進めています。発送が完了しましたら、追跡番号をお知らせするメールをお送りします。".into()
+        }
+    } else {
+        let origin = if site.id == DEFAULT_SITE_ID { " from our Los Angeles office" } else { "" };
+        if has_preorder {
+            format!("Your order includes a pre-order item and will ship within the window shown next to the item. We'll send another email with your tracking number as soon as it ships{}.", origin)
+        } else {
+            format!("We're processing your order now. You'll get a second email with your tracking number once it ships{}.", origin)
+        }
+    }
+}
+
+fn confirmation_vars(
+    state: &AppState,
+    site: &SiteConfig,
+    event: &Value,
+    line_items: &[Value],
+    order_id: Option<i64>,
+    lang: &str,
+) -> Vec<(&'static str, String)> {
+    let obj = event.pointer("/data/object").cloned().unwrap_or(Value::Null);
+    let name = obj.pointer("/customer_details/name").and_then(|v| v.as_str()).unwrap_or("");
+    let amount_total = obj.get("amount_total").and_then(|v| v.as_i64()).unwrap_or(0);
+    let amount_subtotal = obj.get("amount_subtotal").and_then(|v| v.as_i64()).unwrap_or(0);
+    let currency = obj.get("currency").and_then(|v| v.as_str()).unwrap_or("usd");
+    let total_details = obj.get("total_details").cloned().unwrap_or(Value::Null);
+    let amount_shipping = total_details.get("amount_shipping").and_then(|v| v.as_i64()).unwrap_or(0);
+    let amount_tax = total_details.get("amount_tax").and_then(|v| v.as_i64()).unwrap_or(0);
+    let e = crate::email_md::escape;
+
+    let mut items = String::from("|  |  |\n| --- | ---: |\n");
+    if line_items.is_empty() {
+        items.push_str(&format!("| {} |  |\n", tr(lang, "(item details unavailable)")));
+    } else {
+        for li in line_items {
+            let qty = li.get("quantity").and_then(|v| v.as_i64()).unwrap_or(1);
+            let desc = li.get("description").and_then(|v| v.as_str()).unwrap_or("(item)");
+            let amt = li.get("amount_total").and_then(|v| v.as_i64()).unwrap_or(0);
+            let cur = li.get("currency").and_then(|v| v.as_str()).unwrap_or(currency);
+            items.push_str(&format!("| {} × {} | {} |\n", qty, e(desc), fmt_money(amt, cur)));
+        }
+    }
+
+    let totals = format!(
+        "|  |  |\n| --- | ---: |\n| {} | {} |\n| {} | {} |\n| {} | {} |\n| **{}** | **{}** |",
+        tr(lang, "Subtotal"), fmt_money(amount_subtotal, currency),
+        tr(lang, "Shipping"), fmt_money(amount_shipping, currency),
+        tr(lang, "Tax"), fmt_money(amount_tax, currency),
+        tr(lang, "Total"), fmt_money(amount_total, currency),
+    );
+
+    // Always show ship-to and bill-to (even when they match) so the customer
+    // can verify both at a glance.
+    let mut addresses = String::new();
+    for (title, block) in [
+        (tr(lang, "Ship to"), address_block_text(obj.get("shipping_details"), name)),
+        (tr(lang, "Bill to"), address_block_text(obj.get("customer_details"), name)),
+    ] {
+        if !block.is_empty() {
+            addresses.push_str(&format!("## {}\n\n", title));
+            let lines: Vec<String> = block.lines().map(e).collect();
+            addresses.push_str(&lines.join("\\\n"));
+            addresses.push_str("\n\n");
+        }
+    }
+
+    vec![
+        ("order", order_id.map(|i| format!("#{}", i)).unwrap_or_else(|| "-".into())),
+        ("date", chrono::Utc::now().format("%Y-%m-%d").to_string()),
+        ("name", e(if name.is_empty() { tr(lang, "there") } else { name })),
+        ("site", e(site.name)),
+        ("items", items.trim_end().to_string()),
+        ("totals", totals),
+        ("addresses", addresses.trim_end().to_string()),
+        ("shipping_note", shipping_note(site, lang, line_items_have_preorder(line_items))),
+        ("support", get_setting_str(state, site, SETTING_SUPPORT_CONTACT)),
+    ]
+}
+
+fn confirmation_subject(site: &SiteConfig, lang: &str, order_label: &str) -> String {
+    if lang == "ja" {
+        format!("ご注文ありがとうございます - {} {}", site.name, order_label)
+    } else {
+        format!("Thanks for your order - {} {}", site.name, order_label)
+    }
+}
+
 const SETTING_NOTIFY_EMAILS: &str = "notification_emails";
 const SETTING_CUSTOMER_EMAIL_ENABLED: &str = "customer_email_enabled";
-const SETTING_CUSTOMER_THANK_YOU: &str = "customer_thank_you_html";
 const SETTING_SUPPORT_CONTACT: &str = "support_contact";
 const SETTING_SHIPPING_COUNTRIES: &str = "shipping_countries";
 const SETTING_INVOICE_FROM: &str = "invoice_from";
@@ -1003,223 +1222,21 @@ fn get_setting_str(state: &AppState, site: &SiteConfig, key: &str) -> String {
     db.get_shop_setting(&shop_setting_key(site, key)).ok().flatten().unwrap_or_default()
 }
 
+/// The customer order confirmation: the shop's template filled with this
+/// order's variables, in the language the order was placed in.
 fn build_customer_confirmation(
     state: &AppState,
     site: &SiteConfig,
     event: &Value,
     line_items: &[Value],
     order_id: Option<i64>,
-) -> (String, String, String) {
-    let obj = event.pointer("/data/object").cloned().unwrap_or(Value::Null);
-    let name = obj.pointer("/customer_details/name").and_then(|v| v.as_str()).unwrap_or("");
-    let amount_total = obj.get("amount_total").and_then(|v| v.as_i64()).unwrap_or(0);
-    let amount_subtotal = obj.get("amount_subtotal").and_then(|v| v.as_i64()).unwrap_or(0);
-    let currency = obj.get("currency").and_then(|v| v.as_str()).unwrap_or("usd");
-    let total_details = obj.get("total_details").cloned().unwrap_or(Value::Null);
-    let amount_shipping = total_details.get("amount_shipping").and_then(|v| v.as_i64()).unwrap_or(0);
-    let amount_tax = total_details.get("amount_tax").and_then(|v| v.as_i64()).unwrap_or(0);
-
+    lang: &str,
+) -> (String, String) {
     let order_label = order_id.map(|i| format!("#{}", i)).unwrap_or_else(|| "-".into());
-
-    let support = get_setting_str(state, site, SETTING_SUPPORT_CONTACT);
-    let extra_html = get_setting_str(state, site, SETTING_CUSTOMER_THANK_YOU);
-
-    let subject = format!("Thanks for your order - {} {}", site.name, order_label);
-
-    let has_preorder = line_items_have_preorder(line_items);
-    // The default site ships from the Los Angeles office; other shops keep
-    // the generic phrasing until they get copy of their own.
-    let ship_origin = if site.id == DEFAULT_SITE_ID { " from our Los Angeles office" } else { "" };
-
-    // -------- Plain text --------
-    let mut text = String::new();
-    text.push_str(&format!("Hi {},\n\n",
-        if name.is_empty() { "there" } else { name }));
-    if has_preorder {
-        text.push_str(&format!("Thank you for your order! Order {} has been received.\n\n", order_label));
-    } else {
-        text.push_str(&format!("Thank you for your order! Order {} has been received and we're getting it ready.\n\n", order_label));
-    }
-
-    text.push_str("Items\n");
-    if line_items.is_empty() {
-        text.push_str("  (line items unavailable)\n");
-    } else {
-        for li in line_items {
-            let qty = li.get("quantity").and_then(|v| v.as_i64()).unwrap_or(1);
-            let desc = li.get("description").and_then(|v| v.as_str()).unwrap_or("(item)");
-            let amt = li.get("amount_total").and_then(|v| v.as_i64()).unwrap_or(0);
-            text.push_str(&format!("  {} × {}  -  {}\n", qty, desc, fmt_money(amt, currency)));
-        }
-    }
-    text.push_str("\n");
-    text.push_str(&format!("Subtotal:  {}\n", fmt_money(amount_subtotal, currency)));
-    text.push_str(&format!("Shipping:  {}\n", fmt_money(amount_shipping, currency)));
-    text.push_str(&format!("Tax:       {}\n", fmt_money(amount_tax, currency)));
-    text.push_str(&format!("Total:     {}\n\n", fmt_money(amount_total, currency)));
-
-    // Ship-to confirmation in the customer email - reassures them the address
-    // we'll ship to is what they entered. Always show ship-to and bill-to as
-    // separate blocks (even when they match) so the customer can see both.
-    let ship_text = address_block_text(obj.get("shipping_details"), name);
-    let bill_text = address_block_text(obj.get("customer_details"), name);
-    if !ship_text.is_empty() {
-        text.push_str("Ship to\n");
-        text.push_str(&indent2(&ship_text));
-        text.push_str("\n");
-    }
-    if !bill_text.is_empty() {
-        text.push_str("Bill to\n");
-        text.push_str(&indent2(&bill_text));
-        text.push_str("\n");
-    }
-
-    text.push_str("A PDF invoice is attached for your records.\n\n");
-    if has_preorder {
-        text.push_str(&format!("Your order includes a pre-order item and will ship within the window shown next to the item. We'll send another email with your tracking number as soon as it ships{}.\n\n", ship_origin));
-    } else {
-        text.push_str(&format!("We'll send another email with your tracking number once your order ships{}.\n\n", ship_origin));
-    }
-    if !support.is_empty() {
-        text.push_str(&format!("Questions? Reach us at {}.\n\n", support));
-    }
-    text.push_str(&format!("- The {} team\n", site.name));
-
-    // -------- HTML --------
-    let mut item_rows = String::new();
-    for li in line_items {
-        let qty = li.get("quantity").and_then(|v| v.as_i64()).unwrap_or(1);
-        let desc = li.get("description").and_then(|v| v.as_str()).unwrap_or("(item)");
-        let amt = li.get("amount_total").and_then(|v| v.as_i64()).unwrap_or(0);
-        let cur = li.get("currency").and_then(|v| v.as_str()).unwrap_or(currency);
-        item_rows.push_str(&format!(
-            "<tr>\
-              <td style=\"padding:8px 0;color:#5c6470;width:50px;\">{} ×</td>\
-              <td style=\"padding:8px 0;\">{}</td>\
-              <td style=\"padding:8px 0;text-align:right;font-variant-numeric:tabular-nums;\">{}</td>\
-            </tr>",
-            qty, html_escape_local(desc), html_escape_local(&fmt_money(amt, cur)),
-        ));
-    }
-
-    // Always render ship-to and bill-to as separate blocks, even when they
-    // match - keeps the email layout consistent and lets the customer verify
-    // both addresses at a glance.
-    let ship_html = address_block_html(obj.get("shipping_details"), name);
-    let bill_html = address_block_html(obj.get("customer_details"), name);
-
-    let support_block = if support.is_empty() { String::new() } else {
-        format!(
-            "<p style=\"color:#5c6470;font-size:13px;margin-top:24px;\">Questions? Reach us at <a href=\"mailto:{s}\" style=\"color:#2d6fdc;\">{s}</a>.</p>",
-            s = html_escape_local(&support),
-        )
-    };
-
-    // Admin-supplied custom thank-you copy. Sanitized through `ammonia` so a
-    // compromised admin (or stolen API token) can't inject scripts, tracking
-    // pixels, or javascript: links into a customer email that ships from our
-    // domain. ammonia's default allowlist permits formatting + safe links.
-    let extra_block = if extra_html.trim().is_empty() { String::new() } else {
-        let safe = ammonia::clean(&extra_html);
-        format!(
-            "<div style=\"background:#eef4ff;border-left:3px solid #2d6fdc;padding:12px 16px;margin:18px 0;color:#1a1d23;font-size:13px;line-height:1.55;\">{}</div>",
-            safe,
-        )
-    };
-
-    // Address sections - always two columns when both are present so the
-    // customer sees ship-to and bill-to side by side, even when identical.
-    let address_section = if ship_html.is_empty() && bill_html.is_empty() {
-        String::new()
-    } else if bill_html.is_empty() {
-        format!(
-            "<h2 style=\"font-size:14px;margin:28px 0 8px;\">Ship to</h2>\
-             <div style=\"font-size:13px;line-height:1.55;\">{}</div>",
-            ship_html,
-        )
-    } else if ship_html.is_empty() {
-        format!(
-            "<h2 style=\"font-size:14px;margin:28px 0 8px;\">Bill to</h2>\
-             <div style=\"font-size:13px;line-height:1.55;\">{}</div>",
-            bill_html,
-        )
-    } else {
-        format!(
-            "<table style=\"width:100%;border-collapse:separate;border-spacing:12px 0;margin-top:20px;\">\
-               <tr>\
-                 <td style=\"width:50%;vertical-align:top;\">\
-                   <h2 style=\"font-size:14px;margin:0 0 8px;\">Ship to</h2>\
-                   <div style=\"font-size:13px;line-height:1.55;\">{ship}</div>\
-                 </td>\
-                 <td style=\"width:50%;vertical-align:top;\">\
-                   <h2 style=\"font-size:14px;margin:0 0 8px;\">Bill to</h2>\
-                   <div style=\"font-size:13px;line-height:1.55;\">{bill}</div>\
-                 </td>\
-               </tr>\
-             </table>",
-            ship = ship_html,
-            bill = bill_html,
-        )
-    };
-
-    let intro_html = if has_preorder {
-        format!("Thanks for your purchase from {} - we've received your order.", site.name)
-    } else {
-        format!("Thanks for your purchase from {} - we've received your order and are getting it ready.", site.name)
-    };
-    let shipping_html = if has_preorder {
-        format!("Your order includes a pre-order item and will ship within the window shown next to the item. You'll get a second email with your tracking number as soon as it ships{}.", ship_origin)
-    } else {
-        format!("We're processing your order now. You'll get a second email with your tracking number once it ships{}.", ship_origin)
-    };
-
-    let html = format!(
-        "<!doctype html><html><body style=\"margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#ffffff;color:#1a1d23;\">\
-         <div style=\"max-width:600px;margin:0 auto;padding:32px 24px;\">\
-           <div style=\"text-align:left;margin-bottom:24px;\">\
-             <img src=\"cid:{logo_cid}\" alt=\"{brand}\" style=\"height:36px;display:inline-block;\">\
-           </div>\
-           <h1 style=\"font-size:22px;margin:0 0 6px;\">Thank you for your order</h1>\
-           <p style=\"color:#5c6470;margin:0 0 20px;\">Order {order} · {date}</p>\
-           <p>Hi {name_html},</p>\
-           <p>{intro}</p>\
-           {extra_block}\
-           <h2 style=\"font-size:14px;margin:28px 0 8px;\">Items</h2>\
-           <table style=\"width:100%;border-collapse:collapse;\">\
-             <tbody>{rows}</tbody>\
-           </table>\
-           <table style=\"width:100%;margin-top:14px;font-size:13px;\">\
-             <tr><td style=\"color:#5c6470;\">Subtotal</td><td style=\"text-align:right;\">{subtotal}</td></tr>\
-             <tr><td style=\"color:#5c6470;\">Shipping</td><td style=\"text-align:right;\">{shipping}</td></tr>\
-             <tr><td style=\"color:#5c6470;\">Tax</td><td style=\"text-align:right;\">{tax}</td></tr>\
-             <tr><td style=\"font-weight:600;padding-top:6px;border-top:1px solid #d8dbe1;\">Total</td><td style=\"font-weight:600;text-align:right;padding-top:6px;border-top:1px solid #d8dbe1;\">{total}</td></tr>\
-           </table>\
-           {address_section}\
-           <p style=\"margin-top:24px;font-size:13px;color:#5c6470;\">\
-             {shipping_note}\
-           </p>\
-           <p style=\"color:#5c6470;font-size:12px;margin-top:18px;\">A PDF invoice is attached to this email for your records.</p>\
-           {support_block}\
-           <p style=\"color:#5c6470;font-size:12px;margin-top:32px;\">- The {brand} team</p>\
-         </div></body></html>",
-        logo_cid = LOGO_CID,
-        brand = html_escape_local(site.name),
-        order = order_label,
-        date = chrono::Utc::now().format("%Y-%m-%d"),
-        name_html = html_escape_local(if name.is_empty() { "there" } else { name }),
-        intro = intro_html,
-        shipping_note = shipping_html,
-        extra_block = extra_block,
-        rows = if item_rows.is_empty() { "<tr><td style=\"padding:8px 0;color:#5c6470;\">(item details unavailable)</td></tr>".into() } else { item_rows },
-        subtotal = html_escape_local(&fmt_money(amount_subtotal, currency)),
-        shipping = html_escape_local(&fmt_money(amount_shipping, currency)),
-        tax = html_escape_local(&fmt_money(amount_tax, currency)),
-        total = html_escape_local(&fmt_money(amount_total, currency)),
-        address_section = address_section,
-        support_block = support_block,
-    );
-
-    (subject, text, html)
+    let subject = confirmation_subject(site, lang, &order_label);
+    let vars = confirmation_vars(state, site, event, line_items, order_id, lang);
+    let tpl = effective_template(state, site, SETTING_TPL_CONFIRMATION, lang);
+    (subject, crate::email_md::apply_template(&tpl, &vars))
 }
 
 /// Plain-text equivalent of `address_block_html`, joining lines with `\n`.
@@ -1245,42 +1262,6 @@ fn address_block_text(details: Option<&Value>, fallback_name: &str) -> String {
         if !c.is_empty() { parts.push(c.to_string()); }
     }
     parts.join("\n")
-}
-
-fn indent2(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 16);
-    for line in s.lines() {
-        out.push_str("  ");
-        out.push_str(line);
-        out.push('\n');
-    }
-    out
-}
-
-/// Build an HTML address block from a Stripe `customer_details` /
-/// `shipping_details` object. Returns "" when the address is empty / absent.
-fn address_block_html(details: Option<&Value>, fallback_name: &str) -> String {
-    let Some(s) = details else { return String::new() };
-    let a = s.get("address").cloned().unwrap_or(Value::Null);
-    if a.is_null() { return String::new() }
-    let line1 = a.get("line1").and_then(|v| v.as_str()).unwrap_or("");
-    if line1.is_empty() { return String::new() } // Skip when there's no real street address.
-    let ship_name = s.get("name").and_then(|v| v.as_str()).unwrap_or(fallback_name);
-    let mut parts: Vec<String> = Vec::new();
-    if !ship_name.is_empty() { parts.push(html_escape_local(ship_name)); }
-    parts.push(html_escape_local(line1));
-    if let Some(v) = a.get("line2").and_then(|v| v.as_str()) {
-        if !v.is_empty() { parts.push(html_escape_local(v)); }
-    }
-    let city = a.get("city").and_then(|v| v.as_str()).unwrap_or("");
-    let state_ = a.get("state").and_then(|v| v.as_str()).unwrap_or("");
-    let postal = a.get("postal_code").and_then(|v| v.as_str()).unwrap_or("");
-    let csz: Vec<&str> = [city, state_, postal].iter().copied().filter(|s| !s.is_empty()).collect();
-    if !csz.is_empty() { parts.push(html_escape_local(&csz.join(", "))); }
-    if let Some(c) = a.get("country").and_then(|v| v.as_str()) {
-        if !c.is_empty() { parts.push(html_escape_local(c)); }
-    }
-    parts.join("<br>")
 }
 
 /// Fetch a Stripe Invoice object so we can extract its hosted PDF URL.
@@ -1328,6 +1309,7 @@ async fn fetch_line_items(state: &AppState, secret: &str, session_id: &str) -> V
 async fn persist_order_from_event(
     state: &AppState,
     site: &SiteConfig,
+    lang: &str,
     event: &Value,
     status: &str,
 ) -> Option<(i64, bool)> {
@@ -1353,7 +1335,7 @@ async fn persist_order_from_event(
     let now = chrono::Utc::now().to_rfc3339();
     let res = {
         let db = state.db.lock();
-        db.insert_order_if_absent(site.id, session_id, &now, email, name, amount, currency, status, &ship_to_json, &line_items_json)
+        db.insert_order_if_absent(site.id, lang, session_id, &now, email, name, amount, currency, status, &ship_to_json, &line_items_json)
     };
     match res {
         Ok((id, inserted)) => Some((id, inserted)),
@@ -1452,9 +1434,26 @@ fn format_order_summary(event: &Value, line_items: &[Value], order_id: Option<i6
     (short, out)
 }
 
-fn fmt_money(cents: i64, currency: &str) -> String {
-    let whole = cents / 100;
-    let frac = (cents.rem_euclid(100)).abs();
+fn thousands(n: i64) -> String {
+    let neg = n < 0;
+    let digits = n.unsigned_abs().to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3 + 1);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    if neg { format!("-{}", out) } else { out }
+}
+
+/// JPY amounts are whole yen (zero-decimal); everything else is hundredths.
+fn fmt_money(amount: i64, currency: &str) -> String {
+    if zero_decimal(currency) {
+        return format!("¥{}", thousands(amount));
+    }
+    let whole = amount / 100;
+    let frac = (amount.rem_euclid(100)).abs();
     format!("{}.{:02} {}", whole, frac, currency.to_uppercase())
 }
 
@@ -1506,6 +1505,13 @@ pub struct UpsertProductRequest {
     pub active: bool,
     #[serde(default)]
     pub ord: i64,
+    #[serde(default)]
+    pub title_ja: String,
+    #[serde(default)]
+    pub description_md_ja: String,
+    /// Whole yen; 0 = not offered in JPY (the ja storefront falls back to USD).
+    #[serde(default)]
+    pub price_jpy: i64,
 }
 
 fn default_currency() -> String { "usd".into() }
@@ -1560,6 +1566,9 @@ pub async fn handle_upsert_product(
             &req.tax_code,
             req.active,
             req.ord,
+            &req.title_ja,
+            &req.description_md_ja,
+            req.price_jpy.max(0),
         )
         .map_err(db_err)?;
     }
@@ -1762,11 +1771,8 @@ pub async fn handle_admin_delete_order(
     Ok(Json(json!({ "status": "OK" })))
 }
 
-#[allow(clippy::type_complexity)]
-fn order_to_json(
-    row: (i64, String, String, String, String, i64, String, String, String, String, String, String, Option<String>, String),
-) -> Value {
-    let (id, sid, created_at, email, name, amount, currency, status, ship_to, line_items, carrier, tracking, shipped_at, notes) = row;
+fn order_to_json(row: OrderRow) -> Value {
+    let (id, sid, created_at, email, name, amount, currency, status, ship_to, line_items, carrier, tracking, shipped_at, notes, lang) = row;
     let ship_to_v: Value = serde_json::from_str(&ship_to).unwrap_or(Value::Null);
     let line_items_v: Value = serde_json::from_str(&line_items).unwrap_or_else(|_| Value::Array(Vec::new()));
     json!({
@@ -1786,6 +1792,7 @@ fn order_to_json(
         "tracking_url": tracking_url(&carrier, &tracking),
         "shipped_at": shipped_at,
         "notes": notes,
+        "lang": lang,
     })
 }
 
@@ -1898,11 +1905,17 @@ pub async fn handle_admin_mark_shipped(
         let email = order.3.clone();
         if !email.is_empty() {
             if let Some(svc) = state.email.clone() {
-                let body = build_shipped_email(site, &order);
-                let subject = format!("Your {} order #{} has shipped", site.name, order.0);
+                let lang = order_email_lang(site, &order.14).to_string();
+                let vars = shipped_vars(site, &order, &lang);
+                let tpl = effective_template(&state, site, SETTING_TPL_SHIPPED, &lang);
+                let md = crate::email_md::apply_template(&tpl, &vars);
+                let doc = crate::email_md::render(&md, Some((LOGO_CID, site.name)));
+                let subject = shipped_subject(site, &lang, order.0);
                 let sender = format!("{} Shop", site.name);
+                let logo = logo_inline_image(site);
                 tokio::spawn(async move {
-                    if let Err(e) = svc.send_html_as(&sender, &email, &subject, &body.0, &body.1).await {
+                    let inline = vec![logo];
+                    if let Err(e) = svc.send_html_rich(&email, &subject, &doc.text, &doc.html, &inline, &[], Some(&sender)).await {
                         log::error!("Failed to send shipped email to {}: {}", email, e);
                     }
                 });
@@ -1945,81 +1958,46 @@ pub async fn handle_admin_update_order_notes(
 }
 
 #[allow(clippy::type_complexity)]
-fn build_shipped_email(
-    site: &SiteConfig,
-    order: &(i64, String, String, String, String, i64, String, String, String, String, String, String, Option<String>, String),
-) -> (String, String) {
-    let (id, _sid, _created, _email, name, amount, currency, _status, _ship, line_items_json, carrier, tracking, _shipped, _notes) = order;
+/// A shop order row (see susi_core list_orders/get_order; lang is last).
+type OrderRow = (i64, String, String, String, String, i64, String, String, String, String, String, String, Option<String>, String, String);
+
+fn shipped_vars(site: &SiteConfig, order: &OrderRow, lang: &str) -> Vec<(&'static str, String)> {
+    let (id, _sid, _created, _email, name, amount, currency, _status, _ship, line_items_json, carrier, tracking, _shipped, _notes, _lang) = order;
     let line_items: Value = serde_json::from_str(line_items_json).unwrap_or(Value::Array(Vec::new()));
-    let url = tracking_url(carrier, tracking);
+    let e = crate::email_md::escape;
 
-    let mut text = String::new();
-    text.push_str(&format!("Hi {},\n\n", if name.is_empty() { "there" } else { name.as_str() }));
-    text.push_str(&format!("Your {} order #{} has shipped.\n\n", site.name, id));
-    text.push_str(&format!("Carrier:  {}\n", carrier));
-    text.push_str(&format!("Tracking: {}\n", tracking));
-    if let Some(u) = &url { text.push_str(&format!("Track:    {}\n", u)); }
-    text.push_str(&format!("\nOrder total: {}\n", fmt_money(*amount, currency)));
-    if let Some(items) = line_items.as_array() {
-        if !items.is_empty() {
-            text.push_str("\nItems shipped:\n");
-            for li in items {
-                let qty = li.get("quantity").and_then(|v| v.as_i64()).unwrap_or(1);
-                let desc = li.get("description").and_then(|v| v.as_str()).unwrap_or("(item)");
-                text.push_str(&format!("  {} × {}\n", qty, desc));
-            }
-        }
-    }
-    text.push_str(&format!("\nThanks for buying from {0}!\n- The {0} team\n", site.name));
-
-    let track_btn = match &url {
-        Some(u) => format!(
-            "<p style=\"margin:18px 0;\"><a href=\"{}\" style=\"display:inline-block;padding:10px 20px;background:#2d6fdc;color:#fff;text-decoration:none;border-radius:6px;font-weight:600;\">Track shipment</a></p>",
-            html_escape_local(u),
-        ),
-        None => String::new(),
-    };
-    let mut item_rows = String::new();
-    if let Some(items) = line_items.as_array() {
-        for li in items {
+    let shipment = format!(
+        "|  |  |\n| --- | --- |\n| {} | **{}** |\n| {} | {} |",
+        tr(lang, "Carrier"), e(carrier), tr(lang, "Tracking"), e(tracking),
+    );
+    let tracking_button = tracking_url(carrier, tracking)
+        .map(|u| format!("{{{{button:{}|{}}}}}", tr(lang, "Track shipment"), u))
+        .unwrap_or_default();
+    let mut items = String::new();
+    if let Some(list) = line_items.as_array() {
+        for li in list {
             let qty = li.get("quantity").and_then(|v| v.as_i64()).unwrap_or(1);
             let desc = li.get("description").and_then(|v| v.as_str()).unwrap_or("(item)");
-            item_rows.push_str(&format!(
-                "<tr><td style=\"padding:6px 0;color:#5c6470;\">{} ×</td><td style=\"padding:6px 0;\">{}</td></tr>",
-                qty, html_escape_local(desc),
-            ));
+            items.push_str(&format!("- {} × {}\n", qty, e(desc)));
         }
     }
+    vec![
+        ("order", format!("#{}", id)),
+        ("name", e(if name.is_empty() { tr(lang, "there") } else { name.as_str() })),
+        ("site", e(site.name)),
+        ("shipment", shipment),
+        ("tracking_button", tracking_button),
+        ("items", items.trim_end().to_string()),
+        ("total", fmt_money(*amount, currency)),
+    ]
+}
 
-    let html = format!(
-        "<!doctype html><html><body style=\"margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#ffffff;color:#1a1d23;\">\
-         <div style=\"max-width:560px;margin:0 auto;padding:32px 24px;\">\
-           <h1 style=\"font-size:22px;margin:0 0 8px;\">Your order has shipped</h1>\
-           <p style=\"color:#5c6470;margin:0 0 20px;\">Order #{id}</p>\
-           <table style=\"width:100%;border-collapse:collapse;font-size:13px;\">\
-             <tr><td style=\"padding:4px 0;color:#5c6470;width:120px;\">Carrier:</td><td style=\"padding:4px 0;font-weight:600;\">{carrier_html}</td></tr>\
-             <tr><td style=\"padding:4px 0;color:#5c6470;\">Tracking:</td><td style=\"padding:4px 0;font-family:monospace;\">{tracking_html}</td></tr>\
-           </table>\
-           {track_btn}\
-           {items_block}\
-           <p style=\"color:#5c6470;font-size:13px;margin-top:32px;\">Thanks for buying from {brand}!<br>- The {brand} team</p>\
-         </div></body></html>",
-        id = id,
-        brand = html_escape_local(site.name),
-        carrier_html = html_escape_local(carrier),
-        tracking_html = html_escape_local(tracking),
-        track_btn = track_btn,
-        items_block = if item_rows.is_empty() {
-            String::new()
-        } else {
-            format!(
-                "<h3 style=\"font-size:14px;margin:24px 0 8px;\">Items shipped</h3>\
-                 <table style=\"width:100%;border-collapse:collapse;font-size:13px;\">{}</table>",
-                item_rows,
-            )
-        },
-    );
-    (text, html)
+fn shipped_subject(site: &SiteConfig, lang: &str, order_id: i64) -> String {
+    if lang == "ja" {
+        format!("{} ご注文#{}の商品を発送しました", site.name, order_id)
+    } else {
+        format!("Your {} order #{} has shipped", site.name, order_id)
+    }
 }
 
 fn html_escape_local(s: &str) -> String {
@@ -2044,10 +2022,13 @@ fn html_escape_local(s: &str) -> String {
 const KNOWN_SETTING_KEYS: &[&str] = &[
     SETTING_NOTIFY_EMAILS,
     SETTING_CUSTOMER_EMAIL_ENABLED,
-    SETTING_CUSTOMER_THANK_YOU,
     SETTING_SUPPORT_CONTACT,
     SETTING_SHIPPING_COUNTRIES,
     SETTING_INVOICE_FROM,
+    SETTING_TPL_CONFIRMATION,
+    SETTING_TPL_CONFIRMATION_JA,
+    SETTING_TPL_SHIPPED,
+    SETTING_TPL_SHIPPED_JA,
 ];
 
 /// Normalize a submitted shipping-country list to canonical, sorted, deduped
@@ -2168,6 +2149,143 @@ pub async fn handle_admin_put_settings(
 }
 
 // ---------------------------------------------------------------------------
+// Email template editor - preview and test-send
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct EmailTemplateRequest {
+    pub template: String,
+    #[serde(default)]
+    pub lang: String,
+    #[serde(default)]
+    pub body_md: String,
+}
+
+/// A canned order for previews: realistic amounts in the storefront currency.
+fn sample_order_event(lang: &str) -> (Value, Vec<Value>) {
+    let (cur, item, sub, ship, tax, total) = if lang == "ja" {
+        ("jpy", 63800i64, 58000i64, 1500i64, 5950i64, 65450i64)
+    } else {
+        ("usd", 32390, 29900, 1500, 2490, 33890)
+    };
+    let addr = json!({
+        "line1": "3-10-4 Motoazabu", "line2": "RE-FLAT 201", "city": "Minato-ku",
+        "state": "Tokyo", "postal_code": "106-0046", "country": "JP",
+    });
+    let event = json!({ "data": { "object": {
+        "id": "cs_sample", "currency": cur,
+        "amount_total": total, "amount_subtotal": sub,
+        "total_details": { "amount_shipping": ship, "amount_tax": tax },
+        "customer_details": { "name": "Taro Test", "email": "customer@example.com", "address": addr },
+        "shipping_details": { "name": "Taro Test", "address": addr },
+    }}});
+    let items = vec![json!({
+        "quantity": 1, "description": "LPMS-B2 - Wireless 9-Axis IMU (Bluetooth)",
+        "amount_total": item, "currency": cur,
+    })];
+    (event, items)
+}
+
+fn sample_order_row(lang: &str) -> OrderRow {
+    let (event, items) = sample_order_event(lang);
+    let amount = event.pointer("/data/object/amount_total").and_then(|v| v.as_i64()).unwrap_or(0);
+    let cur = event.pointer("/data/object/currency").and_then(|v| v.as_str()).unwrap_or("usd").to_string();
+    (
+        42, "cs_sample".into(), String::new(), "customer@example.com".into(), "Taro Test".into(),
+        amount, cur, "shipped".into(), "{}".into(),
+        serde_json::to_string(&items).unwrap_or_else(|_| "[]".into()),
+        "EMS".into(), "EM123456789JP".into(), None, String::new(), lang.to_string(),
+    )
+}
+
+/// Resolve and fill a template with sample data. `body_md` empty = the
+/// currently effective (stored or default) template.
+fn render_template_sample(
+    state: &AppState,
+    site: &'static SiteConfig,
+    req: &EmailTemplateRequest,
+) -> Result<(String, String, String), (StatusCode, Json<ErrorResponse>)> {
+    let lang = match req.lang.as_str() {
+        "" => "",
+        l if site.langs.iter().any(|x| *x == l) => l,
+        _ => return Err(error_response(StatusCode::BAD_REQUEST, "Unknown language for this site")),
+    };
+    let base = match req.template.as_str() {
+        "order_confirmation" => SETTING_TPL_CONFIRMATION,
+        "order_shipped" => SETTING_TPL_SHIPPED,
+        _ => return Err(error_response(StatusCode::BAD_REQUEST, "Unknown template")),
+    };
+    let tpl = if req.body_md.trim().is_empty() {
+        effective_template(state, site, base, lang)
+    } else {
+        req.body_md.clone()
+    };
+    let (subject, md) = if base == SETTING_TPL_CONFIRMATION {
+        let (event, items) = sample_order_event(lang);
+        let vars = confirmation_vars(state, site, &event, &items, Some(42), lang);
+        (confirmation_subject(site, lang, "#42"), crate::email_md::apply_template(&tpl, &vars))
+    } else {
+        let order = sample_order_row(lang);
+        let vars = shipped_vars(site, &order, lang);
+        (shipped_subject(site, lang, 42), crate::email_md::apply_template(&tpl, &vars))
+    };
+    Ok((subject, md, tpl))
+}
+
+pub async fn handle_admin_email_preview(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
+    Json(req): Json<EmailTemplateRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
+    let site = resolve_site(&headers, &sq)?;
+    let p = validate_principal(&headers, &state)?;
+    require_admin_full(&state, &p)?;
+    let (subject, md, tpl) = render_template_sample(&state, site, &req)?;
+    let doc = crate::email_md::render(&md, Some((LOGO_CID, site.name)));
+    let base = if req.template == "order_confirmation" { SETTING_TPL_CONFIRMATION } else { SETTING_TPL_SHIPPED };
+    let vars: &[&str] = if base == SETTING_TPL_CONFIRMATION { VARS_CONFIRMATION } else { VARS_SHIPPED };
+    Ok(Json(json!({
+        "subject": subject,
+        "markdown": tpl,
+        "default_markdown": default_template(base, order_email_lang(site, &req.lang)),
+        "setting_key": template_key(base, order_email_lang(site, &req.lang)),
+        "html": doc.html,
+        "text": doc.text,
+        "variables": vars,
+        "langs": site.langs,
+    })))
+}
+
+pub async fn handle_admin_email_test(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
+    Json(req): Json<EmailTemplateRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
+    let site = resolve_site(&headers, &sq)?;
+    let p = validate_principal(&headers, &state)?;
+    require_admin_full(&state, &p)?;
+    let svc = state.email.clone().ok_or_else(|| {
+        error_response(StatusCode::SERVICE_UNAVAILABLE, "SMTP is not configured on this server")
+    })?;
+    let to = {
+        let db = state.db.lock();
+        db.get_user_email(&p.username).ok().flatten()
+    }
+    .filter(|e| !e.is_empty())
+    .ok_or_else(|| error_response(StatusCode::BAD_REQUEST, "Your account has no email address"))?;
+    let (subject, md, _tpl) = render_template_sample(&state, site, &req)?;
+    let doc = crate::email_md::render(&md, Some((LOGO_CID, site.name)));
+    let inline = vec![logo_inline_image(site)];
+    let sender = format!("{} Shop", site.name);
+    svc.send_html_rich(&to, &format!("[Test] {}", subject), &doc.text, &doc.html, &inline, &[], Some(&sender))
+        .await
+        .map_err(|e| error_response(StatusCode::BAD_GATEWAY, &format!("Send failed: {}", e)))?;
+    Ok(Json(json!({ "sent_to": to })))
+}
+
+// ---------------------------------------------------------------------------
 // Public shop HTML shell
 //
 // /shop URLs reuse the same single-page-app shell as the public website so
@@ -2185,37 +2303,164 @@ pub async fn handle_shop_page(
         Ok(s) => s,
         Err(e) => return e.into_response(),
     };
+    let lang = crate::website::resolve_lang(site, &sq);
+    shop_shell_response(&state, site, &lang, "")
+}
+
+pub async fn handle_shop_product_page(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
+    Path(sku): Path<String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let site = match resolve_site(&headers, &sq) {
+        Ok(s) => s,
+        Err(e) => return e.into_response(),
+    };
+    let lang = crate::website::resolve_lang(site, &sq);
+    shop_shell_response(&state, site, &lang, &sku)
+}
+
+/// The storefront SPA shell for a site, in the given content language.
+/// Serves a 404 shell on shopless sites so /shop never shadows real content.
+/// A non-empty `sku` marks a product detail URL: the shell then carries the
+/// product's JSON-LD so Merchant Center can verify price and availability on
+/// the landing page.
+pub fn shop_shell_response(
+    state: &Arc<AppState>,
+    site: &'static SiteConfig,
+    lang: &str,
+    sku: &str,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
     if !site.has_shop {
         let head = format!(
             "<title>{}</title>\n<meta name=\"robots\" content=\"noindex\">\n",
             crate::website::html_escape(site.name),
         );
-        let html = crate::website::render_shell(&state, site, "", &head, "<div class=\"empty-state\">Page not found</div>");
+        let html = crate::website::render_shell(state, site, "", &head, "<div class=\"empty-state\">Page not found</div>");
         return (StatusCode::NOT_FOUND, axum::response::Html(String::from_utf8_lossy(&html).into_owned())).into_response();
     }
     let esc_name = crate::website::html_escape(site.name);
-    let desc = if site.id == DEFAULT_SITE_ID {
-        format!("Order {} IMU and inertial sensors directly. Shipped from our Los Angeles office.", esc_name)
+    let (title, desc) = if lang == "ja" {
+        (
+            format!("ショップ - {}", esc_name),
+            format!("{}の製品を直接ご注文いただけます。", esc_name),
+        )
+    } else if site.id == DEFAULT_SITE_ID {
+        (
+            format!("Shop - {}", esc_name),
+            format!("Order {} IMU and inertial sensors directly. Shipped from our Los Angeles office.", esc_name),
+        )
     } else {
-        format!("Order {} products directly.", esc_name)
+        (
+            format!("Shop - {}", esc_name),
+            format!("Order {} products directly.", esc_name),
+        )
     };
-    let head = format!(
-        "<title>Shop - {name}</title>\n\
+    let mut head = format!(
+        "<title>{title}</title>\n\
          <meta name=\"description\" content=\"{desc}\">\n\
-         <meta property=\"og:title\" content=\"Shop - {name}\">\n\
+         <meta property=\"og:title\" content=\"{title}\">\n\
          <meta property=\"og:type\" content=\"website\">\n",
-        name = esc_name,
-        desc = desc,
     );
+    if !sku.is_empty() {
+        let row = {
+            let db = state.db.lock();
+            db.get_product(site.id, sku).ok().flatten().filter(|r| r.7)
+        };
+        if let Some(block) = row.and_then(|r| crate::website::product_jsonld_block(site, lang, &r)) {
+            head.push_str(&format!("<script type=\"application/ld+json\">{}</script>\n", block));
+        }
+    }
     let html = String::from_utf8_lossy(&crate::website::render_shell(
-        &state,
+        state,
         site,
-        "",
+        lang,
         &head,
         "<div class=\"empty-state\">Loading…</div>",
     ))
     .into_owned();
     axum::response::Html(html).into_response()
+}
+
+/// GET /shop/feed.xml - Google Merchant Center product feed (RSS 2.0 with the
+/// g: namespace). `?lang=ja` (or /ja/shop/feed.xml via the marketing rewrite)
+/// serves Japanese titles and JPY prices.
+pub async fn handle_shop_feed(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let site = match resolve_site(&headers, &sq) {
+        Ok(s) => s,
+        Err(e) => return e.into_response(),
+    };
+    let lang = crate::website::resolve_lang(site, &sq);
+    shop_feed_response(&state, site, &lang)
+}
+
+/// The Merchant Center feed for a site in the given content language.
+/// Pre-order items are omitted: Google requires an availability date for
+/// `preorder`, which the catalog doesn't track.
+pub fn shop_feed_response(
+    state: &Arc<AppState>,
+    site: &'static SiteConfig,
+    lang: &str,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if !site.has_shop {
+        return (StatusCode::NOT_FOUND, "Not found").into_response();
+    }
+    let rows = {
+        let db = state.db.lock();
+        db.list_products(site.id, true).unwrap_or_default()
+    };
+    let esc = crate::website::html_escape;
+    let ja = lang == "ja";
+    let lang_seg = if lang.is_empty() { String::new() } else { format!("/{}", lang) };
+    let mut xml = String::with_capacity(4096);
+    xml.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+    xml.push_str("<rss version=\"2.0\" xmlns:g=\"http://base.google.com/ns/1.0\">\n<channel>\n");
+    xml.push_str(&format!("<title>{} Shop</title>\n", esc(site.name)));
+    xml.push_str(&format!("<link>{}{}/shop</link>\n", esc(site.public_base), lang_seg));
+    xml.push_str(&format!("<description>{}</description>\n", esc(site.tagline)));
+    for (sku, title_en, desc_md_en, price_cents, currency, image_asset, _tax, _active, _ord, _upd, title_ja, desc_md_ja, price_jpy) in &rows {
+        let title = if ja && !title_ja.trim().is_empty() { title_ja } else { title_en };
+        if title_en.to_ascii_lowercase().contains("pre-order")
+            || title.to_ascii_lowercase().contains("pre-order")
+        {
+            continue;
+        }
+        let price = if ja {
+            if *price_jpy <= 0 { continue; }
+            format!("{} JPY", price_jpy)
+        } else {
+            if *price_cents <= 0 { continue; }
+            format!("{}.{:02} {}", price_cents / 100, (price_cents % 100).abs(), currency.to_uppercase())
+        };
+        let desc_md = if ja && !desc_md_ja.trim().is_empty() { desc_md_ja } else { desc_md_en };
+        let desc = crate::website::derive_description(desc_md);
+        let desc = if desc.is_empty() { title.clone() } else { desc };
+        let img = crate::website::product_image_abs_url(site, image_asset.as_deref());
+        xml.push_str("<item>\n");
+        xml.push_str(&format!("<g:id>{}</g:id>\n", esc(sku)));
+        xml.push_str(&format!("<g:title>{}</g:title>\n", esc(title)));
+        xml.push_str(&format!("<g:description>{}</g:description>\n", esc(&desc)));
+        xml.push_str(&format!("<g:link>{}{}/shop/{}</g:link>\n", esc(site.public_base), lang_seg, esc(sku)));
+        if !img.is_empty() {
+            xml.push_str(&format!("<g:image_link>{}</g:image_link>\n", esc(&img)));
+        }
+        xml.push_str("<g:condition>new</g:condition>\n<g:availability>in_stock</g:availability>\n");
+        xml.push_str(&format!("<g:price>{}</g:price>\n", price));
+        xml.push_str(&format!("<g:brand>{}</g:brand>\n", esc(site.name)));
+        xml.push_str(&format!("<g:mpn>{}</g:mpn>\n", esc(sku)));
+        xml.push_str("</item>\n");
+    }
+    xml.push_str("</channel>\n</rss>\n");
+    ([(header::CONTENT_TYPE, "application/xml; charset=utf-8")], xml).into_response()
 }
 
 #[cfg(test)]

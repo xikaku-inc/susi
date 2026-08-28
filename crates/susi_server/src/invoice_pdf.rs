@@ -36,6 +36,16 @@ fn cached_logo(logo_png: &'static [u8]) -> Result<Arc<CachedLogo>> {
     let img = image_crate::load_from_memory_with_format(logo_png, ImageFormat::Png)
         .context("png decode")?;
     let (orig_w, orig_h) = img.dimensions();
+    // printpdf drops the alpha channel, which turns a transparent-background
+    // logo into a solid color block - flatten onto white first.
+    let rgba = img.to_rgba8();
+    let mut flat = image_crate::RgbImage::new(orig_w, orig_h);
+    for (x, y, p) in rgba.enumerate_pixels() {
+        let a = p[3] as u32;
+        let blend = |c: u8| ((c as u32 * a + 255 * (255 - a)) / 255) as u8;
+        flat.put_pixel(x, y, image_crate::Rgb([blend(p[0]), blend(p[1]), blend(p[2])]));
+    }
+    let img = DynamicImage::ImageRgb8(flat);
     let target_w_px = (LOGO_TARGET_WIDTH_MM / 25.4 * 300.0).round() as u32;
     let target_h_px = (orig_h as f32 * target_w_px as f32 / orig_w as f32).round() as u32;
     let resized = img.resize(target_w_px, target_h_px, FilterType::Lanczos3);
@@ -136,7 +146,7 @@ pub fn generate(
     }
 
     // ---------- Big total ----------
-    let total_line = format!("{} {} paid on {}", fmt_money(amount_total), currency, date_str);
+    let total_line = format!("{} {} paid on {}", fmt_money(amount_total, &currency), currency, date_str);
     l.set_fill_color(dark.clone());
     l.use_text(&total_line, 18.0, Mm(LEFT), Mm(178.0), &bold);
 
@@ -168,8 +178,8 @@ pub fn generate(
             l.set_fill_color(dark.clone());
             l.use_text(truncate(&desc, 60), 10.0, Mm(LEFT), Mm(y), &regular);
             right_text(&l, &regular, &qty.to_string(),       10.0, col_qty + 12.0, y);
-            right_text(&l, &regular, &fmt_money(unit),       10.0, col_unit + 22.0, y);
-            right_text(&l, &regular, &fmt_money(amt),        10.0, col_amt_r,       y);
+            right_text(&l, &regular, &fmt_money(unit, &currency), 10.0, col_unit + 22.0, y);
+            right_text(&l, &regular, &fmt_money(amt, &currency), 10.0, col_amt_r, y);
             y -= row_h;
         }
     }
@@ -189,14 +199,14 @@ pub fn generate(
         l.set_fill_color(muted.clone());
         l.use_text(*lbl, 10.0, Mm(label_x), Mm(yt), &regular);
         l.set_fill_color(dark.clone());
-        right_text(&l, &regular, &fmt_money(*amt), 10.0, RIGHT, yt);
+        right_text(&l, &regular, &fmt_money(*amt, &currency), 10.0, RIGHT, yt);
         yt -= 5.0;
     }
     draw_hline(&l, &border, label_x, RIGHT, yt + 2.5, 0.4);
     yt -= 1.5;
     l.set_fill_color(dark.clone());
     l.use_text("Total", 11.0, Mm(label_x), Mm(yt), &bold);
-    right_text(&l, &bold, &format!("{} {}", fmt_money(amount_total), currency), 11.0, RIGHT, yt);
+    right_text(&l, &bold, &format!("{} {}", fmt_money(amount_total, &currency), currency), 11.0, RIGHT, yt);
 
     // ---------- Serialize ----------
     let buf: Vec<u8> = Vec::new();
@@ -280,9 +290,22 @@ fn address_block(details: Option<&Value>, include_email: bool) -> Vec<String> {
     out
 }
 
-fn fmt_money(cents: i64) -> String {
-    let neg = cents < 0;
-    let v = cents.unsigned_abs();
+// JPY is zero-decimal (whole yen); the built-in Helvetica has no yen glyph,
+// so JPY amounts render bare with the currency code alongside.
+fn fmt_money(amount: i64, currency: &str) -> String {
+    if currency.eq_ignore_ascii_case("jpy") {
+        let neg = amount < 0;
+        let digits = amount.unsigned_abs().to_string();
+        let mut out = String::new();
+        if neg { out.push('-'); }
+        for (i, c) in digits.chars().enumerate() {
+            if i > 0 && (digits.len() - i) % 3 == 0 { out.push(','); }
+            out.push(c);
+        }
+        return out;
+    }
+    let neg = amount < 0;
+    let v = amount.unsigned_abs();
     let dollars = v / 100;
     let frac = v % 100;
     let mut s = String::new();

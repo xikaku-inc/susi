@@ -1312,8 +1312,16 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
         <h2 style="font-size:16px;font-weight:600;">Shop</h2>
         <select id="shopSiteSelect" onchange="switchShopSite()"></select>
     </div>
-    <div style="margin-top:24px;margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
-        <h2 style="font-size:16px;font-weight:600;">Orders</h2>
+    <div class="ws-tabs" role="tablist">
+        <button class="ws-tab active" data-shop-tab="orders" onclick="shopTab('orders')">Orders</button>
+        <button class="ws-tab" data-shop-tab="products" onclick="shopTab('products')">Products</button>
+        <button class="ws-tab" data-shop-tab="shipping" onclick="shopTab('shipping')">Shipping</button>
+        <button class="ws-tab" data-shop-tab="settings" onclick="shopTab('settings')">Settings</button>
+        <button class="ws-tab" data-shop-tab="emails" onclick="shopTab('emails')">Emails</button>
+    </div>
+
+    <div class="ws-tab-panel active" data-shop-panel="orders">
+    <div style="margin-bottom:12px;display:flex;justify-content:flex-end;">
         <select id="ordersStatusFilter" onchange="loadShopOrders()" style="padding:6px 10px;">
             <option value="">All statuses</option>
             <option value="paid">Paid (awaiting fulfillment)</option>
@@ -1338,9 +1346,10 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
             </tbody>
         </table>
     </div>
+    </div>
 
-    <div style="margin-top:40px;margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;">
-        <h2 style="font-size:16px;font-weight:600;">Shop - Products</h2>
+    <div class="ws-tab-panel" data-shop-panel="products">
+    <div style="margin-bottom:12px;display:flex;justify-content:flex-end;">
         <button onclick="showProductModal()">+ New Product</button>
     </div>
     <div class="card" style="padding:0;">
@@ -1361,9 +1370,11 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
             </tbody>
         </table>
     </div>
+    </div>
 
-    <div style="margin-top:40px;margin-bottom:14px;">
-        <h2 style="font-size:16px;font-weight:600;margin:0 0 14px;">Shipping Countries</h2>
+    <div class="ws-tab-panel" data-shop-panel="shipping">
+    <div style="margin-bottom:14px;">
+        <h2 style="font-size:16px;font-weight:600;margin:0 0 14px;">Countries</h2>
         <div class="card settings-card">
             <div class="detail-body">
                 <div class="form-row">
@@ -1380,9 +1391,8 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
             </div>
         </div>
     </div>
-
-    <div style="margin-top:40px;margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;">
-        <h2 style="font-size:16px;font-weight:600;">Shipping Rates</h2>
+    <div style="margin-top:24px;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;">
+        <h2 style="font-size:16px;font-weight:600;">Rates</h2>
         <button onclick="showShippingRateModal()">+ New Rate</button>
     </div>
     <div class="card" style="padding:0;">
@@ -1402,10 +1412,10 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
             </tbody>
         </table>
     </div>
+    </div>
 
-    <div style="margin-top:40px;margin-bottom:14px;">
-        <h2 style="font-size:16px;font-weight:600;margin:0 0 14px;">Settings</h2>
-        <div class="card settings-card">
+    <div class="ws-tab-panel" data-shop-panel="settings">
+    <div class="card settings-card">
             <div class="detail-header">
                 <h3>Email notifications</h3>
             </div>
@@ -1424,10 +1434,6 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                     <input type="text" id="shopSetSupport">
                 </div>
                 <div class="form-row">
-                    <label for="shopSetThankYou">Optional thank-you message (HTML)</label>
-                    <textarea id="shopSetThankYou" rows="3"></textarea>
-                </div>
-                <div class="form-row">
                     <label for="shopSetInvoiceFrom">Invoice sender (company name, then address lines)</label>
                     <textarea id="shopSetInvoiceFrom" rows="4"></textarea>
                 </div>
@@ -1435,6 +1441,33 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
             </div>
             <div class="form-footer">
                 <button class="primary" onclick="saveShopSettings()">Save settings</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="ws-tab-panel" data-shop-panel="emails">
+    <div class="card settings-card">
+            <div class="detail-body">
+                <div class="form-row" style="display:flex;gap:12px;">
+                    <select id="emailTplName" onchange="loadEmailTemplate()">
+                        <option value="order_confirmation">Order confirmation</option>
+                        <option value="order_shipped">Order shipped</option>
+                    </select>
+                    <select id="emailTplLang" onchange="loadEmailTemplate()">
+                        <option value="">English</option>
+                    </select>
+                </div>
+                <div class="form-row">
+                    <textarea id="emailTplBody" rows="18" spellcheck="false" style="width:100%;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;"></textarea>
+                </div>
+                <div id="emailTplVars" style="font-size:11px;color:var(--text2);font-family:ui-monospace,Menlo,Consolas,monospace;"></div>
+                <div id="emailTplError" class="form-error" style="display:none;"></div>
+            </div>
+            <div class="form-footer" style="display:flex;gap:8px;justify-content:flex-end;">
+                <button onclick="resetEmailTemplate()">Use default</button>
+                <button onclick="previewEmailTemplate()">Preview</button>
+                <button onclick="testEmailTemplate()">Send test</button>
+                <button class="primary" onclick="saveEmailTemplate()">Save</button>
             </div>
         </div>
     </div>
@@ -2044,9 +2077,18 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                 <label>Description (Markdown)</label>
                 <textarea id="productDesc" rows="4" style="width:100%;"></textarea>
             </div>
-            <div class="form-row" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+            <div class="form-row" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">
                 <div><label>Price (cents)</label><input type="number" id="productPrice" min="0" value="0"></div>
                 <div><label>Currency</label><input type="text" id="productCurrency" value="usd" maxlength="3"></div>
+                <div><label>Price (JPY)</label><input type="number" id="productPriceJpy" min="0" value="0"></div>
+            </div>
+            <div class="form-row">
+                <label>Title (ja)</label>
+                <input type="text" id="productTitleJa">
+            </div>
+            <div class="form-row">
+                <label>Description (ja, Markdown)</label>
+                <textarea id="productDescJa" rows="4" style="width:100%;"></textarea>
             </div>
             <div class="form-row">
                 <label>Image</label>
@@ -2069,6 +2111,19 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
         <div class="form-actions">
             <button class="secondary" onclick="closeProductModal()">Cancel</button>
             <button class="primary" onclick="saveProduct()">Save</button>
+        </div>
+    </div>
+</div>
+
+<!-- Email template preview -->
+<div id="emailPreviewModal" class="modal-overlay" onclick="if(event.target===this)closeEmailPreview()">
+    <div class="modal" style="max-width:720px;width:92%;">
+        <h2 id="emailPreviewSubject" style="font-size:14px;word-break:break-all;"></h2>
+        <div class="modal-body" style="padding:0;">
+            <iframe id="emailPreviewFrame" style="width:100%;height:70vh;border:0;background:#fff;border-radius:6px;"></iframe>
+        </div>
+        <div class="form-actions">
+            <button class="secondary" onclick="closeEmailPreview()">Close</button>
         </div>
     </div>
 </div>
@@ -6511,8 +6566,97 @@ let editingRateId = null;      // null = create mode
 async function loadShop() {
     if (!roleIsAdmin(userRole)) return;
     await ensureShopSiteSelect();
-    await Promise.all([loadShopProducts(), loadShopRates(), loadShopOrders(), loadShopSettings(), loadShopCountryCatalogue()]);
+    await Promise.all([loadShopProducts(), loadShopRates(), loadShopOrders(), loadShopSettings(), loadShopCountryCatalogue(), loadEmailTemplate()]);
 }
+
+// ----- Email templates -----
+let emailTplKey = '';
+let emailTplDefault = '';
+
+async function emailTplRequest(path, bodyMd) {
+    const resp = await fetch(API + '/shop/admin/' + path + wsQ(), {
+        method: 'POST',
+        headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            template: document.getElementById('emailTplName').value,
+            lang: document.getElementById('emailTplLang').value,
+            body_md: bodyMd,
+        }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status));
+    return data;
+}
+
+async function loadEmailTemplate() {
+    const errEl = document.getElementById('emailTplError');
+    if (!errEl) return;
+    errEl.style.display = 'none';
+    try {
+        const data = await emailTplRequest('email_preview', '');
+        document.getElementById('emailTplBody').value = data.markdown || '';
+        emailTplKey = data.setting_key || '';
+        emailTplDefault = data.default_markdown || '';
+        document.getElementById('emailTplVars').textContent = (data.variables || []).map(v => '{' + v + '}').join('  ');
+        const langSel = document.getElementById('emailTplLang');
+        const langs = [''].concat(data.langs || []);
+        if (langSel.options.length !== langs.length) {
+            const cur = langSel.value;
+            langSel.innerHTML = langs.map(l =>
+                '<option value="' + escHtml(l) + '">' + (l === '' ? 'English' : (l === 'ja' ? '日本語' : escHtml(l))) + '</option>').join('');
+            langSel.value = langs.includes(cur) ? cur : '';
+        }
+    } catch (e) { errEl.textContent = e.message; errEl.style.display = ''; }
+}
+
+async function previewEmailTemplate() {
+    const errEl = document.getElementById('emailTplError');
+    errEl.style.display = 'none';
+    try {
+        const data = await emailTplRequest('email_preview', document.getElementById('emailTplBody').value);
+        document.getElementById('emailPreviewSubject').textContent = data.subject || '';
+        document.getElementById('emailPreviewFrame').srcdoc = data.html || '';
+        document.getElementById('emailPreviewModal').classList.add('visible');
+    } catch (e) { errEl.textContent = e.message; errEl.style.display = ''; }
+}
+
+function closeEmailPreview() { document.getElementById('emailPreviewModal').classList.remove('visible'); }
+
+async function testEmailTemplate() {
+    const errEl = document.getElementById('emailTplError');
+    errEl.style.display = 'none';
+    try {
+        const data = await emailTplRequest('email_test', document.getElementById('emailTplBody').value);
+        toast('Test email sent to ' + (data.sent_to || ''), 'success');
+    } catch (e) { errEl.textContent = e.message; errEl.style.display = ''; }
+}
+
+async function saveEmailTemplateValue(value) {
+    const errEl = document.getElementById('emailTplError');
+    errEl.style.display = 'none';
+    if (!emailTplKey) { errEl.textContent = 'Template not loaded'; errEl.style.display = ''; return; }
+    try {
+        const body = {};
+        body[emailTplKey] = value;
+        const resp = await fetch(API + '/shop/admin/settings' + wsQ(), {
+            method: 'PUT',
+            headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) { errEl.textContent = data.error || ('HTTP ' + resp.status); errEl.style.display = ''; return; }
+        toast(value === '' ? 'Template reset to default' : 'Template saved', 'success');
+        await loadEmailTemplate();
+    } catch (e) { errEl.textContent = e.message; errEl.style.display = ''; }
+}
+
+function saveEmailTemplate() {
+    const v = document.getElementById('emailTplBody').value;
+    // Saving the untouched default stores nothing - the default stays live.
+    saveEmailTemplateValue(v.trim() === emailTplDefault.trim() ? '' : v);
+}
+
+function resetEmailTemplate() { saveEmailTemplateValue(''); }
 
 // The shop page shares the website section's active site (websiteSite);
 // each page carries its own selector, kept in sync with the other.
@@ -6537,6 +6681,13 @@ async function ensureShopSiteSelect() {
         }
     }
     if (sel.options.length) sel.value = websiteSite;
+}
+
+function shopTab(name) {
+    document.querySelectorAll('#page-shop .ws-tab').forEach(t =>
+        t.classList.toggle('active', t.dataset.shopTab === name));
+    document.querySelectorAll('#page-shop .ws-tab-panel').forEach(p =>
+        p.classList.toggle('active', p.dataset.shopPanel === name));
 }
 
 function switchShopSite() {
@@ -6610,7 +6761,6 @@ async function loadShopSettings() {
         const ce = s.customer_email_enabled;
         document.getElementById('shopSetCustomerEnabled').checked = (ce === '' || ce === '1' || ce === 'true' || ce == null);
         document.getElementById('shopSetSupport').value = s.support_contact || '';
-        document.getElementById('shopSetThankYou').value = s.customer_thank_you_html || '';
         document.getElementById('shopSetInvoiceFrom').value = s.invoice_from || '';
         shopCountrySel = new Set((s.shipping_countries || '').split(',').map(c => c.trim()).filter(Boolean));
         renderShopCountryPicker();
@@ -6635,7 +6785,6 @@ async function saveShopSettings() {
         notification_emails: document.getElementById('shopSetEmails').value,
         customer_email_enabled: document.getElementById('shopSetCustomerEnabled').checked ? '1' : '0',
         support_contact: document.getElementById('shopSetSupport').value,
-        customer_thank_you_html: document.getElementById('shopSetThankYou').value,
         invoice_from: document.getElementById('shopSetInvoiceFrom').value,
     };
     try {
@@ -6831,8 +6980,11 @@ function renderShopProducts() {
     }).join('');
 }
 
-function shopFmtMoney(cents, currency) {
-    return (cents / 100).toFixed(2) + ' ' + (currency || 'usd').toUpperCase();
+function shopFmtMoney(amount, currency) {
+    const cur = (currency || 'usd').toUpperCase();
+    // JPY is zero-decimal: amounts are whole yen.
+    if (cur === 'JPY') return amount.toLocaleString('en-US') + ' JPY';
+    return (amount / 100).toFixed(2) + ' ' + cur;
 }
 
 function showProductModal(sku) {
@@ -6849,6 +7001,9 @@ function showProductModal(sku) {
         document.getElementById('productDesc').value = p.description_md || '';
         document.getElementById('productPrice').value = p.price_cents;
         document.getElementById('productCurrency').value = p.currency;
+        document.getElementById('productPriceJpy').value = p.price_jpy || 0;
+        document.getElementById('productTitleJa').value = p.title_ja || '';
+        document.getElementById('productDescJa').value = p.description_md_ja || '';
         populateProductImageOptions(p.image_asset || '');
         document.getElementById('productTaxCode').value = p.tax_code;
         document.getElementById('productOrd').value = p.ord;
@@ -6860,6 +7015,9 @@ function showProductModal(sku) {
         document.getElementById('productDesc').value = '';
         document.getElementById('productPrice').value = 0;
         document.getElementById('productCurrency').value = 'usd';
+        document.getElementById('productPriceJpy').value = 0;
+        document.getElementById('productTitleJa').value = '';
+        document.getElementById('productDescJa').value = '';
         populateProductImageOptions('');
         document.getElementById('productTaxCode').value = 'txcd_99999999';
         document.getElementById('productOrd').value = 0;
@@ -6884,6 +7042,9 @@ async function saveProduct() {
         tax_code: document.getElementById('productTaxCode').value.trim() || 'txcd_99999999',
         ord: parseInt(document.getElementById('productOrd').value, 10) || 0,
         active: document.getElementById('productActive').checked,
+        title_ja: document.getElementById('productTitleJa').value.trim(),
+        description_md_ja: document.getElementById('productDescJa').value,
+        price_jpy: parseInt(document.getElementById('productPriceJpy').value, 10) || 0,
     };
     try {
         const resp = await fetch(API + '/shop/admin/products/' + encodeURIComponent(sku) + wsQ(), {

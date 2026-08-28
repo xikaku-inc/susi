@@ -40,6 +40,9 @@ services:
       # Shop / Stripe (test keys live in /opt/susi/.env on the host)
       - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY:-}
       - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET:-}
+      # LPR shop Stripe account; staging always runs on the LP sandbox keys.
+      - STRIPE_SECRET_KEY_LPR=${STRIPE_SECRET_KEY_LPR_TEST:-}
+      - STRIPE_WEBHOOK_SECRET_LPR=${STRIPE_WEBHOOK_SECRET_LPR_TEST:-}
       - SUSI_SHOP_BASE_URL=${SUSI_SHOP_BASE_URL:-https://staging.susi.lp-research.com}
       - SUSI_SHOP_NOTIFY_ADDR=${SUSI_SHOP_NOTIFY_ADDR:-}
       # Contact form (empty contact-to-addr disables; turnstile keys optional)

@@ -2393,6 +2393,298 @@ fn test_shop_site_scoping() {
     assert!(orders("xikaku").is_empty(), "xikaku must not see the other shop's order");
 }
 
+/// The bilingual shop: Japanese fields round-trip through the admin API, the
+/// public listing carries them, /shop and /site/{lang}/shop serve the
+/// storefront shell in the right language, and a JPY checkout is refused for
+/// products without a yen price (before any Stripe call).
+#[test]
+fn test_shop_bilingual() {
+    // A dummy Stripe key for the test site lets checkout reach price
+    // resolution (the currency rules run before any Stripe round-trip).
+    let server = TestServer::start_with_env(&[
+        ("STRIPE_SECRET_KEY_JSHOP", "sk_test_dummy"),
+        ("STRIPE_WEBHOOK_SECRET_JSHOP", "whsec_jshop"),
+    ]);
+    let admin = server.admin_token();
+    let client = server.http();
+
+    let resp = client
+        .post(format!("{}/sites", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({
+            "id": "jshop",
+            "name": "J Shop",
+            "hosts": ["jshop.example.com"],
+            "public_base": "https://jshop.example.com",
+            "has_shop": true,
+            "langs": ["ja"],
+        }))
+        .send()
+        .expect("create site");
+    assert_eq!(resp.status().as_u16(), 200, "create: {}", resp.text().unwrap_or_default());
+
+    let resp = client
+        .put(format!("{}/shop/admin/products/lpms-b2?site=jshop", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({
+            "title": "LPMS-B2 - Wireless 9-Axis IMU",
+            "price_cents": 29900,
+            "title_ja": "LPMS-B2 - ワイヤレス9軸IMU",
+            "description_md_ja": "Bluetooth接続の9軸IMUセンサー。",
+            "price_jpy": 58000,
+        }))
+        .send()
+        .expect("upsert product");
+    assert_eq!(resp.status().as_u16(), 200, "{}", resp.text().unwrap_or_default());
+    // A second product without a yen price.
+    let resp = client
+        .put(format!("{}/shop/admin/products/usd-only?site=jshop", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({ "title": "USD Only", "price_cents": 1000 }))
+        .send()
+        .expect("upsert usd-only");
+    assert!(resp.status().is_success());
+
+    let listing = client
+        .get(format!("{}/shop/products", server.api_url))
+        .header("Host", "jshop.example.com")
+        .send()
+        .expect("list")
+        .json::<Value>()
+        .unwrap();
+    let b2 = listing["products"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["sku"] == json!("lpms-b2"))
+        .expect("b2 in listing");
+    assert_eq!(b2["title_ja"], json!("LPMS-B2 - ワイヤレス9軸IMU"));
+    assert_eq!(b2["price_jpy"], json!(58000));
+
+    // The storefront shell is served through /site (the marketing nginx
+    // rewrites clean URLs there) in both languages.
+    let shell = client
+        .get(format!("{}/site/shop", server.url))
+        .header("Host", "jshop.example.com")
+        .send()
+        .expect("shop shell")
+        .text()
+        .unwrap();
+    assert!(shell.contains("<title>Shop - J Shop</title>"), "en shell");
+    let shell = client
+        .get(format!("{}/site/ja/shop", server.url))
+        .header("Host", "jshop.example.com")
+        .send()
+        .expect("ja shop shell")
+        .text()
+        .unwrap();
+    assert!(shell.contains("<title>ショップ - J Shop</title>"), "ja shell title");
+    assert!(shell.contains(r#"<html lang="ja""#), "ja shell html lang");
+    let shell = client
+        .get(format!("{}/site/ja/shop/lpms-b2", server.url))
+        .header("Host", "jshop.example.com")
+        .send()
+        .expect("ja detail shell");
+    assert!(shell.status().is_success());
+
+    // A JPY checkout of a product without a yen price is refused up front;
+    // one with a yen price passes price resolution and only fails at the
+    // Stripe round-trip (dummy key -> 502), proving the currency rules ran.
+    let checkout = |body: Value| {
+        client
+            .post(format!("{}/shop/checkout", server.api_url))
+            .header("Host", "jshop.example.com")
+            .json(&body)
+            .send()
+            .expect("checkout")
+    };
+    let resp = checkout(json!({ "items": [{"sku": "usd-only", "qty": 1}], "currency": "jpy" }));
+    assert_eq!(resp.status().as_u16(), 400);
+    assert!(resp.text().unwrap_or_default().contains("Not available in JPY"));
+    let resp = checkout(json!({ "items": [{"sku": "lpms-b2", "qty": 1}], "currency": "jpy" }));
+    assert_eq!(resp.status().as_u16(), 502, "dummy Stripe key fails only at the API call");
+
+    // A webhook stamped lang=ja books the order in Japanese.
+    let event = json!({
+        "type": "checkout.session.completed",
+        "data": { "object": {
+            "id": "cs_ja_1",
+            "payment_status": "paid",
+            "amount_total": 65450,
+            "currency": "jpy",
+            "metadata": { "site": "jshop", "lang": "ja" },
+            "customer_details": { "email": "b@example.com", "name": "B" },
+        }}
+    });
+    let payload = event.to_string();
+    let sig = stripe_sig("whsec_jshop", &payload, chrono_now());
+    let resp = client
+        .post(format!("{}/shop/webhook", server.api_url))
+        .header("Stripe-Signature", sig)
+        .header("Content-Type", "application/json")
+        .body(payload)
+        .send()
+        .expect("webhook");
+    assert!(resp.status().is_success());
+    let orders = client
+        .get(format!("{}/shop/admin/orders?site=jshop", server.api_url))
+        .bearer_auth(&admin)
+        .send()
+        .expect("orders")
+        .json::<Value>()
+        .unwrap();
+    assert_eq!(orders["orders"][0]["lang"], json!("ja"));
+
+    // The email template editor: the ja preview serves the Japanese default,
+    // an override is applied on the next preview, and reset restores it.
+    let preview = |body: Value| {
+        client
+            .post(format!("{}/shop/admin/email_preview?site=jshop", server.api_url))
+            .bearer_auth(&admin)
+            .json(&body)
+            .send()
+            .expect("preview")
+            .json::<Value>()
+            .unwrap()
+    };
+    let p = preview(json!({ "template": "order_confirmation", "lang": "ja", "body_md": "" }));
+    assert!(p["markdown"].as_str().unwrap().contains("ご注文ありがとうございます"));
+    assert!(p["html"].as_str().unwrap().contains("LPMS-B2"), "sample items rendered");
+    assert!(p["html"].as_str().unwrap().contains("¥"), "ja sample uses yen");
+    assert_eq!(p["setting_key"], json!("email_order_confirmation_ja"));
+
+    let resp = client
+        .put(format!("{}/shop/admin/settings?site=jshop", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({ "email_order_confirmation_ja": "# カスタム\n\n{items}\n" }))
+        .send()
+        .expect("save template");
+    assert!(resp.status().is_success());
+    let p = preview(json!({ "template": "order_confirmation", "lang": "ja", "body_md": "" }));
+    assert!(p["markdown"].as_str().unwrap().starts_with("# カスタム"));
+    assert!(p["html"].as_str().unwrap().contains("カスタム"));
+
+    let resp = client
+        .put(format!("{}/shop/admin/settings?site=jshop", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({ "email_order_confirmation_ja": "" }))
+        .send()
+        .expect("reset template");
+    assert!(resp.status().is_success());
+    let p = preview(json!({ "template": "order_confirmation", "lang": "ja", "body_md": "" }));
+    assert!(p["markdown"].as_str().unwrap().contains("ご注文ありがとうございます"));
+}
+
+/// The Merchant Center feed: en and ja variants carry the right currency,
+/// products without a yen price stay out of the ja feed, pre-order items are
+/// omitted entirely, and the /shop/{sku} shell carries the product JSON-LD
+/// Google verifies against the feed.
+#[test]
+fn test_shop_merchant_feed() {
+    let server = TestServer::start();
+    let admin = server.admin_token();
+    let client = server.http();
+
+    let resp = client
+        .post(format!("{}/sites", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({
+            "id": "feedshop",
+            "name": "Feed Shop",
+            "hosts": ["feedshop.example.com"],
+            "public_base": "https://feedshop.example.com",
+            "has_shop": true,
+            "langs": ["ja"],
+        }))
+        .send()
+        .expect("create site");
+    assert_eq!(resp.status().as_u16(), 200, "create: {}", resp.text().unwrap_or_default());
+
+    let upsert = |sku: &str, body: Value| {
+        let resp = client
+            .put(format!("{}/shop/admin/products/{}?site=feedshop", server.api_url, sku))
+            .bearer_auth(&admin)
+            .json(&body)
+            .send()
+            .expect("upsert product");
+        assert!(resp.status().is_success(), "{}: {}", sku, resp.text().unwrap_or_default());
+    };
+    upsert("lpms-b2", json!({
+        "title": "LPMS-B2 - Wireless 9-Axis IMU",
+        "description_md": "Bluetooth 9-axis IMU sensor.",
+        "price_cents": 29900,
+        "title_ja": "LPMS-B2 - ワイヤレス9軸IMU",
+        "description_md_ja": "Bluetooth接続の9軸IMUセンサー。",
+        "price_jpy": 58000,
+    }));
+    upsert("usd-only", json!({ "title": "USD Only", "price_cents": 1000 }));
+    upsert("xicap-avp", json!({
+        "title": "Xicap - Spatial Tracker (Pre-order - ships Nov 2026)",
+        "price_cents": 19900,
+        "price_jpy": 39000,
+    }));
+
+    let feed = client
+        .get(format!("{}/shop/feed.xml", server.url))
+        .header("Host", "feedshop.example.com")
+        .send()
+        .expect("en feed");
+    assert_eq!(feed.status().as_u16(), 200);
+    let ct = feed.headers()[reqwest::header::CONTENT_TYPE].to_str().unwrap().to_string();
+    assert!(ct.starts_with("application/xml"), "content type: {}", ct);
+    let body = feed.text().unwrap();
+    assert!(body.contains("<g:id>lpms-b2</g:id>"), "en feed: {}", body);
+    assert!(body.contains("<g:title>LPMS-B2 - Wireless 9-Axis IMU</g:title>"));
+    assert!(body.contains("<g:price>299.00 USD</g:price>"));
+    assert!(body.contains("<g:link>https://feedshop.example.com/shop/lpms-b2</g:link>"));
+    assert!(body.contains("<g:id>usd-only</g:id>"));
+    assert!(!body.contains("xicap-avp"), "pre-order item must stay out of the feed");
+
+    // The ja feed through the marketing rewrite: JPY prices, ja titles, and
+    // no items that lack a yen price.
+    let body = client
+        .get(format!("{}/site/ja/shop/feed.xml", server.url))
+        .header("Host", "feedshop.example.com")
+        .send()
+        .expect("ja feed")
+        .text()
+        .unwrap();
+    assert!(body.contains("<g:title>LPMS-B2 - ワイヤレス9軸IMU</g:title>"), "ja feed: {}", body);
+    assert!(body.contains("<g:price>58000 JPY</g:price>"));
+    assert!(body.contains("<g:link>https://feedshop.example.com/ja/shop/lpms-b2</g:link>"));
+    assert!(!body.contains("usd-only"), "no yen price -> not in the ja feed");
+
+    // The product detail shell carries a single Product JSON-LD block.
+    let body = client
+        .get(format!("{}/site/shop/lpms-b2", server.url))
+        .header("Host", "feedshop.example.com")
+        .send()
+        .expect("en detail shell")
+        .text()
+        .unwrap();
+    assert!(body.contains(r#""@type":"Product""#), "en shell: {}", body);
+    assert!(body.contains(r#""sku":"lpms-b2""#));
+    assert!(body.contains(r#""price":"299.00""#));
+    let body = client
+        .get(format!("{}/site/ja/shop/lpms-b2", server.url))
+        .header("Host", "feedshop.example.com")
+        .send()
+        .expect("ja detail shell")
+        .text()
+        .unwrap();
+    assert!(body.contains(r#""price":"58000""#), "ja shell: {}", body);
+    assert!(body.contains(r#""priceCurrency":"JPY""#));
+    // The storefront listing and success/cancel shells stay LD-free.
+    let body = client
+        .get(format!("{}/site/shop", server.url))
+        .header("Host", "feedshop.example.com")
+        .send()
+        .expect("listing shell")
+        .text()
+        .unwrap();
+    assert!(!body.contains(r#""@type":"Product""#));
+}
+
 fn chrono_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
