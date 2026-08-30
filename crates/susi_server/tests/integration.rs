@@ -5053,7 +5053,7 @@ fn test_site_chrome_flags() {
 
     let shell = lpr_shell();
     assert!(shell.contains(r#"<html lang="en" data-theme="light">"#), "theme_mode=light must pin the light theme before paint");
-    assert!(shell.contains(r#"<body class="no-topbar">"#), "no_topbar must reach the body class");
+    assert!(shell.contains(r#"<body class="no-topbar sidebar-logo">"#), "no_topbar and sidebar_logo must reach the body class");
     assert!(shell.contains(r#"class="sidebar-brand""#), "the brand must render inside the sidebar");
     assert!(shell.contains(r#"<div class="layout no-toc" id="layout">"#), "the sidebar column must show immediately");
     assert!(shell.contains(r#""theme":"light""#) && shell.contains(r#""no_topbar":true"#) && shell.contains(r#""sidebar_logo":true"#));
@@ -5092,8 +5092,29 @@ fn test_site_chrome_flags() {
     assert_eq!(s["no_topbar"], "1");
     assert_eq!(s["sidebar_logo"], "");
 
+    // A configured top bar logo height reaches the shell as CSS variables,
+    // growing the bar with the logo; clearing it restores the defaults.
+    let resp = http
+        .put(format!("{}/site/admin/settings?site=lpr", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "logo_height": "77" }))
+        .send().expect("set logo height");
+    assert_eq!(resp.status().as_u16(), 200);
+    let shell = lpr_shell();
+    assert!(shell.contains("--brand-logo-h:77px"), "logo height must reach the shell");
+    assert!(shell.contains("--topbar-h:93px"), "the top bar must grow with the logo");
+    assert!(shell.contains("@media (max-width: 720px){:root:root{--brand-logo-h:40px;--topbar-h:56px}}"),
+        "phones must cap the logo at 40px with the default bar height");
+    let resp = http
+        .put(format!("{}/site/admin/settings?site=lpr", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "logo_height": "" }))
+        .send().expect("clear logo height");
+    assert_eq!(resp.status().as_u16(), 200);
+    assert!(!lpr_shell().contains("--brand-logo-h:77px"), "cleared height must fall back to the CSS default");
+
     // Invalid values are rejected.
-    for bad in [json!({ "theme_mode": "auto" }), json!({ "no_topbar": "2" }), json!({ "sidebar_logo": "yes" })] {
+    for bad in [json!({ "theme_mode": "auto" }), json!({ "no_topbar": "2" }), json!({ "sidebar_logo": "yes" }), json!({ "logo_height": "500" })] {
         let resp = http
             .put(format!("{}/site/admin/settings?site=lpr", server.api_url))
             .bearer_auth(&token)

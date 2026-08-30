@@ -2324,7 +2324,7 @@ fn site_config_script(
 /// artwork (uploaded or compiled-in) gets the photo layer and the veil
 /// styles keyed on it.
 pub(crate) fn render_shell(state: &Arc<AppState>, site: &SiteConfig, lang: &str, seo_head: &str, body_html: &str) -> Bytes {
-    let (custom_bg, veil, parallax, theme, no_topbar, sidebar_logo, favicon) = {
+    let (custom_bg, veil, parallax, theme, no_topbar, sidebar_logo, favicon, logo_height) = {
         let db = state.db.lock();
         let get = |k: &str| {
             db.get_site_setting(&sites::setting_key(site, k)).ok().flatten().unwrap_or_default()
@@ -2337,12 +2337,36 @@ pub(crate) fn render_shell(state: &Arc<AppState>, site: &SiteConfig, lang: &str,
             get(SETTING_NO_TOPBAR) == "1",
             get(SETTING_SIDEBAR_LOGO) == "1",
             get(SETTING_FAVICON_IMAGE),
+            get(SETTING_LOGO_HEIGHT),
         )
     };
     let theme = if matches!(theme.as_str(), "light" | "dark") { theme } else { String::new() };
+    // A configured brand-logo height overrides the 28px default; the top bar
+    // grows with it so the logo keeps 8px of breathing room each side. On
+    // phones the height is capped at 40px so a large logo never crowds the
+    // hamburger, language switcher and cart. The doubled :root outranks the
+    // stylesheet's default regardless of where the injection marker sits.
+    let logo_css = match logo_height.parse::<u32>() {
+        Ok(h) if (16..=120).contains(&h) => {
+            let mobile_h = h.min(40);
+            format!(
+                "<style>:root:root{{--brand-logo-h:{}px;--topbar-h:{}px}}\
+                 @media (max-width: 720px){{:root:root{{--brand-logo-h:{}px;--topbar-h:{}px}}}}</style>",
+                h,
+                (h + 16).max(56),
+                mobile_h,
+                (mobile_h + 16).max(56)
+            )
+        }
+        _ => String::new(),
+    };
     let mut html = WEBSITE_HTML
         .replacen("<!--SEO_HEAD-->", seo_head, 1)
-        .replacen("<!--SITE_CONFIG-->", &site_config_script(state, site, lang, &theme, no_topbar, sidebar_logo), 1)
+        .replacen(
+            "<!--SITE_CONFIG-->",
+            &format!("{}{}", logo_css, site_config_script(state, site, lang, &theme, no_topbar, sidebar_logo)),
+            1,
+        )
         .replacen("<!--ANALYTICS-->", &analytics_head(state, site), 1)
         .replacen("<!--BODY_CONTENT-->", body_html, 1);
     // One rewrite covers both html-tag concerns: the document language of a
@@ -2947,6 +2971,9 @@ pub const SETTING_THEME_MODE: &str = "theme_mode";
 pub const SETTING_NO_TOPBAR: &str = "no_topbar";
 /// "1" = the brand logo renders above the sidebar nav.
 pub const SETTING_SIDEBAR_LOGO: &str = "sidebar_logo";
+/// Top bar brand logo height in px (16-120); empty = the 28px default. The
+/// top bar itself grows to logo height + 16px when this exceeds the default.
+pub const SETTING_LOGO_HEIGHT: &str = "logo_height";
 
 /// Sidebar nav config: JSON array of groups rendered between the ungrouped
 /// pages and nothing else. Items are page slugs, plus the pseudo-slugs
@@ -3395,6 +3422,7 @@ const KNOWN_SITE_SETTING_KEYS: &[&str] = &[
     SETTING_SIDEBAR_LOGO,
     SETTING_LOGO_IMAGE,
     SETTING_LOGO_DARK_IMAGE,
+    SETTING_LOGO_HEIGHT,
     SETTING_FAVICON_IMAGE,
 ];
 
@@ -3459,6 +3487,10 @@ pub async fn handle_admin_put_site_settings(
         } else if k == SETTING_BG_VEIL {
             if !trimmed.is_empty() && !trimmed.parse::<u8>().map_or(false, |v| v <= 100) {
                 return Err(error_response(StatusCode::BAD_REQUEST, "bg_veil must be 0-100"));
+            }
+        } else if k == SETTING_LOGO_HEIGHT {
+            if !trimmed.is_empty() && !trimmed.parse::<u32>().map_or(false, |v| (16..=120).contains(&v)) {
+                return Err(error_response(StatusCode::BAD_REQUEST, "logo_height must be 16-120"));
             }
         } else if k == SETTING_BG_PARALLAX || k == SETTING_NO_TOPBAR || k == SETTING_SIDEBAR_LOGO {
             if !matches!(trimmed, "" | "0" | "1") {

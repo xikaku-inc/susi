@@ -26,6 +26,10 @@
 <script src="/docs/easymde.js" defer></script>
 <style>
 :root {
+    /* Top bar height and brand logo height; a site's logo_height setting
+       overrides both via an injected style (see render_shell). */
+    --topbar-h: 56px;
+    --brand-logo-h: 28px;
     --bg: #000000;
     --bg2: #161922;
     --bg3: #1d212c;
@@ -97,17 +101,18 @@ body.has-bg .site-footer { background: transparent; }
    content never passes under it. The sticky rails re-anchor to the
    container top; sticky admin bars anchor to 0 instead of the header. */
 body.has-bg { height: 100dvh; overflow: hidden; }
-body.has-bg .page-scroll { height: calc(100dvh - 56px); overflow-y: auto; }
+body.has-bg .page-scroll { height: calc(100dvh - var(--topbar-h)); overflow-y: auto; }
 body.has-bg .sidebar,
 body.has-bg .toc-rail { top: 0; }
 body.has-bg .editor-toolbar { top: 0; }
 .header {
-    height: 56px;
+    height: var(--topbar-h);
     border-bottom: 1px solid var(--border);
     background: var(--bg);
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 12px;
     padding: 0 24px;
     position: sticky;
     top: 0;
@@ -118,7 +123,7 @@ body.has-bg .editor-toolbar { top: 0; }
     font-size: 16px; font-weight: 600; letter-spacing: 0.02em;
     display: flex; align-items: center;
 }
-.header .brand img { height: 28px; display: block; }
+.header .brand img { height: var(--brand-logo-h); display: block; }
 .header .brand img.logo-light,
 .content img.logo-light { display: none; }
 :root[data-theme="light"] .header .brand img.logo-dark,
@@ -153,7 +158,7 @@ body.has-bg .editor-toolbar { top: 0; }
 .nav-toggle:hover { background: var(--bg3); }
 .nav-toggle svg { width: 20px; height: 20px; display: block; stroke: currentColor; }
 .nav-overlay {
-    position: fixed; inset: 56px 0 0 0;
+    position: fixed; inset: var(--topbar-h) 0 0 0;
     background: rgba(0,0,0,0.4);
     opacity: 0; pointer-events: none;
     transition: opacity 0.2s;
@@ -167,7 +172,7 @@ body.has-bg .editor-toolbar { top: 0; }
 .layout {
     display: grid;
     grid-template-columns: var(--sidebar-width) 1fr var(--sidebar-width);
-    min-height: calc(100vh - 56px);
+    min-height: calc(100vh - var(--topbar-h));
 }
 .layout.no-sidebar { grid-template-columns: 1fr var(--sidebar-width); }
 .layout.no-sidebar .sidebar { display: none; }
@@ -197,9 +202,9 @@ body.has-bg .editor-toolbar { top: 0; }
     /* Reserve the scrollbar lane so the brand logo keeps one width whether
        the nav overflows or not. */
     scrollbar-gutter: stable;
-    max-height: calc(100vh - 56px);
+    max-height: calc(100vh - var(--topbar-h));
     position: sticky;
-    top: 56px;
+    top: var(--topbar-h);
 }
 .sidebar h3 {
     font-size: 11px;
@@ -334,6 +339,17 @@ div.grid.cols-5 { --cols: 5; }
 div.grid.cols-6 { --cols: 6; }
 @media (max-width: 760px) {
     .content div.grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    /* People grids skip the two-column stage: one person per row, cells
+       reordered column-major so name and role follow their photo. */
+    .content div.grid.people { grid-template-columns: 1fr; }
+    .content div.grid.people.cols-2 > div:nth-child(2n) { order: 1; }
+    .content div.grid.people.cols-3 > div:nth-child(3n+2) { order: 1; }
+    .content div.grid.people.cols-3 > div:nth-child(3n) { order: 2; }
+    .content div.grid.people.cols-4 > div:nth-child(4n+2) { order: 1; }
+    .content div.grid.people.cols-4 > div:nth-child(4n+3) { order: 2; }
+    .content div.grid.people.cols-4 > div:nth-child(4n) { order: 3; }
+    .content div.grid.people > div:has(img) { margin-top: 14px; }
+    .content div.grid.people > div:first-child { margin-top: 0; }
 }
 @media (max-width: 640px) {
     .content div.grid.cols-2 { grid-template-columns: 1fr; }
@@ -414,7 +430,7 @@ div.grid.cols-6 { --cols: 6; }
     border-bottom: none;
     opacity: 1 !important;
     position: sticky;
-    top: 56px;
+    top: var(--topbar-h);
     z-index: 9;
 }
 .editor-toolbar button {
@@ -636,8 +652,8 @@ div.grid.cols-6 { --cols: 6; }
     background: var(--bg);
     padding: 24px 18px;
     overflow-y: auto;
-    max-height: calc(100vh - 56px);
-    position: sticky; top: 56px;
+    max-height: calc(100vh - var(--topbar-h));
+    position: sticky; top: var(--topbar-h);
     font-size: 16px;
 }
 .toc-rail .toc-title {
@@ -678,11 +694,11 @@ div.grid.cols-6 { --cols: 6; }
     .layout.no-sidebar.no-toc { grid-template-columns: 1fr; }
     .sidebar {
         position: fixed;
-        top: 56px;
+        top: var(--topbar-h);
         left: 0;
         width: 280px;
         max-width: 80vw;
-        height: calc(100vh - 56px);
+        height: calc(100vh - var(--topbar-h));
         max-height: none;
         border-right: 1px solid var(--border);
         border-bottom: none;
@@ -699,8 +715,12 @@ div.grid.cols-6 { --cols: 6; }
     body.no-topbar .sidebar { top: 0; height: 100vh; padding-top: 56px; }
     body.no-topbar .content { padding-top: 56px; }
     .content { padding: 20px 16px; max-width: 100%; }
-    /* The slide-in sidebar overlays content and needs its own backing. */
+    /* The slide-in sidebar overlays content and needs its own backing. It
+       also anchors below the top bar again - the global has-bg top: 0 is for
+       the desktop scroll-container layout and would cover the hamburger. */
     body.has-bg .sidebar {
+        top: var(--topbar-h);
+        height: calc(100vh - var(--topbar-h));
         background: var(--bg);
         background: color-mix(in srgb, var(--bg) 88%, transparent);
         backdrop-filter: blur(12px);
@@ -710,6 +730,8 @@ div.grid.cols-6 { --cols: 6; }
     .content h2 { font-size: 19px; }
     .header { padding: 0 12px; }
     .header .brand { font-size: 15px; }
+    /* Never let a wide logo push the switcher and cart off the bar. */
+    .header .brand img { max-width: 42vw; object-fit: contain; object-position: left center; }
     .header-right { gap: 4px; }
     .header-right .btn { padding: 8px 10px; font-size: 13px; min-height: 36px; }
     .cart-badge { margin-left: 4px; padding: 0 5px; }
@@ -1047,10 +1069,8 @@ function previewPageLink(u) {
     } else {
         brand.textContent = SITE.name;
     }
-    if (!SITE.has_shop) {
-        const cart = document.getElementById('btnCart');
-        if (cart) cart.style.display = 'none';
-    }
+    // The cart button stays visible even while the shop is paused
+    // (has_shop off) - the drawer just shows an empty cart.
 })();
 
 // Same Host-resolution problem for the favicon links and the background
@@ -1398,7 +1418,14 @@ function renderMarkdown(src) {
             const isGrid = headers.every(h => h.trim() === '');
             let html;
             if (isGrid) {
-                html = '<div class="grid cols-' + headers.length + '">';
+                // A people/variant grid - a row of photos with caption rows
+                // beneath - stacks column-major on phones so each caption
+                // stays with its photo.
+                const isPeople = rows.length > 1
+                    && rows[0].some(c => /^!\[/.test((c || '').trim()))
+                    && rows[0].every(c => { const t = (c || '').trim(); return !t || /^!\[/.test(t); })
+                    && rows.slice(1).every(r => r.every(c => !/^!\[/.test((c || '').trim())));
+                html = '<div class="grid cols-' + headers.length + (isPeople ? ' people' : '') + '">';
                 rows.forEach(r => {
                     for (let c = 0; c < headers.length; c++)
                         html += '<div>' + renderInline(r[c] || '') + '</div>';

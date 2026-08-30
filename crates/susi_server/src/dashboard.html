@@ -1995,6 +1995,10 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                     <input type="checkbox" id="siteSetSidebarLogo">
                     <label for="siteSetSidebarLogo">Show logo above menu</label>
                 </div>
+                <div class="form-row">
+                    <label for="siteSetLogoHeight">Top bar logo height (px)</label>
+                    <input type="number" id="siteSetLogoHeight" min="16" max="120" style="width:180px;">
+                </div>
                 <div id="siteSetError" class="form-error" style="display:none;"></div>
             </div>
             <div class="form-footer">
@@ -6841,6 +6845,7 @@ async function loadSiteSettings() {
         document.getElementById('siteSetThemeMode').value = s.theme_mode || '';
         document.getElementById('siteSetNoTopbar').checked = s.no_topbar === '1';
         document.getElementById('siteSetSidebarLogo').checked = s.sidebar_logo === '1';
+        document.getElementById('siteSetLogoHeight').value = s.logo_height || '';
     } catch (e) {
         // Non-fatal - settings just won't pre-fill.
     }
@@ -6930,6 +6935,7 @@ async function saveSiteSettings() {
         theme_mode: document.getElementById('siteSetThemeMode').value,
         no_topbar: document.getElementById('siteSetNoTopbar').checked ? '1' : '',
         sidebar_logo: document.getElementById('siteSetSidebarLogo').checked ? '1' : '',
+        logo_height: document.getElementById('siteSetLogoHeight').value.trim(),
         logo_image: siteLogoImage,
         logo_dark_image: siteLogoDarkImage,
         favicon_image: siteFaviconImage,
