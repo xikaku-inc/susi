@@ -1,5 +1,7 @@
 /target
 *.db
+*.db-shm
+*.db-wal
 keys/
 *.pem
 license.json
