@@ -10,7 +10,7 @@
 
 |  |  |
 | --- | --- |
-| ![慣性計測装置（IMU）](Sensor-whiteBG.png){width=100%} **[慣性計測装置（IMU）](/ja/inertial-measurement-unit-imu-series-2)** - 高速かつ高精度な3D姿勢センシング。多彩な通信インターフェースと筐体オプションをご用意しています。 | ![VR/ARトラッキング](LP-Webpage-img-etc.png){width=100%} **[VR/ARトラッキング](/ja/vrトラッキング-ハイブリッドシステム)** - 車載、大空間、モーションシミュレーター向けの低遅延LPVRトラッキング。 |
+| [![慣性計測装置（IMU）](Sensor-whiteBG.png){width=100%}](/ja/inertial-measurement-unit-imu-series-2) **[慣性計測装置（IMU）](/ja/inertial-measurement-unit-imu-series-2)** - 高速かつ高精度な3D姿勢センシング。多彩な通信インターフェースと筐体オプションをご用意しています。 | [![VR/ARトラッキング](LP-Webpage-img-etc.png){width=100%}](/ja/vrトラッキング-ハイブリッドシステム) **[VR/ARトラッキング](/ja/vrトラッキング-ハイブリッドシステム)** - 車載、大空間、モーションシミュレーター向けの低遅延LPVRトラッキング。 |
 
 ## 活用事例
 

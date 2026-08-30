@@ -6,6 +6,6 @@
 
 |  |  |
 | --- | --- |
-| ![LPVR-CAD](SQS-LPVR-DUO-13.png){width=100%} [LPVR-CAD](/ja/lpvr-cad) - ロケーションベースのVRトラッキング・ソリューション · アウトサイドイン光学トラッキングシステム（ARTなど）に対応 · HTC VIVE Pro 2、Varjo HMDなどを強化 | ![LPVR-DUO](SQS-LPVR-DUO-14.png){width=100%} [LPVR-DUO](/ja/lpvr-duo) - 車載VR/ARトラッキング・ソリューション · アウトサイドイン（ARTなど）とインサイドアウトのトラッキングに対応 · HTC VIVE Pro 2、Varjo HMDなどに対応 |
-| ![LPVR-AIR](SQS-LPVR-DUO-15.png){width=100%} [LPVR-AIR](/ja/lpvr-air) - ワイヤレスHMD（Meta Quest 2、Meta Quest Proなど）で使えるLPVR-CADの機能 · ロケーションベースのVRトラッキング・ソリューション · アウトサイドイン光学トラッキングシステム（ARTなど）に対応 | ![LPVR-POS](SQS-LPVR-DUO-12.png){width=100%} [LPVR-POS](/ja/lpvr-pos) - AR用途向けの高精度でスムーズな車両ローカライゼーション · 高精度・高頻度・低遅延のセンサーフュージョン · デッドレコニングによりGPSが一時的に届かないエリアもカバー |
+| [![LPVR-CAD](SQS-LPVR-DUO-13.png){width=100%}](/ja/lpvr-cad) [LPVR-CAD](/ja/lpvr-cad) - ロケーションベースのVRトラッキング・ソリューション · アウトサイドイン光学トラッキングシステム（ARTなど）に対応 · HTC VIVE Pro 2、Varjo HMDなどを強化 | [![LPVR-DUO](SQS-LPVR-DUO-14.png){width=100%}](/ja/lpvr-duo) [LPVR-DUO](/ja/lpvr-duo) - 車載VR/ARトラッキング・ソリューション · アウトサイドイン（ARTなど）とインサイドアウトのトラッキングに対応 · HTC VIVE Pro 2、Varjo HMDなどに対応 |
+| [![LPVR-AIR](SQS-LPVR-DUO-15.png){width=100%}](/ja/lpvr-air) [LPVR-AIR](/ja/lpvr-air) - ワイヤレスHMD（Meta Quest 2、Meta Quest Proなど）で使えるLPVR-CADの機能 · ロケーションベースのVRトラッキング・ソリューション · アウトサイドイン光学トラッキングシステム（ARTなど）に対応 | [![LPVR-POS](SQS-LPVR-DUO-12.png){width=100%}](/ja/lpvr-pos) [LPVR-POS](/ja/lpvr-pos) - AR用途向けの高精度でスムーズな車両ローカライゼーション · 高精度・高頻度・低遅延のセンサーフュージョン · デッドレコニングによりGPSが一時的に届かないエリアもカバー |
 
