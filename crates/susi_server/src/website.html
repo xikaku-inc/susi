@@ -171,14 +171,15 @@ body.has-bg .editor-toolbar { top: 0; }
 
 .layout {
     display: grid;
-    grid-template-columns: var(--sidebar-width) 1fr var(--sidebar-width);
+    /* minmax(0,...) keeps wide content (spec tables) from stretching the track. */
+    grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(--sidebar-width);
     min-height: calc(100vh - var(--topbar-h));
 }
-.layout.no-sidebar { grid-template-columns: 1fr var(--sidebar-width); }
+.layout.no-sidebar { grid-template-columns: minmax(0, 1fr) var(--sidebar-width); }
 .layout.no-sidebar .sidebar { display: none; }
-.layout.no-toc { grid-template-columns: var(--sidebar-width) 1fr; }
+.layout.no-toc { grid-template-columns: var(--sidebar-width) minmax(0, 1fr); }
 .layout.no-toc .toc-rail { display: none; }
-.layout.no-sidebar.no-toc { grid-template-columns: 1fr; }
+.layout.no-sidebar.no-toc { grid-template-columns: minmax(0, 1fr); }
 .site-footer {
     display: flex;
     gap: 20px;
@@ -679,8 +680,8 @@ div.grid.cols-6 { --cols: 6; }
 @media (max-width: 1100px) {
     .layout,
     .layout.no-sidebar,
-    .layout.no-toc { grid-template-columns: var(--sidebar-width) 1fr; }
-    .layout.no-sidebar { grid-template-columns: 1fr; }
+    .layout.no-toc { grid-template-columns: var(--sidebar-width) minmax(0, 1fr); }
+    .layout.no-sidebar { grid-template-columns: minmax(0, 1fr); }
     .toc-rail { display: none; }
 }
 @media (max-width: 900px) {
@@ -691,7 +692,7 @@ div.grid.cols-6 { --cols: 6; }
     .layout,
     .layout.no-sidebar,
     .layout.no-toc,
-    .layout.no-sidebar.no-toc { grid-template-columns: 1fr; }
+    .layout.no-sidebar.no-toc { grid-template-columns: minmax(0, 1fr); }
     .sidebar {
         position: fixed;
         top: var(--topbar-h);
