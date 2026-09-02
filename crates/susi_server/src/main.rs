@@ -358,7 +358,7 @@ const SECURITY_CSP: &str = "default-src 'self'; \
     img-src 'self' data: blob: https:; \
     font-src 'self' data:; \
     connect-src 'self' https://*.google-analytics.com https://*.analytics.google.com https://www.googletagmanager.com https://www.googleadservices.com https://*.doubleclick.net https://*.google.com https://*.reddit.com; \
-    frame-src 'self' https://www.googletagmanager.com https://www.youtube.com https://player.vimeo.com https://challenges.cloudflare.com https://*.doubleclick.net; \
+    frame-src 'self' https://www.googletagmanager.com https://www.youtube.com https://player.vimeo.com https://w.soundcloud.com https://challenges.cloudflare.com https://*.doubleclick.net; \
     object-src 'none'; \
     frame-ancestors 'none'; \
     base-uri 'self'; \

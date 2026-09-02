@@ -368,6 +368,9 @@ div.grid.cols-6 { --cols: 6; }
     width: 100%; height: 100%; border: 0;
     border-radius: var(--radius);
 }
+.content .audio-embed { margin: 16px 0; }
+.content .audio-embed iframe { width: 100%; height: 166px; border: 0; border-radius: var(--radius); }
+.content .audio-embed.set iframe { height: 450px; }
 .content ul, .content ol { margin: 10px 0; padding-left: 24px; }
 .content li { margin: 4px 0; }
 .content a { color: var(--accent); text-decoration: none; }
@@ -1306,6 +1309,15 @@ function videoEmbedSrc(url) {
     return null;
 }
 
+function audioEmbedSrc(url) {
+    // Track or playlist permalink: soundcloud.com/{user}/{track} or /{user}/sets/{name}.
+    const clean = url.split(/[?#]/)[0];
+    const m = clean.match(/^https?:\/\/(?:www\.)?soundcloud\.com\/[\w-]+\/(?:sets\/)?[\w-]+\/?$/);
+    if (!m) return null;
+    return 'https://w.soundcloud.com/player/?url=' + encodeURIComponent(clean)
+        + '&visual=false&show_teaser=false&hide_related=true&show_comments=false';
+}
+
 function renderInline(s) {
     // Backslash escapes (\* \_ \# ...) become literal characters, held as
     // placeholders so the emphasis/format passes below can't touch them.
@@ -1336,6 +1348,13 @@ function renderInline(s) {
                 + '" title="' + alt
                 + '" allow="autoplay; fullscreen; picture-in-picture"'
                 + ' allowfullscreen loading="lazy"></iframe></div>';
+        }
+        const asrc = audioEmbedSrc(url);
+        if (asrc) {
+            return '<div class="audio-embed' + (/\/sets\//.test(url.split(/[?#]/)[0]) ? ' set' : '')
+                + '"><iframe src="' + asrc
+                + '" title="' + alt
+                + '" allow="autoplay" loading="lazy"></iframe></div>';
         }
         let extra = '';
         if (attrs) {
