@@ -2324,7 +2324,7 @@ fn site_config_script(
 /// artwork (uploaded or compiled-in) gets the photo layer and the veil
 /// styles keyed on it.
 pub(crate) fn render_shell(state: &Arc<AppState>, site: &SiteConfig, lang: &str, seo_head: &str, body_html: &str) -> Bytes {
-    let (custom_bg, veil, parallax, theme, no_topbar, sidebar_logo, favicon, logo_height) = {
+    let (custom_bg, veil, parallax, theme, no_topbar, sidebar_logo, favicon, logo_height, font) = {
         let db = state.db.lock();
         let get = |k: &str| {
             db.get_site_setting(&sites::setting_key(site, k)).ok().flatten().unwrap_or_default()
@@ -2338,6 +2338,7 @@ pub(crate) fn render_shell(state: &Arc<AppState>, site: &SiteConfig, lang: &str,
             get(SETTING_SIDEBAR_LOGO) == "1",
             get(SETTING_FAVICON_IMAGE),
             get(SETTING_LOGO_HEIGHT),
+            get(SETTING_FONT),
         )
     };
     let theme = if matches!(theme.as_str(), "light" | "dark") { theme } else { String::new() };
@@ -2360,11 +2361,18 @@ pub(crate) fn render_shell(state: &Arc<AppState>, site: &SiteConfig, lang: &str,
         }
         _ => String::new(),
     };
+    // A font preset swaps the body stack via the shell's --font-body variable;
+    // code blocks keep their own mono stack either way.
+    let font_css = match font.as_str() {
+        "mono" => "<style>:root:root{--font-body:ui-monospace,\"SF Mono\",\"Cascadia Code\",Consolas,\"Fira Code\",monospace}</style>",
+        "serif" => "<style>:root:root{--font-body:ui-serif,Georgia,\"Times New Roman\",serif}</style>",
+        _ => "",
+    };
     let mut html = WEBSITE_HTML
         .replacen("<!--SEO_HEAD-->", seo_head, 1)
         .replacen(
             "<!--SITE_CONFIG-->",
-            &format!("{}{}", logo_css, site_config_script(state, site, lang, &theme, no_topbar, sidebar_logo)),
+            &format!("{}{}{}", logo_css, font_css, site_config_script(state, site, lang, &theme, no_topbar, sidebar_logo)),
             1,
         )
         .replacen("<!--ANALYTICS-->", &analytics_head(state, site), 1)
@@ -2974,6 +2982,8 @@ pub const SETTING_SIDEBAR_LOGO: &str = "sidebar_logo";
 /// Top bar brand logo height in px (16-120); empty = the 28px default. The
 /// top bar itself grows to logo height + 16px when this exceeds the default.
 pub const SETTING_LOGO_HEIGHT: &str = "logo_height";
+/// Body font preset: "mono" / "serif"; empty = the compiled-in sans stack.
+pub const SETTING_FONT: &str = "font";
 
 /// Sidebar nav config: JSON array of groups rendered between the ungrouped
 /// pages and nothing else. Items are page slugs, plus the pseudo-slugs
@@ -3424,6 +3434,7 @@ const KNOWN_SITE_SETTING_KEYS: &[&str] = &[
     SETTING_LOGO_DARK_IMAGE,
     SETTING_LOGO_HEIGHT,
     SETTING_FAVICON_IMAGE,
+    SETTING_FONT,
 ];
 
 pub async fn handle_admin_get_site_settings(
@@ -3499,6 +3510,10 @@ pub async fn handle_admin_put_site_settings(
         } else if k == SETTING_THEME_MODE {
             if !matches!(trimmed, "" | "light" | "dark") {
                 return Err(error_response(StatusCode::BAD_REQUEST, "theme_mode must be \"light\", \"dark\" or empty"));
+            }
+        } else if k == SETTING_FONT {
+            if !matches!(trimmed, "" | "mono" | "serif") {
+                return Err(error_response(StatusCode::BAD_REQUEST, "font must be \"mono\", \"serif\" or empty"));
             }
         } else if !trimmed.is_empty() && !is_valid_analytics_id(trimmed) {
             // The remaining site settings are analytics tag IDs / labels.

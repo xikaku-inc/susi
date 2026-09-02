@@ -41,6 +41,8 @@
     --code-bg: #11141b;
     --radius: 6px;
     --sidebar-width: 280px;
+    /* Body font; a site's font setting overrides via an injected style. */
+    --font-body: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Ubuntu, "Helvetica Neue", sans-serif;
 }
 :root[data-theme="light"] {
     --bg: #ffffff;
@@ -68,7 +70,7 @@ html, body { margin: 0; padding: 0; }
 body {
     background: var(--bg);
     color: var(--text1);
-    font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Ubuntu, "Helvetica Neue", sans-serif;
+    font-family: var(--font-body);
     font-size: 14px;
     line-height: 1.43;
     min-height: 100vh;

@@ -5113,8 +5113,25 @@ fn test_site_chrome_flags() {
     assert_eq!(resp.status().as_u16(), 200);
     assert!(!lpr_shell().contains("--brand-logo-h:77px"), "cleared height must fall back to the CSS default");
 
+    // A font preset reaches the shell as the body font variable; clearing it
+    // restores the compiled-in sans stack.
+    let resp = http
+        .put(format!("{}/site/admin/settings?site=lpr", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "font": "mono" }))
+        .send().expect("set font");
+    assert_eq!(resp.status().as_u16(), 200);
+    assert!(lpr_shell().contains("--font-body:ui-monospace"), "font preset must reach the shell");
+    let resp = http
+        .put(format!("{}/site/admin/settings?site=lpr", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "font": "" }))
+        .send().expect("clear font");
+    assert_eq!(resp.status().as_u16(), 200);
+    assert!(!lpr_shell().contains(":root:root{--font-body:"), "cleared font must fall back to the CSS default");
+
     // Invalid values are rejected.
-    for bad in [json!({ "theme_mode": "auto" }), json!({ "no_topbar": "2" }), json!({ "sidebar_logo": "yes" }), json!({ "logo_height": "500" })] {
+    for bad in [json!({ "theme_mode": "auto" }), json!({ "no_topbar": "2" }), json!({ "sidebar_logo": "yes" }), json!({ "logo_height": "500" }), json!({ "font": "comic" })] {
         let resp = http
             .put(format!("{}/site/admin/settings?site=lpr", server.api_url))
             .bearer_auth(&token)
