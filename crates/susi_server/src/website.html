@@ -39,6 +39,8 @@
     --accent: #6aa9ff;
     --accent-soft: rgba(106,169,255,0.15);
     --code-bg: #11141b;
+    /* Zebra tint: translucent so a background photo stays visible. */
+    --table-stripe: rgba(255,255,255,0.055);
     --radius: 6px;
     --sidebar-width: 280px;
     /* Body font; a site's font setting overrides via an injected style. */
@@ -54,6 +56,7 @@
     --accent: #2563eb;
     --accent-soft: rgba(37,99,235,0.10);
     --code-bg: #f1f3f6;
+    --table-stripe: rgba(26,29,35,0.05);
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; }
@@ -327,8 +330,8 @@ body.no-topbar.has-bg .page-scroll { height: 100dvh; }
     border: 1px solid var(--border);
     padding: 7px 11px; text-align: left; vertical-align: top;
 }
-.content th { background: var(--bg2); font-weight: 600; }
-.content tr:nth-child(even) td { background: var(--bg2); }
+.content th { background: var(--bg3); font-weight: 600; border-bottom: 2px solid var(--border); }
+.content tr:nth-child(even) td { background: var(--table-stripe); }
 .content div.grid,
 .EasyMDEContainer .editor-preview div.grid,
 .EasyMDEContainer .editor-preview-side div.grid {
@@ -489,7 +492,7 @@ div.grid.cols-6 { --cols: 6; }
 .EasyMDEContainer .editor-preview-side th, .EasyMDEContainer .editor-preview-side td {
     border: 1px solid var(--border); padding: 5px 8px; text-align: left;
 }
-.EasyMDEContainer .editor-preview th, .EasyMDEContainer .editor-preview-side th { background: var(--bg2); }
+.EasyMDEContainer .editor-preview th, .EasyMDEContainer .editor-preview-side th { background: var(--bg3); }
 
 .edit-meta-row {
     display: flex; gap: 12px; flex-wrap: wrap;
@@ -1664,7 +1667,9 @@ function renderSidebar() {
         if (!groupedSlugs.has('__shop__')) html += shopLink;
     } else {
         // No nav config: flat top-level list with Blog and Shop at the end.
-        topLevel.forEach(p => html += renderTop(p));
+        // Legal pages (ord >= 900, the seed convention) stay footer-only
+        // here; a grouped nav can still place them explicitly.
+        topLevel.filter(p => p.ord < 900).forEach(p => html += renderTop(p));
         html += blogLink + shopLink;
     }
     const orphans = navPages.filter(p => p.parent_slug && !slugSet.has(p.parent_slug));
@@ -1934,7 +1939,9 @@ function renderToc(headings) {
         && items[0].text.toLowerCase() === pageTitle.toLowerCase()) {
         items = items.slice(1);
     }
-    if (items.length < 2) {
+    // A single heading still gets the rail: the content column would
+    // otherwise shift between pages with one and several headings.
+    if (items.length < 1) {
         rail.innerHTML = '';
         if (layout) layout.classList.add('no-toc');
         return;
