@@ -2001,6 +2001,7 @@ function renderEditor() {
     const ord = d ? d.ord : (currentPage.ord || 0);
     const body = d ? d.body_md : (currentPage.body_md || '');
     const metaDesc = d ? d.meta_description : (currentPage.meta_description || '');
+    const ogImage = d ? (d.og_image || '') : (currentPage.og_image || '');
     const redirect = d ? (d.redirect_to || '') : (currentPage.redirect_to || '');
     const slugVal = d ? d.slug : currentSlug;
     const isPost = (d ? d.page_kind : currentPage.page_kind) === 'post';
@@ -2022,6 +2023,10 @@ function renderEditor() {
             '<label title="Overrides the auto-derived description for SEO / AI crawlers. Leave empty to auto-derive from body.">SEO description</label>' +
             '<input id="editMetaDesc" type="text" maxlength="300" '
                 + 'style="flex:1;min-width:200px;">' +
+        '</div>' +
+        '<div class="edit-meta-row" style="margin-top:8px;">' +
+            '<label title="Link preview image (og:image): an uploaded asset name, a /path, or a full URL. Empty = first body image, else the site card.">OG image</label>' +
+            '<input id="editOgImage" type="text" style="flex:1;min-width:200px;">' +
         '</div>' +
         '<div class="edit-meta-row" style="margin-top:8px;">' +
             '<label title="Retire this page: it stops rendering and permanently redirects here. A slug, a /path, or a full URL. Empty = live.">Redirects to</label>' +
@@ -2051,6 +2056,7 @@ function renderEditor() {
         document.getElementById('editOrd').value = ord;
     }
     document.getElementById('editMetaDesc').value = metaDesc;
+    document.getElementById('editOgImage').value = ogImage;
     document.getElementById('editRedirect').value = redirect;
     initEasyMDE(body);
 }
@@ -2234,6 +2240,7 @@ function cancelEdit() {
 function editorValues() {
     if (previewMode && editDraft) return editDraft;
     const metaDescEl = document.getElementById('editMetaDesc');
+    const ogImageEl = document.getElementById('editOgImage');
     // Posts render a date input instead of parent/order controls.
     const parentEl = document.getElementById('editParent');
     const ordEl = document.getElementById('editOrd');
@@ -2246,6 +2253,7 @@ function editorValues() {
         ord: ordEl ? (parseInt(ordEl.value, 10) || 0) : ((currentPage && currentPage.ord) || 0),
         body_md: easymde ? easymde.value() : document.getElementById('editBody').value,
         meta_description: metaDescEl ? metaDescEl.value.trim() : '',
+        og_image: ogImageEl ? ogImageEl.value.trim() : ((currentPage && currentPage.og_image) || ''),
         slug: document.getElementById('editSlug').value.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '-'),
         page_kind: (currentPage && currentPage.page_kind) || 'page',
         published_at: publishedEl ? publishedEl.value : ((currentPage && currentPage.published_at) || ''),
@@ -2324,6 +2332,7 @@ async function savePage() {
         headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken() },
         body: JSON.stringify({
             title, body_md, parent_slug: parent || null, ord, meta_description,
+            og_image: v.og_image,
             page_kind: v.page_kind, published_at: v.published_at,
             author_username: v.author_username,
             redirect_to: v.redirect_to,

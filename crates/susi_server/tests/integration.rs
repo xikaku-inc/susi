@@ -4501,6 +4501,86 @@ fn test_website_page_hide_show() {
     assert!(ssr.contains("Secret v2"), "SSR must serve the page again after showing");
 }
 
+/// Per-page og:image: an explicit setting beats the first body image, updates
+/// that omit the field preserve it, an empty value falls back to the body
+/// image. HEAD is public wherever GET is (link-preview crawlers probe assets
+/// with HEAD).
+#[test]
+fn test_page_og_image_override() {
+    let server = TestServer::start();
+    let token = server.admin_token();
+    let http = server.http();
+
+    let og_line = |html: &str| -> String {
+        html.lines()
+            .find(|l| l.contains("property=\"og:image\" content"))
+            .unwrap_or_default()
+            .to_string()
+    };
+
+    // Without a setting, the first body image is the og:image.
+    let resp = http
+        .put(format!("{}/website/pages/gallery", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "title": "Gallery", "body_md": "![x](body.png)\n\ntext" }))
+        .send()
+        .expect("create page");
+    assert_eq!(resp.status().as_u16(), 200, "create: {}", resp.text().unwrap_or_default());
+    let ssr = http.get(format!("{}/site/gallery", server.url))
+        .send().expect("ssr").text().unwrap();
+    assert!(og_line(&ssr).contains("/api/v1/website/assets/body.png"), "body image fallback: {}", og_line(&ssr));
+
+    // An explicit og_image (bare asset name) wins over the body image and
+    // round-trips through the page API.
+    let resp = http
+        .put(format!("{}/website/pages/gallery", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "title": "Gallery", "body_md": "![x](body.png)\n\ntext", "og_image": "card.png" }))
+        .send()
+        .expect("set og_image");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = http.get(format!("{}/website/pages/gallery", server.api_url))
+        .send().expect("get").json::<Value>().unwrap();
+    assert_eq!(body["og_image"].as_str().unwrap(), "card.png");
+    let ssr = http.get(format!("{}/site/gallery", server.url))
+        .send().expect("ssr override").text().unwrap();
+    assert!(og_line(&ssr).contains("/api/v1/website/assets/card.png"), "override: {}", og_line(&ssr));
+    assert!(!ssr.contains("og:image:width"), "no fixed dimensions for a custom image");
+    assert!(ssr.contains("name=\"twitter:image\" content=\"https://xikaku.com/api/v1/website/assets/card.png\""));
+
+    // An update that omits og_image preserves it.
+    let resp = http
+        .put(format!("{}/website/pages/gallery", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "title": "Gallery", "body_md": "![x](body.png)\n\nmore text" }))
+        .send()
+        .expect("update without og_image");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = http.get(format!("{}/website/pages/gallery", server.api_url))
+        .send().expect("get").json::<Value>().unwrap();
+    assert_eq!(body["og_image"].as_str().unwrap(), "card.png", "omitted field must preserve the setting");
+
+    // An empty og_image clears it - back to the body image.
+    let resp = http
+        .put(format!("{}/website/pages/gallery", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "title": "Gallery", "body_md": "![x](body.png)\n\ntext", "og_image": "" }))
+        .send()
+        .expect("clear og_image");
+    assert_eq!(resp.status().as_u16(), 200);
+    let ssr = http.get(format!("{}/site/gallery", server.url))
+        .send().expect("ssr cleared").text().unwrap();
+    assert!(og_line(&ssr).contains("/api/v1/website/assets/body.png"), "cleared: {}", og_line(&ssr));
+
+    // HEAD works on public GET routes, and stays denied elsewhere.
+    let resp = http.head(format!("{}/website/pages/gallery", server.api_url))
+        .send().expect("head public");
+    assert_eq!(resp.status().as_u16(), 200, "HEAD on a public GET route must pass the auth gate");
+    let resp = http.head(format!("{}/audit", server.api_url))
+        .send().expect("head private");
+    assert_eq!(resp.status().as_u16(), 401, "HEAD on a private route must still be denied");
+}
+
 /// Blog posts: kind/date round-trip, /blog index + /blog/{slug} SSR with
 /// BlogPosting schema, RSS feed, sitemap/llms.txt listing, draft (hidden)
 /// exclusion, and kind preservation on kind-less updates.

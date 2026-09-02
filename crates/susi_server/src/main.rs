@@ -1309,7 +1309,9 @@ fn is_public_api_route(method: &Method, path: &str) -> bool {
         // Non-API paths (site shells, static assets, health) are public.
         return true;
     }
-    let get = *method == Method::GET;
+    // HEAD is public wherever GET is: axum's get() routes serve both, and
+    // link-preview crawlers probe assets with HEAD before fetching.
+    let get = *method == Method::GET || *method == Method::HEAD;
     let post = *method == Method::POST;
     match &segs[2..] {
         ["features"] => get,

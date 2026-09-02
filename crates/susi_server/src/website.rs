@@ -273,7 +273,7 @@ pub async fn handle_get_page(
         .get_website_page(site.id, &lang, &slug)
         .map_err(db_err)?
         .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Page not found"))?;
-    let (title, body_md, parent_slug, ord, updated_at, meta_description, hidden, page_kind, published_at, author_username, redirect_to, translation_of) = page;
+    let (title, body_md, parent_slug, ord, updated_at, meta_description, hidden, page_kind, published_at, author_username, redirect_to, translation_of, og_image) = page;
     if hidden && !is_admin {
         return Err(error_response(StatusCode::NOT_FOUND, "Page not found"));
     }
@@ -292,6 +292,7 @@ pub async fn handle_get_page(
         "redirect_to": redirect_to,
         "lang": lang,
         "translation_of": translation_of,
+        "og_image": og_image,
     });
     if is_admin {
         out["author_username"] = json!(author_username);
@@ -476,6 +477,11 @@ pub struct UpsertPageRequest {
     // mirrors. Omitted preserves the current link; empty clears it.
     #[serde(default)]
     pub translation_of: Option<String>,
+    // Social preview image: an uploaded asset name, a /path, or a full URL.
+    // Omitted preserves the current setting; empty falls back to the first
+    // body image, then the site card.
+    #[serde(default)]
+    pub og_image: Option<String>,
 }
 
 pub async fn handle_upsert_page(
@@ -571,6 +577,13 @@ pub async fn handle_upsert_page(
             }
             t
         };
+        let og_image = req
+            .og_image
+            .clone()
+            .or_else(|| existing.as_ref().map(|r| r.12.clone()))
+            .unwrap_or_default()
+            .trim()
+            .to_string();
         let id = db.upsert_website_page(
             site.id,
             &lang,
@@ -585,6 +598,7 @@ pub async fn handle_upsert_page(
             &author_username,
             &redirect_to,
             &translation_of,
+            &og_image,
             Some(&principal.username),
         )
         .map_err(db_err)?;
@@ -676,11 +690,11 @@ pub async fn handle_restore_page_revision(
     let (title, body_md, parent_slug, ord, _captured_at, _author) = rev;
     // Preserve the current meta_description, kind, publish date and author
     // when restoring prior body/title.
-    let (existing_meta, existing_kind, existing_pub, existing_author, existing_redirect, existing_tr) = db
+    let (existing_meta, existing_kind, existing_pub, existing_author, existing_redirect, existing_tr, existing_og) = db
         .get_website_page(site.id, &lang, &slug)
         .map_err(db_err)?
-        .map(|(_t, _b, _p, _o, _u, m, _h, k, pd, au, rd, tr)| (m, k, pd, au, rd, tr))
-        .unwrap_or_else(|| (String::new(), "page".to_string(), String::new(), String::new(), String::new(), String::new()));
+        .map(|(_t, _b, _p, _o, _u, m, _h, k, pd, au, rd, tr, og)| (m, k, pd, au, rd, tr, og))
+        .unwrap_or_else(|| (String::new(), "page".to_string(), String::new(), String::new(), String::new(), String::new(), String::new()));
     let new_id = db.upsert_website_page(
         site.id, &lang, &slug, &title, &body_md, parent_slug.as_deref(), ord,
         &existing_meta,
@@ -689,6 +703,7 @@ pub async fn handle_restore_page_revision(
         &existing_author,
         &existing_redirect,
         &existing_tr,
+        &existing_og,
         Some(&principal.username),
     ).map_err(db_err)?;
     let url = if existing_kind == "post" {
@@ -1014,7 +1029,7 @@ pub(crate) fn seed_legal_pages(state: &Arc<AppState>) {
         let mut db = state.db.lock();
         let exists = db.get_website_page(site.id, "", slug).ok().flatten().is_some();
         if !exists {
-            match db.upsert_website_page(site.id, "", slug, title, body, None, 900, "", "page", "", "", "", "", None) {
+            match db.upsert_website_page(site.id, "", slug, title, body, None, 900, "", "page", "", "", "", "", "", None) {
                 Ok(_) => log::info!("Seeded website page '{}'", slug),
                 Err(e) => log::error!("Failed to seed website page '{}': {}", slug, e),
             }
@@ -2567,8 +2582,8 @@ fn render_website(
     });
     // If the requested slug is unknown, render the shell anyway (SPA shows "Page not found")
     // but omit the SEO head - better than 500'ing.
-    let (title, description, updated_at, valid_slug, body_md, post_published, post_author):
-        (String, String, String, Option<String>, String, Option<String>, Option<String>) =
+    let (title, description, updated_at, valid_slug, body_md, post_published, post_author, page_og):
+        (String, String, String, Option<String>, String, Option<String>, Option<String>, String) =
         if let Some(s) = slug_owned.as_deref() {
             let (row, author) = {
                 let db = state.db.lock();
@@ -2580,7 +2595,7 @@ fn render_website(
             // head, no body - the SPA shows "Page not found" to visitors.
             // The /blog/ path only serves posts.
             match row {
-                Some((t, body, _p, _o, upd, meta, false, kind, published, _au, _rd, _tr))
+                Some((t, body, _p, _o, upd, meta, false, kind, published, _au, _rd, _tr, og))
                     if !post_path || kind == "post" =>
                 {
                     let desc = if !meta.trim().is_empty() {
@@ -2592,19 +2607,25 @@ fn render_website(
                     let is_post_kind = kind == "post";
                     (t, desc, upd, Some(s.to_string()), body,
                      is_post_kind.then_some(published),
-                     if is_post_kind { author } else { None })
+                     if is_post_kind { author } else { None },
+                     og)
                 }
-                _ => (site.name.to_string(), site.tagline.to_string(), String::new(), None, String::new(), None, None),
+                _ => (site.name.to_string(), site.tagline.to_string(), String::new(), None, String::new(), None, None, String::new()),
             }
         } else {
-            (site.name.to_string(), site.tagline.to_string(), String::new(), None, String::new(), None, None)
+            (site.name.to_string(), site.tagline.to_string(), String::new(), None, String::new(), None, None, String::new())
         };
 
     // A requested slug that resolves to no page is a real 404: rendered as
     // the shell (the SPA shows "Page not found") but with the right status
     // and a noindex, and never cached - a cache hit would revive it as 200.
     let not_found = had_requested_slug && valid_slug.is_none();
-    let og_image = first_image_url(site, &body_md);
+    // Explicit per-page og:image wins over the first body image; both beat
+    // the site card (applied inside render_seo_head).
+    let og_image = match page_og.trim() {
+        "" => first_image_url(site, &body_md),
+        s => Some(product_image_abs_url(site, Some(s))),
+    };
     let injected = match valid_slug.as_deref() {
         Some(s) => {
             let alt = hreflang_links(site, &pages, &lang, s, post_published.is_some());
@@ -2668,7 +2689,7 @@ fn render_blog_index(
         db.get_website_page(site.id, lang, "blog").unwrap_or(None)
     };
     let (title, intro_md, updated_at, meta) = match row {
-        Some((t, body, _p, _o, upd, m, false, _k, _pd, _au, _rd, _tr)) => (t, body, upd, m),
+        Some((t, body, _p, _o, upd, m, false, _k, _pd, _au, _rd, _tr, _og)) => (t, body, upd, m),
         _ => ("Blog".to_string(), String::new(), String::new(), String::new()),
     };
     let lang_pages = pages_in_lang(pages, lang);
@@ -2841,7 +2862,7 @@ fn render_newsletter_index(
         )
     };
     let (title, intro_md, updated_at, meta) = match row {
-        Some((t, body, _p, _o, upd, m, false, _k, _pd, _au, _rd, _tr)) => (t, body, upd, m),
+        Some((t, body, _p, _o, upd, m, false, _k, _pd, _au, _rd, _tr, _og)) => (t, body, upd, m),
         _ => ("Newsletter".to_string(), String::new(), String::new(), String::new()),
     };
 
@@ -4105,6 +4126,7 @@ pub async fn handle_import_pages(
                 "",
                 &r.redirect_to,
                 &r.translation_of,
+                "",
                 Some(&principal.username),
             )
             .map_err(db_err)?;
