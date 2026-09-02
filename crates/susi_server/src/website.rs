@@ -1718,7 +1718,13 @@ fn rewrite_pandoc_image_attrs(body_md: &str) -> String {
             html_escape(img.url),
         );
         if let Some(w) = img.width {
-            html.push_str(&format!(r#" width="{}""#, html_escape(w)));
+            // A px width is a desktop cap, not a fixed size: the image still
+            // fills the column on screens narrower than the cap.
+            if let Some(n) = px_width(w) {
+                html.push_str(&format!(r#" style="width:100%;max-width:{n}px""#));
+            } else {
+                html.push_str(&format!(r#" width="{}""#, html_escape(w)));
+            }
         }
         if let Some(h) = img.height {
             html.push_str(&format!(r#" height="{}""#, html_escape(h)));
@@ -1729,6 +1735,13 @@ fn rewrite_pandoc_image_attrs(body_md: &str) -> String {
         html.push('>');
         html
     })
+}
+
+/// The numeric part of a `width=N`/`width=Npx` attribute; `None` for percent
+/// or anything else.
+fn px_width(w: &str) -> Option<&str> {
+    let n = w.strip_suffix("px").unwrap_or(w);
+    (!n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())).then_some(n)
 }
 
 /// Try to parse `![alt](url)` with an optional `{attrs}` span at the
@@ -1799,9 +1812,10 @@ fn scan_pandoc_image(s: &str) -> Option<PandocImage<'_>> {
 /// credential (API tokens skip the TOTP gate) must not become persistent XSS
 /// on the public site. Ammonia strips script/style/event handlers and
 /// javascript: URLs while keeping document structure; `class`/`id` are
-/// allowed so the image attributes emitted above survive. The client-side
-/// renderer escapes raw HTML entirely, so nothing user-visible relies on
-/// markup this strips.
+/// allowed so the image attributes emitted above survive, and `style` on
+/// images only in the exact width-cap form the rewriter emits. The
+/// client-side renderer escapes raw HTML entirely, so nothing user-visible
+/// relies on markup this strips.
 pub(crate) fn render_body_html(body_md: &str) -> String {
     use pulldown_cmark::{html, Options, Parser};
     let cleaned = rewrite_pandoc_image_attrs(body_md);
@@ -1819,6 +1833,17 @@ pub(crate) fn render_body_html(body_md: &str) -> String {
         .add_generic_attributes(&["class", "id"])
         .add_tags(&["video"])
         .add_tag_attributes("video", &["src", "autoplay", "muted", "loop", "playsinline", "width", "height"])
+        .add_tag_attributes("img", &["style"])
+        .attribute_filter(|element, attribute, value| {
+            if element == "img" && attribute == "style" {
+                let ok = value
+                    .strip_prefix("width:100%;max-width:")
+                    .and_then(px_width)
+                    .is_some();
+                return ok.then(|| value.into());
+            }
+            Some(value.into())
+        })
         .clean(&out)
         .to_string();
     obfuscate_email_shortcodes(&absolutize_bare_img_srcs(&clean))
@@ -3008,8 +3033,10 @@ pub const SETTING_FONT: &str = "font";
 
 /// Sidebar nav config: JSON array of groups rendered between the ungrouped
 /// pages and nothing else. Items are page slugs, plus the pseudo-slugs
-/// "__blog__" and "__shop__" for the fixed Blog/Shop links, or
-/// `{"title", "url"}` objects for links off the site (docs, external shop).
+/// "__blog__" and "__shop__" for the fixed Blog/Shop links,
+/// `{"title", "url"}` objects for links off the site (docs, external shop),
+/// or `{"title", "slug"}` objects to show an in-site page under a custom nav
+/// label. An empty group title renders the group without a heading.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NavGroup {
@@ -3025,10 +3052,18 @@ struct NavLink {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NavPageLabel {
+    title: String,
+    slug: String,
+}
+
+#[derive(Deserialize)]
 #[serde(untagged)]
 enum NavItem {
     Slug(String),
     Link(NavLink),
+    PageLabel(NavPageLabel),
 }
 
 impl NavItem {
@@ -3045,6 +3080,12 @@ impl NavItem {
                         || l.url.starts_with("http://")
                         || l.url.starts_with('/'))
             }
+            NavItem::PageLabel(l) => {
+                !l.title.trim().is_empty()
+                    && l.title.len() <= 40
+                    && !l.slug.is_empty()
+                    && l.slug.len() <= 100
+            }
         }
     }
 }
@@ -3057,8 +3098,7 @@ fn is_valid_nav_structure(s: &str) -> bool {
         Ok(groups) => {
             groups.len() <= 12
                 && groups.iter().all(|g| {
-                    !g.title.trim().is_empty()
-                        && g.title.len() <= 40
+                    g.title.len() <= 40
                         && g.items.len() <= 50
                         && g.items.iter().all(NavItem::is_valid)
                 })
@@ -3360,10 +3400,16 @@ pub async fn handle_llms_txt(
     let mut body = String::new();
     body.push_str(&format!("# {}\n\n", site.name));
     body.push_str(&format!("> {}\n\n", site.tagline));
-    body.push_str(&format!(
-        "{} ({}) {}\n\n",
-        site.name, site.org_legal_name, site.llms_blurb,
-    ));
+    if !site.llms_blurb.is_empty() {
+        if site.org_legal_name.is_empty() {
+            body.push_str(&format!("{} {}\n\n", site.name, site.llms_blurb));
+        } else {
+            body.push_str(&format!(
+                "{} ({}) {}\n\n",
+                site.name, site.org_legal_name, site.llms_blurb,
+            ));
+        }
+    }
 
     body.push_str("## Pages\n");
     for (slug, title, parent, _ord, _upd, meta, _hidden, kind, _published, _author, _rd, _lang, _tr) in &pages {
@@ -4506,8 +4552,28 @@ mod tests {
         let md = "![logo](/static/logo.png){width=400px .logo-dark}\n\nText.";
         let cleaned = rewrite_pandoc_image_attrs(md);
         assert!(!cleaned.contains("{width"), "got: {}", cleaned);
-        assert!(cleaned.contains(r#"<img alt="logo" src="/static/logo.png" width="400px" class="logo-dark">"#));
+        assert!(cleaned.contains(
+            r#"<img alt="logo" src="/static/logo.png" style="width:100%;max-width:400px" class="logo-dark">"#
+        ));
         assert!(cleaned.contains("Text."));
+    }
+
+    #[test]
+    fn px_image_width_is_a_responsive_cap() {
+        // A px width becomes a cap that survives the sanitizer; the image
+        // fills the column on screens narrower than the cap.
+        let html = render_body_html("![p](/p.png){width=400px}\n");
+        assert!(html.contains(r#"style="width:100%;max-width:400px""#), "got: {}", html);
+        assert!(!html.contains(r#"width="400px""#), "got: {}", html);
+        // A bare number means px too.
+        let html = render_body_html("![p](/p.png){width=400}\n");
+        assert!(html.contains(r#"style="width:100%;max-width:400px""#), "got: {}", html);
+        // Percent widths stay literal attributes - already column-relative.
+        let html = render_body_html("![p](/p.png){width=50%}\n");
+        assert!(html.contains(r#"width="50%""#), "got: {}", html);
+        // Foreign inline styles on raw HTML images do not survive.
+        let html = render_body_html("<img src=\"/p.png\" style=\"position:fixed\">\n");
+        assert!(!html.contains("position:fixed"), "got: {}", html);
     }
 
     #[test]
@@ -4780,6 +4846,21 @@ mod tests {
                 {"title":"Company","items":["our-story","contact"]}]"#
         ));
         assert!(is_valid_nav_structure("[]"));
+        // An empty group title is a headingless group.
+        assert!(is_valid_nav_structure(r#"[{"title":"","items":["a"]}]"#));
+    }
+
+    #[test]
+    fn nav_structure_validator_accepts_page_labels() {
+        assert!(is_valid_nav_structure(
+            r#"[{"title":"","items":[{"title":"Pub","slug":"publications"},"__blog__"]}]"#
+        ));
+        // A page-label item must carry a title, a slug and nothing else.
+        assert!(!is_valid_nav_structure(r#"[{"title":"S","items":[{"title":"","slug":"x"}]}]"#));
+        assert!(!is_valid_nav_structure(r#"[{"title":"S","items":[{"slug":"x"}]}]"#));
+        assert!(!is_valid_nav_structure(
+            r#"[{"title":"S","items":[{"title":"X","slug":"x","url":"/y"}]}]"#
+        ));
     }
 
     #[test]
@@ -4803,7 +4884,6 @@ mod tests {
     fn nav_structure_validator_rejects_bad_shapes() {
         assert!(!is_valid_nav_structure("not json"));
         assert!(!is_valid_nav_structure(r#"{"title":"x","items":[]}"#));
-        assert!(!is_valid_nav_structure(r#"[{"title":"","items":["a"]}]"#));
         assert!(!is_valid_nav_structure(r#"[{"title":"x","items":[""]}]"#));
         assert!(!is_valid_nav_structure(r#"[{"title":"x","items":["a"],"extra":1}]"#));
         let long_title = format!(r#"[{{"title":"{}","items":["a"]}}]"#, "t".repeat(41));

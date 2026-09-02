@@ -1122,9 +1122,11 @@ function renderInline(s) {
         }
         let extra = '';
         if (attrs) {
-            const w = attrs.match(/\bwidth\s*=\s*(\d+(?:px|%)?)/i);
+            const w = attrs.match(/\bwidth\s*=\s*(\d+)(px|%)?/i);
             const h = attrs.match(/\bheight\s*=\s*(\d+(?:px|%)?)/i);
-            if (w) extra += ' width="' + w[1] + '"';
+            // A px width is a desktop cap: full column width on narrower screens.
+            if (w && w[2] !== '%') extra += ' style="width:100%;max-width:' + w[1] + 'px"';
+            else if (w) extra += ' width="' + w[1] + (w[2] || '') + '"';
             if (h) extra += ' height="' + h[1] + '"';
         }
         const resolved = resolveAssetUrl(url);

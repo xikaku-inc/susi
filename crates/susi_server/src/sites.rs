@@ -356,17 +356,45 @@ fn build_org_jsonld(site: &SiteConfig) -> String {
                 .join(",")
         )
     };
+    // Empty fields are omitted entirely; empty-string values read as noise
+    // to structured-data parsers.
+    let legal = if site.org_legal_name.is_empty() {
+        String::new()
+    } else {
+        format!(r#""legalName":"{}","#, html_escape(site.org_legal_name))
+    };
+    let address = if site.addr_locality.is_empty() && site.addr_country.is_empty() {
+        String::new()
+    } else {
+        format!(
+            r#","address":{{"@type":"PostalAddress","addressLocality":"{}","addressCountry":"{}"}}"#,
+            html_escape(site.addr_locality),
+            html_escape(site.addr_country),
+        )
+    };
+    let contact = if site.contact_email.is_empty() {
+        String::new()
+    } else {
+        format!(
+            r#","email":"{email}","contactPoint":{{"@type":"ContactPoint","contactType":"customer support","email":"{email}"{area}}}"#,
+            email = html_escape(site.contact_email),
+            area = area,
+        )
+    };
+    let same_as = if same_as.is_empty() {
+        String::new()
+    } else {
+        format!(r#","sameAs":[{}]"#, same_as)
+    };
     format!(
-        r#"{{"@context":"https://schema.org","@type":"Organization","name":"{name}","legalName":"{legal}","url":"{url}",{logo}"slogan":"{slogan}","email":"{email}","address":{{"@type":"PostalAddress","addressLocality":"{loc}","addressCountry":"{country}"}},"contactPoint":{{"@type":"ContactPoint","contactType":"customer support","email":"{email}"{area}}},"sameAs":[{same_as}]}}"#,
+        r#"{{"@context":"https://schema.org","@type":"Organization","name":"{name}",{legal}"url":"{url}",{logo}"slogan":"{slogan}"{address}{contact}{same_as}}}"#,
         name = html_escape(site.name),
-        legal = html_escape(site.org_legal_name),
+        legal = legal,
         url = html_escape(site.public_base),
         logo = logo,
         slogan = html_escape(site.tagline),
-        email = html_escape(site.contact_email),
-        loc = html_escape(site.addr_locality),
-        country = html_escape(site.addr_country),
-        area = area,
+        address = address,
+        contact = contact,
         same_as = same_as,
     )
 }
@@ -412,5 +440,21 @@ mod tests {
         // areaServed and the og card are still unset for this site.
         assert!(!l.contains("areaServed"));
         assert!(l.contains(r#""name":"LP-Research""#));
+    }
+
+    #[test]
+    fn org_jsonld_omits_empty_org_fields_for_personal_sites() {
+        let def: SiteDef = serde_json::from_str(
+            r#"{"name":"K","tagline":"t","hosts":["k.example.com"],"public_base":"https://k.example.com","social_links":["https://soundcloud.com/x"]}"#,
+        )
+        .unwrap();
+        let cfg = build_config("ktest", &def, false);
+        let j = org_jsonld(cfg);
+        assert!(!j.contains("legalName"));
+        assert!(!j.contains("email"));
+        assert!(!j.contains("PostalAddress"));
+        assert!(!j.contains("contactPoint"));
+        assert!(j.contains(r#""sameAs":["https://soundcloud.com/x"]"#));
+        serde_json::from_str::<serde_json::Value>(j).expect("org JSON-LD must stay valid JSON");
     }
 }

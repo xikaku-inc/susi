@@ -1360,15 +1360,18 @@ function renderInline(s) {
                 + '" allow="autoplay" loading="lazy"></iframe></div>';
         }
         let extra = '';
+        const isVideo = /\.(mp4|webm)([?#]|$)/i.test(url);
         if (attrs) {
-            const w = attrs.match(/\bwidth\s*=\s*(\d+(?:px|%)?)/i);
+            const w = attrs.match(/\bwidth\s*=\s*(\d+)(px|%)?/i);
             const h = attrs.match(/\bheight\s*=\s*(\d+(?:px|%)?)/i);
-            if (w) extra += ' width="' + w[1] + '"';
+            // A px width is a desktop cap: full column width on narrower screens.
+            if (w && !isVideo && w[2] !== '%') extra += ' style="width:100%;max-width:' + w[1] + 'px"';
+            else if (w) extra += ' width="' + w[1] + (w[2] || '') + '"';
             if (h) extra += ' height="' + h[1] + '"';
             const classes = [...attrs.matchAll(/\.([A-Za-z][\w-]*)/g)].map(m => m[1]);
             if (classes.length) extra += ' class="' + classes.join(' ') + '"';
         }
-        if (/\.(mp4|webm)([?#]|$)/i.test(url)) {
+        if (isVideo) {
             return '<video src="' + resolveAssetUrl(url) + '"' + extra
                 + ' autoplay muted loop playsinline></video>';
         }
@@ -1644,15 +1647,22 @@ function renderSidebar() {
     let html = '';
     if (navStructure && navStructure.length) {
         // Grouped nav from the "nav_structure" site setting. Ungrouped pages
-        // (Home, any newly created top-level page) come first, in ord order.
+        // (Home, any newly created top-level page) come first, in ord order;
+        // legal pages (ord >= 900) stay footer-only unless placed explicitly.
         const groupedSlugs = new Set(navStructure.flatMap(g => g.items || [])
+            .map(s => (s && typeof s === 'object' && s.slug) ? s.slug : s)
             .filter(s => typeof s === 'string'));
         const groupKey = p => (LANG ? (p.translation_of || p.slug) : p.slug);
-        topLevel.filter(p => !groupedSlugs.has(groupKey(p))).forEach(p => html += renderTop(p));
+        topLevel.filter(p => !groupedSlugs.has(groupKey(p)) && p.ord < 900).forEach(p => html += renderTop(p));
         navStructure.forEach(g => {
             let body = '';
             (g.items || []).forEach(s => {
-                if (s && typeof s === 'object') {
+                if (s && typeof s === 'object' && s.slug) {
+                    // {title, slug}: an in-site page under a custom nav label.
+                    const pg = bySlug.get(s.slug);
+                    if (pg) body += renderTop(Object.assign({}, pg, { title: s.title }));
+                }
+                else if (s && typeof s === 'object') {
                     body += '<a class="section-head" href="' + escHtml(s.url) + '">'
                         + escHtml(t(s.title)) + '</a>';
                 }
@@ -1660,7 +1670,8 @@ function renderSidebar() {
                 else if (s === '__shop__') body += shopLink;
                 else if (bySlug.has(s)) body += renderTop(bySlug.get(s));
             });
-            if (body) html += '<h3>' + escHtml(t(g.title || '')) + '</h3>' + body;
+            // An empty group title renders as a headingless block.
+            if (body) html += (g.title && g.title.trim() ? '<h3>' + escHtml(t(g.title)) + '</h3>' : '') + body;
         });
         // Links no group placed keep their flat-nav position at the end.
         if (!groupedSlugs.has('__blog__')) html += blogLink;
