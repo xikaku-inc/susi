@@ -19,8 +19,10 @@ set -euo pipefail
 #   2. Saves the image to a gzipped tarball and scps it to the server.
 #   3. rsyncs the deployment files (compose files) into /opt/susi.
 #   4. Creates an empty .env + RSA keypair on first deploy.
-#   5. `docker load` of the shipped image + `docker compose up -d` (no
-#      `--build` flag - uses the loaded image directly).
+#   5. `docker load` of the shipped image + `docker compose up -d
+#      --force-recreate` (no `--build` flag - uses the loaded image directly;
+#      --force-recreate because the reused susi:latest tag makes a plain
+#      `up -d` treat the container as up-to-date and skip the new image).
 #
 # Local prereqs:
 #   - docker (build host), rsync, ssh, openssl, gzip.
@@ -140,7 +142,9 @@ ssh_cmd "
     gunzip -c /tmp/susi-image.tar.gz | docker load
     rm -f /tmp/susi-image.tar.gz
 
-    docker compose --env-file $ENV_FILE -f $COMPOSE_FILE up -d
+    # --force-recreate: the loaded image reuses the susi:latest tag, so a plain
+    # `up -d` sees an unchanged config and leaves the old container running.
+    docker compose --env-file $ENV_FILE -f $COMPOSE_FILE up -d --force-recreate
 
     if [ -f $REMOTE_DIR/_private.pem ]; then
         VOLUME_DIR=\$(docker volume inspect $VOLUME_NAME --format '{{.Mountpoint}}')
