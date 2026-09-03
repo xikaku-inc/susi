@@ -34,6 +34,14 @@ services:
       - SUSI_NEWSLETTER_SMTP_FROM_NAME=${SUSI_NEWSLETTER_SMTP_FROM_NAME:-Susi by LP-Research}
       - SUSI_NEWSLETTER_SMTP_FROM_ADDR=${SUSI_NEWSLETTER_SMTP_FROM_ADDR:-}
       - SUSI_NEWSLETTER_RATE_PER_MIN=${SUSI_NEWSLETTER_RATE_PER_MIN:-30}
+      # Per-site newsletter relays: SUSI_NEWSLETTER_SMTP_{KEY}_{SITE} (site id
+      # uppercased). Each site sends as its own identity, no cross-site fallback.
+      - SUSI_NEWSLETTER_SMTP_HOST_KLAUS=${SUSI_NEWSLETTER_SMTP_HOST_KLAUS:-}
+      - SUSI_NEWSLETTER_SMTP_PORT_KLAUS=${SUSI_NEWSLETTER_SMTP_PORT_KLAUS:-587}
+      - SUSI_NEWSLETTER_SMTP_USER_KLAUS=${SUSI_NEWSLETTER_SMTP_USER_KLAUS:-}
+      - SUSI_NEWSLETTER_SMTP_PASSWORD_KLAUS=${SUSI_NEWSLETTER_SMTP_PASSWORD_KLAUS:-}
+      - SUSI_NEWSLETTER_SMTP_FROM_NAME_KLAUS=${SUSI_NEWSLETTER_SMTP_FROM_NAME_KLAUS:-}
+      - SUSI_NEWSLETTER_SMTP_FROM_ADDR_KLAUS=${SUSI_NEWSLETTER_SMTP_FROM_ADDR_KLAUS:-}
       # Optional alternative to the newsletter user/password above: an admin
       # connects a Google Workspace account from the dashboard and campaign
       # mail goes out over Gmail with OAuth, so no app password lives on the

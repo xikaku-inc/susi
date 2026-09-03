@@ -426,14 +426,11 @@ fn embed_local_image(
     Some(format!("cid:{}", cid))
 }
 
-/// Where the composer's uploaded images land - the default site's website
+/// Where the composer's uploaded images land - the issue's site's website
 /// asset store, which `website::assets_dir` owns. Mirrored rather than shared
 /// because that helper is private to its module.
-pub(crate) fn newsletter_assets_dir(state: &AppState) -> std::path::PathBuf {
-    std::path::Path::new(&state.data_dir)
-        .join("website")
-        .join("assets")
-        .join(crate::sites::default_site().id)
+pub(crate) fn newsletter_assets_dir(state: &AppState, site_id: &str) -> std::path::PathBuf {
+    std::path::Path::new(&state.data_dir).join("website").join("assets").join(site_id)
 }
 
 /// Only real raster image types are embedded. SVG is deliberately excluded:
@@ -764,20 +761,51 @@ pub(crate) fn render_email_text(body_md: &str, base_url: &str, asset_base: &str)
     out.trim().to_string()
 }
 
+/// The newsletter site an admin request addresses: `?site=` from the
+/// dashboard, defaulting to the default site. Must have a newsletter at all.
+fn resolve_newsletter_site(
+    headers: &HeaderMap,
+    sq: &crate::website::SiteQuery,
+) -> Result<&'static crate::sites::SiteConfig, (StatusCode, Json<ErrorResponse>)> {
+    let site = crate::website::resolve_site(headers, sq)?;
+    if !site.has_newsletter {
+        return Err(error_response(StatusCode::BAD_REQUEST, "This site has no newsletter"));
+    }
+    Ok(site)
+}
+
 /// Whether campaign mail can actually go out. The composer checks this on open
 /// so an admin learns the relay is unconfigured before writing an issue, not
 /// after clicking Send.
 pub(crate) async fn handle_newsletter_config(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(sq): Query<crate::website::SiteQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
     require_owner(&state, &principal)?;
+    let site = resolve_newsletter_site(&headers, &sq)?;
+
+    if site.id != crate::sites::DEFAULT_SITE_ID {
+        // Per-site newsletters send over env-configured SMTP only; the Google
+        // connector belongs to the default site's relay.
+        return Ok(Json(serde_json::json!({
+            "site": site.id,
+            "sending_configured": site_static_mailer(site).is_some(),
+            "static_smtp_configured": site_static_mailer(site).is_some(),
+            "google_oauth_available": false,
+            "base_url_configured": !site.public_base.is_empty(),
+            "rate_per_min": state.newsletter_rate_per_min,
+            "smtp_env_suffix": site.id.to_uppercase().replace('-', "_"),
+        })));
+    }
+
     let google = {
         let db = state.db.lock();
         db.get_newsletter_google_account().ok().flatten()
     };
     Ok(Json(serde_json::json!({
+        "site": site.id,
         "sending_configured": state.newsletter_email.is_some() || google.is_some(),
         "static_smtp_configured": state.newsletter_email.is_some(),
         "google_oauth_available": state.google_oauth.configured(),
@@ -788,22 +816,47 @@ pub(crate) async fn handle_newsletter_config(
     })))
 }
 
+/// Resolve the audience of a site's newsletter: user-account consent for the
+/// default site, the confirmed subscriber list for every other.
+fn audience_for_site(
+    db: &LicenseDb,
+    site: &crate::sites::SiteConfig,
+) -> Result<susi_core::db::NewsletterAudience, (StatusCode, Json<ErrorResponse>)> {
+    if site.id == crate::sites::DEFAULT_SITE_ID {
+        db.newsletter_audience()
+    } else {
+        db.subscriber_audience(site.id)
+    }
+    .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))
+}
+
 pub(crate) async fn handle_newsletter_audience(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(sq): Query<crate::website::SiteQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
     require_owner(&state, &principal)?;
+    let site = resolve_newsletter_site(&headers, &sq)?;
 
     let db = state.db.lock();
-    let audience = db
-        .newsletter_audience()
-        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    let audience = audience_for_site(&db, site)?;
+    // For a subscriber list, "pending" (signed up, never confirmed) is the
+    // count worth showing next to the recipients.
+    let pending = if site.id == crate::sites::DEFAULT_SITE_ID {
+        0
+    } else {
+        db.count_newsletter_subscribers(site.id)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+            .1
+    };
 
     Ok(Json(serde_json::json!({
+        "site": site.id,
         "recipients": audience.recipients.len(),
         "opted_out": audience.opted_out,
         "no_email": audience.no_email,
+        "pending": pending,
         // Addresses themselves stay out of the summary: the admin UI only needs
         // counts to decide, and a full customer email dump on every panel open
         // is a needless exposure.
@@ -829,17 +882,113 @@ pub(crate) fn email_base_urls(
     Ok((base, assets))
 }
 
+/// Per-site variant: the default site keeps the classic dashboard base, every
+/// other site's mail links against its own public origin - relative links in
+/// a klaus issue must open on klaus's site, and the unsubscribe/confirm
+/// endpoints are served on every site host.
+pub(crate) fn email_base_urls_for_site(
+    state: &AppState,
+    site: &crate::sites::SiteConfig,
+) -> Result<(String, String), (StatusCode, Json<ErrorResponse>)> {
+    if site.id == crate::sites::DEFAULT_SITE_ID {
+        return email_base_urls(state);
+    }
+    let base = site.public_base.trim_end_matches('/').to_string();
+    if base.is_empty() {
+        return Err(error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "The site has no public base URL - newsletter links and images would be dead",
+        ));
+    }
+    let assets = format!("{}/api/v1/website/assets", base);
+    Ok((base, assets))
+}
+
+// ---------------------------------------------------------------------------
+// Per-site transport
+// ---------------------------------------------------------------------------
+
+/// `SUSI_NEWSLETTER_SMTP_{KEY}_{SITE}` (site id uppercased, '-' becoming '_'),
+/// mirroring the shop's per-site Stripe variables.
+fn site_smtp_env(site_id: &str, key: &str) -> String {
+    let suffix = site_id.to_uppercase().replace('-', "_");
+    std::env::var(format!("SUSI_NEWSLETTER_SMTP_{}_{}", key, suffix)).unwrap_or_default()
+}
+
+/// The static SMTP transport of a non-default site's newsletter. Env-only and
+/// deliberately without any fallback to the default site's relay: each
+/// newsletter must send as its own identity or not at all.
+fn site_static_mailer(site: &crate::sites::SiteConfig) -> Option<EmailService> {
+    let host = site_smtp_env(site.id, "HOST");
+    let user = site_smtp_env(site.id, "USER");
+    let password = site_smtp_env(site.id, "PASSWORD");
+    let from_addr = site_smtp_env(site.id, "FROM_ADDR");
+    if host.is_empty() || user.is_empty() || password.is_empty() || from_addr.is_empty() {
+        return None;
+    }
+    let port = site_smtp_env(site.id, "PORT").parse().unwrap_or(587);
+    let from_name = match site_smtp_env(site.id, "FROM_NAME") {
+        n if n.is_empty() => site.name.to_string(),
+        n => n,
+    };
+    let cfg = EmailConfig::from_parts(host, port, user, password, &from_name, &from_addr)
+        .map_err(|e| log::error!("Newsletter SMTP config for site {}: {:#}", site.id, e))
+        .ok()?;
+    EmailService::new(cfg)
+        .map_err(|e| log::error!("Newsletter SMTP transport for site {}: {:#}", site.id, e))
+        .ok()
+}
+
+/// The transport a site's campaign mail goes out on: the classic global
+/// config (static SMTP, then Google) for the default site, per-site SMTP env
+/// for everything else.
+pub(crate) async fn newsletter_mailer_for_site(
+    state: &Arc<AppState>,
+    site: &crate::sites::SiteConfig,
+) -> Option<EmailService> {
+    if site.id == crate::sites::DEFAULT_SITE_ID {
+        newsletter_mailer(state).await
+    } else {
+        site_static_mailer(site)
+    }
+}
+
+/// What the recipient subscribed to, for the footer and the unsubscribe page.
+fn newsletter_source_phrase(site: &crate::sites::SiteConfig) -> String {
+    if site.id == crate::sites::DEFAULT_SITE_ID {
+        "the newsletter from Susi by LP-Research".to_string()
+    } else {
+        format!("the newsletter from {}", site.name)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Unsubscribe
 // ---------------------------------------------------------------------------
 
 /// No expiry by design - the link has to keep working for as long as the mail
 /// sits in an archive. It is single-purpose (a dedicated JWT audience) and its
-/// only effect is clearing a consent flag, so an old one is harmless.
+/// only effect is withdrawing newsletter consent, so an old one is harmless.
 pub(crate) fn mint_unsubscribe_token(secret: &[u8; 32], username: &str) -> Option<String> {
     let claims = UnsubscribeClaims {
         sub: username.to_string(),
         aud: UNSUBSCRIBE_AUDIENCE.to_string(),
+        site: String::new(),
+    };
+    encode(&Header::default(), &claims, &EncodingKey::from_secret(secret)).ok()
+}
+
+/// The subscriber-list variant: `sub` is the address itself, `site` names the
+/// list it comes off. Same audience, so old account tokens stay valid.
+pub(crate) fn mint_subscriber_unsubscribe_token(
+    secret: &[u8; 32],
+    site_id: &str,
+    email: &str,
+) -> Option<String> {
+    let claims = UnsubscribeClaims {
+        sub: email.to_string(),
+        aud: UNSUBSCRIBE_AUDIENCE.to_string(),
+        site: site_id.to_string(),
     };
     encode(&Header::default(), &claims, &EncodingKey::from_secret(secret)).ok()
 }
@@ -847,14 +996,14 @@ pub(crate) fn mint_unsubscribe_token(secret: &[u8; 32], username: &str) -> Optio
 fn validate_unsubscribe_token(
     secret: &[u8; 32],
     token: &str,
-) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<UnsubscribeClaims, (StatusCode, Json<ErrorResponse>)> {
     let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
     validation.set_audience(&[UNSUBSCRIBE_AUDIENCE]);
     // Tokens carry no `exp`; without this jsonwebtoken rejects them outright.
     validation.required_spec_claims.clear();
     validation.validate_exp = false;
     decode::<UnsubscribeClaims>(token, &DecodingKey::from_secret(secret), &validation)
-        .map(|d| d.claims.sub)
+        .map(|d| d.claims)
         .map_err(|_| error_response(StatusCode::BAD_REQUEST, "Invalid unsubscribe link"))
 }
 
@@ -863,27 +1012,37 @@ pub(crate) fn unsubscribe_url(state: &AppState, base: &str, username: &str) -> O
         .map(|t| format!("{}/api/v1/newsletter/unsubscribe?token={}", base, t))
 }
 
+pub(crate) fn subscriber_unsubscribe_url(
+    state: &AppState,
+    base: &str,
+    site_id: &str,
+    email: &str,
+) -> Option<String> {
+    mint_subscriber_unsubscribe_token(&state.jwt_secret, site_id, email)
+        .map(|t| format!("{}/api/v1/newsletter/unsubscribe?token={}", base, t))
+}
+
 /// Footer carried by every campaign mail. States why the recipient is getting
 /// it and how to stop, which is both a legal expectation and what keeps a
 /// sending domain out of spam folders.
-fn unsubscribe_footer(url: &str) -> String {
+fn unsubscribe_footer(url: &str, source_phrase: &str) -> String {
     format!(
         "<div style=\"margin:32px 0 0;padding:16px 0 0;border-top:1px solid #e4e6ea;\
          font-size:13px;line-height:1.5;\">\
-           <p style=\"margin:0 0 6px;\">You are receiving this because you subscribed to the \
-            newsletter from Susi by LP-Research.</p>\
+           <p style=\"margin:0 0 6px;\">You are receiving this because you subscribed to \
+            {source}.</p>\
            <p style=\"margin:0;\"><a href=\"{url}\" style=\"color:#2563eb;text-decoration:none;\">\
             Unsubscribe</a></p>\
          </div>",
+        source = html_escape(source_phrase),
         url = html_escape(url),
     )
 }
 
-fn unsubscribe_footer_text(url: &str) -> String {
+fn unsubscribe_footer_text(url: &str, source_phrase: &str) -> String {
     format!(
-        "\n\n----------\nYou are receiving this because you subscribed to the newsletter from \
-         Susi by LP-Research.\nUnsubscribe: {}\n",
-        url
+        "\n\n----------\nYou are receiving this because you subscribed to {}.\nUnsubscribe: {}\n",
+        source_phrase, url
     )
 }
 
@@ -917,35 +1076,325 @@ pub(crate) async fn handle_unsubscribe(
     State(state): State<Arc<AppState>>,
     Query(q): Query<UnsubscribeQuery>,
 ) -> Result<axum::response::Html<String>, (StatusCode, Json<ErrorResponse>)> {
-    let username = validate_unsubscribe_token(&state.jwt_secret, &q.token)?;
+    let claims = validate_unsubscribe_token(&state.jwt_secret, &q.token)?;
+
+    if !claims.site.is_empty() {
+        // Subscriber-list token: withdrawing consent deletes the row.
+        {
+            let db = state.db.lock();
+            db.delete_newsletter_subscriber(&claims.site, &claims.sub)
+                .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+        }
+        log::info!("Newsletter unsubscribe (site {})", claims.site);
+        let source = crate::sites::site_by_id(&claims.site)
+            .map(newsletter_source_phrase)
+            .unwrap_or_else(|| "this newsletter".to_string());
+        return Ok(public_page(
+            "You have been unsubscribed",
+            &format!(
+                "<p style=\"margin:0 0 14px;\">{email} will no longer receive {source}.</p>\
+                 <p style=\"margin:0;font-size:13px;\">Changed your mind? You can subscribe \
+                  again on the website.</p>",
+                email = html_escape(&claims.sub),
+                source = html_escape(&source),
+            ),
+        ));
+    }
+
     {
         let db = state.db.lock();
-        db.set_user_newsletter_opt_in(&username, false)
+        db.set_user_newsletter_opt_in(&claims.sub, false)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
     }
-    log::info!("Newsletter unsubscribe: {}", username);
+    log::info!("Newsletter unsubscribe: {}", claims.sub);
 
-    // Inline styles only: the global CSP is default-src 'self', and this page
-    // is opened straight from a mail client.
-    Ok(axum::response::Html(format!(
+    Ok(public_page(
+        "You have been unsubscribed",
+        &format!(
+            "<p style=\"margin:0 0 14px;\">{user} will no longer receive the newsletter from \
+              Susi by LP-Research.</p>\
+             <p style=\"margin:0 0 14px;\">Account email such as sign-in codes and password resets \
+              is unaffected.</p>\
+             <p style=\"margin:0;font-size:13px;\">Changed your mind? Turn the newsletter back on \
+              under Account Settings.</p>",
+            user = html_escape(&claims.sub),
+        ),
+    ))
+}
+
+/// A minimal self-contained page for links opened straight from a mail
+/// client. Inline styles only: the global CSP is default-src 'self'.
+fn public_page(heading: &str, body_html: &str) -> axum::response::Html<String> {
+    axum::response::Html(format!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
-         <title>Unsubscribed</title></head>\
+         <title>{h}</title></head>\
          <body style=\"font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;\
           max-width:540px;margin:60px auto;padding:0 20px;color:#1a1d23;line-height:1.55;\">\
-           <h1 style=\"font-size:22px;font-weight:600;margin:0 0 14px;\">You have been unsubscribed</h1>\
-           <p style=\"margin:0 0 14px;\">{user} will no longer receive the newsletter from \
-            Susi by LP-Research.</p>\
-           <p style=\"margin:0 0 14px;\">Account email such as sign-in codes and password resets \
-            is unaffected.</p>\
-           <p style=\"margin:0;font-size:13px;\">Changed your mind? Turn the newsletter back on \
-            under Account Settings.</p>\
+           <h1 style=\"font-size:22px;font-weight:600;margin:0 0 14px;\">{h}</h1>{b}\
          </body></html>",
-        user = html_escape(&username),
-    )))
+        h = html_escape(heading),
+        b = body_html,
+    ))
 }
 
 // ---------------------------------------------------------------------------
+// Public signup (per-site newsletters, double opt-in)
+// ---------------------------------------------------------------------------
+
+/// CSRF-free proof of address ownership: clicking the mailed link is the
+/// confirmation. Expires - a stale signup should re-subscribe, not confirm.
+#[derive(Debug, Serialize, Deserialize)]
+struct ConfirmClaims {
+    sub: String,
+    aud: String,
+    site: String,
+    exp: i64,
+}
+
+const CONFIRM_AUDIENCE: &str = "newsletter-confirm";
+const CONFIRM_TTL_SECS: i64 = 14 * 24 * 3600;
+
+const SUBSCRIBE_WINDOW: StdDuration = StdDuration::from_secs(3600);
+const SUBSCRIBE_MAX_PER_HOUR: usize = 5;
+const MAX_SUBSCRIBER_EMAIL: usize = 320; // RFC 5321 max
+
+/// The site whose newsletter runs on public signups: any newsletter site
+/// except the default one, whose audience is user accounts.
+fn signup_site(
+    headers: &HeaderMap,
+    sq: &crate::website::SiteQuery,
+) -> Result<&'static crate::sites::SiteConfig, (StatusCode, Json<ErrorResponse>)> {
+    let site = crate::website::resolve_site(headers, sq)?;
+    if site.id == crate::sites::DEFAULT_SITE_ID || !site.has_newsletter {
+        return Err(error_response(
+            StatusCode::NOT_FOUND,
+            "This site has no public newsletter signup",
+        ));
+    }
+    Ok(site)
+}
+
+/// The site's brand mark for the confirmation mail: the uploaded logo asset,
+/// falling back to compiled artwork. None = the mail goes out without one.
+fn site_email_logo(state: &AppState, site: &crate::sites::SiteConfig) -> Option<InlineImage> {
+    const CID: &str = "nl-logo";
+    if let Some((name, bytes)) = crate::website::custom_asset(state, site, crate::website::SETTING_LOGO_IMAGE) {
+        if let Some(mime) = image_mime(&name.to_ascii_lowercase()) {
+            return Some(InlineImage {
+                content_id: CID.into(),
+                mime_type: mime.to_string(),
+                bytes: bytes.into(),
+            });
+        }
+    }
+    crate::sites::compiled_brand(site.id).map(|b| InlineImage {
+        content_id: CID.into(),
+        mime_type: "image/png".into(),
+        bytes: b.logo.to_vec().into(),
+    })
+}
+
+#[derive(Deserialize)]
+pub(crate) struct SubscribeRequest {
+    #[serde(default)]
+    email: String,
+    /// Honeypot - must be empty (same trick as the contact form).
+    #[serde(default)]
+    website: String,
+}
+
+/// Public signup. Inserts a pending row and mails a confirmation link; only
+/// the click makes the address part of the audience. The response is the same
+/// whether the address is new, pending, or already subscribed, so the
+/// endpoint cannot be used to probe the list.
+pub(crate) async fn handle_subscribe(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Query(sq): Query<crate::website::SiteQuery>,
+    Json(req): Json<SubscribeRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let site = signup_site(&headers, &sq)?;
+    if !req.website.trim().is_empty() {
+        log::info!("Newsletter signup honeypot tripped (site {})", site.id);
+        return Ok(Json(serde_json::json!({ "status": "OK" })));
+    }
+
+    let ip = client_ip(peer, &headers);
+    check_ip_rate_limit(
+        &state.newsletter_subscribe_attempts,
+        ip,
+        SUBSCRIBE_WINDOW,
+        SUBSCRIBE_MAX_PER_HOUR,
+        "Newsletter signup",
+        "Too many signup attempts, try again later",
+    )?;
+
+    let email = req.email.trim().to_lowercase();
+    if !crate::contact::is_email_like(&email) || email.len() > MAX_SUBSCRIBER_EMAIL {
+        return Err(error_response(StatusCode::BAD_REQUEST, "Invalid email address"));
+    }
+
+    let mailer = newsletter_mailer_for_site(&state, site).await.ok_or_else(|| {
+        error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Newsletter signups are not available right now",
+        )
+    })?;
+    let (base, _) = email_base_urls_for_site(&state, site)?;
+
+    let status = {
+        let db = state.db.lock();
+        db.upsert_newsletter_subscriber(site.id, &email)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+    };
+    if status == "confirmed" {
+        return Ok(Json(serde_json::json!({ "status": "OK" })));
+    }
+
+    let claims = ConfirmClaims {
+        sub: email.clone(),
+        aud: CONFIRM_AUDIENCE.to_string(),
+        site: site.id.to_string(),
+        exp: Utc::now().timestamp() + CONFIRM_TTL_SECS,
+    };
+    let token =
+        encode(&Header::default(), &claims, &EncodingKey::from_secret(&state.jwt_secret))
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    let confirm_url = format!("{}/api/v1/newsletter/confirm?token={}", base, token);
+
+    let md = format!(
+        "# Confirm your subscription\n\n\
+         This address was entered for the {name} newsletter.\n\n\
+         {{{{button:Confirm subscription|{url}}}}}\n\n\
+         If this wasn't you, ignore this email and nothing will be sent.\n\n\
+         - {name}",
+        name = site.name,
+        url = confirm_url,
+    );
+    let logo = site_email_logo(&state, site);
+    let doc = crate::email_md::render(&md, logo.as_ref().map(|l| (l.content_id.as_str(), site.name)));
+    let inline: Vec<InlineImage> = logo.into_iter().collect();
+    mailer
+        .send_html_rich(
+            &email,
+            &format!("Confirm your {} newsletter subscription", site.name),
+            &doc.text,
+            &doc.html,
+            &inline,
+            &[],
+            None,
+        )
+        .await
+        .map_err(|e| {
+            log::error!("Newsletter confirmation mail failed (site {}): {:#}", site.id, e);
+            error_response(
+                StatusCode::BAD_GATEWAY,
+                "Could not send the confirmation email - please try again later",
+            )
+        })?;
+    // No PII in the log line, matching the contact form.
+    log::info!("Newsletter signup pending confirmation (site {})", site.id);
+    Ok(Json(serde_json::json!({ "status": "OK" })))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct ConfirmQuery {
+    token: String,
+}
+
+/// The click on the mailed link. Public and idempotent; an expired or
+/// tampered token renders an error page, a valid one for a since-removed
+/// signup does not resurrect it.
+pub(crate) async fn handle_confirm(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ConfirmQuery>,
+) -> Result<axum::response::Html<String>, (StatusCode, Json<ErrorResponse>)> {
+    let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
+    validation.set_audience(&[CONFIRM_AUDIENCE]);
+    let claims =
+        decode::<ConfirmClaims>(&q.token, &DecodingKey::from_secret(&state.jwt_secret), &validation)
+            .map(|d| d.claims)
+            .map_err(|_| {
+                error_response(StatusCode::BAD_REQUEST, "Invalid or expired confirmation link")
+            })?;
+
+    let confirmed = {
+        let db = state.db.lock();
+        db.confirm_newsletter_subscriber(&claims.site, &claims.sub)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+    };
+    let source = crate::sites::site_by_id(&claims.site)
+        .map(newsletter_source_phrase)
+        .unwrap_or_else(|| "this newsletter".to_string());
+    if !confirmed {
+        return Ok(public_page(
+            "This link is no longer valid",
+            "<p style=\"margin:0;\">The signup it belongs to was removed. You can subscribe \
+              again on the website.</p>",
+        ));
+    }
+    log::info!("Newsletter subscription confirmed (site {})", claims.site);
+    Ok(public_page(
+        "Subscription confirmed",
+        &format!(
+            "<p style=\"margin:0 0 14px;\">{email} will now receive {source}.</p>\
+             <p style=\"margin:0;font-size:13px;\">Every issue carries an unsubscribe link.</p>",
+            email = html_escape(&claims.sub),
+            source = html_escape(&source),
+        ),
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Subscriber admin (owner)
+// ---------------------------------------------------------------------------
+
+pub(crate) async fn handle_list_subscribers(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(sq): Query<crate::website::SiteQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    require_owner(&state, &principal)?;
+    let site = signup_site(&headers, &sq)?;
+    let db = state.db.lock();
+    let rows = db
+        .list_newsletter_subscribers(site.id)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    Ok(Json(serde_json::json!({ "site": site.id, "subscribers": rows })))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct SubscriberDeleteQuery {
+    #[serde(default)]
+    site: Option<String>,
+    email: String,
+}
+
+pub(crate) async fn handle_delete_subscriber(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(q): Query<SubscriberDeleteQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    require_owner(&state, &principal)?;
+    let sq = crate::website::SiteQuery::for_site(q.site.clone());
+    let site = signup_site(&headers, &sq)?;
+    let email = q.email.trim().to_lowercase();
+    let removed = {
+        let db = state.db.lock();
+        db.delete_newsletter_subscriber(site.id, &email)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+    };
+    if !removed {
+        return Err(error_response(StatusCode::NOT_FOUND, "No such subscriber"));
+    }
+    audit(&state, &principal.username, "newsletter.subscriber_remove", site.id, &email);
+    Ok(Json(serde_json::json!({ "status": "OK" })))
+}
+
 // ---------------------------------------------------------------------------
 // Google OAuth connector (Gmail relay)
 // ---------------------------------------------------------------------------
@@ -1300,9 +1749,8 @@ pub(crate) async fn newsletter_mailer(state: &Arc<AppState>) -> Option<EmailServ
 /// process killed mid-campaign resumes on the next boot instead of re-mailing
 /// everyone who already received it.
 pub(crate) fn spawn_sender(state: Arc<AppState>) {
-    if state.newsletter_email.is_none() && !state.google_oauth.configured() {
-        return;
-    }
+    // Always spawned: per-site transports live in the environment, so a box
+    // with no global newsletter config can still be sending a site's campaign.
     tokio::spawn(async move {
         // Reconcile anything the previous process left behind before the first
         // batch, so a campaign that finished during a restart closes out.
@@ -1335,9 +1783,6 @@ pub(crate) fn spawn_sender(state: Arc<AppState>) {
 /// sites in this codebase spawn one unbounded task per recipient, which against
 /// a rate-limited relay is exactly how a campaign gets throttled or blocked.
 async fn drain_once(state: &Arc<AppState>) -> usize {
-    let Some(mailer) = newsletter_mailer(state).await else {
-        return 0;
-    };
     let batch = {
         let db = state.db.lock();
         match db.has_pending_newsletter_work() {
@@ -1353,13 +1798,10 @@ async fn drain_once(state: &Arc<AppState>) -> usize {
         return 0;
     }
 
-    let base = state.magic_link_base_url.trim_end_matches('/').to_string();
-    let assets = format!("{}/api/v1/website/assets", base);
-    let asset_dir = newsletter_assets_dir(state);
     let mut attempted = 0;
     // Looked up once per issue, not once per recipient - the poster fetches in
     // particular are network round trips.
-    let mut cache: HashMap<i64, Option<PreparedIssue>> = HashMap::new();
+    let mut cache: HashMap<i64, Prepared> = HashMap::new();
 
     for item in batch {
         if !cache.contains_key(&item.issue_id) {
@@ -1367,49 +1809,54 @@ async fn drain_once(state: &Arc<AppState>) -> usize {
                 let db = state.db.lock();
                 db.get_newsletter_issue(item.issue_id).ok().flatten()
             };
-            let prepared = match row {
-                Some(issue) => Some(PreparedIssue {
-                    posters: resolve_video_posters(&state.http, &issue.body_md).await,
-                    subject: issue.subject,
-                    body_md: issue.body_md,
-                }),
-                None => None,
-            };
-            cache.insert(item.issue_id, prepared);
+            cache.insert(item.issue_id, prepare_issue(state, row).await);
         }
-        let Some(PreparedIssue { subject, body_md, posters }) =
-            cache.get(&item.issue_id).and_then(|c| c.as_ref())
-        else {
-            let db = state.db.lock();
-            let _ = db.mark_delivery_attempt_failed(item.id, "Issue disappeared");
-            continue;
+        let prepared = match cache.get(&item.issue_id).expect("just inserted") {
+            Prepared::Ready(p) => p,
+            Prepared::Failed(msg) => {
+                let db = state.db.lock();
+                let _ = db.mark_delivery_attempt_failed(item.id, msg);
+                continue;
+            }
+            // Transient (transport or base URL unconfigured): the rows stay
+            // pending and the next tick after the fix picks them up, without
+            // burning delivery attempts.
+            Prepared::Skip => continue,
         };
 
-        let Some(url) = unsubscribe_url(state, &base, &item.username) else {
+        // Account-based lists unsubscribe by username, subscriber lists by
+        // the address itself.
+        let url = if prepared.site_default {
+            unsubscribe_url(state, &prepared.base, &item.username)
+        } else {
+            subscriber_unsubscribe_url(state, &prepared.base, &prepared.site_id, &item.email)
+        };
+        let Some(url) = url else {
             let db = state.db.lock();
             let _ = db.mark_delivery_attempt_failed(item.id, "Could not mint unsubscribe token");
             continue;
         };
         let (html, images) = render_email_html_with_images(
-            body_md,
-            &base,
-            &assets,
-            &unsubscribe_footer(&url),
-            Some(&asset_dir),
-            posters,
+            &prepared.body_md,
+            &prepared.base,
+            &prepared.asset_base,
+            &unsubscribe_footer(&url, &prepared.source_phrase),
+            Some(&prepared.assets_dir),
+            &prepared.posters,
         );
         let text = format!(
             "{}{}",
-            render_email_text(body_md, &base, &assets),
-            unsubscribe_footer_text(&url)
+            render_email_text(&prepared.body_md, &prepared.base, &prepared.asset_base),
+            unsubscribe_footer_text(&url, &prepared.source_phrase)
         );
 
         attempted += 1;
         // The DB guard is dropped before awaiting: parking_lot's mutex is not
         // reentrant and holding it across an SMTP round-trip would wedge every
         // other request for the duration.
-        let result = mailer
-            .send_newsletter(&item.email, subject, &text, &html, &images, &url)
+        let result = prepared
+            .mailer
+            .send_newsletter(&item.email, &prepared.subject, &text, &html, &images, &url)
             .await;
         let db = state.db.lock();
         match result {
@@ -1435,6 +1882,61 @@ struct PreparedIssue {
     subject: String,
     body_md: String,
     posters: VideoPosters,
+    site_id: String,
+    site_default: bool,
+    base: String,
+    asset_base: String,
+    assets_dir: std::path::PathBuf,
+    source_phrase: String,
+    mailer: EmailService,
+}
+
+enum Prepared {
+    Ready(PreparedIssue),
+    /// Permanent - the rows burn an attempt and eventually fail.
+    Failed(&'static str),
+    /// Transient - leave the rows pending for a later tick.
+    Skip,
+}
+
+async fn prepare_issue(
+    state: &Arc<AppState>,
+    row: Option<susi_core::db::NewsletterIssue>,
+) -> Prepared {
+    let Some(issue) = row else {
+        return Prepared::Failed("Issue disappeared");
+    };
+    let Some(site) = crate::sites::site_by_id(&issue.site) else {
+        return Prepared::Failed("Site no longer exists");
+    };
+    let Some(mailer) = newsletter_mailer_for_site(state, site).await else {
+        log::warn!(
+            "Newsletter issue {} (site {}): no transport configured - deliveries stay pending",
+            issue.id,
+            site.id
+        );
+        return Prepared::Skip;
+    };
+    let Ok((base, asset_base)) = email_base_urls_for_site(state, site) else {
+        log::warn!(
+            "Newsletter issue {} (site {}): no base URL - deliveries stay pending",
+            issue.id,
+            site.id
+        );
+        return Prepared::Skip;
+    };
+    Prepared::Ready(PreparedIssue {
+        posters: resolve_video_posters(&state.http, &issue.body_md).await,
+        subject: issue.subject,
+        body_md: issue.body_md,
+        site_id: site.id.to_string(),
+        site_default: site.id == crate::sites::DEFAULT_SITE_ID,
+        base,
+        asset_base,
+        assets_dir: newsletter_assets_dir(state, site.id),
+        source_phrase: newsletter_source_phrase(site),
+        mailer,
+    })
 }
 
 #[derive(Deserialize)]
@@ -1450,12 +1952,14 @@ pub(crate) struct PreviewRequest {
 pub(crate) async fn handle_newsletter_preview(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(sq): Query<crate::website::SiteQuery>,
     Json(req): Json<PreviewRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
     require_owner(&state, &principal)?;
+    let site = resolve_newsletter_site(&headers, &sq)?;
 
-    let (base, assets) = email_base_urls(&state)?;
+    let (base, assets) = email_base_urls_for_site(&state, site)?;
     // No assets dir: a browser cannot resolve cid:, so the preview keeps URLs.
     let posters = resolve_video_posters(&state.http, &req.body_md).await;
     Ok(Json(serde_json::json!({
@@ -1476,6 +1980,10 @@ pub(crate) struct IssueRequest {
     subject: String,
     #[serde(default)]
     body_md: String,
+    /// Which site's newsletter this issue belongs to. Only read on create
+    /// (an issue never moves between sites); empty = the default site.
+    #[serde(default)]
+    site: String,
 }
 
 fn validate_issue(req: &IssueRequest) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
@@ -1495,12 +2003,14 @@ fn validate_issue(req: &IssueRequest) -> Result<(), (StatusCode, Json<ErrorRespo
 pub(crate) async fn handle_list_issues(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(sq): Query<crate::website::SiteQuery>,
 ) -> Result<Json<Vec<susi_core::db::NewsletterIssue>>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
     require_owner(&state, &principal)?;
+    let site = resolve_newsletter_site(&headers, &sq)?;
     let db = state.db.lock();
     let rows = db
-        .list_newsletter_issues()
+        .list_newsletter_issues(site.id)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
     Ok(Json(rows))
 }
@@ -1527,10 +2037,14 @@ pub(crate) async fn handle_create_issue(
     let principal = validate_principal(&headers, &state)?;
     require_owner(&state, &principal)?;
     validate_issue(&req)?;
+    let sq = crate::website::SiteQuery::for_site(
+        Some(req.site.clone()).filter(|s| !s.is_empty()),
+    );
+    let site = resolve_newsletter_site(&headers, &sq)?;
 
     let db = state.db.lock();
     let id = db
-        .create_newsletter_issue(req.subject.trim(), &req.body_md, &principal.username)
+        .create_newsletter_issue(site.id, req.subject.trim(), &req.body_md, &principal.username)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
     audit_db(&db, &principal.username, "newsletter.create", &id.to_string(), req.subject.trim());
     Ok(Json(serde_json::json!({ "status": "OK", "id": id })))
@@ -1629,13 +2143,17 @@ pub(crate) async fn handle_set_issue_public(
 }
 
 /// Public: the issues selected for the website archive, newest first. Feeds
-/// the /newsletter page on the public site.
+/// the /newsletter page on the public site; the site comes from the Host
+/// header like every other public site API.
 pub(crate) async fn handle_public_issues(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(sq): Query<crate::website::SiteQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let site = crate::website::resolve_site(&headers, &sq)?;
     let issues = {
         let db = state.db.lock();
-        db.list_public_newsletter_issues()
+        db.list_public_newsletter_issues(site.id)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
     };
     let issues: Vec<serde_json::Value> = issues
@@ -1667,15 +2185,25 @@ pub(crate) async fn handle_list_deliveries(
 
 async fn require_newsletter_mailer(
     state: &Arc<AppState>,
+    site: &crate::sites::SiteConfig,
 ) -> Result<EmailService, (StatusCode, Json<ErrorResponse>)> {
-    if let Some(svc) = newsletter_mailer(state).await {
+    if let Some(svc) = newsletter_mailer_for_site(state, site).await {
         return Ok(svc);
     }
-    let hint = if state.google_oauth.configured() {
+    let hint = if site.id != crate::sites::DEFAULT_SITE_ID {
+        let suffix = site.id.to_uppercase().replace('-', "_");
+        format!(
+            "Set SUSI_NEWSLETTER_SMTP_HOST_{s} / _USER_{s} / _PASSWORD_{s} / _FROM_ADDR_{s} \
+             in the host environment and restart.",
+            s = suffix
+        )
+    } else if state.google_oauth.configured() {
         "Connect a Google account on the Newsletter page, or set SUSI_NEWSLETTER_SMTP_*."
+            .to_string()
     } else {
         "Set SUSI_NEWSLETTER_SMTP_*, or configure SUSI_GOOGLE_CLIENT_ID / \
          SUSI_GOOGLE_CLIENT_SECRET to connect a Google account from the dashboard."
+            .to_string()
     };
     Err(error_response(
         StatusCode::SERVICE_UNAVAILABLE,
@@ -1685,6 +2213,19 @@ async fn require_newsletter_mailer(
             hint
         ),
     ))
+}
+
+/// The site an already-stored issue belongs to. A missing site is a
+/// configuration error surfaced to the admin, not a silent fallback.
+fn issue_site(
+    issue: &susi_core::db::NewsletterIssue,
+) -> Result<&'static crate::sites::SiteConfig, (StatusCode, Json<ErrorResponse>)> {
+    crate::sites::site_by_id(&issue.site).ok_or_else(|| {
+        error_response(
+            StatusCode::CONFLICT,
+            &format!("The issue belongs to site '{}', which no longer exists", issue.site),
+        )
+    })
 }
 
 /// Send one copy to the calling admin's own address. Uses the real transport,
@@ -1697,40 +2238,47 @@ pub(crate) async fn handle_test_send(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
     require_owner(&state, &principal)?;
-    let mailer = require_newsletter_mailer(&state).await?;
-    let (base, assets) = email_base_urls(&state)?;
 
-    let (issue, to) = {
+    let issue = {
         let db = state.db.lock();
-        let issue = db
-            .get_newsletter_issue(id)
+        db.get_newsletter_issue(id)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
-            .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Issue not found"))?;
-        let to = db
-            .get_user_email(&principal.username)
-            .ok()
-            .flatten()
-            .ok_or_else(|| {
-                error_response(StatusCode::BAD_REQUEST, "Your account has no email on file")
-            })?;
-        (issue, to)
+            .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Issue not found"))?
+    };
+    let site = issue_site(&issue)?;
+    // Missing config outranks a missing address: it affects every send, not
+    // just this admin's test copy.
+    let mailer = require_newsletter_mailer(&state, site).await?;
+    let (base, assets) = email_base_urls_for_site(&state, site)?;
+    let to = {
+        let db = state.db.lock();
+        db.get_user_email(&principal.username).ok().flatten().ok_or_else(|| {
+            error_response(StatusCode::BAD_REQUEST, "Your account has no email on file")
+        })?
     };
 
-    let url = unsubscribe_url(&state, &base, &principal.username)
-        .ok_or_else(|| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Token mint failed"))?;
+    // The admin is not necessarily on the issue's list; a subscriber-style
+    // token for their own address keeps the link shape real and harmless.
+    let url = if site.id == crate::sites::DEFAULT_SITE_ID {
+        unsubscribe_url(&state, &base, &principal.username)
+    } else {
+        subscriber_unsubscribe_url(&state, &base, site.id, &to)
+    }
+    .ok_or_else(|| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Token mint failed"))?;
+    let source = newsletter_source_phrase(site);
     let posters = resolve_video_posters(&state.http, &issue.body_md).await;
     let (html, images) = render_email_html_with_images(
         &issue.body_md,
         &base,
         &assets,
-        &unsubscribe_footer(&url),
-        Some(&newsletter_assets_dir(&state)),
+        &unsubscribe_footer(&url, &source),
+        Some(&newsletter_assets_dir(&state, site.id)),
         &posters,
     );
     let text = format!(
         "{}{}",
         render_email_text(&issue.body_md, &base, &assets),
-        unsubscribe_footer_text(&url)
+        unsubscribe_footer_text(&url, &source)
     );
     let subject = format!("[TEST] {}", issue.subject);
 
@@ -1763,24 +2311,25 @@ pub(crate) async fn handle_send_issue(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
     require_owner(&state, &principal)?;
-    require_newsletter_mailer(&state).await?;
-    email_base_urls(&state)?;
 
-    let db = state.db.lock();
-    let issue = db
-        .get_newsletter_issue(id)
-        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
-        .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Issue not found"))?;
+    let issue = {
+        let db = state.db.lock();
+        db.get_newsletter_issue(id)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+            .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Issue not found"))?
+    };
     if issue.status != "draft" {
         return Err(error_response(
             StatusCode::CONFLICT,
             &format!("Issue is already '{}'", issue.status),
         ));
     }
+    let site = issue_site(&issue)?;
+    require_newsletter_mailer(&state, site).await?;
+    email_base_urls_for_site(&state, site)?;
 
-    let audience = db
-        .newsletter_audience()
-        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    let db = state.db.lock();
+    let audience = audience_for_site(&db, site)?;
     if audience.recipients.is_empty() {
         return Err(error_response(
             StatusCode::BAD_REQUEST,
@@ -2392,7 +2941,37 @@ mod tests {
         let secret = [7u8; 32];
         let token = mint_unsubscribe_token(&secret, "alice").expect("mint");
         // ErrorResponse has no Debug impl, so go through Option to unwrap.
-        assert_eq!(validate_unsubscribe_token(&secret, &token).ok().expect("validate"), "alice");
+        let claims = validate_unsubscribe_token(&secret, &token).ok().expect("validate");
+        assert_eq!(claims.sub, "alice");
+        assert!(claims.site.is_empty(), "an account token carries no site");
+    }
+
+    /// The subscriber variant carries the list it comes off, and a token
+    /// minted before the site claim existed still validates as an account one.
+    #[test]
+    fn subscriber_unsubscribe_token_round_trips() {
+        let secret = [7u8; 32];
+        let token =
+            mint_subscriber_unsubscribe_token(&secret, "klaus", "a@example.com").expect("mint");
+        let claims = validate_unsubscribe_token(&secret, &token).ok().expect("validate");
+        assert_eq!(claims.sub, "a@example.com");
+        assert_eq!(claims.site, "klaus");
+
+        // A pre-site token is the same JWT without the claim.
+        #[derive(Serialize)]
+        struct OldClaims {
+            sub: String,
+            aud: String,
+        }
+        let old = encode(
+            &Header::default(),
+            &OldClaims { sub: "alice".into(), aud: UNSUBSCRIBE_AUDIENCE.into() },
+            &EncodingKey::from_secret(&secret),
+        )
+        .expect("encode");
+        let claims = validate_unsubscribe_token(&secret, &old).ok().expect("validate");
+        assert_eq!(claims.sub, "alice");
+        assert!(claims.site.is_empty());
     }
 
     #[test]
@@ -2412,7 +2991,11 @@ mod tests {
         // this is what keeps the dedicated `aud` load-bearing.
         let wrong_aud = encode(
             &Header::default(),
-            &UnsubscribeClaims { sub: "alice".into(), aud: "release-download".into() },
+            &UnsubscribeClaims {
+                sub: "alice".into(),
+                aud: "release-download".into(),
+                site: String::new(),
+            },
             &EncodingKey::from_secret(&secret),
         )
         .expect("encode");
@@ -2443,11 +3026,18 @@ mod tests {
     #[test]
     fn footer_carries_the_unsubscribe_link() {
         let url = "https://susi.example.com/api/v1/newsletter/unsubscribe?token=abc";
-        let html = unsubscribe_footer(url);
+        let source = "the newsletter from Susi by LP-Research";
+        let html = unsubscribe_footer(url, source);
         assert!(html.contains(url), "got: {}", html);
         assert!(html.contains("Unsubscribe</a>"), "got: {}", html);
+        assert!(html.contains(source), "got: {}", html);
 
-        let text = unsubscribe_footer_text(url);
+        let text = unsubscribe_footer_text(url, source);
         assert!(text.contains(&format!("Unsubscribe: {}", url)), "got: {}", text);
+
+        // A per-site newsletter names the site, not LP-Research.
+        let html = unsubscribe_footer(url, "the newsletter from Klaus");
+        assert!(html.contains("the newsletter from Klaus"), "got: {}", html);
+        assert!(!html.contains("LP-Research"), "got: {}", html);
     }
 }

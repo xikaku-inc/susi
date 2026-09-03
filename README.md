@@ -1103,6 +1103,18 @@ SUSI_NEWSLETTER_SMTP_FROM_ADDR=news@example.com
 # handshake, and providers cap daily recipients - keep this modest.
 SUSI_NEWSLETTER_RATE_PER_MIN=30
 
+# Per-site newsletters (any non-default site with has_newsletter) send over
+# their own relay: SUSI_NEWSLETTER_SMTP_{HOST|PORT|USER|PASSWORD|FROM_NAME|
+# FROM_ADDR}_{SITE} with the site id uppercased and '-' becoming '_', same
+# convention as the per-site Stripe keys. No cross-site fallback: without
+# these, that site's sends respond 503 while drafts and previews still work.
+# Their audience is the site's own double-opt-in subscriber list (public
+# signup on the site's /newsletter page), not user accounts.
+SUSI_NEWSLETTER_SMTP_HOST_KLAUS=smtp.example.com
+SUSI_NEWSLETTER_SMTP_USER_KLAUS=news@klaus.example.com
+SUSI_NEWSLETTER_SMTP_PASSWORD_KLAUS=<app-password>
+SUSI_NEWSLETTER_SMTP_FROM_ADDR_KLAUS=news@klaus.example.com
+
 # Gmail connector (optional alternative to SUSI_NEWSLETTER_SMTP_USER/_PASSWORD).
 # With these set, an admin connects a Google Workspace account from the
 # Newsletter page and campaign mail goes out over Gmail with OAuth - no app

@@ -311,6 +311,7 @@ struct AppState {
     checkout_attempts: Mutex<HashMap<IpAddr, Vec<Instant>>>,
     webhook_attempts: Mutex<HashMap<IpAddr, Vec<Instant>>>,
     contact_attempts: Mutex<HashMap<IpAddr, Vec<Instant>>>,
+    newsletter_subscribe_attempts: Mutex<HashMap<IpAddr, Vec<Instant>>>,
     email: Option<EmailService>,
     /// Separate transport for bulk campaign mail. Never falls back to `email`:
     /// isolating reputation from authentication mail is the whole point.
@@ -805,6 +806,11 @@ const DOWNLOAD_TICKET_TTL_SECS: i64 = 60;
 pub(crate) struct UnsubscribeClaims {
     pub sub: String,
     pub aud: String,
+    /// Empty (or absent, on tokens minted before per-site newsletters) =
+    /// `sub` is a username whose account opt-in is cleared. Set = `sub` is a
+    /// subscriber email address on that site's list.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub site: String,
 }
 
 pub(crate) const UNSUBSCRIBE_AUDIENCE: &str = "newsletter-unsubscribe";
@@ -1331,6 +1337,8 @@ fn is_public_api_route(method: &Method, path: &str) -> bool {
         ["updates", "download-ticket"] => post,
         ["indexnow", _] => get,
         ["newsletter", "unsubscribe"] => get || post,
+        ["newsletter", "subscribe"] => post,
+        ["newsletter", "confirm"] => get,
         ["newsletter", "google", "callback"] => get,
         ["newsletter", "public"] => get,
         ["website", "pages"] => get,
@@ -3118,6 +3126,7 @@ async fn main() -> Result<()> {
         checkout_attempts: Mutex::new(HashMap::new()),
         webhook_attempts: Mutex::new(HashMap::new()),
         contact_attempts: Mutex::new(HashMap::new()),
+        newsletter_subscribe_attempts: Mutex::new(HashMap::new()),
         email: email_service,
         newsletter_email: newsletter_email_service,
         newsletter_rate_per_min: cli.newsletter_rate_per_min.max(1),
@@ -3343,12 +3352,19 @@ async fn main() -> Result<()> {
         .route("/api/v1/newsletter/issues/{id}/deliveries", get(newsletter::handle_list_deliveries))
         .route("/api/v1/newsletter/issues/{id}/test", post(newsletter::handle_test_send))
         .route("/api/v1/newsletter/issues/{id}/send", post(newsletter::handle_send_issue))
+        .route(
+            "/api/v1/newsletter/subscribers",
+            get(newsletter::handle_list_subscribers).delete(newsletter::handle_delete_subscriber),
+        )
         // Public: an <a> click from a mail client carries no auth header, so
         // the signed token in the query string is the credential.
         .route(
             "/api/v1/newsletter/unsubscribe",
             get(newsletter::handle_unsubscribe).post(newsletter::handle_unsubscribe),
         )
+        // Public: signup + double-opt-in confirmation for per-site newsletters.
+        .route("/api/v1/newsletter/subscribe", post(newsletter::handle_subscribe))
+        .route("/api/v1/newsletter/confirm", get(newsletter::handle_confirm))
         // Public: feeds the /newsletter archive page on the website.
         .route("/api/v1/newsletter/public", get(newsletter::handle_public_issues))
         // Public client endpoints

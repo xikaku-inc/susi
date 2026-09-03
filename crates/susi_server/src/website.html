@@ -976,7 +976,7 @@ const API = '/api/v1';
 
 // Per-site config injected by the server (sites.rs). The fallback keeps the
 // shell working if the marker was not replaced (e.g. a stale cached page).
-const SITE = window.__SITE || { id: 'xikaku', name: 'Xikaku', hosts: ['xikaku.com', 'www.xikaku.com'], brand_logo: '/static/logo.png', brand_logo_dark: '/static/logo-dark.png', has_shop: true, has_newsletter: true, has_blog: true };
+const SITE = window.__SITE || { id: 'xikaku', name: 'Xikaku', hosts: ['xikaku.com', 'www.xikaku.com'], brand_logo: '/static/logo.png', brand_logo_dark: '/static/logo-dark.png', has_shop: true, has_newsletter: true, newsletter_signup: false, has_blog: true };
 // Content language of this render, injected by the server ("" = default).
 // A translated page lives at the same URLs one /{lang}/ segment deeper.
 const LANG = SITE.lang || '';
@@ -1792,6 +1792,7 @@ async function renderNewsletterIndexView() {
     let html = currentPage
         ? renderMarkdown(currentPage.body_md || '')
         : '<h1>Newsletter</h1>';
+    if (SITE.newsletter_signup) html += '<div data-newsletter-signup></div>';
     let issues = [];
     try {
         const r = await fetch(API + '/newsletter/public');
@@ -1820,6 +1821,7 @@ async function renderNewsletterIndexView() {
     renderToc(headings);
     revealEmailObfs(c);
     mountContactForms(c);
+    mountNewsletterSignup(c);
     startAmbientVideos(c);
 }
 
@@ -3352,6 +3354,61 @@ function mountContactForms(root) {
     if (!slots.length) return;
     loadContactConfig().then(cfg => {
         slots.forEach(slot => buildContactForm(slot, cfg));
+    });
+}
+
+// Newsletter signup on /newsletter (subscriber-based sites only). Markup is
+// kept in sync with the SSR form in website.rs.
+function mountNewsletterSignup(root) {
+    const slot = root.querySelector('div[data-newsletter-signup]');
+    if (!slot) return;
+    slot.innerHTML =
+        '<form class="contact-form newsletter-signup" novalidate>'
+        + '<label>Email<input type="email" name="email" required maxlength="320" autocomplete="email"></label>'
+        + '<div class="hp-field" aria-hidden="true"><label>Website<input type="text" name="website" tabindex="-1" autocomplete="off"></label></div>'
+        + '<div class="row-actions">'
+        +   '<button type="submit" class="btn primary">Subscribe</button>'
+        +   '<span class="status"></span>'
+        + '</div>'
+        + '</form>';
+    const form = slot.querySelector('form');
+    const status = form.querySelector('.status');
+    form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        status.className = 'status';
+        status.textContent = '';
+        const fd = new FormData(form);
+        const payload = {
+            email: (fd.get('email') || '').toString().trim(),
+            website: (fd.get('website') || '').toString(),
+        };
+        if (!payload.email) {
+            status.className = 'status err';
+            status.textContent = t('Please enter your email address.');
+            return;
+        }
+        const submitBtn = form.querySelector('button[type=submit]');
+        submitBtn.disabled = true;
+        try {
+            const resp = await fetch(API + '/newsletter/subscribe' + siteQ(), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            if (resp.ok) {
+                slot.innerHTML = '<div class="contact-success"><div class="mark">✓</div>'
+                    + '<div class="msg">' + t('Check your inbox to confirm your subscription.') + '</div></div>';
+                return;
+            }
+            const d = await resp.json().catch(() => ({}));
+            status.className = 'status err';
+            status.textContent = d.error || ('Could not subscribe (HTTP ' + resp.status + ')');
+        } catch (err) {
+            status.className = 'status err';
+            status.textContent = t('Network error - please try again.');
+        } finally {
+            submitBtn.disabled = false;
+        }
     });
 }
 

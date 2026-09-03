@@ -26,6 +26,9 @@ services:
       # test mail the real customer base. Drafts, previews and the audience
       # panel all still work; only the send path is unavailable.
       - SUSI_NEWSLETTER_SMTP_HOST=
+      # Per-site relays are blanked for the same reason - the staging DB is a
+      # copy of production's, subscriber lists included.
+      - SUSI_NEWSLETTER_SMTP_HOST_KLAUS=
       # Same reasoning for the Gmail connector: no OAuth client on staging, so
       # a staging admin cannot connect an account and start sending.
       - SUSI_GOOGLE_CLIENT_ID=

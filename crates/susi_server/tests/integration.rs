@@ -6658,6 +6658,168 @@ fn test_newsletter_public_archive_endpoints() {
     assert_eq!(public_subjects(), vec!["March update"], "refused toggles must change nothing");
 }
 
+/// Per-site newsletters: public signup exists only on subscriber-based sites,
+/// the subscriber admin and audience are site-scoped, issues stay on their
+/// site, and per-site SMTP config is read from the environment.
+#[test]
+fn test_newsletter_per_site_signup() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    // The relay is deliberately unreachable: config detection must see the
+    // variables while an actual send fails fast.
+    let server = TestServer::start_in_dir(
+        dir,
+        &[
+            ("SUSI_NEWSLETTER_SMTP_HOST_KLAUS", "127.0.0.1"),
+            ("SUSI_NEWSLETTER_SMTP_PORT_KLAUS", "1"),
+            ("SUSI_NEWSLETTER_SMTP_USER_KLAUS", "klaus"),
+            ("SUSI_NEWSLETTER_SMTP_PASSWORD_KLAUS", "pw"),
+            ("SUSI_NEWSLETTER_SMTP_FROM_ADDR_KLAUS", "news@klaus.test"),
+        ],
+    );
+    let admin = server.admin_token();
+    let client = server.http();
+
+    let resp = client
+        .post(format!("{}/sites", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({
+            "id": "klaus",
+            "name": "Klaus",
+            "tagline": "personal site",
+            "hosts": ["klaus.test"],
+            "public_base": "https://klaus.test",
+            "has_newsletter": true,
+        }))
+        .send()
+        .expect("create site");
+    assert!(resp.status().is_success(), "create site: {}", resp.text().unwrap_or_default());
+
+    // Per-site SMTP env is picked up; the default site stays unconfigured.
+    let cfg = client
+        .get(format!("{}/newsletter/config?site=klaus", server.api_url))
+        .bearer_auth(&admin)
+        .send()
+        .expect("config klaus")
+        .json::<Value>()
+        .expect("config json");
+    assert_eq!(cfg["sending_configured"], json!(true));
+    assert_eq!(cfg["smtp_env_suffix"], json!("KLAUS"));
+    let cfg = client
+        .get(format!("{}/newsletter/config", server.api_url))
+        .bearer_auth(&admin)
+        .send()
+        .expect("config default")
+        .json::<Value>()
+        .expect("config json");
+    assert_eq!(cfg["sending_configured"], json!(false), "no global relay is set");
+
+    // The default site's newsletter is account-based - no public signup.
+    let resp = client
+        .post(format!("{}/newsletter/subscribe", server.api_url))
+        .json(&json!({ "email": "a@example.com" }))
+        .send()
+        .expect("subscribe default");
+    assert_eq!(resp.status().as_u16(), 404);
+
+    // A signup on the klaus site records the pending row and then fails on
+    // the unreachable relay - the address is normalized on the way in.
+    let resp = client
+        .post(format!("{}/newsletter/subscribe?site=klaus", server.api_url))
+        .json(&json!({ "email": " Fan@Example.com " }))
+        .send()
+        .expect("subscribe klaus");
+    assert_eq!(resp.status().as_u16(), 502, "{}", resp.text().unwrap_or_default());
+
+    // Honeypot submissions are swallowed; garbage addresses are refused.
+    let resp = client
+        .post(format!("{}/newsletter/subscribe?site=klaus", server.api_url))
+        .json(&json!({ "email": "bot@example.com", "website": "spam" }))
+        .send()
+        .expect("honeypot");
+    assert_eq!(resp.status().as_u16(), 200);
+    let resp = client
+        .post(format!("{}/newsletter/subscribe?site=klaus", server.api_url))
+        .json(&json!({ "email": "not-an-address" }))
+        .send()
+        .expect("bad email");
+    assert_eq!(resp.status().as_u16(), 400);
+
+    let subscribers = || -> Vec<Value> {
+        client
+            .get(format!("{}/newsletter/subscribers?site=klaus", server.api_url))
+            .bearer_auth(&admin)
+            .send()
+            .expect("subscribers")
+            .json::<Value>()
+            .expect("subscribers json")["subscribers"]
+            .as_array()
+            .expect("array")
+            .clone()
+    };
+    let rows = subscribers();
+    assert_eq!(rows.len(), 1, "only the real signup is stored: {:?}", rows);
+    assert_eq!(rows[0]["email"], json!("fan@example.com"));
+    assert_eq!(rows[0]["status"], json!("pending"));
+
+    // Pending signups are not part of the audience.
+    let audience = client
+        .get(format!("{}/newsletter/audience?site=klaus", server.api_url))
+        .bearer_auth(&admin)
+        .send()
+        .expect("audience")
+        .json::<Value>()
+        .expect("audience json");
+    assert_eq!(audience["recipients"], json!(0));
+    assert_eq!(audience["pending"], json!(1));
+
+    // A tampered confirmation link changes nothing.
+    let resp = client
+        .get(format!("{}/newsletter/confirm?token=garbage", server.api_url))
+        .send()
+        .expect("confirm");
+    assert_eq!(resp.status().as_u16(), 400);
+
+    // Issues are scoped to their site.
+    let resp = client
+        .post(format!("{}/newsletter/issues", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({ "subject": "Klaus news", "body_md": "# Hi", "site": "klaus" }))
+        .send()
+        .expect("create issue");
+    assert!(resp.status().is_success(), "{}", resp.text().unwrap_or_default());
+    let list = |q: &str| -> Vec<String> {
+        client
+            .get(format!("{}/newsletter/issues{}", server.api_url, q))
+            .bearer_auth(&admin)
+            .send()
+            .expect("issues")
+            .json::<Vec<Value>>()
+            .expect("issues json")
+            .iter()
+            .map(|i| i["subject"].as_str().unwrap_or_default().to_string())
+            .collect()
+    };
+    assert_eq!(list("?site=klaus"), vec!["Klaus news"]);
+    assert!(list("").is_empty(), "the default site's list must not show klaus issues");
+
+    // The subscriber admin is owner-gated and can remove an address.
+    let resp = client
+        .get(format!("{}/newsletter/subscribers?site=klaus", server.api_url))
+        .send()
+        .expect("anonymous subscribers");
+    assert_eq!(resp.status().as_u16(), 401);
+    let resp = client
+        .delete(format!(
+            "{}/newsletter/subscribers?site=klaus&email=fan%40example.com",
+            server.api_url
+        ))
+        .bearer_auth(&admin)
+        .send()
+        .expect("delete subscriber");
+    assert!(resp.status().is_success(), "{}", resp.text().unwrap_or_default());
+    assert!(subscribers().is_empty());
+}
+
 /// Newsletter sending never falls back to the account-email relay. With the
 /// dedicated credentials unset, send and test-send must refuse - silently
 /// borrowing the sign-in-code relay is exactly the blast radius this avoids.

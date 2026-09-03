@@ -875,6 +875,7 @@ impl LicenseDb {
             -- re-mailing the first half, and bounds retries per recipient.
             CREATE TABLE IF NOT EXISTS newsletter_issues (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                site       TEXT    NOT NULL DEFAULT 'xikaku',
                 subject    TEXT    NOT NULL,
                 body_md    TEXT    NOT NULL DEFAULT '',
                 -- draft | sending | sent
@@ -888,6 +889,21 @@ impl LicenseDb {
             );
             CREATE INDEX IF NOT EXISTS idx_newsletter_issues_status
                 ON newsletter_issues(status, created_at DESC);
+
+            -- Public signups for per-site newsletters (the default site's
+            -- newsletter draws from user accounts instead). Double opt-in:
+            -- a row is created 'pending' and only 'confirmed' rows are ever
+            -- mailed.
+            CREATE TABLE IF NOT EXISTS newsletter_subscribers (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                site         TEXT    NOT NULL,
+                email        TEXT    NOT NULL,
+                -- pending | confirmed
+                status       TEXT    NOT NULL DEFAULT 'pending',
+                created_at   TEXT    NOT NULL,
+                confirmed_at TEXT,
+                UNIQUE(site, email)
+            );
 
             -- One row per address per issue. UNIQUE(issue_id, email) is the
             -- double-send guard: re-running a send can only ever be a no-op
@@ -1383,6 +1399,11 @@ impl LicenseDb {
         // image, else the site card).
         let _ = self.conn.execute_batch(
             "ALTER TABLE website_pages ADD COLUMN og_image TEXT NOT NULL DEFAULT '';",
+        );
+
+        // Per-site newsletters: existing issues belong to the default site.
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE newsletter_issues ADD COLUMN site TEXT NOT NULL DEFAULT 'xikaku';",
         );
 
         // >> Add new migrations as own execute_batch statements here <<
@@ -4278,7 +4299,7 @@ mod tests {
     #[test]
     fn test_newsletter_send_lifecycle() {
         let db = seed_campaign_db();
-        let id = db.create_newsletter_issue("Release 2.0", "# Hi", "admin").unwrap();
+        let id = db.create_newsletter_issue("xikaku", "Release 2.0", "# Hi", "admin").unwrap();
 
         let issue = db.get_newsletter_issue(id).unwrap().unwrap();
         assert_eq!(issue.status, "draft");
@@ -4337,7 +4358,7 @@ mod tests {
     #[test]
     fn test_newsletter_delivery_retries_then_fails() {
         let db = seed_campaign_db();
-        let id = db.create_newsletter_issue("Subject", "Body", "admin").unwrap();
+        let id = db.create_newsletter_issue("xikaku", "Subject", "Body", "admin").unwrap();
         let audience = db.newsletter_audience().unwrap();
         db.start_newsletter_send(id, &audience.recipients).unwrap();
 
@@ -4382,7 +4403,7 @@ mod tests {
     fn test_newsletter_send_snapshots_consent() {
         let db = seed_campaign_db();
         db.set_user_newsletter_opt_in("c_carol", false).unwrap();
-        let id = db.create_newsletter_issue("Subject", "Body", "admin").unwrap();
+        let id = db.create_newsletter_issue("xikaku", "Subject", "Body", "admin").unwrap();
 
         let audience = db.newsletter_audience().unwrap();
         assert_eq!(db.start_newsletter_send(id, &audience.recipients).unwrap(), 2);
@@ -4400,7 +4421,7 @@ mod tests {
     #[test]
     fn test_newsletter_deliveries_are_unique_per_address() {
         let db = seed_campaign_db();
-        let id = db.create_newsletter_issue("Subject", "Body", "admin").unwrap();
+        let id = db.create_newsletter_issue("xikaku", "Subject", "Body", "admin").unwrap();
         let dup = NewsletterRecipient {
             username: "c_alice".into(),
             email: "c_alice@example.com".into(),
@@ -4419,13 +4440,13 @@ mod tests {
     #[test]
     fn test_newsletter_delete_draft_cascades() {
         let db = seed_campaign_db();
-        let id = db.create_newsletter_issue("Subject", "Body", "admin").unwrap();
+        let id = db.create_newsletter_issue("xikaku", "Subject", "Body", "admin").unwrap();
         let audience = db.newsletter_audience().unwrap();
         db.start_newsletter_send(id, &audience.recipients).unwrap();
         // Now sending, so it is protected.
         assert!(!db.delete_newsletter_issue(id).unwrap());
 
-        let draft = db.create_newsletter_issue("Draft", "Body", "admin").unwrap();
+        let draft = db.create_newsletter_issue("xikaku", "Draft", "Body", "admin").unwrap();
         assert!(db.delete_newsletter_issue(draft).unwrap());
         assert!(db.get_newsletter_issue(draft).unwrap().is_none());
         assert!(db.list_newsletter_deliveries(draft).unwrap().is_empty());
@@ -4437,7 +4458,7 @@ mod tests {
     fn test_newsletter_public_archive() {
         let db = seed_campaign_db();
         let send = |subject: &str| {
-            let id = db.create_newsletter_issue(subject, "# Hello", "admin").unwrap();
+            let id = db.create_newsletter_issue("xikaku", subject, "# Hello", "admin").unwrap();
             let audience = db.newsletter_audience().unwrap();
             db.start_newsletter_send(id, &audience.recipients).unwrap();
             for d in db.claim_pending_deliveries(10).unwrap() {
@@ -4447,7 +4468,7 @@ mod tests {
             id
         };
 
-        let draft = db.create_newsletter_issue("Draft", "Body", "admin").unwrap();
+        let draft = db.create_newsletter_issue("xikaku", "Draft", "Body", "admin").unwrap();
         assert!(
             !db.set_newsletter_issue_public(draft, true).unwrap(),
             "a draft must not be publishable to the archive"
@@ -4455,13 +4476,13 @@ mod tests {
 
         let first = send("First");
         let second = send("Second");
-        assert!(db.list_public_newsletter_issues().unwrap().is_empty(), "opt-in per issue");
+        assert!(db.list_public_newsletter_issues("xikaku").unwrap().is_empty(), "opt-in per issue");
         assert!(!db.get_newsletter_issue(first).unwrap().unwrap().public);
 
         assert!(db.set_newsletter_issue_public(first, true).unwrap());
         assert!(db.set_newsletter_issue_public(second, true).unwrap());
         assert!(db.get_newsletter_issue(first).unwrap().unwrap().public);
-        let rows = db.list_public_newsletter_issues().unwrap();
+        let rows = db.list_public_newsletter_issues("xikaku").unwrap();
         assert_eq!(
             rows.iter().map(|r| r.0).collect::<Vec<_>>(),
             vec![second, first],
@@ -4472,7 +4493,7 @@ mod tests {
         assert!(!rows[0].3.is_empty(), "sent_at is populated for a sent issue");
 
         assert!(db.set_newsletter_issue_public(second, false).unwrap());
-        assert_eq!(db.list_public_newsletter_issues().unwrap().len(), 1);
+        assert_eq!(db.list_public_newsletter_issues("xikaku").unwrap().len(), 1);
         assert!(!db.set_newsletter_issue_public(9999, true).unwrap());
     }
 
@@ -4498,15 +4519,116 @@ mod tests {
         }
 
         let db = LicenseDb::open(&p).unwrap();
-        let issues = db.list_newsletter_issues().unwrap();
+        let issues = db.list_newsletter_issues("xikaku").unwrap();
         assert_eq!(issues.len(), 1);
         assert!(
             !issues[0].public,
             "an existing issue must not appear on the website by the migration alone"
         );
-        assert!(db.list_public_newsletter_issues().unwrap().is_empty());
+        assert!(db.list_public_newsletter_issues("xikaku").unwrap().is_empty());
         assert!(db.set_newsletter_issue_public(issues[0].id, true).unwrap());
-        assert_eq!(db.list_public_newsletter_issues().unwrap().len(), 1);
+        assert_eq!(db.list_public_newsletter_issues("xikaku").unwrap().len(), 1);
+
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Subscriber lifecycle for a per-site newsletter: pending on signup,
+    /// mailed only once confirmed, gone on unsubscribe.
+    #[test]
+    fn test_newsletter_subscribers() {
+        let db = test_db();
+
+        assert_eq!(db.upsert_newsletter_subscriber("klaus", "a@example.com").unwrap(), "pending");
+        // Re-subscribing must not reset or duplicate anything.
+        assert_eq!(db.upsert_newsletter_subscriber("klaus", "a@example.com").unwrap(), "pending");
+        assert_eq!(db.count_newsletter_subscribers("klaus").unwrap(), (0, 1));
+        assert!(db.subscriber_audience("klaus").unwrap().recipients.is_empty());
+
+        assert!(db.confirm_newsletter_subscriber("klaus", "a@example.com").unwrap());
+        // Idempotent, and a later re-subscribe reports the confirmed state.
+        assert!(db.confirm_newsletter_subscriber("klaus", "a@example.com").unwrap());
+        assert_eq!(db.upsert_newsletter_subscriber("klaus", "a@example.com").unwrap(), "confirmed");
+
+        db.upsert_newsletter_subscriber("klaus", "b@example.com").unwrap();
+        assert_eq!(db.count_newsletter_subscribers("klaus").unwrap(), (1, 1));
+        let audience = db.subscriber_audience("klaus").unwrap();
+        assert_eq!(audience.recipients.len(), 1);
+        assert_eq!(audience.recipients[0].email, "a@example.com");
+        assert!(audience.recipients[0].username.is_empty());
+
+        // Sites do not share lists.
+        assert!(db.subscriber_audience("other").unwrap().recipients.is_empty());
+        assert!(!db.confirm_newsletter_subscriber("other", "a@example.com").unwrap());
+
+        let rows = db.list_newsletter_subscribers("klaus").unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().any(|r| r.email == "a@example.com" && r.status == "confirmed"));
+        assert!(rows.iter().any(|r| r.email == "b@example.com" && r.status == "pending"));
+
+        assert!(db.delete_newsletter_subscriber("klaus", "a@example.com").unwrap());
+        assert!(!db.delete_newsletter_subscriber("klaus", "a@example.com").unwrap());
+        assert!(db.subscriber_audience("klaus").unwrap().recipients.is_empty());
+        // A confirmation link clicked after unsubscribing must not resurrect
+        // the row.
+        assert!(!db.confirm_newsletter_subscriber("klaus", "a@example.com").unwrap());
+    }
+
+    /// Issues are scoped to their site: each site's admin list and public
+    /// archive see only their own.
+    #[test]
+    fn test_newsletter_issues_are_site_scoped() {
+        let db = seed_campaign_db();
+        let xi = db.create_newsletter_issue("xikaku", "Xikaku news", "Body", "admin").unwrap();
+        let kl = db.create_newsletter_issue("klaus", "Klaus news", "Body", "admin").unwrap();
+
+        let ids = |site: &str| {
+            db.list_newsletter_issues(site).unwrap().iter().map(|i| i.id).collect::<Vec<_>>()
+        };
+        assert_eq!(ids("xikaku"), vec![xi]);
+        assert_eq!(ids("klaus"), vec![kl]);
+        assert_eq!(db.get_newsletter_issue(kl).unwrap().unwrap().site, "klaus");
+
+        // Send and publish the klaus issue; only the klaus archive lists it.
+        db.upsert_newsletter_subscriber("klaus", "a@example.com").unwrap();
+        db.confirm_newsletter_subscriber("klaus", "a@example.com").unwrap();
+        let audience = db.subscriber_audience("klaus").unwrap();
+        assert_eq!(db.start_newsletter_send(kl, &audience.recipients).unwrap(), 1);
+        for d in db.claim_pending_deliveries(10).unwrap() {
+            db.mark_delivery_sent(d.id).unwrap();
+        }
+        db.finalize_newsletter_issues().unwrap();
+        assert!(db.set_newsletter_issue_public(kl, true).unwrap());
+        assert!(db.list_public_newsletter_issues("xikaku").unwrap().is_empty());
+        assert_eq!(db.list_public_newsletter_issues("klaus").unwrap().len(), 1);
+    }
+
+    /// A database from before the `site` column existed migrates cleanly and
+    /// hands every existing issue to the default site.
+    #[test]
+    fn test_newsletter_site_migration() {
+        let path = std::env::temp_dir()
+            .join(format!("susi_newsletter_site_mig_{}.db", std::process::id()));
+        let p = path.to_str().unwrap().to_string();
+        let _ = std::fs::remove_file(&path);
+        {
+            let db = LicenseDb::open(&p).unwrap();
+            db.conn
+                .execute_batch("ALTER TABLE newsletter_issues DROP COLUMN site;")
+                .unwrap();
+            db.conn
+                .execute_batch(
+                    "INSERT INTO newsletter_issues (subject, status, created_by, created_at, updated_at)
+                     VALUES ('Old issue', 'draft', 'admin', '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z');",
+                )
+                .unwrap();
+        }
+
+        let db = LicenseDb::open(&p).unwrap();
+        let issues = db.list_newsletter_issues("xikaku").unwrap();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].site, "xikaku");
+        assert!(db.list_newsletter_issues("klaus").unwrap().is_empty());
 
         drop(db);
         let _ = std::fs::remove_file(&path);

@@ -1156,7 +1156,7 @@ fn compiled_or_default_brand(site: &SiteConfig) -> &'static sites::CompiledBrand
 
 /// An uploaded per-site asset chosen by a setting (logo/bg), read from the
 /// site's asset store: (file name, bytes).
-fn custom_asset(state: &AppState, site: &SiteConfig, setting: &str) -> Option<(String, Vec<u8>)> {
+pub(crate) fn custom_asset(state: &AppState, site: &SiteConfig, setting: &str) -> Option<(String, Vec<u8>)> {
     let name = {
         let db = state.db.lock();
         db.get_site_setting(&sites::setting_key(site, setting)).ok().flatten()
@@ -2350,6 +2350,9 @@ fn site_config_script(
             "brand_logo_dark": brand_logo_dark,
             "has_shop": site.has_shop,
             "has_newsletter": site.has_newsletter,
+            // Public signup form on /newsletter: subscriber-based lists only
+            // (the default site's newsletter draws from user accounts).
+            "newsletter_signup": site.has_newsletter && site.id != sites::DEFAULT_SITE_ID,
             "has_blog": site.has_blog,
             "theme": theme,
             "no_topbar": no_topbar,
@@ -2860,6 +2863,22 @@ fn obfuscate_email_shortcodes(html: &str) -> String {
     out
 }
 
+/// The /newsletter signup form. One markup for SSR and the client shell (kept
+/// in sync with website.html's renderNewsletterIndexView), styled by the
+/// existing contact-form rules; the shell's JS wires the submit.
+pub(crate) fn newsletter_signup_form_html() -> &'static str {
+    "<form class=\"contact-form newsletter-signup\" novalidate>\
+       <label>Email<input type=\"email\" name=\"email\" autocomplete=\"email\" required></label>\
+       <div class=\"hp-field\" aria-hidden=\"true\">\
+         <label>Website<input type=\"text\" name=\"website\" tabindex=\"-1\" autocomplete=\"off\"></label>\
+       </div>\
+       <div class=\"row-actions\">\
+         <button type=\"submit\" class=\"btn primary\">Subscribe</button>\
+         <span class=\"status\"></span>\
+       </div>\
+     </form>"
+}
+
 /// Markdown for a newsletter issue as shown on the website: the email-only
 /// [TOC] marker lines are dropped - the site has its own TOC sidebar.
 fn newsletter_web_md(body_md: &str) -> String {
@@ -2883,7 +2902,7 @@ fn render_newsletter_index(
         let db = state.db.lock();
         (
             db.get_website_page(site.id, "", "newsletter").unwrap_or(None),
-            db.list_public_newsletter_issues().unwrap_or_default(),
+            db.list_public_newsletter_issues(site.id).unwrap_or_default(),
         )
     };
     let (title, intro_md, updated_at, meta) = match row {
@@ -2903,6 +2922,10 @@ fn render_newsletter_index(
     } else {
         render_body_html(&intro_md)
     };
+    // Static mirror of the client shell's signup form, so crawlers see it.
+    if site.has_newsletter && site.id != sites::DEFAULT_SITE_ID {
+        body_html.push_str(newsletter_signup_form_html());
+    }
     if issues.is_empty() {
         body_html.push_str("<p>No newsletters yet.</p>");
     } else {

@@ -200,7 +200,7 @@ pub async fn handle_submit(
     Ok(Json(json!({ "status": "ok" })))
 }
 
-fn is_email_like(s: &str) -> bool {
+pub(crate) fn is_email_like(s: &str) -> bool {
     // Intentionally minimal - full RFC 5322 is famously hopeless. We just
     // require a single @ with non-empty parts and a dot in the domain.
     let mut parts = s.split('@');

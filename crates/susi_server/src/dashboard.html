@@ -1542,7 +1542,10 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
 <div id="newsletterListView">
     <div style="margin-top:32px;margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
         <h2 style="font-size:16px;font-weight:600;">Newsletter</h2>
-        <button onclick="openNewsletterEditor(null)">New issue</button>
+        <div style="display:flex;align-items:center;gap:10px;">
+            <select id="newsletterSiteSelect" onchange="switchNewsletterSite()" style="display:none;"></select>
+            <button onclick="openNewsletterEditor(null)">New issue</button>
+        </div>
     </div>
 
     <!-- Gmail connection. Only rendered when the server has an OAuth client
@@ -1566,7 +1569,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
     </div>
 
     <div id="newsletterNotConfigured" class="card" style="display:none;margin-bottom:20px;">
-        <p style="font-size:13px;margin:0;">
+        <p id="newsletterNotConfiguredText" style="font-size:13px;margin:0;">
             Newsletter sending is not configured. Set <code>SUSI_NEWSLETTER_SMTP_HOST</code>,
             <code>SUSI_NEWSLETTER_SMTP_USER</code>, <code>SUSI_NEWSLETTER_SMTP_PASSWORD</code> and
             <code>SUSI_NEWSLETTER_SMTP_FROM_ADDR</code> in the host environment and restart.
@@ -1591,6 +1594,30 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                 <tr><td colspan="5" class="empty-state"><p>Loading...</p></td></tr>
             </tbody>
         </table>
+    </div>
+
+    <!-- Subscriber list of a per-site newsletter (the default site's audience
+         is user accounts, managed on the Users page). -->
+    <div id="newsletterSubscribersSection" style="display:none;">
+        <div style="margin-top:32px;margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
+            <h2 style="font-size:16px;font-weight:600;">Subscribers</h2>
+            <span id="newsletterSubscribersCount" style="font-size:13px;color:var(--text2);"></span>
+        </div>
+        <div class="card" style="padding:0;">
+            <table style="width:100%;" id="newsletterSubscribersTable">
+                <thead>
+                    <tr>
+                        <th style="width:110px;">Status</th>
+                        <th>Email</th>
+                        <th style="width:170px;">Signed up</th>
+                        <th style="width:110px;"></th>
+                    </tr>
+                </thead>
+                <tbody id="newsletterSubscribersBody">
+                    <tr><td colspan="4" class="empty-state"><p>Loading...</p></td></tr>
+                </tbody>
+            </table>
+        </div>
     </div>
 </div><!-- /newsletterListView -->
 
@@ -7309,18 +7336,67 @@ async function loadTickets() {
 // ---------------------------------------------------------------------------
 // Newsletter (admin)
 // ---------------------------------------------------------------------------
-// One newsletter, sent to everyone who subscribed. Consent is opt-in, so most
-// accounts start unsubscribed - the audience panel reports the breakdown
-// (subscribed / not subscribed / no email) rather than a single number.
+// One newsletter per site. The default site's audience is user accounts with
+// opt-in consent (the audience panel reports the breakdown rather than a
+// single number); every other newsletter site draws from its own public
+// subscriber list, managed in the Subscribers card below the issues.
 
 let newsletterModalId = null;
 let newsletterAudienceCount = null;
 let nlEditor = null;   // EasyMDE instance for the composer
 let nlPreviewObserver = null;  // watches the preview-active class
+let newsletterSite = 'xikaku';
+let newsletterSites = null;    // [{id, name, is_default}] with has_newsletter
+
+function nlQ(sep) { return (sep || '?') + 'site=' + encodeURIComponent(newsletterSite); }
+
+function nlSiteIsDefault() {
+    const s = (newsletterSites || []).find(s => s.id === newsletterSite);
+    return s ? s.is_default : newsletterSite === 'xikaku';
+}
+
+// The selector only appears when more than one site has a newsletter.
+async function loadNewsletterSites() {
+    if (newsletterSites !== null) return;
+    try {
+        const resp = await fetch(API + '/sites', { headers: authHeaders() });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const data = await resp.json();
+        newsletterSites = (data.sites || [])
+            .filter(s => s.def && s.def.has_newsletter)
+            .map(s => ({ id: s.id, name: s.def.name || s.id, is_default: !!s.is_default }));
+    } catch (e) {
+        newsletterSites = [];
+    }
+    if (!newsletterSites.length) return;
+    if (!newsletterSites.some(s => s.id === newsletterSite)) newsletterSite = newsletterSites[0].id;
+    const sel = document.getElementById('newsletterSiteSelect');
+    if (sel && newsletterSites.length > 1) {
+        sel.innerHTML = newsletterSites.map(s =>
+            '<option value="' + escHtml(s.id) + '">' + escHtml(s.name) + '</option>').join('');
+        sel.value = newsletterSite;
+        sel.style.display = '';
+    }
+}
+
+function switchNewsletterSite() {
+    newsletterSite = document.getElementById('newsletterSiteSelect').value;
+    loadNewsletter();
+}
 
 function renderNewsletterConfig(cfg) {
     const ok = cfg.sending_configured && cfg.base_url_configured;
     document.getElementById('newsletterNotConfigured').style.display = ok ? 'none' : '';
+    if (!ok) {
+        const suffix = cfg.smtp_env_suffix ? '_' + escHtml(cfg.smtp_env_suffix) : '';
+        const v = k => '<code>SUSI_NEWSLETTER_SMTP_' + k + suffix + '</code>';
+        document.getElementById('newsletterNotConfiguredText').innerHTML =
+            'Newsletter sending is not configured' + (suffix ? ' for this site' : '') + '. Set '
+            + v('HOST') + ', ' + v('USER') + ', ' + v('PASSWORD') + ' and ' + v('FROM_ADDR')
+            + ' in the host environment and restart. Campaign mail deliberately uses its own'
+            + ' credentials and never falls back to the account-email relay.'
+            + ' Drafts can still be written and previewed.';
+    }
 
     // Static SMTP credentials win server-side, so offering a Gmail connection
     // alongside them would imply a choice the server does not actually make.
@@ -7378,14 +7454,16 @@ function nlStatusBadge(status) {
 async function loadNewsletter() {
     const tbody = document.getElementById('newsletterBody');
     if (!tbody) return;
+    await loadNewsletterSites();
     // Surface a missing relay up front, so nobody writes a whole issue and
     // only finds out at Send time.
     try {
-        const resp = await fetch(API + '/newsletter/config', { headers: authHeaders() });
+        const resp = await fetch(API + '/newsletter/config' + nlQ(), { headers: authHeaders() });
         if (resp.ok) renderNewsletterConfig(await resp.json());
     } catch (e) {}
+    loadNewsletterSubscribers();
     try {
-        const resp = await fetch(API + '/newsletter/issues', { headers: authHeaders() });
+        const resp = await fetch(API + '/newsletter/issues' + nlQ(), { headers: authHeaders() });
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
         const issues = await resp.json();
         if (!issues.length) {
@@ -7425,6 +7503,59 @@ async function loadNewsletter() {
         }).join('');
     } catch (e) {
         tbody.innerHTML = '<tr><td colspan="5" class="empty-state"><p>Failed to load: ' + escHtml(e.message) + '</p></td></tr>';
+    }
+}
+
+async function loadNewsletterSubscribers() {
+    const section = document.getElementById('newsletterSubscribersSection');
+    if (!section) return;
+    if (nlSiteIsDefault()) {
+        section.style.display = 'none';
+        return;
+    }
+    section.style.display = '';
+    const tbody = document.getElementById('newsletterSubscribersBody');
+    try {
+        const resp = await fetch(API + '/newsletter/subscribers' + nlQ(), { headers: authHeaders() });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const rows = (await resp.json()).subscribers || [];
+        const confirmed = rows.filter(r => r.status === 'confirmed').length;
+        document.getElementById('newsletterSubscribersCount').textContent =
+            rows.length ? confirmed + ' confirmed · ' + (rows.length - confirmed) + ' pending' : '';
+        if (!rows.length) {
+            tbody.innerHTML = '<tr><td colspan="4" class="empty-state"><p>No subscribers yet.</p></td></tr>';
+            return;
+        }
+        tbody.innerHTML = rows.map(r => {
+            const badge = r.status === 'confirmed'
+                ? '<span class="badge active">confirmed</span>'
+                : '<span class="badge">pending</span>';
+            return '<tr>'
+                + '<td>' + badge + '</td>'
+                + '<td>' + escHtml(r.email) + '</td>'
+                + '<td style="white-space:nowrap;color:var(--text2);">' + formatDateTime(r.created_at) + '</td>'
+                + '<td class="col-actions"><button class="danger" onclick="removeNewsletterSubscriber(\''
+                +   escHtml(r.email) + '\')">Remove</button></td>'
+                + '</tr>';
+        }).join('');
+    } catch (e) {
+        tbody.innerHTML = '<tr><td colspan="4" class="empty-state"><p>Failed to load: ' + escHtml(e.message) + '</p></td></tr>';
+    }
+}
+
+async function removeNewsletterSubscriber(email) {
+    if (!confirm('Remove ' + email + ' from the list?')) return;
+    try {
+        const resp = await fetch(
+            API + '/newsletter/subscribers' + nlQ() + '&email=' + encodeURIComponent(email),
+            { method: 'DELETE', headers: authHeaders() },
+        );
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) { toast('Error: ' + (data.error || resp.status), 'error'); return; }
+        toast('Subscriber removed', 'success');
+        await loadNewsletterSubscribers();
+    } catch (e) {
+        toast('Failed: ' + e.message, 'error');
     }
 }
 
@@ -7569,7 +7700,7 @@ function nlWatchPreviewState() {
 // ourselves once the server responds. The result goes into a sandboxed iframe
 // so dashboard CSS cannot leak in and flatter the preview.
 function newsletterPreviewRender(plainText, preview) {
-    fetch(API + '/newsletter/preview', {
+    fetch(API + '/newsletter/preview' + nlQ(), {
         method: 'POST',
         headers: authHeaders(),
         body: JSON.stringify({ body_md: plainText }),
@@ -7609,7 +7740,7 @@ async function newsletterImageUpload(file, onSuccess, onError) {
         const name = 'nl-' + stamp + '-' + clean;
         const fd = new FormData();
         fd.append('file', file, name);
-        const resp = await fetch(API + '/website/assets', {
+        const resp = await fetch(API + '/website/assets' + nlQ(), {
             method: 'POST',
             headers: { 'Authorization': 'Bearer ' + authToken },
             body: fd,
@@ -7632,17 +7763,18 @@ async function loadNewsletterAudience() {
     newsletterAudienceCount = null;
     box.innerHTML = '<span style="color:var(--text2);">Resolving audience…</span>';
     try {
-        const resp = await fetch(API + '/newsletter/audience', { headers: authHeaders() });
+        const resp = await fetch(API + '/newsletter/audience' + nlQ(), { headers: authHeaders() });
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
         const a = await resp.json();
         newsletterAudienceCount = a.recipients;
 
+        const detail = nlSiteIsDefault()
+            ? a.opted_out + ' not subscribed · ' + a.no_email + ' subscribed without an email'
+            : a.pending + ' pending confirmation';
         box.innerHTML = '<div style="font-weight:600;margin-bottom:6px;">'
             + a.recipients + (a.recipients === 1 ? ' subscriber' : ' subscribers')
             + ' will receive this</div>'
-            + '<div style="color:var(--text2);">'
-            + a.opted_out + ' not subscribed · ' + a.no_email + ' subscribed without an email'
-            + '</div>';
+            + '<div style="color:var(--text2);">' + detail + '</div>';
     } catch (e) {
         box.innerHTML = '<span style="color:var(--red);">Failed to resolve audience: ' + escHtml(e.message) + '</span>';
     }
@@ -7652,6 +7784,8 @@ function newsletterFormBody() {
     return {
         subject: document.getElementById('nlSubject').value.trim(),
         body_md: nlBodyValue(),
+        // Only read on create; an issue never moves between sites.
+        site: newsletterSite,
     };
 }
 

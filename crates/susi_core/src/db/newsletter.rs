@@ -64,6 +64,140 @@ impl LicenseDb {
 }
 
 // ---------------------------------------------------------------------------
+// Subscribers (per-site newsletters)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+pub struct NewsletterSubscriber {
+    pub email: String,
+    pub status: String,
+    pub created_at: String,
+    pub confirmed_at: Option<String>,
+}
+
+impl LicenseDb {
+    /// Register a signup. Existing rows keep their status - re-subscribing a
+    /// confirmed address is a no-op, a pending one stays pending. Returns the
+    /// row's status after the call so the caller knows whether to (re)send a
+    /// confirmation mail. The email must arrive normalized (trimmed,
+    /// lowercased).
+    pub fn upsert_newsletter_subscriber(
+        &self,
+        site: &str,
+        email: &str,
+    ) -> Result<String, LicenseError> {
+        self.conn
+            .execute(
+                "INSERT OR IGNORE INTO newsletter_subscribers (site, email, created_at)
+                 VALUES (?1, ?2, ?3)",
+                params![site, email, Utc::now().to_rfc3339()],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB insert: {}", e)))?;
+        self.conn
+            .query_row(
+                "SELECT status FROM newsletter_subscribers WHERE site = ?1 AND email = ?2",
+                params![site, email],
+                |r| r.get(0),
+            )
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))
+    }
+
+    /// Flip a signup to confirmed. Idempotent; false = no such signup (it was
+    /// removed after the confirmation mail went out).
+    pub fn confirm_newsletter_subscriber(
+        &self,
+        site: &str,
+        email: &str,
+    ) -> Result<bool, LicenseError> {
+        let n = self
+            .conn
+            .execute(
+                "UPDATE newsletter_subscribers
+                 SET status = 'confirmed', confirmed_at = COALESCE(confirmed_at, ?1)
+                 WHERE site = ?2 AND email = ?3",
+                params![Utc::now().to_rfc3339(), site, email],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))?;
+        Ok(n > 0)
+    }
+
+    /// Unsubscribe = delete: the list holds nothing but consent, so withdrawn
+    /// consent leaves nothing to keep.
+    pub fn delete_newsletter_subscriber(
+        &self,
+        site: &str,
+        email: &str,
+    ) -> Result<bool, LicenseError> {
+        let n = self
+            .conn
+            .execute(
+                "DELETE FROM newsletter_subscribers WHERE site = ?1 AND email = ?2",
+                params![site, email],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB delete: {}", e)))?;
+        Ok(n > 0)
+    }
+
+    pub fn list_newsletter_subscribers(
+        &self,
+        site: &str,
+    ) -> Result<Vec<NewsletterSubscriber>, LicenseError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT email, status, created_at, confirmed_at
+                 FROM newsletter_subscribers WHERE site = ?1 ORDER BY created_at DESC",
+            )
+            .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
+        let rows = stmt
+            .query_map(params![site], |r| {
+                Ok(NewsletterSubscriber {
+                    email: r.get(0)?,
+                    status: r.get(1)?,
+                    created_at: r.get(2)?,
+                    confirmed_at: r.get(3)?,
+                })
+            })
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    /// (confirmed, pending) counts for the admin audience panel.
+    pub fn count_newsletter_subscribers(&self, site: &str) -> Result<(i64, i64), LicenseError> {
+        self.conn
+            .query_row(
+                "SELECT COALESCE(SUM(status = 'confirmed'), 0),
+                        COALESCE(SUM(status = 'pending'), 0)
+                 FROM newsletter_subscribers WHERE site = ?1",
+                params![site],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))
+    }
+
+    /// The audience of a subscriber-based newsletter: every confirmed address.
+    /// Emails are stored normalized and UNIQUE, so no dedupe pass is needed.
+    pub fn subscriber_audience(&self, site: &str) -> Result<NewsletterAudience, LicenseError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT email FROM newsletter_subscribers
+                 WHERE site = ?1 AND status = 'confirmed' ORDER BY email",
+            )
+            .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
+        let recipients = stmt
+            .query_map(params![site], |r| r.get::<_, String>(0))
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
+            .filter_map(|r| r.ok())
+            .map(|email| NewsletterRecipient { username: String::new(), email })
+            .collect();
+        Ok(NewsletterAudience { recipients, ..Default::default() })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Google OAuth connection for the newsletter relay
 // ---------------------------------------------------------------------------
 
@@ -146,6 +280,7 @@ pub const MAX_DELIVERY_ATTEMPTS: i64 = 3;
 #[derive(Debug, Clone, Serialize)]
 pub struct NewsletterIssue {
     pub id: i64,
+    pub site: String,
     pub subject: String,
     pub body_md: String,
     pub status: String,
@@ -179,7 +314,7 @@ pub struct PendingDelivery {
     pub email: String,
 }
 
-const ISSUE_SELECT: &str = "SELECT i.id, i.subject, i.body_md, i.status, i.created_by,
+const ISSUE_SELECT: &str = "SELECT i.id, i.site, i.subject, i.body_md, i.status, i.created_by,
         i.created_at, i.updated_at, i.sent_at, i.public,
         COALESCE(SUM(CASE WHEN d.status = 'pending' THEN 1 ELSE 0 END), 0),
         COALESCE(SUM(CASE WHEN d.status = 'sent'    THEN 1 ELSE 0 END), 0),
@@ -190,23 +325,25 @@ const ISSUE_SELECT: &str = "SELECT i.id, i.subject, i.body_md, i.status, i.creat
 fn row_to_issue(r: &rusqlite::Row<'_>) -> rusqlite::Result<NewsletterIssue> {
     Ok(NewsletterIssue {
         id: r.get(0)?,
-        subject: r.get(1)?,
-        body_md: r.get(2)?,
-        status: r.get(3)?,
-        created_by: r.get(4)?,
-        created_at: r.get(5)?,
-        updated_at: r.get(6)?,
-        sent_at: r.get(7)?,
-        public: r.get::<_, i64>(8)? != 0,
-        pending: r.get(9)?,
-        sent: r.get(10)?,
-        failed: r.get(11)?,
+        site: r.get(1)?,
+        subject: r.get(2)?,
+        body_md: r.get(3)?,
+        status: r.get(4)?,
+        created_by: r.get(5)?,
+        created_at: r.get(6)?,
+        updated_at: r.get(7)?,
+        sent_at: r.get(8)?,
+        public: r.get::<_, i64>(9)? != 0,
+        pending: r.get(10)?,
+        sent: r.get(11)?,
+        failed: r.get(12)?,
     })
 }
 
 impl LicenseDb {
     pub fn create_newsletter_issue(
         &self,
+        site: &str,
         subject: &str,
         body_md: &str,
         created_by: &str,
@@ -214,9 +351,9 @@ impl LicenseDb {
         let now = Utc::now().to_rfc3339();
         self.conn
             .execute(
-                "INSERT INTO newsletter_issues (subject, body_md, status, created_by, created_at, updated_at)
-                 VALUES (?1, ?2, 'draft', ?3, ?4, ?4)",
-                params![subject, body_md, created_by, now],
+                "INSERT INTO newsletter_issues (site, subject, body_md, status, created_by, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, 'draft', ?4, ?5, ?5)",
+                params![site, subject, body_md, created_by, now],
             )
             .map_err(|e| LicenseError::Other(format!("DB insert: {}", e)))?;
         Ok(self.conn.last_insert_rowid())
@@ -253,13 +390,16 @@ impl LicenseDb {
             .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))
     }
 
-    pub fn list_newsletter_issues(&self) -> Result<Vec<NewsletterIssue>, LicenseError> {
+    pub fn list_newsletter_issues(&self, site: &str) -> Result<Vec<NewsletterIssue>, LicenseError> {
         let mut stmt = self
             .conn
-            .prepare(&format!("{} GROUP BY i.id ORDER BY i.created_at DESC", ISSUE_SELECT))
+            .prepare(&format!(
+                "{} WHERE i.site = ?1 GROUP BY i.id ORDER BY i.created_at DESC",
+                ISSUE_SELECT
+            ))
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
         let rows = stmt
-            .query_map([], row_to_issue)
+            .query_map(params![site], row_to_issue)
             .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
             .filter_map(|r| r.ok())
             .collect();
@@ -287,18 +427,19 @@ impl LicenseDb {
     /// sent_at), newest first.
     pub fn list_public_newsletter_issues(
         &self,
+        site: &str,
     ) -> Result<Vec<(i64, String, String, String)>, LicenseError> {
         let mut stmt = self
             .conn
             .prepare(
                 "SELECT id, subject, body_md, COALESCE(sent_at, created_at)
                  FROM newsletter_issues
-                 WHERE public = 1 AND status = 'sent'
+                 WHERE site = ?1 AND public = 1 AND status = 'sent'
                  ORDER BY COALESCE(sent_at, created_at) DESC",
             )
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
         let rows = stmt
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .query_map(params![site], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
             .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
             .filter_map(|r| r.ok())
             .collect();
