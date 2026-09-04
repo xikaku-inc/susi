@@ -24,15 +24,19 @@ pub struct RenderedEmail {
 }
 
 const S_BODY: &str = "margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#ffffff;color:#1a1d23;font-size:14px;line-height:1.55;";
-const S_H1: &str = "margin:0 0 22px;font-weight:600;font-size:22px;text-align:center;";
-const S_H2: &str = "font-size:14px;margin:28px 0 8px;";
-const S_P: &str = "margin:0 0 14px;";
+// Every text element declares the black explicitly rather than inheriting it
+// from <body>: Gmail rewrites body styles and dims trailing "signature-like"
+// or thread-repeated lines, and an inline color on the element itself is what
+// keeps the single-black-text rule holding inside an inbox.
+const S_H1: &str = "margin:0 0 22px;font-weight:600;font-size:22px;text-align:center;color:#1a1d23;";
+const S_H2: &str = "font-size:14px;margin:28px 0 8px;color:#1a1d23;";
+const S_P: &str = "margin:0 0 14px;color:#1a1d23;";
 const S_A: &str = "color:#2563eb;text-decoration:none;";
 const S_TABLE: &str = "width:100%;border-collapse:collapse;margin:0 0 14px;";
-const S_TH: &str = "padding:6px 0;border-bottom:1px solid #d8dbe1;font-weight:600;";
-const S_TD: &str = "padding:6px 0;vertical-align:top;";
+const S_TH: &str = "padding:6px 0;border-bottom:1px solid #d8dbe1;font-weight:600;color:#1a1d23;";
+const S_TD: &str = "padding:6px 0;vertical-align:top;color:#1a1d23;";
 const S_UL: &str = "margin:0 0 14px;padding-left:20px;";
-const S_LI: &str = "margin:0 0 4px;";
+const S_LI: &str = "margin:0 0 4px;color:#1a1d23;";
 const S_QUOTE: &str = "background:#eef4ff;border-left:3px solid #2563eb;padding:12px 16px;margin:0 0 18px;";
 const S_HR: &str = "border:none;border-top:1px solid #d8dbe1;margin:18px 0;";
 const S_CODE_BOX: &str = "margin:0 0 26px;padding:22px 12px;background:#f3f4f6;border-radius:10px;font-family:'SF Mono','Fira Code','Consolas',monospace;font-size:34px;font-weight:600;letter-spacing:10px;color:#1a1d23;text-align:center;";
