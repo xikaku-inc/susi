@@ -1809,7 +1809,7 @@ async function renderNewsletterIndexView() {
     // {{newsletter-signup}} marker (the optional intro page row included).
     let issues = [];
     try {
-        const r = await fetch(API + '/newsletter/public');
+        const r = await fetch(API + '/newsletter/public' + siteQ());
         if (r.ok) issues = (await r.json()).issues || [];
     } catch (e) {}
     if (!issues.length) {
