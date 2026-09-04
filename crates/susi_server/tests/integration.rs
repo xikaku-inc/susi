@@ -6802,6 +6802,39 @@ fn test_newsletter_per_site_signup() {
     assert_eq!(list("?site=klaus"), vec!["Klaus news"]);
     assert!(list("").is_empty(), "the default site's list must not show klaus issues");
 
+    // A standalone {{newsletter-signup}} marker in page content renders as
+    // the signup form on the site's SSR pages, never as literal text. The
+    // shell's JS carries the form markup as a string literal on every page,
+    // so the rendered form is asserted as one occurrence MORE than the
+    // default-site page, where the marker must render nothing.
+    const FORM_TAG: &str = "<form class=\"contact-form newsletter-signup\"";
+    for (slug, q) in [("start", "?site=klaus"), ("nl-marker", "")] {
+        let resp = client
+            .put(format!("{}/website/pages/{}{}", server.api_url, slug, q))
+            .bearer_auth(&admin)
+            .json(&json!({ "title": "M", "body_md": "# Hi\n\n{{newsletter-signup}}\n" }))
+            .send()
+            .expect("create page");
+        assert!(resp.status().is_success(), "{}", resp.text().unwrap_or_default());
+    }
+    let ssr_page = |slug: &str, q: &str| -> String {
+        client
+            .get(format!("{}/site/{}{}", server.url, slug, q))
+            .send()
+            .expect("ssr page")
+            .text()
+            .expect("ssr body")
+    };
+    let klaus_ssr = ssr_page("start", "?site=klaus");
+    let default_ssr = ssr_page("nl-marker", "");
+    assert_eq!(
+        klaus_ssr.matches(FORM_TAG).count(),
+        default_ssr.matches(FORM_TAG).count() + 1,
+        "the marker must become the form on the signup site and nothing on the default site"
+    );
+    assert!(!klaus_ssr.contains("<p>{{newsletter-signup}}</p>"), "marker must not leak as text");
+    assert!(!default_ssr.contains("<p>{{newsletter-signup}}</p>"), "marker must not leak as text");
+
     // The subscriber admin is owner-gated and can remove an address.
     let resp = client
         .get(format!("{}/newsletter/subscribers?site=klaus", server.api_url))

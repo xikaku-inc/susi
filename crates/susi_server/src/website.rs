@@ -2682,7 +2682,7 @@ fn render_website(
                 byline_suffix(post_author.as_deref()),
             ));
         }
-        h.push_str(&render_body_html(&body_md));
+        h.push_str(&expand_newsletter_signup(site, &render_body_html(&body_md)));
         h
     };
 
@@ -2863,8 +2863,27 @@ fn obfuscate_email_shortcodes(html: &str) -> String {
     out
 }
 
-/// The /newsletter signup form. One markup for SSR and the client shell (kept
-/// in sync with website.html's renderNewsletterIndexView), styled by the
+/// Mirror the client shell's `{{newsletter-signup}}` marker on the SSR body:
+/// the form on sites with a public signup, nothing elsewhere. Runs after
+/// `render_body_html` - the sanitizer would strip a raw form injected into
+/// the markdown, and it has already reduced a standalone marker line to a
+/// plain-text paragraph (markers inside code blocks sit in <pre><code>, which
+/// this exact-paragraph match never touches).
+pub(crate) fn expand_newsletter_signup(site: &SiteConfig, html: &str) -> String {
+    const MARKER: &str = "<p>{{newsletter-signup}}</p>";
+    if !html.contains(MARKER) {
+        return html.to_string();
+    }
+    let replacement = if site.has_newsletter && site.id != sites::DEFAULT_SITE_ID {
+        newsletter_signup_form_html()
+    } else {
+        ""
+    };
+    html.replace(MARKER, replacement)
+}
+
+/// The newsletter signup form. One markup for SSR and the client shell (kept
+/// in sync with website.html's buildNewsletterSignup), styled by the
 /// existing contact-form rules; the shell's JS wires the submit.
 pub(crate) fn newsletter_signup_form_html() -> &'static str {
     "<form class=\"contact-form newsletter-signup\" novalidate>\
@@ -2917,15 +2936,13 @@ fn render_newsletter_index(
         if d.is_empty() { format!("Past newsletters from {}.", site.name) } else { d }
     };
 
+    // No built-in form: the signup renders wherever the intro page (or any
+    // other page) places the {{newsletter-signup}} marker.
     let mut body_html = if intro_md.is_empty() {
         format!("<h1>{}</h1>", html_escape(&title))
     } else {
-        render_body_html(&intro_md)
+        expand_newsletter_signup(site, &render_body_html(&intro_md))
     };
-    // Static mirror of the client shell's signup form, so crawlers see it.
-    if site.has_newsletter && site.id != sites::DEFAULT_SITE_ID {
-        body_html.push_str(newsletter_signup_form_html());
-    }
     if issues.is_empty() {
         body_html.push_str("<p>No newsletters yet.</p>");
     } else {

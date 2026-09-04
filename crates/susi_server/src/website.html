@@ -814,6 +814,11 @@ div.grid.cols-6 { --cols: 6; }
 .contact-form .status { font-size: 13px; }
 .contact-form .status.ok { color: #4caf75; }
 .contact-form .status.err { color: #e2615e; }
+/* The signup input sits directly on the background photo; a translucent fill
+   keeps it from reading as a black bar. Firms up on focus for typing; without
+   color-mix the base opaque rule stands. */
+.newsletter-signup input { background: color-mix(in srgb, var(--bg) 55%, transparent); }
+.newsletter-signup input:focus { background: color-mix(in srgb, var(--bg) 80%, transparent); }
 .contact-success { margin: 24px 0; max-width: 560px; padding: 28px 24px; text-align: center; border: 1px solid #4caf75; border-radius: var(--radius); background: color-mix(in srgb, #4caf75 10%, transparent); }
 .contact-success .mark { font-size: 34px; line-height: 1; color: #4caf75; }
 .contact-success .msg { margin-top: 10px; font-size: 16px; font-weight: 600; color: var(--text1); }
@@ -1407,6 +1412,13 @@ function renderMarkdown(src) {
             i++;
             continue;
         }
+        if (line.trim() === '{{newsletter-signup}}') {
+            // Only sites with a public signup render the form; elsewhere the
+            // marker disappears rather than leaking as text.
+            if (SITE.newsletter_signup) out.push('<div data-newsletter-signup></div>');
+            i++;
+            continue;
+        }
         const fence = line.match(/^```(.*)$/);
         if (fence) {
             const lang = fence[1].trim();
@@ -1781,6 +1793,7 @@ async function renderBlogIndexView() {
     renderToc(headings);
     revealEmailObfs(c);
     mountContactForms(c);
+    mountNewsletterSignup(c);
     startAmbientVideos(c);
 }
 
@@ -1792,7 +1805,8 @@ async function renderNewsletterIndexView() {
     let html = currentPage
         ? renderMarkdown(currentPage.body_md || '')
         : '<h1>Newsletter</h1>';
-    if (SITE.newsletter_signup) html += '<div data-newsletter-signup></div>';
+    // No built-in form here: the signup renders wherever a page places the
+    // {{newsletter-signup}} marker (the optional intro page row included).
     let issues = [];
     try {
         const r = await fetch(API + '/newsletter/public');
@@ -1896,6 +1910,7 @@ function renderPage() {
     renderToc(headings);
     revealEmailObfs(c);
     mountContactForms(c);
+    mountNewsletterSignup(c);
     startAmbientVideos(c);
     // Append a "buy" callout for sensor pages whose slug maps to live SKUs
     // (translated pages resolve through the page they mirror).
@@ -2306,6 +2321,7 @@ function renderPreviewView() {
     renderToc(headings);
     revealEmailObfs(c);
     mountContactForms(c);
+    mountNewsletterSignup(c);
     startAmbientVideos(c);
     const skuSlug = SITE.has_shop && currentSlug ? skuSlugFor(currentSlug) : null;
     if (skuSlug) {
@@ -3357,11 +3373,15 @@ function mountContactForms(root) {
     });
 }
 
-// Newsletter signup on /newsletter (subscriber-based sites only). Markup is
-// kept in sync with the SSR form in website.rs.
+// Newsletter signup slots: the /newsletter page's built-in one, plus any
+// {{newsletter-signup}} marker in page content (subscriber-based sites only).
+// Markup is kept in sync with the SSR form in website.rs.
 function mountNewsletterSignup(root) {
-    const slot = root.querySelector('div[data-newsletter-signup]');
-    if (!slot) return;
+    if (!SITE.newsletter_signup) return;
+    root.querySelectorAll('div[data-newsletter-signup]').forEach(buildNewsletterSignup);
+}
+
+function buildNewsletterSignup(slot) {
     slot.innerHTML =
         '<form class="contact-form newsletter-signup" novalidate>'
         + '<label>Email<input type="email" name="email" required maxlength="320" autocomplete="email"></label>'
