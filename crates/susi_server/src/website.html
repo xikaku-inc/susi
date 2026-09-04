@@ -148,6 +148,7 @@ body.has-bg .editor-toolbar { top: 0; }
     min-height: 32px;
 }
 .btn:hover { background: var(--bg3); }
+a.btn { display: inline-flex; align-items: center; text-decoration: none; }
 .nav-toggle {
     display: none;
     background: transparent;
@@ -842,6 +843,7 @@ div.grid.cols-6 { --cols: 6; }
         <img class="logo-light" src="/static/logo.png?v=3" alt="">
     </a>
     <div class="header-right">
+        <a id="dashBtn" class="btn" href="/" style="display:none;">Dashboard</a>
         <button id="editBtn" class="btn" onclick="enterEditMode()" style="display:none;">Edit</button>
         <button id="newPageBtn" class="btn" onclick="newPage()" style="display:none;">+ Page</button>
         <button id="newPostBtn" class="btn" onclick="newPost()" style="display:none;">+ Post</button>
@@ -1243,6 +1245,26 @@ let isAdmin = false;
 function authToken() { return localStorage.getItem('auth_token') || ''; }
 function isPotentialAdmin() { return !!authToken(); }
 
+// A dashboard "Open site" navigation carries a single-use SSO ticket in the
+// URL fragment; redeem it against this origin so the admin chrome shows up
+// on the live host without a separate login. Runs before resolveAdminStatus.
+async function redeemSsoTicket() {
+    const m = (location.hash || '').match(/^#susi-sso=([a-f0-9]{64})$/);
+    if (!m) return;
+    history.replaceState(null, '', location.pathname + location.search);
+    try {
+        const r = await fetch(API + '/auth/sso-redeem', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ticket: m[1], device_label: navigator.userAgent }),
+        });
+        if (r.ok) {
+            const d = await r.json();
+            if (d.token) localStorage.setItem('auth_token', d.token);
+        }
+    } catch (e) {}
+}
+
 async function resolveAdminStatus() {
     if (!authToken()) { isAdmin = false; return; }
     try {
@@ -1264,6 +1286,12 @@ function updateAdminChrome() {
         document.body.classList.toggle('admin-topbar', isAdmin);
         renderCartBadge();
     }
+    // Back to the backend: same origin under the dashboard preview, the
+    // configured dashboard URL on a canonical host.
+    const dashBtn = document.getElementById('dashBtn');
+    const dashHref = SITE_PATH_PREFIX ? '/' : (SITE.dashboard_url || '');
+    dashBtn.href = dashHref || '/';
+    dashBtn.style.display = (isAdmin && dashHref) ? '' : 'none';
     document.getElementById('navLogoutBtn').style.display = isAdmin ? '' : 'none';
     document.getElementById('newPageBtn').style.display = isAdmin ? '' : 'none';
     document.getElementById('newPostBtn').style.display = isAdmin ? '' : 'none';
@@ -1563,9 +1591,9 @@ async function loadPage(slug) {
     const resp = await fetch(API + '/website/pages/' + encodeURIComponent(slug) + siteQ(), opts);
     if (!resp.ok) {
         currentPage = null;
-        // The /blog and /newsletter indexes work without a page row of their
-        // own (the row only supplies title/intro).
-        if (slug !== 'blog' && slug !== 'newsletter') {
+        // The /blog index works without a page row of its own (the row only
+        // supplies title/intro).
+        if (slug !== 'blog') {
             renderEmptyState('Page "' + slug + '" not found.');
             return;
         }
@@ -1651,13 +1679,13 @@ function renderSidebar() {
         return h;
     };
     // Fixed Blog/Shop links; '__blog__'/'__shop__' place them inside groups.
-    // The Newsletter archive rides directly below Blog wherever it is placed.
+    // No fixed Newsletter entry: the archive lives on whatever page the
+    // author gives the {{newsletter-archive}} tag, named and placed like any
+    // other page.
     const onPost = currentPage && currentPage.page_kind === 'post';
     const blogActive = (currentSlug === 'blog' || onPost) ? ' active' : '';
-    const newsletterActive = currentSlug === 'newsletter' ? ' active' : '';
     const blogLink = (SITE.has_blog === false ? ''
-            : '<a class="section-head' + blogActive + '" href="' + SITE_PATH_PREFIX + LANG_PREFIX + '/blog">' + escHtml(t('Blog')) + '</a>')
-        + (SITE.has_newsletter && !LANG ? '<a class="section-head' + newsletterActive + '" href="' + SITE_PATH_PREFIX + '/newsletter">Newsletter</a>' : '');
+            : '<a class="section-head' + blogActive + '" href="' + SITE_PATH_PREFIX + LANG_PREFIX + '/blog">' + escHtml(t('Blog')) + '</a>');
     const shopActive = currentSlug === '__shop__' ? ' active' : '';
     const shopLink = SITE.has_shop ? '<a class="section-head' + shopActive + '" href="' + shopHref() + '">' + escHtml(t('Shop')) + '</a>' : '';
     const bySlug = new Map(topLevel.map(p => [LANG ? (p.translation_of || p.slug) : p.slug, p]));
@@ -1811,9 +1839,8 @@ async function fetchNewsletterIssues() {
     return [];
 }
 
-// The published-issue listing - the /newsletter archive body and every
-// {{newsletter-archive}} marker (kept in sync with website.rs's
-// newsletter_archive_html).
+// The published-issue listing behind every {{newsletter-archive}} marker
+// (kept in sync with website.rs's newsletter_archive_html).
 function renderNewsletterIssuesHtml(issues) {
     if (!issues.length) return '<p>No newsletters yet.</p>';
     // The email-only [TOC] marker has no meaning here - the site renders
@@ -1830,30 +1857,6 @@ function renderNewsletterIssuesHtml(issues) {
             + '</article>';
     });
     return html + '</div>';
-}
-
-// Public /newsletter view: optional intro from the "newsletter" page row,
-// then every issue published to the site rendered in full, newest first.
-// No built-in form here: the signup renders wherever a page places the
-// {{newsletter-signup}} marker, and an intro carrying {{newsletter-archive}}
-// takes charge of the listing's position itself.
-async function renderNewsletterIndexView() {
-    const c = document.getElementById('content');
-    updateAdminChrome();
-    let html = currentPage
-        ? renderMarkdown(currentPage.body_md || '')
-        : '<h1>Newsletter</h1>';
-    if (html.indexOf('data-newsletter-archive') === -1) {
-        html += renderNewsletterIssuesHtml(await fetchNewsletterIssues());
-    }
-    const { html: withIds, headings } = injectHeadingIds(html);
-    c.innerHTML = withIds;
-    renderToc(headings);
-    revealEmailObfs(c);
-    mountContactForms(c);
-    mountNewsletterSignup(c);
-    mountNewsletterArchive(c);
-    startAmbientVideos(c);
 }
 
 function renderNoPages() {
@@ -1879,11 +1882,6 @@ function renderPage() {
     // "blog" intro page still uses the normal editor flow below.
     if (currentSlug === 'blog' && !editMode && !(previewMode && editDraft)) {
         renderBlogIndexView();
-        return;
-    }
-    // Same for the newsletter archive and its optional "newsletter" intro page.
-    if (currentSlug === 'newsletter' && !editMode && !(previewMode && editDraft)) {
-        renderNewsletterIndexView();
         return;
     }
     if (!currentPage) {
@@ -3601,6 +3599,7 @@ if (LANG) {
 }
 
 (async () => {
+    await redeemSsoTicket();
     await resolveAdminStatus();
     await route();
     renderCartBadge();

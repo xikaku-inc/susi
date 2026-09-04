@@ -251,7 +251,7 @@ pub async fn handle_list_pages(
         .collect();
     Ok(Json(json!({
         "site": site.id,
-        "sites": sites::all_sites().iter().map(|s| json!({ "id": s.id, "name": s.name, "langs": s.langs })).collect::<Vec<_>>(),
+        "sites": sites::all_sites().iter().map(|s| json!({ "id": s.id, "name": s.name, "langs": s.langs, "public_base": s.public_base })).collect::<Vec<_>>(),
         "pages": pages_json,
         "assets": assets_json,
         "nav": nav,
@@ -2359,6 +2359,9 @@ fn site_config_script(
             "sidebar_logo": sidebar_logo,
             "langs": site.langs,
             "lang": lang,
+            // Where the admin dashboard lives, so the site's admin chrome can
+            // link back to it from a canonical host (different origin).
+            "dashboard_url": state.magic_link_base_url.trim_end_matches('/'),
         }),
     )
 }
@@ -2582,15 +2585,9 @@ fn render_website(
         return (build_html_headers(), html).into_response();
     }
 
-    // /newsletter renders the public newsletter archive; an optional
-    // "newsletter" page row supplies the title/intro when present. Sites
-    // without a newsletter treat the slug as a normal page. The archive
-    // exists in the default language only.
-    if !post_path && site.has_newsletter && lang.is_empty() && requested_slug.as_deref() == Some("newsletter") {
-        let html = render_newsletter_index(state, site, &pages, &products);
-        page_cache_put(cache_key, html.clone());
-        return (build_html_headers(), html).into_response();
-    }
+    // No special /newsletter route: the archive and the signup form render
+    // wherever a page places the {{newsletter-archive}} / {{newsletter-signup}}
+    // tags, on a page the author creates and names like any other.
 
     // The home of a translation is the translated home page: the row that
     // mirrors the default language's home slug, else the language's first
@@ -2948,60 +2945,6 @@ pub(crate) fn expand_newsletter_archive(
     let replacement =
         if site.has_newsletter { newsletter_archive_html(state, site) } else { String::new() };
     html.replace(MARKER, &replacement)
-}
-
-/// SSR body + head for the /newsletter archive: intro from the optional
-/// "newsletter" page row, then every issue published to the site,
-/// newest first.
-fn render_newsletter_index(
-    state: &Arc<AppState>,
-    site: &SiteConfig,
-    pages: &[PageRow],
-    products: &[susi_core::db::ShopProductRow],
-) -> Bytes {
-    let (row, issues) = {
-        let db = state.db.lock();
-        (
-            db.get_website_page(site.id, "", "newsletter").unwrap_or(None),
-            db.list_public_newsletter_issues(site.id).unwrap_or_default(),
-        )
-    };
-    let (title, intro_md, updated_at, meta) = match row {
-        Some((t, body, _p, _o, upd, m, false, _k, _pd, _au, _rd, _tr, _og)) => (t, body, upd, m),
-        _ => ("Newsletter".to_string(), String::new(), String::new(), String::new()),
-    };
-
-    let description = if !meta.trim().is_empty() {
-        meta
-    } else {
-        let d = derive_description(&intro_md);
-        if d.is_empty() { format!("Past newsletters from {}.", site.name) } else { d }
-    };
-
-    // No built-in form: the signup renders wherever the intro page (or any
-    // other page) places the {{newsletter-signup}} marker. The listing is
-    // appended automatically unless the intro places {{newsletter-archive}}
-    // itself and takes charge of the layout.
-    let mut body_html = if intro_md.is_empty() {
-        format!("<h1>{}</h1>", html_escape(&title))
-    } else {
-        expand_newsletter_archive(
-            state,
-            site,
-            &expand_newsletter_signup(site, &render_body_html(&intro_md)),
-        )
-    };
-    let intro_has_archive =
-        intro_md.lines().any(|l| l.trim() == "{{newsletter-archive}}");
-    if !intro_has_archive {
-        body_html.push_str(&newsletter_archive_html(state, site));
-    }
-
-    // dateModified for the archive: the newest issue, else the intro page edit.
-    let updated = issues.first().map(|i| i.3.clone()).unwrap_or(updated_at);
-    let injected =
-        render_seo_head(site, "", "", "newsletter", &title, &description, &updated, None, pages, products, None, None);
-    render_shell(state, site, "", &injected, &body_html)
 }
 
 /// RSS 2.0 feed of visible posts at /blog/rss.xml.

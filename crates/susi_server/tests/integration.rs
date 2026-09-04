@@ -2608,10 +2608,11 @@ fn test_shop_bilingual() {
     assert_eq!(orders["orders"][0]["lang"], json!("ja"));
 
     // The email template editor: the ja preview serves the Japanese default,
-    // an override is applied on the next preview, and reset restores it.
+    // an override (body + subject) is applied on the next preview, and reset
+    // restores the defaults.
     let preview = |body: Value| {
         client
-            .post(format!("{}/shop/admin/email_preview?site=jshop", server.api_url))
+            .post(format!("{}/admin/email_templates/preview?site=jshop", server.api_url))
             .bearer_auth(&admin)
             .json(&body)
             .send()
@@ -2619,32 +2620,123 @@ fn test_shop_bilingual() {
             .json::<Value>()
             .unwrap()
     };
-    let p = preview(json!({ "template": "order_confirmation", "lang": "ja", "body_md": "" }));
+    let save = |body: Value| {
+        let resp = client
+            .put(format!("{}/admin/email_templates?site=jshop", server.api_url))
+            .bearer_auth(&admin)
+            .json(&body)
+            .send()
+            .expect("save template");
+        assert!(resp.status().is_success());
+    };
+    let p = preview(json!({ "id": "order_confirmation", "lang": "ja" }));
     assert!(p["markdown"].as_str().unwrap().contains("ご注文ありがとうございます"));
     assert!(p["html"].as_str().unwrap().contains("LPMS-B2"), "sample items rendered");
     assert!(p["html"].as_str().unwrap().contains("¥"), "ja sample uses yen");
-    assert_eq!(p["setting_key"], json!("email_order_confirmation_ja"));
+    assert!(p["subject"].as_str().unwrap().contains("#42"), "sample order in subject");
+    assert!(p["langs"].as_array().unwrap().iter().any(|l| l == "ja"));
 
-    let resp = client
-        .put(format!("{}/shop/admin/settings?site=jshop", server.api_url))
-        .bearer_auth(&admin)
-        .json(&json!({ "email_order_confirmation_ja": "# カスタム\n\n{items}\n" }))
-        .send()
-        .expect("save template");
-    assert!(resp.status().is_success());
-    let p = preview(json!({ "template": "order_confirmation", "lang": "ja", "body_md": "" }));
+    save(json!({
+        "id": "order_confirmation", "lang": "ja",
+        "subject": "カスタム件名 {order}",
+        "body_md": "# カスタム\n\n{items}\n",
+    }));
+    let p = preview(json!({ "id": "order_confirmation", "lang": "ja" }));
     assert!(p["markdown"].as_str().unwrap().starts_with("# カスタム"));
     assert!(p["html"].as_str().unwrap().contains("カスタム"));
+    assert_eq!(p["subject"], json!("カスタム件名 #42"));
 
-    let resp = client
-        .put(format!("{}/shop/admin/settings?site=jshop", server.api_url))
-        .bearer_auth(&admin)
-        .json(&json!({ "email_order_confirmation_ja": "" }))
-        .send()
-        .expect("reset template");
-    assert!(resp.status().is_success());
-    let p = preview(json!({ "template": "order_confirmation", "lang": "ja", "body_md": "" }));
+    save(json!({ "id": "order_confirmation", "lang": "ja", "subject": "", "body_md": "" }));
+    let p = preview(json!({ "id": "order_confirmation", "lang": "ja" }));
     assert!(p["markdown"].as_str().unwrap().contains("ご注文ありがとうございます"));
+    assert!(p["subject"].as_str().unwrap().contains("ご注文ありがとうございます"));
+}
+
+/// The unified template editor: listing, previewing and overriding a global
+/// (non-shop) template, and rejection of unknown ids.
+#[test]
+fn test_email_template_editor_global_templates() {
+    let server = TestServer::start();
+    let admin = server.admin_token();
+    let client = server.http();
+
+    let list = client
+        .get(format!("{}/admin/email_templates", server.api_url))
+        .bearer_auth(&admin)
+        .send()
+        .expect("list")
+        .json::<Value>()
+        .unwrap();
+    let templates = list["templates"].as_array().unwrap();
+    for id in ["signin_code", "password_reset", "invitation", "ticket_notification", "newsletter_confirm", "order_confirmation", "order_shipped"] {
+        assert!(templates.iter().any(|t| t["id"] == json!(id)), "missing {}", id);
+    }
+
+    let preview = |body: Value| {
+        client
+            .post(format!("{}/admin/email_templates/preview", server.api_url))
+            .bearer_auth(&admin)
+            .json(&body)
+            .send()
+            .expect("preview")
+            .json::<Value>()
+            .unwrap()
+    };
+    let p = preview(json!({ "id": "signin_code" }));
+    assert!(p["subject"].as_str().unwrap().contains("sign-in code"));
+    assert!(p["html"].as_str().unwrap().contains("483920"), "sample code rendered");
+    assert!(p["markdown"].as_str().unwrap().contains("{code}"));
+    assert_eq!(p["subject_editable"], json!(true));
+
+    // The ticket layout is editable, its event-specific subject is not.
+    let p = preview(json!({ "id": "ticket_notification" }));
+    assert_eq!(p["subject_editable"], json!(false));
+    assert!(p["html"].as_str().unwrap().contains("New ticket #12"));
+
+    // Override body + subject, verify, then reset.
+    let save = |body: Value| {
+        let resp = client
+            .put(format!("{}/admin/email_templates", server.api_url))
+            .bearer_auth(&admin)
+            .json(&body)
+            .send()
+            .expect("save template");
+        assert!(resp.status().is_success());
+    };
+    save(json!({
+        "id": "signin_code",
+        "subject": "Code {code} for {user}",
+        "body_md": "# Custom code mail\n\n{{code:{code}}}\n",
+    }));
+    let p = preview(json!({ "id": "signin_code" }));
+    assert_eq!(p["subject"], json!("Code 483920 for Taro"));
+    assert!(p["markdown"].as_str().unwrap().starts_with("# Custom code mail"));
+    save(json!({ "id": "signin_code", "subject": "", "body_md": "" }));
+    let p = preview(json!({ "id": "signin_code" }));
+    assert!(p["subject"].as_str().unwrap().contains("sign-in code"));
+
+    // Unknown template ids and languages are rejected.
+    let resp = client
+        .post(format!("{}/admin/email_templates/preview", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({ "id": "nope" }))
+        .send()
+        .expect("preview");
+    assert_eq!(resp.status().as_u16(), 400);
+    let resp = client
+        .post(format!("{}/admin/email_templates/preview", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({ "id": "signin_code", "lang": "ja" }))
+        .send()
+        .expect("preview");
+    assert_eq!(resp.status().as_u16(), 400);
+
+    // The editor is admin-only.
+    let resp = client
+        .get(format!("{}/admin/email_templates", server.api_url))
+        .send()
+        .expect("list unauthenticated");
+    assert_eq!(resp.status().as_u16(), 401);
 }
 
 /// The Merchant Center feed: en and ja variants carry the right currency,
@@ -6554,11 +6646,30 @@ fn test_newsletter_public_archive_endpoints() {
     assert!(issues[0]["body_md"].as_str().expect("body_md").contains("# Spring news"));
     assert_eq!(issues[0]["sent_at"], json!("2026-03-02T09:00:00+00:00"));
 
-    // SSR /newsletter: selected issue rendered in full, bare image names
+    // There is no built-in /newsletter route any more: the archive renders
+    // on whatever page the author gives the {{newsletter-archive}} tag.
+    let resp = client
+        .get(format!("{}/site/newsletter", server.url))
+        .send()
+        .expect("old route");
+    assert_eq!(
+        resp.status().as_u16(),
+        404,
+        "without a page row, /newsletter is an ordinary missing slug"
+    );
+    let resp = client
+        .put(format!("{}/website/pages/news", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({ "title": "News", "body_md": "# News\n\n{{newsletter-archive}}\n" }))
+        .send()
+        .expect("create news page");
+    assert!(resp.status().is_success(), "{}", resp.text().unwrap_or_default());
+
+    // SSR archive tag: selected issue rendered in full, bare image names
     // resolved against the asset store, the email-only [TOC] marker dropped,
     // unselected and draft issues absent.
     let ssr = client
-        .get(format!("{}/site/newsletter", server.url))
+        .get(format!("{}/site/news", server.url))
         .send()
         .expect("ssr")
         .text()
@@ -6586,7 +6697,7 @@ fn test_newsletter_public_archive_endpoints() {
     assert_eq!(resp.status().as_u16(), 200, "publish: {}", resp.text().unwrap_or_default());
     assert_eq!(public_subjects(), vec!["April update", "March update"]);
     let ssr = client
-        .get(format!("{}/site/newsletter", server.url))
+        .get(format!("{}/site/news", server.url))
         .send()
         .expect("ssr again")
         .text()
