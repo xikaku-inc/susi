@@ -30,6 +30,11 @@ pub const ROLE_USER: &str = "user";
 pub const ROLE_ADMIN: &str = "admin";
 pub const ROLE_OWNER: &str = "owner";
 
+/// The site owning unscoped legacy data - the same fixed id the server's site
+/// registry uses. Account-level newsletter consent maps onto this site's
+/// subscriber list.
+pub const DEFAULT_SITE: &str = "xikaku";
+
 /// Whether a role carries full admin capability. Owners do.
 pub fn is_admin_role(role: &str) -> bool {
     role == ROLE_ADMIN || role == ROLE_OWNER
@@ -1405,6 +1410,30 @@ impl LicenseDb {
         let _ = self.conn.execute_batch(
             "ALTER TABLE newsletter_issues ADD COLUMN site TEXT NOT NULL DEFAULT 'xikaku';",
         );
+
+        // Move account newsletter consent onto the default site's subscriber
+        // list - every newsletter audience is a subscriber list now. One-shot
+        // by construction: zeroing the flags in the same transaction is what
+        // makes a re-run a no-op, so a later unsubscribe (a deleted row) is
+        // never undone by a restart. The dead flag column stays; dropping
+        // columns buys nothing.
+        {
+            let now = Utc::now().to_rfc3339();
+            let tx = self
+                .conn
+                .unchecked_transaction()
+                .map_err(|e| LicenseError::Other(format!("DB tx: {}", e)))?;
+            tx.execute(
+                "INSERT OR IGNORE INTO newsletter_subscribers (site, email, status, created_at, confirmed_at)
+                 SELECT ?1, LOWER(TRIM(email)), 'confirmed', ?2, ?2 FROM users
+                 WHERE newsletter_opt_in = 1 AND email IS NOT NULL AND TRIM(email) <> ''",
+                params![DEFAULT_SITE, now],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB consent migration: {}", e)))?;
+            tx.execute("UPDATE users SET newsletter_opt_in = 0 WHERE newsletter_opt_in = 1", [])
+                .map_err(|e| LicenseError::Other(format!("DB consent migration: {}", e)))?;
+            tx.commit().map_err(|e| LicenseError::Other(format!("DB commit: {}", e)))?;
+        }
 
         // >> Add new migrations as own execute_batch statements here <<
         Ok(())
@@ -4219,6 +4248,11 @@ mod tests {
         assert_eq!(users.len(), 1);
         assert!(!users[0].newsletter_opt_in);
 
+        // Consent is keyed by address, so an account without one cannot be
+        // subscribed - and unsubscribing it stays a harmless no-op.
+        assert!(db.set_user_newsletter_opt_in("legacy", true).is_err());
+        assert!(db.set_user_newsletter_opt_in("legacy", false).unwrap());
+        db.set_user_email("legacy", Some("Legacy@Example.com")).unwrap();
         assert!(db.set_user_newsletter_opt_in("legacy", true).unwrap());
         assert!(db.get_user_newsletter_opt_in("legacy").unwrap());
         assert!(
@@ -4230,47 +4264,58 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// Audience resolution. Consent is the only filter - there is one
-    /// newsletter and it goes to whoever subscribed, whatever they own.
+    /// Account consent is a write-through view over the default site's
+    /// subscriber list: toggles land there normalized, and the audience is
+    /// exactly the confirmed rows.
     #[test]
-    fn test_newsletter_audience_is_every_subscriber() {
+    fn test_newsletter_account_consent_writes_through() {
         let db = test_db();
-
-        let mk = |user: &str, email: Option<&str>, opt_in: bool| {
+        let mk = |user: &str, email: Option<&str>| {
             db.create_user(user, "hash", "user").unwrap();
             if let Some(e) = email {
                 db.set_user_email(user, Some(e)).unwrap();
             }
-            db.set_user_newsletter_opt_in(user, opt_in).unwrap();
         };
+        mk("licensee", Some("licensee@example.com"));
+        mk("no_license", Some("NoLicense@Example.com"));
+        mk("no_address", None);
+        mk("no_consent", Some("noconsent@example.com"));
 
-        // Subscribed and reachable. One holds a license, one does not - both
-        // are mailed.
-        mk("licensee", Some("licensee@example.com"), true);
-        mk("no_license", Some("NoLicense@Example.com"), true);
-        // Subscribed but unreachable, and reachable but never subscribed.
-        mk("no_address", None, true);
-        mk("no_consent", Some("noconsent@example.com"), false);
+        db.set_user_newsletter_opt_in("licensee", true).unwrap();
+        db.set_user_newsletter_opt_in("no_license", true).unwrap();
+        assert!(db.set_user_newsletter_opt_in("no_address", true).is_err());
 
-        let license = License::new("FusionHub".into(), "Test Corp".into(), None, vec![], 3);
-        db.insert_license(&license).unwrap();
-        db.assign_license_user(&license.id, "licensee").unwrap();
-
-        let a = db.newsletter_audience().unwrap();
+        let a = db.subscriber_audience(DEFAULT_SITE).unwrap();
         let mails: Vec<&str> = a.recipients.iter().map(|r| r.email.as_str()).collect();
         assert_eq!(
             mails,
             vec!["licensee@example.com", "nolicense@example.com"],
             "every subscriber is mailed, and addresses are lowercased"
         );
-        assert_eq!(a.opted_out, 1);
-        assert_eq!(a.no_email, 1);
+        assert!(db.get_user_newsletter_opt_in("licensee").unwrap());
+        assert!(!db.get_user_newsletter_opt_in("no_consent").unwrap());
+        let users = db.list_users().unwrap();
+        let flag = |name: &str| {
+            users.iter().find(|u| u.username == name).unwrap().newsletter_opt_in
+        };
+        assert!(flag("licensee") && flag("no_license"));
+        assert!(!flag("no_address") && !flag("no_consent"));
+
+        // The toggle and the public unsubscribe path meet in the same row.
+        assert!(db.delete_newsletter_subscriber(DEFAULT_SITE, "licensee@example.com").unwrap());
+        assert!(!db.get_user_newsletter_opt_in("licensee").unwrap());
+
+        // Bulk applies where it can and reports how many it reached.
+        let names: Vec<String> =
+            ["licensee", "no_address", "ghost"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(db.set_newsletter_opt_in_bulk(&names, true).unwrap(), 1);
+        assert!(db.get_user_newsletter_opt_in("licensee").unwrap());
     }
 
-    /// Two accounts sharing one address get one email, not two. `users.email`
-    /// has no UNIQUE constraint, so this is reachable in production data.
+    /// Two accounts sharing one address map onto one list row: one email per
+    /// send, and either account's opt-out clears the shared subscription.
     #[test]
-    fn test_newsletter_audience_dedupes_shared_address() {
+    fn test_newsletter_shared_address_is_one_subscription() {
         let db = test_db();
         for user in ["dup_a", "dup_b"] {
             db.create_user(user, "hash", "user").unwrap();
@@ -4278,9 +4323,56 @@ mod tests {
             db.set_user_newsletter_opt_in(user, true).unwrap();
         }
 
-        let a = db.newsletter_audience().unwrap();
+        let a = db.subscriber_audience(DEFAULT_SITE).unwrap();
         assert_eq!(a.recipients.len(), 1, "the shared address is mailed once");
         assert_eq!(a.recipients[0].email, "shared@example.com");
+
+        db.set_user_newsletter_opt_in("dup_b", false).unwrap();
+        assert!(!db.get_user_newsletter_opt_in("dup_a").unwrap(), "one address, one consent");
+    }
+
+    /// The consent-flag era migrates onto the subscriber list exactly once:
+    /// opted-in accounts become confirmed rows, flags are zeroed, and a later
+    /// unsubscribe survives the next restart.
+    #[test]
+    fn test_newsletter_consent_seed_migration() {
+        let path = std::env::temp_dir()
+            .join(format!("susi_newsletter_seed_mig_{}.db", std::process::id()));
+        let p = path.to_str().unwrap().to_string();
+        let _ = std::fs::remove_file(&path);
+        {
+            let db = LicenseDb::open(&p).unwrap();
+            // A pre-switch database: consent lives in the flag column.
+            db.conn
+                .execute_batch(
+                    "INSERT INTO users (username, password_hash, role, created_at, updated_at, email, newsletter_opt_in) VALUES
+                     ('flag_a', 'x', 'user', '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z', ' Flag_A@Example.com ', 1),
+                     ('flag_b', 'x', 'user', '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z', 'flag_a@example.com', 1),
+                     ('flag_off', 'x', 'user', '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z', 'off@example.com', 0),
+                     ('flag_no_mail', 'x', 'user', '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z', NULL, 1);",
+                )
+                .unwrap();
+        }
+
+        let db = LicenseDb::open(&p).unwrap();
+        let a = db.subscriber_audience(DEFAULT_SITE).unwrap();
+        let mails: Vec<&str> = a.recipients.iter().map(|r| r.email.as_str()).collect();
+        assert_eq!(mails, vec!["flag_a@example.com"], "normalized, deduped, address-less skipped");
+        assert!(db.get_user_newsletter_opt_in("flag_a").unwrap());
+        assert!(!db.get_user_newsletter_opt_in("flag_off").unwrap());
+
+        // Unsubscribing must stick across restarts - the zeroed flags are
+        // what keeps the seed from running again.
+        assert!(db.delete_newsletter_subscriber(DEFAULT_SITE, "flag_a@example.com").unwrap());
+        drop(db);
+        let db = LicenseDb::open(&p).unwrap();
+        assert!(
+            db.subscriber_audience(DEFAULT_SITE).unwrap().recipients.is_empty(),
+            "a restart must not resurrect consent that was withdrawn"
+        );
+
+        drop(db);
+        let _ = std::fs::remove_file(&path);
     }
 
     fn seed_campaign_db() -> LicenseDb {
@@ -4305,7 +4397,7 @@ mod tests {
         assert_eq!(issue.status, "draft");
         assert_eq!((issue.pending, issue.sent, issue.failed), (0, 0, 0));
 
-        let audience = db.newsletter_audience().unwrap();
+        let audience = db.subscriber_audience(DEFAULT_SITE).unwrap();
         assert_eq!(audience.recipients.len(), 3);
         assert_eq!(db.start_newsletter_send(id, &audience.recipients).unwrap(), 3);
 
@@ -4359,7 +4451,7 @@ mod tests {
     fn test_newsletter_delivery_retries_then_fails() {
         let db = seed_campaign_db();
         let id = db.create_newsletter_issue("xikaku", "Subject", "Body", "admin").unwrap();
-        let audience = db.newsletter_audience().unwrap();
+        let audience = db.subscriber_audience(DEFAULT_SITE).unwrap();
         db.start_newsletter_send(id, &audience.recipients).unwrap();
 
         let target = db.claim_pending_deliveries(1).unwrap()[0].clone();
@@ -4405,7 +4497,7 @@ mod tests {
         db.set_user_newsletter_opt_in("c_carol", false).unwrap();
         let id = db.create_newsletter_issue("xikaku", "Subject", "Body", "admin").unwrap();
 
-        let audience = db.newsletter_audience().unwrap();
+        let audience = db.subscriber_audience(DEFAULT_SITE).unwrap();
         assert_eq!(db.start_newsletter_send(id, &audience.recipients).unwrap(), 2);
         let mails: Vec<String> =
             db.list_newsletter_deliveries(id).unwrap().into_iter().map(|d| d.email).collect();
@@ -4441,7 +4533,7 @@ mod tests {
     fn test_newsletter_delete_draft_cascades() {
         let db = seed_campaign_db();
         let id = db.create_newsletter_issue("xikaku", "Subject", "Body", "admin").unwrap();
-        let audience = db.newsletter_audience().unwrap();
+        let audience = db.subscriber_audience(DEFAULT_SITE).unwrap();
         db.start_newsletter_send(id, &audience.recipients).unwrap();
         // Now sending, so it is protected.
         assert!(!db.delete_newsletter_issue(id).unwrap());
@@ -4459,7 +4551,7 @@ mod tests {
         let db = seed_campaign_db();
         let send = |subject: &str| {
             let id = db.create_newsletter_issue("xikaku", subject, "# Hello", "admin").unwrap();
-            let audience = db.newsletter_audience().unwrap();
+            let audience = db.subscriber_audience(DEFAULT_SITE).unwrap();
             db.start_newsletter_send(id, &audience.recipients).unwrap();
             for d in db.claim_pending_deliveries(10).unwrap() {
                 db.mark_delivery_sent(d.id).unwrap();

@@ -7336,10 +7336,10 @@ async function loadTickets() {
 // ---------------------------------------------------------------------------
 // Newsletter (admin)
 // ---------------------------------------------------------------------------
-// One newsletter per site. The default site's audience is user accounts with
-// opt-in consent (the audience panel reports the breakdown rather than a
-// single number); every other newsletter site draws from its own public
-// subscriber list, managed in the Subscribers card below the issues.
+// One newsletter per site, each with its own subscriber list (managed in the
+// Subscribers card below the issues, fed by the public signup form). Account
+// newsletter consent on the Users page writes through to the default site's
+// list, keyed by the account's email.
 
 let newsletterModalId = null;
 let newsletterAudienceCount = null;
@@ -7349,11 +7349,6 @@ let newsletterSite = 'xikaku';
 let newsletterSites = null;    // [{id, name, is_default}] with has_newsletter
 
 function nlQ(sep) { return (sep || '?') + 'site=' + encodeURIComponent(newsletterSite); }
-
-function nlSiteIsDefault() {
-    const s = (newsletterSites || []).find(s => s.id === newsletterSite);
-    return s ? s.is_default : newsletterSite === 'xikaku';
-}
 
 // The selector only appears when more than one site has a newsletter.
 async function loadNewsletterSites() {
@@ -7509,10 +7504,6 @@ async function loadNewsletter() {
 async function loadNewsletterSubscribers() {
     const section = document.getElementById('newsletterSubscribersSection');
     if (!section) return;
-    if (nlSiteIsDefault()) {
-        section.style.display = 'none';
-        return;
-    }
     section.style.display = '';
     const tbody = document.getElementById('newsletterSubscribersBody');
     try {
@@ -7768,13 +7759,10 @@ async function loadNewsletterAudience() {
         const a = await resp.json();
         newsletterAudienceCount = a.recipients;
 
-        const detail = nlSiteIsDefault()
-            ? a.opted_out + ' not subscribed · ' + a.no_email + ' subscribed without an email'
-            : a.pending + ' pending confirmation';
         box.innerHTML = '<div style="font-weight:600;margin-bottom:6px;">'
             + a.recipients + (a.recipients === 1 ? ' subscriber' : ' subscribers')
             + ' will receive this</div>'
-            + '<div style="color:var(--text2);">' + detail + '</div>';
+            + '<div style="color:var(--text2);">' + a.pending + ' pending confirmation</div>';
     } catch (e) {
         box.innerHTML = '<span style="color:var(--red);">Failed to resolve audience: ' + escHtml(e.message) + '</span>';
     }

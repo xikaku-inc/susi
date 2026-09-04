@@ -816,18 +816,15 @@ pub(crate) async fn handle_newsletter_config(
     })))
 }
 
-/// Resolve the audience of a site's newsletter: user-account consent for the
-/// default site, the confirmed subscriber list for every other.
+/// Every newsletter's audience is its site's confirmed subscriber list; the
+/// default site's list is fed by account consent (a write-through in
+/// susi_core) and, like any other, by public signups.
 fn audience_for_site(
     db: &LicenseDb,
     site: &crate::sites::SiteConfig,
 ) -> Result<susi_core::db::NewsletterAudience, (StatusCode, Json<ErrorResponse>)> {
-    if site.id == crate::sites::DEFAULT_SITE_ID {
-        db.newsletter_audience()
-    } else {
-        db.subscriber_audience(site.id)
-    }
-    .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))
+    db.subscriber_audience(site.id)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))
 }
 
 pub(crate) async fn handle_newsletter_audience(
@@ -841,21 +838,16 @@ pub(crate) async fn handle_newsletter_audience(
 
     let db = state.db.lock();
     let audience = audience_for_site(&db, site)?;
-    // For a subscriber list, "pending" (signed up, never confirmed) is the
-    // count worth showing next to the recipients.
-    let pending = if site.id == crate::sites::DEFAULT_SITE_ID {
-        0
-    } else {
-        db.count_newsletter_subscribers(site.id)
-            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
-            .1
-    };
+    // "pending" (signed up, never confirmed) is the count worth showing next
+    // to the recipients.
+    let pending = db
+        .count_newsletter_subscribers(site.id)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .1;
 
     Ok(Json(serde_json::json!({
         "site": site.id,
         "recipients": audience.recipients.len(),
-        "opted_out": audience.opted_out,
-        "no_email": audience.no_email,
         "pending": pending,
         // Addresses themselves stay out of the summary: the admin UI only needs
         // counts to decide, and a full customer email dump on every panel open
@@ -927,11 +919,7 @@ fn site_static_mailer(site: &crate::sites::SiteConfig) -> Option<EmailService> {
         return None;
     }
     let port = site_smtp_env(site.id, "PORT").parse().unwrap_or(587);
-    let from_name = match site_smtp_env(site.id, "FROM_NAME") {
-        n if n.is_empty() => site.name.to_string(),
-        n => n,
-    };
-    let cfg = EmailConfig::from_parts(host, port, user, password, &from_name, &from_addr)
+    let cfg = EmailConfig::from_parts(host, port, user, password, &site_from_name(site), &from_addr)
         .map_err(|e| log::error!("Newsletter SMTP config for site {}: {:#}", site.id, e))
         .ok()?;
     EmailService::new(cfg)
@@ -953,6 +941,15 @@ pub(crate) async fn newsletter_mailer_for_site(
     }
 }
 
+/// The name a site's newsletter mail sends and signs as: the relay's
+/// configured From name, falling back to the site name.
+fn site_from_name(site: &crate::sites::SiteConfig) -> String {
+    match site_smtp_env(site.id, "FROM_NAME") {
+        n if n.is_empty() => site.name.to_string(),
+        n => n,
+    }
+}
+
 /// What the recipient subscribed to, for the footer and the unsubscribe page.
 fn newsletter_source_phrase(site: &crate::sites::SiteConfig) -> String {
     if site.id == crate::sites::DEFAULT_SITE_ID {
@@ -969,17 +966,8 @@ fn newsletter_source_phrase(site: &crate::sites::SiteConfig) -> String {
 /// No expiry by design - the link has to keep working for as long as the mail
 /// sits in an archive. It is single-purpose (a dedicated JWT audience) and its
 /// only effect is withdrawing newsletter consent, so an old one is harmless.
-pub(crate) fn mint_unsubscribe_token(secret: &[u8; 32], username: &str) -> Option<String> {
-    let claims = UnsubscribeClaims {
-        sub: username.to_string(),
-        aud: UNSUBSCRIBE_AUDIENCE.to_string(),
-        site: String::new(),
-    };
-    encode(&Header::default(), &claims, &EncodingKey::from_secret(secret)).ok()
-}
-
-/// The subscriber-list variant: `sub` is the address itself, `site` names the
-/// list it comes off. Same audience, so old account tokens stay valid.
+/// `sub` is the address itself, `site` the list it comes off; tokens from the
+/// account-consent era carry a username and no site claim, and stay valid.
 pub(crate) fn mint_subscriber_unsubscribe_token(
     secret: &[u8; 32],
     site_id: &str,
@@ -1005,11 +993,6 @@ fn validate_unsubscribe_token(
     decode::<UnsubscribeClaims>(token, &DecodingKey::from_secret(secret), &validation)
         .map(|d| d.claims)
         .map_err(|_| error_response(StatusCode::BAD_REQUEST, "Invalid unsubscribe link"))
-}
-
-pub(crate) fn unsubscribe_url(state: &AppState, base: &str, username: &str) -> Option<String> {
-    mint_unsubscribe_token(&state.jwt_secret, username)
-        .map(|t| format!("{}/api/v1/newsletter/unsubscribe?token={}", base, t))
 }
 
 pub(crate) fn subscriber_unsubscribe_url(
@@ -1159,22 +1142,6 @@ const SUBSCRIBE_WINDOW: StdDuration = StdDuration::from_secs(3600);
 const SUBSCRIBE_MAX_PER_HOUR: usize = 5;
 const MAX_SUBSCRIBER_EMAIL: usize = 320; // RFC 5321 max
 
-/// The site whose newsletter runs on public signups: any newsletter site
-/// except the default one, whose audience is user accounts.
-fn signup_site(
-    headers: &HeaderMap,
-    sq: &crate::website::SiteQuery,
-) -> Result<&'static crate::sites::SiteConfig, (StatusCode, Json<ErrorResponse>)> {
-    let site = crate::website::resolve_site(headers, sq)?;
-    if site.id == crate::sites::DEFAULT_SITE_ID || !site.has_newsletter {
-        return Err(error_response(
-            StatusCode::NOT_FOUND,
-            "This site has no public newsletter signup",
-        ));
-    }
-    Ok(site)
-}
-
 /// The site's brand mark for the confirmation mail: the uploaded logo asset,
 /// falling back to compiled artwork. None = the mail goes out without one.
 fn site_email_logo(state: &AppState, site: &crate::sites::SiteConfig) -> Option<InlineImage> {
@@ -1215,7 +1182,7 @@ pub(crate) async fn handle_subscribe(
     Query(sq): Query<crate::website::SiteQuery>,
     Json(req): Json<SubscribeRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    let site = signup_site(&headers, &sq)?;
+    let site = resolve_newsletter_site(&headers, &sq)?;
     if !req.website.trim().is_empty() {
         log::info!("Newsletter signup honeypot tripped (site {})", site.id);
         return Ok(Json(serde_json::json!({ "status": "OK" })));
@@ -1264,14 +1231,32 @@ pub(crate) async fn handle_subscribe(
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
     let confirm_url = format!("{}/api/v1/newsletter/confirm?token={}", base, token);
 
+    // The default site's newsletter is a company list and signs per the
+    // customer-email rules; every other subscriber site is a personal brand,
+    // hence the first person - signed with the sender's given name, the way
+    // a person signs, while the From line keeps the full name. "\-" follows
+    // the shop order emails: it keeps the dash literal instead of a bullet.
+    let from_name = site_from_name(site);
+    let (thanks, signed) = if site.id == crate::sites::DEFAULT_SITE_ID {
+        (
+            format!("Thank you for subscribing to {}!", newsletter_source_phrase(site)),
+            "Xikaku / LP-Research",
+        )
+    } else {
+        (
+            "Thank you for subscribing to my newsletter!".to_string(),
+            from_name.split_whitespace().next().unwrap_or(site.name),
+        )
+    };
     let md = format!(
         "# Confirm your subscription\n\n\
-         This address was entered for the {name} newsletter.\n\n\
+         {thanks}\n\n\
          {{{{button:Confirm subscription|{url}}}}}\n\n\
          If this wasn't you, ignore this email and nothing will be sent.\n\n\
-         - {name}",
-        name = site.name,
+         \\- {signed}",
+        thanks = thanks,
         url = confirm_url,
+        signed = signed,
     );
     let logo = site_email_logo(&state, site);
     let doc = crate::email_md::render(&md, logo.as_ref().map(|l| (l.content_id.as_str(), site.name)));
@@ -1358,7 +1343,7 @@ pub(crate) async fn handle_list_subscribers(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
     require_owner(&state, &principal)?;
-    let site = signup_site(&headers, &sq)?;
+    let site = resolve_newsletter_site(&headers, &sq)?;
     let db = state.db.lock();
     let rows = db
         .list_newsletter_subscribers(site.id)
@@ -1381,7 +1366,7 @@ pub(crate) async fn handle_delete_subscriber(
     let principal = validate_principal(&headers, &state)?;
     require_owner(&state, &principal)?;
     let sq = crate::website::SiteQuery::for_site(q.site.clone());
-    let site = signup_site(&headers, &sq)?;
+    let site = resolve_newsletter_site(&headers, &sq)?;
     let email = q.email.trim().to_lowercase();
     let removed = {
         let db = state.db.lock();
@@ -1824,13 +1809,10 @@ async fn drain_once(state: &Arc<AppState>) -> usize {
             Prepared::Skip => continue,
         };
 
-        // Account-based lists unsubscribe by username, subscriber lists by
-        // the address itself.
-        let url = if prepared.site_default {
-            unsubscribe_url(state, &prepared.base, &item.username)
-        } else {
-            subscriber_unsubscribe_url(state, &prepared.base, &prepared.site_id, &item.email)
-        };
+        // Every list unsubscribes by address; the legacy username-token path
+        // only survives for links in already-delivered mail.
+        let url =
+            subscriber_unsubscribe_url(state, &prepared.base, &prepared.site_id, &item.email);
         let Some(url) = url else {
             let db = state.db.lock();
             let _ = db.mark_delivery_attempt_failed(item.id, "Could not mint unsubscribe token");
@@ -1883,7 +1865,6 @@ struct PreparedIssue {
     body_md: String,
     posters: VideoPosters,
     site_id: String,
-    site_default: bool,
     base: String,
     asset_base: String,
     assets_dir: std::path::PathBuf,
@@ -1930,7 +1911,6 @@ async fn prepare_issue(
         subject: issue.subject,
         body_md: issue.body_md,
         site_id: site.id.to_string(),
-        site_default: site.id == crate::sites::DEFAULT_SITE_ID,
         base,
         asset_base,
         assets_dir: newsletter_assets_dir(state, site.id),
@@ -2259,12 +2239,8 @@ pub(crate) async fn handle_test_send(
 
     // The admin is not necessarily on the issue's list; a subscriber-style
     // token for their own address keeps the link shape real and harmless.
-    let url = if site.id == crate::sites::DEFAULT_SITE_ID {
-        unsubscribe_url(&state, &base, &principal.username)
-    } else {
-        subscriber_unsubscribe_url(&state, &base, site.id, &to)
-    }
-    .ok_or_else(|| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Token mint failed"))?;
+    let url = subscriber_unsubscribe_url(&state, &base, site.id, &to)
+        .ok_or_else(|| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Token mint failed"))?;
     let source = newsletter_source_phrase(site);
     let posters = resolve_video_posters(&state.http, &issue.body_md).await;
     let (html, images) = render_email_html_with_images(
@@ -2936,10 +2912,25 @@ mod tests {
         assert!(html.contains('…') && html.contains('✅'), "got: {}", html);
     }
 
+    /// Legacy tokens minted in the account-consent era: username in `sub`,
+    /// no site claim. Delivered mail keeps them alive forever.
+    fn mint_legacy_token(secret: &[u8; 32], username: &str) -> String {
+        encode(
+            &Header::default(),
+            &UnsubscribeClaims {
+                sub: username.into(),
+                aud: UNSUBSCRIBE_AUDIENCE.into(),
+                site: String::new(),
+            },
+            &EncodingKey::from_secret(secret),
+        )
+        .expect("encode")
+    }
+
     #[test]
     fn unsubscribe_token_round_trips() {
         let secret = [7u8; 32];
-        let token = mint_unsubscribe_token(&secret, "alice").expect("mint");
+        let token = mint_legacy_token(&secret, "alice");
         // ErrorResponse has no Debug impl, so go through Option to unwrap.
         let claims = validate_unsubscribe_token(&secret, &token).ok().expect("validate");
         assert_eq!(claims.sub, "alice");
@@ -2958,17 +2949,7 @@ mod tests {
         assert_eq!(claims.site, "klaus");
 
         // A pre-site token is the same JWT without the claim.
-        #[derive(Serialize)]
-        struct OldClaims {
-            sub: String,
-            aud: String,
-        }
-        let old = encode(
-            &Header::default(),
-            &OldClaims { sub: "alice".into(), aud: UNSUBSCRIBE_AUDIENCE.into() },
-            &EncodingKey::from_secret(&secret),
-        )
-        .expect("encode");
+        let old = mint_legacy_token(&secret, "alice");
         let claims = validate_unsubscribe_token(&secret, &old).ok().expect("validate");
         assert_eq!(claims.sub, "alice");
         assert!(claims.site.is_empty());
@@ -2978,7 +2959,7 @@ mod tests {
     fn unsubscribe_token_rejects_other_secrets_and_audiences() {
         let secret = [7u8; 32];
         let other = [8u8; 32];
-        let token = mint_unsubscribe_token(&secret, "alice").expect("mint");
+        let token = mint_legacy_token(&secret, "alice");
 
         assert!(
             validate_unsubscribe_token(&other, &token).is_err(),
@@ -3011,7 +2992,8 @@ mod tests {
     #[test]
     fn unsubscribe_token_does_not_expire() {
         let secret = [7u8; 32];
-        let token = mint_unsubscribe_token(&secret, "alice").expect("mint");
+        let token =
+            mint_subscriber_unsubscribe_token(&secret, "klaus", "a@example.com").expect("mint");
         let payload = token.split('.').nth(1).expect("payload segment");
         let decoded = base64::Engine::decode(
             &base64::engine::general_purpose::URL_SAFE_NO_PAD,

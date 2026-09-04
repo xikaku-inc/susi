@@ -2350,9 +2350,9 @@ fn site_config_script(
             "brand_logo_dark": brand_logo_dark,
             "has_shop": site.has_shop,
             "has_newsletter": site.has_newsletter,
-            // Public signup form on /newsletter: subscriber-based lists only
-            // (the default site's newsletter draws from user accounts).
-            "newsletter_signup": site.has_newsletter && site.id != sites::DEFAULT_SITE_ID,
+            // Every newsletter runs on a subscriber list now, so any site
+            // with one accepts public signups.
+            "newsletter_signup": site.has_newsletter,
             "has_blog": site.has_blog,
             "theme": theme,
             "no_topbar": no_topbar,
@@ -2682,7 +2682,11 @@ fn render_website(
                 byline_suffix(post_author.as_deref()),
             ));
         }
-        h.push_str(&expand_newsletter_signup(site, &render_body_html(&body_md)));
+        h.push_str(&expand_newsletter_archive(
+            &state,
+            site,
+            &expand_newsletter_signup(site, &render_body_html(&body_md)),
+        ));
         h
     };
 
@@ -2874,11 +2878,7 @@ pub(crate) fn expand_newsletter_signup(site: &SiteConfig, html: &str) -> String 
     if !html.contains(MARKER) {
         return html.to_string();
     }
-    let replacement = if site.has_newsletter && site.id != sites::DEFAULT_SITE_ID {
-        newsletter_signup_form_html()
-    } else {
-        ""
-    };
+    let replacement = if site.has_newsletter { newsletter_signup_form_html() } else { "" };
     html.replace(MARKER, replacement)
 }
 
@@ -2906,6 +2906,48 @@ fn newsletter_web_md(body_md: &str) -> String {
         .filter(|l| !crate::newsletter::is_toc_marker(l.trim()))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// The published-issue listing, newest first - the body of the /newsletter
+/// archive and of every `{{newsletter-archive}}` marker (kept in sync with
+/// website.html's renderNewsletterIssuesHtml).
+fn newsletter_archive_html(state: &AppState, site: &SiteConfig) -> String {
+    let issues = {
+        let db = state.db.lock();
+        db.list_public_newsletter_issues(site.id).unwrap_or_default()
+    };
+    if issues.is_empty() {
+        return "<p>No newsletters yet.</p>".to_string();
+    }
+    let mut html = String::from("<div class=\"blog-index\">");
+    for (_id, subject, body_md, sent_at) in &issues {
+        let date = sent_at.get(..10).unwrap_or(sent_at);
+        html.push_str(&format!(
+            "<article class=\"blog-index-item\"><div class=\"meta\">{date}</div>\
+             <h1>{subject}</h1>{body}</article>",
+            date = html_escape(&format_post_date(date)),
+            subject = html_escape(subject),
+            body = render_body_html(&newsletter_web_md(body_md)),
+        ));
+    }
+    html.push_str("</div>");
+    html
+}
+
+/// Mirror the client shell's `{{newsletter-archive}}` marker on the SSR body,
+/// under the same post-sanitizer contract as `expand_newsletter_signup`.
+pub(crate) fn expand_newsletter_archive(
+    state: &AppState,
+    site: &SiteConfig,
+    html: &str,
+) -> String {
+    const MARKER: &str = "<p>{{newsletter-archive}}</p>";
+    if !html.contains(MARKER) {
+        return html.to_string();
+    }
+    let replacement =
+        if site.has_newsletter { newsletter_archive_html(state, site) } else { String::new() };
+    html.replace(MARKER, &replacement)
 }
 
 /// SSR body + head for the /newsletter archive: intro from the optional
@@ -2937,27 +2979,22 @@ fn render_newsletter_index(
     };
 
     // No built-in form: the signup renders wherever the intro page (or any
-    // other page) places the {{newsletter-signup}} marker.
+    // other page) places the {{newsletter-signup}} marker. The listing is
+    // appended automatically unless the intro places {{newsletter-archive}}
+    // itself and takes charge of the layout.
     let mut body_html = if intro_md.is_empty() {
         format!("<h1>{}</h1>", html_escape(&title))
     } else {
-        expand_newsletter_signup(site, &render_body_html(&intro_md))
+        expand_newsletter_archive(
+            state,
+            site,
+            &expand_newsletter_signup(site, &render_body_html(&intro_md)),
+        )
     };
-    if issues.is_empty() {
-        body_html.push_str("<p>No newsletters yet.</p>");
-    } else {
-        body_html.push_str("<div class=\"blog-index\">");
-        for (_id, subject, body_md, sent_at) in &issues {
-            let date = sent_at.get(..10).unwrap_or(sent_at);
-            body_html.push_str(&format!(
-                "<article class=\"blog-index-item\"><div class=\"meta\">{date}</div>\
-                 <h1>{subject}</h1>{body}</article>",
-                date = html_escape(&format_post_date(date)),
-                subject = html_escape(subject),
-                body = render_body_html(&newsletter_web_md(body_md)),
-            ));
-        }
-        body_html.push_str("</div>");
+    let intro_has_archive =
+        intro_md.lines().any(|l| l.trim() == "{{newsletter-archive}}");
+    if !intro_has_archive {
+        body_html.push_str(&newsletter_archive_html(state, site));
     }
 
     // dateModified for the archive: the newest issue, else the intro page edit.

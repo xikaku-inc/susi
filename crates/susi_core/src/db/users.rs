@@ -155,9 +155,19 @@ impl LicenseDb {
     }
 
     pub fn list_users(&self) -> Result<Vec<UserInfo>, LicenseError> {
+        // newsletter_opt_in is derived: membership of the default site's
+        // subscriber list under the account's email.
         let mut stmt = self
             .conn
-            .prepare("SELECT username, role, totp_enabled, must_change_password, created_at, email, newsletter_opt_in, first_name, last_name FROM users ORDER BY created_at")
+            .prepare(&format!(
+                "SELECT username, role, totp_enabled, must_change_password, created_at, email,
+                        EXISTS(SELECT 1 FROM newsletter_subscribers s
+                               WHERE s.site = '{}' AND s.status = 'confirmed'
+                                 AND s.email = LOWER(TRIM(users.email))),
+                        first_name, last_name
+                 FROM users ORDER BY created_at",
+                DEFAULT_SITE
+            ))
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
         let users = stmt
             .query_map([], |r| {
@@ -263,58 +273,98 @@ impl LicenseDb {
             .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))
     }
 
+    /// The account's normalized email, or None when the user is missing or
+    /// has no address on file - the key every consent operation works on.
+    fn user_list_email(&self, username: &str) -> Result<Option<String>, LicenseError> {
+        let email: Option<Option<String>> = self
+            .conn
+            .query_row("SELECT email FROM users WHERE username = ?1", params![username], |r| {
+                r.get(0)
+            })
+            .optional()
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?;
+        Ok(email
+            .flatten()
+            .map(|e| e.trim().to_lowercase())
+            .filter(|e| !e.is_empty()))
+    }
+
+    /// Account newsletter consent is a view over the default site's
+    /// subscriber list, keyed by the account's email.
     pub fn get_user_newsletter_opt_in(&self, username: &str) -> Result<bool, LicenseError> {
-        let v: i32 = self
+        let Some(email) = self.user_list_email(username)? else {
+            return Ok(false);
+        };
+        let n: i64 = self
             .conn
             .query_row(
-                "SELECT newsletter_opt_in FROM users WHERE username = ?1",
-                params![username],
+                "SELECT COUNT(*) FROM newsletter_subscribers
+                 WHERE site = ?1 AND email = ?2 AND status = 'confirmed'",
+                params![DEFAULT_SITE, email],
                 |r| r.get(0),
             )
             .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?;
-        Ok(v != 0)
+        Ok(n > 0)
     }
 
+    /// Write-through to the subscriber list. Returns false when the user does
+    /// not exist; subscribing an account without an email address is an error
+    /// (the list is keyed by address), while unsubscribing one is a no-op.
     pub fn set_user_newsletter_opt_in(
         &self,
         username: &str,
         opt_in: bool,
     ) -> Result<bool, LicenseError> {
-        let now = Utc::now().to_rfc3339();
-        let n = self
+        let exists: i64 = self
             .conn
-            .execute(
-                "UPDATE users SET newsletter_opt_in = ?1, updated_at = ?2 WHERE username = ?3",
-                params![opt_in as i32, now, username],
-            )
-            .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))?;
-        Ok(n > 0)
+            .query_row("SELECT COUNT(*) FROM users WHERE username = ?1", params![username], |r| {
+                r.get(0)
+            })
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?;
+        if exists == 0 {
+            return Ok(false);
+        }
+        let Some(email) = self.user_list_email(username)? else {
+            return if opt_in {
+                Err(LicenseError::Other("User has no email address".into()))
+            } else {
+                Ok(true)
+            };
+        };
+        if opt_in {
+            let now = Utc::now().to_rfc3339();
+            self.conn
+                .execute(
+                    "INSERT INTO newsletter_subscribers (site, email, status, created_at, confirmed_at)
+                     VALUES (?1, ?2, 'confirmed', ?3, ?3)
+                     ON CONFLICT(site, email) DO UPDATE
+                     SET status = 'confirmed', confirmed_at = COALESCE(confirmed_at, excluded.confirmed_at)",
+                    params![DEFAULT_SITE, email, now],
+                )
+                .map_err(|e| LicenseError::Other(format!("DB upsert: {}", e)))?;
+        } else {
+            self.delete_newsletter_subscriber(DEFAULT_SITE, &email)?;
+        }
+        Ok(true)
     }
 
-    /// Set the consent flag on many users at once. Returns the number of rows
-    /// actually changed, which is how the caller detects unknown usernames.
+    /// Flip consent for many users at once. Returns how many were actually
+    /// applied; unknown usernames and (when subscribing) accounts without an
+    /// email are skipped rather than failing the batch.
     pub fn set_newsletter_opt_in_bulk(
         &self,
         usernames: &[String],
         opt_in: bool,
     ) -> Result<usize, LicenseError> {
-        if usernames.is_empty() {
-            return Ok(0);
-        }
-        let now = Utc::now().to_rfc3339();
         let tx = self
             .conn
             .unchecked_transaction()
             .map_err(|e| LicenseError::Other(format!("DB tx: {}", e)))?;
         let mut changed = 0;
-        {
-            let mut stmt = tx
-                .prepare("UPDATE users SET newsletter_opt_in = ?1, updated_at = ?2 WHERE username = ?3")
-                .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
-            for u in usernames {
-                changed += stmt
-                    .execute(params![opt_in as i32, now, u])
-                    .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))?;
+        for u in usernames {
+            match self.set_user_newsletter_opt_in(u, opt_in) {
+                Ok(true) => changed += 1,
+                Ok(false) | Err(_) => {}
             }
         }
         tx.commit()

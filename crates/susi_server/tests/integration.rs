@@ -6168,11 +6168,7 @@ fn test_newsletter_audience_endpoint() {
     assert!(resp.status().is_success(), "audience: {}", resp.text().unwrap_or_default());
     let a = resp.json::<Value>().expect("audience json");
     assert_eq!(a["recipients"], json!(2), "alice and bob; carol did not consent");
-    assert_eq!(a["no_email"], json!(0));
-    assert_eq!(
-        a["opted_out"], json!(2),
-        "carol plus the admin account, which was never subscribed"
-    );
+    assert_eq!(a["pending"], json!(0), "account consent lands confirmed, never pending");
 
     // Sample addresses are capped and lowercased.
     let sample = a["sample"].as_array().expect("sample array");
@@ -6713,13 +6709,14 @@ fn test_newsletter_per_site_signup() {
         .expect("config json");
     assert_eq!(cfg["sending_configured"], json!(false), "no global relay is set");
 
-    // The default site's newsletter is account-based - no public signup.
+    // The default site accepts public signups too now; with its relay unset
+    // the request is refused rather than an address silently swallowed.
     let resp = client
         .post(format!("{}/newsletter/subscribe", server.api_url))
         .json(&json!({ "email": "a@example.com" }))
         .send()
         .expect("subscribe default");
-    assert_eq!(resp.status().as_u16(), 404);
+    assert_eq!(resp.status().as_u16(), 503);
 
     // A signup on the klaus site records the pending row and then fails on
     // the unreachable relay - the address is normalized on the way in.
@@ -6802,17 +6799,21 @@ fn test_newsletter_per_site_signup() {
     assert_eq!(list("?site=klaus"), vec!["Klaus news"]);
     assert!(list("").is_empty(), "the default site's list must not show klaus issues");
 
-    // A standalone {{newsletter-signup}} marker in page content renders as
-    // the signup form on the site's SSR pages, never as literal text. The
-    // shell's JS carries the form markup as a string literal on every page,
-    // so the rendered form is asserted as one occurrence MORE than the
-    // default-site page, where the marker must render nothing.
+    // Standalone {{newsletter-signup}} / {{newsletter-archive}} markers in
+    // page content render as the form and the issue listing on any newsletter
+    // site's SSR pages, never as literal text. The shell's JS carries both
+    // markups as string literals on every page, so rendering is asserted as
+    // equal counts across sites plus at least one occurrence beyond the JS
+    // literal.
     const FORM_TAG: &str = "<form class=\"contact-form newsletter-signup\"";
     for (slug, q) in [("start", "?site=klaus"), ("nl-marker", "")] {
         let resp = client
             .put(format!("{}/website/pages/{}{}", server.api_url, slug, q))
             .bearer_auth(&admin)
-            .json(&json!({ "title": "M", "body_md": "# Hi\n\n{{newsletter-signup}}\n" }))
+            .json(&json!({
+                "title": "M",
+                "body_md": "# Hi\n\n{{newsletter-signup}}\n\n{{newsletter-archive}}\n"
+            }))
             .send()
             .expect("create page");
         assert!(resp.status().is_success(), "{}", resp.text().unwrap_or_default());
@@ -6829,11 +6830,14 @@ fn test_newsletter_per_site_signup() {
     let default_ssr = ssr_page("nl-marker", "");
     assert_eq!(
         klaus_ssr.matches(FORM_TAG).count(),
-        default_ssr.matches(FORM_TAG).count() + 1,
-        "the marker must become the form on the signup site and nothing on the default site"
+        default_ssr.matches(FORM_TAG).count(),
+        "public signup renders on every newsletter site now"
     );
-    assert!(!klaus_ssr.contains("<p>{{newsletter-signup}}</p>"), "marker must not leak as text");
-    assert!(!default_ssr.contains("<p>{{newsletter-signup}}</p>"), "marker must not leak as text");
+    assert!(klaus_ssr.matches(FORM_TAG).count() >= 2, "the form must actually render");
+    for ssr in [&klaus_ssr, &default_ssr] {
+        assert!(!ssr.contains("<p>{{newsletter-signup}}</p>"), "marker must not leak as text");
+        assert!(!ssr.contains("<p>{{newsletter-archive}}</p>"), "marker must not leak as text");
+    }
 
     // The subscriber admin is owner-gated and can remove an address.
     let resp = client

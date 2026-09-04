@@ -469,6 +469,13 @@ pub(crate) async fn handle_set_my_newsletter(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let principal = validate_principal(&headers, &state)?;
     let db = state.db.lock();
+    // Consent lives on the subscriber list, which is keyed by address.
+    if req.opt_in && db.get_user_email(&principal.username).ok().flatten().is_none() {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "Add an email address to your account first",
+        ));
+    }
     db.set_user_newsletter_opt_in(&principal.username, req.opt_in)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
     audit_db(
@@ -493,6 +500,13 @@ pub(crate) async fn handle_set_user_newsletter(
     require_owner(&state, &principal)?;
 
     let db = state.db.lock();
+    // Consent lives on the subscriber list, which is keyed by address.
+    if req.opt_in
+        && db.user_exists(&username).unwrap_or(false)
+        && db.get_user_email(&username).ok().flatten().is_none()
+    {
+        return Err(error_response(StatusCode::BAD_REQUEST, "User has no email address"));
+    }
     if !db
         .set_user_newsletter_opt_in(&username, req.opt_in)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?

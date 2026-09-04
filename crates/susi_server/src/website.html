@@ -1412,6 +1412,11 @@ function renderMarkdown(src) {
             i++;
             continue;
         }
+        if (line.trim() === '{{newsletter-archive}}') {
+            if (SITE.has_newsletter) out.push('<div data-newsletter-archive></div>');
+            i++;
+            continue;
+        }
         if (line.trim() === '{{newsletter-signup}}') {
             // Only sites with a public signup render the form; elsewhere the
             // marker disappears rather than leaking as text.
@@ -1794,41 +1799,52 @@ async function renderBlogIndexView() {
     revealEmailObfs(c);
     mountContactForms(c);
     mountNewsletterSignup(c);
+    mountNewsletterArchive(c);
     startAmbientVideos(c);
+}
+
+async function fetchNewsletterIssues() {
+    try {
+        const r = await fetch(API + '/newsletter/public' + siteQ());
+        if (r.ok) return (await r.json()).issues || [];
+    } catch (e) {}
+    return [];
+}
+
+// The published-issue listing - the /newsletter archive body and every
+// {{newsletter-archive}} marker (kept in sync with website.rs's
+// newsletter_archive_html).
+function renderNewsletterIssuesHtml(issues) {
+    if (!issues.length) return '<p>No newsletters yet.</p>';
+    // The email-only [TOC] marker has no meaning here - the site renders
+    // its own TOC sidebar from the headings.
+    const tocMarkers = new Set(['[toc]', '[[toc]]', '[[_toc_]]', '[_toc_]']);
+    let html = '<div class="blog-index">';
+    issues.forEach(i => {
+        const body = (i.body_md || '').split('\n')
+            .filter(l => !tocMarkers.has(l.trim().toLowerCase())).join('\n');
+        html += '<article class="blog-index-item">'
+            + '<div class="meta">' + escHtml(formatPostDate((i.sent_at || '').slice(0, 10))) + '</div>'
+            + '<h1>' + escHtml(i.subject) + '</h1>'
+            + renderMarkdown(body)
+            + '</article>';
+    });
+    return html + '</div>';
 }
 
 // Public /newsletter view: optional intro from the "newsletter" page row,
 // then every issue published to the site rendered in full, newest first.
+// No built-in form here: the signup renders wherever a page places the
+// {{newsletter-signup}} marker, and an intro carrying {{newsletter-archive}}
+// takes charge of the listing's position itself.
 async function renderNewsletterIndexView() {
     const c = document.getElementById('content');
     updateAdminChrome();
     let html = currentPage
         ? renderMarkdown(currentPage.body_md || '')
         : '<h1>Newsletter</h1>';
-    // No built-in form here: the signup renders wherever a page places the
-    // {{newsletter-signup}} marker (the optional intro page row included).
-    let issues = [];
-    try {
-        const r = await fetch(API + '/newsletter/public' + siteQ());
-        if (r.ok) issues = (await r.json()).issues || [];
-    } catch (e) {}
-    if (!issues.length) {
-        html += '<p>No newsletters yet.</p>';
-    } else {
-        // The email-only [TOC] marker has no meaning here - the site renders
-        // its own TOC sidebar from the headings.
-        const tocMarkers = new Set(['[toc]', '[[toc]]', '[[_toc_]]', '[_toc_]']);
-        html += '<div class="blog-index">';
-        issues.forEach(i => {
-            const body = (i.body_md || '').split('\n')
-                .filter(l => !tocMarkers.has(l.trim().toLowerCase())).join('\n');
-            html += '<article class="blog-index-item">'
-                + '<div class="meta">' + escHtml(formatPostDate((i.sent_at || '').slice(0, 10))) + '</div>'
-                + '<h1>' + escHtml(i.subject) + '</h1>'
-                + renderMarkdown(body)
-                + '</article>';
-        });
-        html += '</div>';
+    if (html.indexOf('data-newsletter-archive') === -1) {
+        html += renderNewsletterIssuesHtml(await fetchNewsletterIssues());
     }
     const { html: withIds, headings } = injectHeadingIds(html);
     c.innerHTML = withIds;
@@ -1836,6 +1852,7 @@ async function renderNewsletterIndexView() {
     revealEmailObfs(c);
     mountContactForms(c);
     mountNewsletterSignup(c);
+    mountNewsletterArchive(c);
     startAmbientVideos(c);
 }
 
@@ -1911,6 +1928,7 @@ function renderPage() {
     revealEmailObfs(c);
     mountContactForms(c);
     mountNewsletterSignup(c);
+    mountNewsletterArchive(c);
     startAmbientVideos(c);
     // Append a "buy" callout for sensor pages whose slug maps to live SKUs
     // (translated pages resolve through the page they mirror).
@@ -2322,6 +2340,7 @@ function renderPreviewView() {
     revealEmailObfs(c);
     mountContactForms(c);
     mountNewsletterSignup(c);
+    mountNewsletterArchive(c);
     startAmbientVideos(c);
     const skuSlug = SITE.has_shop && currentSlug ? skuSlugFor(currentSlug) : null;
     if (skuSlug) {
@@ -3379,6 +3398,15 @@ function mountContactForms(root) {
 function mountNewsletterSignup(root) {
     if (!SITE.newsletter_signup) return;
     root.querySelectorAll('div[data-newsletter-signup]').forEach(buildNewsletterSignup);
+}
+
+// Past-issue listings for {{newsletter-archive}} markers in page content.
+// One fetch fills every slot on the page.
+async function mountNewsletterArchive(root) {
+    const slots = root.querySelectorAll('div[data-newsletter-archive]');
+    if (!slots.length) return;
+    const html = renderNewsletterIssuesHtml(await fetchNewsletterIssues());
+    slots.forEach(slot => { slot.innerHTML = html; });
 }
 
 function buildNewsletterSignup(slot) {

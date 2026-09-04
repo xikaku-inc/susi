@@ -1,10 +1,8 @@
-use std::collections::HashSet;
-
 use super::*;
 
-/// One deliverable address. `email` is lowercased and trimmed so the caller can
-/// dedupe on it directly - `users.email` has no UNIQUE constraint and
-/// `normalize_email` never lowercased, so mixed-case duplicates exist.
+/// One deliverable address, lowercased and trimmed. `username` is empty for
+/// list subscribers; it only carries a value on delivery rows from campaigns
+/// sent before audiences moved to subscriber lists.
 #[derive(Debug, Clone, Serialize)]
 pub struct NewsletterRecipient {
     pub username: String,
@@ -13,54 +11,8 @@ pub struct NewsletterRecipient {
 
 #[derive(Debug, Default, Serialize)]
 pub struct NewsletterAudience {
-    /// Opted in, with a usable address. This is exactly what gets mailed.
+    /// Confirmed subscribers. This is exactly what gets mailed.
     pub recipients: Vec<NewsletterRecipient>,
-    /// Accounts that have not consented.
-    pub opted_out: usize,
-    /// Consented but unreachable - no email on file.
-    pub no_email: usize,
-}
-
-impl LicenseDb {
-    /// Resolve who receives the newsletter: every account that has opted in and
-    /// has an address. There is one newsletter, so entitlement plays no part -
-    /// consent is the only filter.
-    pub fn newsletter_audience(&self) -> Result<NewsletterAudience, LicenseError> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT username, email, newsletter_opt_in FROM users")
-            .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
-        let rows = stmt
-            .query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, Option<String>>(1)?,
-                    r.get::<_, i32>(2)? != 0,
-                ))
-            })
-            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
-            .filter_map(|r| r.ok());
-
-        let mut audience = NewsletterAudience::default();
-        let mut seen_emails: HashSet<String> = HashSet::new();
-        for (username, email, opt_in) in rows {
-            if !opt_in {
-                audience.opted_out += 1;
-                continue;
-            }
-            match email.map(|e| e.trim().to_lowercase()).filter(|e| !e.is_empty()) {
-                None => audience.no_email += 1,
-                // Two accounts can share an address; mail it once.
-                Some(addr) => {
-                    if seen_emails.insert(addr.clone()) {
-                        audience.recipients.push(NewsletterRecipient { username, email: addr });
-                    }
-                }
-            }
-        }
-        audience.recipients.sort_by(|a, b| a.email.cmp(&b.email));
-        Ok(audience)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -177,8 +129,8 @@ impl LicenseDb {
             .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))
     }
 
-    /// The audience of a subscriber-based newsletter: every confirmed address.
-    /// Emails are stored normalized and UNIQUE, so no dedupe pass is needed.
+    /// The audience of a site's newsletter: every confirmed address on its
+    /// list. Emails are stored normalized and UNIQUE, so no dedupe is needed.
     pub fn subscriber_audience(&self, site: &str) -> Result<NewsletterAudience, LicenseError> {
         let mut stmt = self
             .conn
@@ -193,7 +145,7 @@ impl LicenseDb {
             .filter_map(|r| r.ok())
             .map(|email| NewsletterRecipient { username: String::new(), email })
             .collect();
-        Ok(NewsletterAudience { recipients, ..Default::default() })
+        Ok(NewsletterAudience { recipients })
     }
 }
 
@@ -504,7 +456,9 @@ impl LicenseDb {
             .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))
     }
 
-    /// Delivery rows still holding a user's name, for the subject-access export.
+    /// Delivery rows belonging to a user, for the subject-access export:
+    /// matched by username on pre-switch campaigns, by the account's email on
+    /// everything since.
     pub fn list_newsletter_deliveries_for_user(
         &self,
         username: &str,
@@ -513,7 +467,10 @@ impl LicenseDb {
             .conn
             .prepare(
                 "SELECT issue_id, status, sent_at FROM newsletter_deliveries
-                 WHERE username = ?1 ORDER BY issue_id",
+                 WHERE username = ?1
+                    OR (username = '' AND email = (SELECT LOWER(TRIM(email)) FROM users
+                                                   WHERE users.username = ?1))
+                 ORDER BY issue_id",
             )
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
         let rows = stmt
