@@ -143,7 +143,9 @@ ssh_cmd "
     rm -f /tmp/susi-image.tar.gz
 
     # --force-recreate: the loaded image reuses the susi:latest tag, so a plain
-    # `up -d` sees an unchanged config and leaves the old container running.
+    # 'up -d' sees an unchanged config and leaves the old container running.
+    # NB: this whole block is a double-quoted string - backticks in comments
+    # would run locally as command substitution.
     docker compose --env-file $ENV_FILE -f $COMPOSE_FILE up -d --force-recreate
 
     if [ -f $REMOTE_DIR/_private.pem ]; then
