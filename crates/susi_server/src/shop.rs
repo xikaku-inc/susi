@@ -38,7 +38,7 @@ use crate::{
 /// Brand logo embedded in the binary so it ships with every customer email
 /// without depending on remote-image fetches (most clients block those).
 /// Wide horizontal logo; constrain via CSS height in the HTML.
-const LOGO_CID: &str = "shop-logo";
+pub(crate) const LOGO_CID: &str = "shop-logo";
 
 // One `Arc<[u8]>` per site logo. Each `logo_inline_image()` call then bumps
 // the refcount instead of copying ~30 KB of bytes per email.
@@ -51,7 +51,7 @@ fn site_logo_png(site: &SiteConfig) -> &'static [u8] {
         .unwrap_or(sites::compiled_brand(DEFAULT_SITE_ID).expect("default brand").logo)
 }
 
-fn logo_inline_image(site: &SiteConfig) -> InlineImage {
+pub(crate) fn logo_inline_image(site: &SiteConfig) -> InlineImage {
     let bytes = {
         let mut m = LOGO_ARCS.lock().unwrap();
         Arc::clone(m.entry(site.id.to_string()).or_insert_with(|| Arc::from(site_logo_png(site))))
@@ -120,7 +120,7 @@ fn mask_secret(v: &str) -> String {
 /// Shop settings share one table across sites: the default site keeps its
 /// bare keys (stored data predates multi-shop), other sites use
 /// '{site}/{key}' - the same convention as site_settings.
-fn shop_setting_key(site: &SiteConfig, key: &str) -> String {
+pub(crate) fn shop_setting_key(site: &SiteConfig, key: &str) -> String {
     if site.id == DEFAULT_SITE_ID {
         key.to_string()
     } else {
@@ -1022,28 +1022,11 @@ fn invoice_prefix(site: &SiteConfig) -> String {
 // ---------------------------------------------------------------------------
 // Email templates
 //
-// The customer-facing shop emails are markdown templates (email_md): a
-// per-shop override lives in shop_settings (email_order_confirmation[_ja],
-// email_order_shipped[_ja]); an empty override falls back to the built-in
-// default below. Variables are {name} tokens; a line whose variable resolves
-// empty is dropped (email_md::apply_template).
+// The customer-facing shop emails are markdown templates: defaults, override
+// storage, and the admin editor live in crate::email_templates (template ids
+// "order_confirmation" / "order_shipped"). This module builds the per-order
+// variables and sample data.
 // ---------------------------------------------------------------------------
-
-const SETTING_TPL_CONFIRMATION: &str = "email_order_confirmation";
-const SETTING_TPL_CONFIRMATION_JA: &str = "email_order_confirmation_ja";
-const SETTING_TPL_SHIPPED: &str = "email_order_shipped";
-const SETTING_TPL_SHIPPED_JA: &str = "email_order_shipped_ja";
-
-const VARS_CONFIRMATION: &[&str] = &["order", "date", "name", "site", "items", "totals", "addresses", "shipping_note", "support"];
-const VARS_SHIPPED: &[&str] = &["order", "name", "site", "shipment", "tracking_button", "items", "total"];
-
-const TPL_CONFIRMATION_EN: &str = "# Thank you for your order\n\nOrder {order} · {date}\n\nHi {name},\n\nThanks for your purchase from {site} - we've received your order and are getting it ready.\n\n## Items\n\n{items}\n\n{totals}\n\n{addresses}\n\nA PDF invoice is attached to this email for your records.\n\n{shipping_note}\n\nQuestions? Reach us at [{support}](mailto:{support}).\n\n\\- The {site} team\n";
-
-const TPL_CONFIRMATION_JA: &str = "# ご注文ありがとうございます\n\nご注文 {order} · {date}\n\n{name} 様\n\n{site}をご利用いただきありがとうございます。ご注文を承りました。\n\n## ご注文内容\n\n{items}\n\n{totals}\n\n{addresses}\n\n請求書（PDF）をこのメールに添付しています。\n\n{shipping_note}\n\nご不明な点は [{support}](mailto:{support}) までお問い合わせください。\n\n\\- {site}チーム\n";
-
-const TPL_SHIPPED_EN: &str = "# Your order has shipped\n\nOrder {order}\n\nHi {name},\n\n{shipment}\n\n{tracking_button}\n\n## Items shipped\n\n{items}\n\nOrder total: {total}\n\nThanks for buying from {site}!\n\n\\- The {site} team\n";
-
-const TPL_SHIPPED_JA: &str = "# 商品を発送しました\n\nご注文 {order}\n\n{name} 様\n\n{shipment}\n\n{tracking_button}\n\n## 発送した商品\n\n{items}\n\nご注文合計: {total}\n\n{site}をご利用いただきありがとうございます！\n\n\\- {site}チーム\n";
 
 /// Chrome strings the template variables carry, localized per order language.
 fn tr(lang: &str, en: &'static str) -> &'static str {
@@ -1063,33 +1046,6 @@ fn tr(lang: &str, en: &'static str) -> &'static str {
         "there" => "お客様",
         "(item details unavailable)" => "（商品明細を取得できませんでした）",
         _ => en,
-    }
-}
-
-fn template_key(base: &str, lang: &str) -> &'static str {
-    match (base, lang) {
-        (SETTING_TPL_CONFIRMATION, "ja") => SETTING_TPL_CONFIRMATION_JA,
-        (SETTING_TPL_CONFIRMATION, _) => SETTING_TPL_CONFIRMATION,
-        (_, "ja") => SETTING_TPL_SHIPPED_JA,
-        _ => SETTING_TPL_SHIPPED,
-    }
-}
-
-fn default_template(base: &str, lang: &str) -> &'static str {
-    match (base, lang) {
-        (SETTING_TPL_CONFIRMATION, "ja") => TPL_CONFIRMATION_JA,
-        (SETTING_TPL_CONFIRMATION, _) => TPL_CONFIRMATION_EN,
-        (_, "ja") => TPL_SHIPPED_JA,
-        _ => TPL_SHIPPED_EN,
-    }
-}
-
-fn effective_template(state: &AppState, site: &SiteConfig, base: &str, lang: &str) -> String {
-    let stored = get_setting_str(state, site, template_key(base, lang));
-    if stored.trim().is_empty() {
-        default_template(base, lang).to_string()
-    } else {
-        stored
     }
 }
 
@@ -1187,14 +1143,6 @@ fn confirmation_vars(
     ]
 }
 
-fn confirmation_subject(site: &SiteConfig, lang: &str, order_label: &str) -> String {
-    if lang == "ja" {
-        format!("ご注文ありがとうございます - {} {}", site.name, order_label)
-    } else {
-        format!("Thanks for your order - {} {}", site.name, order_label)
-    }
-}
-
 const SETTING_NOTIFY_EMAILS: &str = "notification_emails";
 const SETTING_CUSTOMER_EMAIL_ENABLED: &str = "customer_email_enabled";
 const SETTING_SUPPORT_CONTACT: &str = "support_contact";
@@ -1264,10 +1212,9 @@ fn build_customer_confirmation(
     order_id: Option<i64>,
     lang: &str,
 ) -> (String, String) {
-    let order_label = order_id.map(|i| format!("#{}", i)).unwrap_or_else(|| "-".into());
-    let subject = confirmation_subject(site, lang, &order_label);
     let vars = confirmation_vars(state, site, event, line_items, order_id, lang);
-    let tpl = effective_template(state, site, SETTING_TPL_CONFIRMATION, lang);
+    let subject = crate::email_templates::subject_for(state, "order_confirmation", Some(site), lang, &vars);
+    let tpl = crate::email_templates::effective_body(state, "order_confirmation", Some(site), lang);
     (subject, crate::email_md::apply_template(&tpl, &vars))
 }
 
@@ -1939,10 +1886,10 @@ pub async fn handle_admin_mark_shipped(
             if let Some(svc) = state.email.clone() {
                 let lang = order_email_lang(site, &order.14).to_string();
                 let vars = shipped_vars(site, &order, &lang);
-                let tpl = effective_template(&state, site, SETTING_TPL_SHIPPED, &lang);
+                let tpl = crate::email_templates::effective_body(&state, "order_shipped", Some(site), &lang);
                 let md = crate::email_md::apply_template(&tpl, &vars);
                 let doc = crate::email_md::render(&md, Some((LOGO_CID, site.name)));
-                let subject = shipped_subject(site, &lang, order.0);
+                let subject = crate::email_templates::subject_for(&state, "order_shipped", Some(site), &lang, &vars);
                 let sender = format!("{} Shop", site.name);
                 let logo = logo_inline_image(site);
                 tokio::spawn(async move {
@@ -2024,14 +1971,6 @@ fn shipped_vars(site: &SiteConfig, order: &OrderRow, lang: &str) -> Vec<(&'stati
     ]
 }
 
-fn shipped_subject(site: &SiteConfig, lang: &str, order_id: i64) -> String {
-    if lang == "ja" {
-        format!("{} ご注文#{}の商品を発送しました", site.name, order_id)
-    } else {
-        format!("Your {} order #{} has shipped", site.name, order_id)
-    }
-}
-
 fn html_escape_local(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -2059,10 +1998,6 @@ const KNOWN_SETTING_KEYS: &[&str] = &[
     SETTING_INVOICE_FROM,
     SETTING_STRIPE_SECRET_KEY,
     SETTING_STRIPE_WEBHOOK_SECRET,
-    SETTING_TPL_CONFIRMATION,
-    SETTING_TPL_CONFIRMATION_JA,
-    SETTING_TPL_SHIPPED,
-    SETTING_TPL_SHIPPED_JA,
 ];
 
 /// Normalize a submitted shipping-country list to canonical, sorted, deduped
@@ -2203,17 +2138,8 @@ pub async fn handle_admin_put_settings(
 }
 
 // ---------------------------------------------------------------------------
-// Email template editor - preview and test-send
+// Email template sample data (used by the crate::email_templates editor)
 // ---------------------------------------------------------------------------
-
-#[derive(Deserialize)]
-pub struct EmailTemplateRequest {
-    pub template: String,
-    #[serde(default)]
-    pub lang: String,
-    #[serde(default)]
-    pub body_md: String,
-}
 
 /// A canned order for previews: realistic amounts in the storefront currency.
 fn sample_order_event(lang: &str) -> (Value, Vec<Value>) {
@@ -2252,91 +2178,19 @@ fn sample_order_row(lang: &str) -> OrderRow {
     )
 }
 
-/// Resolve and fill a template with sample data. `body_md` empty = the
-/// currently effective (stored or default) template.
-fn render_template_sample(
+/// Confirmation-email variables for the sample order (preview / test-send).
+pub(crate) fn sample_confirmation_vars(
     state: &AppState,
-    site: &'static SiteConfig,
-    req: &EmailTemplateRequest,
-) -> Result<(String, String, String), (StatusCode, Json<ErrorResponse>)> {
-    let lang = match req.lang.as_str() {
-        "" => "",
-        l if site.langs.iter().any(|x| *x == l) => l,
-        _ => return Err(error_response(StatusCode::BAD_REQUEST, "Unknown language for this site")),
-    };
-    let base = match req.template.as_str() {
-        "order_confirmation" => SETTING_TPL_CONFIRMATION,
-        "order_shipped" => SETTING_TPL_SHIPPED,
-        _ => return Err(error_response(StatusCode::BAD_REQUEST, "Unknown template")),
-    };
-    let tpl = if req.body_md.trim().is_empty() {
-        effective_template(state, site, base, lang)
-    } else {
-        req.body_md.clone()
-    };
-    let (subject, md) = if base == SETTING_TPL_CONFIRMATION {
-        let (event, items) = sample_order_event(lang);
-        let vars = confirmation_vars(state, site, &event, &items, Some(42), lang);
-        (confirmation_subject(site, lang, "#42"), crate::email_md::apply_template(&tpl, &vars))
-    } else {
-        let order = sample_order_row(lang);
-        let vars = shipped_vars(site, &order, lang);
-        (shipped_subject(site, lang, 42), crate::email_md::apply_template(&tpl, &vars))
-    };
-    Ok((subject, md, tpl))
+    site: &SiteConfig,
+    lang: &str,
+) -> Vec<(&'static str, String)> {
+    let (event, items) = sample_order_event(lang);
+    confirmation_vars(state, site, &event, &items, Some(42), lang)
 }
 
-pub async fn handle_admin_email_preview(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Query(sq): Query<SiteQuery>,
-    Json(req): Json<EmailTemplateRequest>,
-) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
-    let site = resolve_site(&headers, &sq)?;
-    let p = validate_principal(&headers, &state)?;
-    require_admin_full(&state, &p)?;
-    let (subject, md, tpl) = render_template_sample(&state, site, &req)?;
-    let doc = crate::email_md::render(&md, Some((LOGO_CID, site.name)));
-    let base = if req.template == "order_confirmation" { SETTING_TPL_CONFIRMATION } else { SETTING_TPL_SHIPPED };
-    let vars: &[&str] = if base == SETTING_TPL_CONFIRMATION { VARS_CONFIRMATION } else { VARS_SHIPPED };
-    Ok(Json(json!({
-        "subject": subject,
-        "markdown": tpl,
-        "default_markdown": default_template(base, order_email_lang(site, &req.lang)),
-        "setting_key": template_key(base, order_email_lang(site, &req.lang)),
-        "html": doc.html,
-        "text": doc.text,
-        "variables": vars,
-        "langs": site.langs,
-    })))
-}
-
-pub async fn handle_admin_email_test(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Query(sq): Query<SiteQuery>,
-    Json(req): Json<EmailTemplateRequest>,
-) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
-    let site = resolve_site(&headers, &sq)?;
-    let p = validate_principal(&headers, &state)?;
-    require_admin_full(&state, &p)?;
-    let svc = state.email.clone().ok_or_else(|| {
-        error_response(StatusCode::SERVICE_UNAVAILABLE, "SMTP is not configured on this server")
-    })?;
-    let to = {
-        let db = state.db.lock();
-        db.get_user_email(&p.username).ok().flatten()
-    }
-    .filter(|e| !e.is_empty())
-    .ok_or_else(|| error_response(StatusCode::BAD_REQUEST, "Your account has no email address"))?;
-    let (subject, md, _tpl) = render_template_sample(&state, site, &req)?;
-    let doc = crate::email_md::render(&md, Some((LOGO_CID, site.name)));
-    let inline = vec![logo_inline_image(site)];
-    let sender = format!("{} Shop", site.name);
-    svc.send_html_rich(&to, &format!("[Test] {}", subject), &doc.text, &doc.html, &inline, &[], Some(&sender))
-        .await
-        .map_err(|e| error_response(StatusCode::BAD_GATEWAY, &format!("Send failed: {}", e)))?;
-    Ok(Json(json!({ "sent_to": to })))
+/// Shipped-email variables for the sample order (preview / test-send).
+pub(crate) fn sample_shipped_vars(site: &SiteConfig, lang: &str) -> Vec<(&'static str, String)> {
+    shipped_vars(site, &sample_order_row(lang), lang)
 }
 
 // ---------------------------------------------------------------------------

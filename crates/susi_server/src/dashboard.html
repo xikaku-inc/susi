@@ -1317,7 +1317,6 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
         <button class="ws-tab" data-shop-tab="products" onclick="shopTab('products')">Products</button>
         <button class="ws-tab" data-shop-tab="shipping" onclick="shopTab('shipping')">Shipping</button>
         <button class="ws-tab" data-shop-tab="settings" onclick="shopTab('settings')">Settings</button>
-        <button class="ws-tab" data-shop-tab="emails" onclick="shopTab('emails')">Emails</button>
     </div>
 
     <div class="ws-tab-panel active" data-shop-panel="orders">
@@ -1453,33 +1452,38 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
         </div>
     </div>
 
-    <div class="ws-tab-panel" data-shop-panel="emails">
+</div><!-- /page-shop -->
+
+<!-- Email templates (admin) -->
+<div id="page-emails" class="dash-page">
+    <div style="margin-top:32px;margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
+        <h2 style="font-size:16px;font-weight:600;">Email Templates</h2>
+    </div>
     <div class="card settings-card">
-            <div class="detail-body">
-                <div class="form-row" style="display:flex;gap:12px;">
-                    <select id="emailTplName" onchange="loadEmailTemplate()">
-                        <option value="order_confirmation">Order confirmation</option>
-                        <option value="order_shipped">Order shipped</option>
-                    </select>
-                    <select id="emailTplLang" onchange="loadEmailTemplate()">
-                        <option value="">English</option>
-                    </select>
-                </div>
-                <div class="form-row">
-                    <textarea id="emailTplBody" rows="18" spellcheck="false" style="width:100%;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;"></textarea>
-                </div>
-                <div id="emailTplVars" style="font-size:11px;color:var(--text2);font-family:ui-monospace,Menlo,Consolas,monospace;"></div>
-                <div id="emailTplError" class="form-error" style="display:none;"></div>
+        <div class="detail-body">
+            <div class="form-row" style="display:flex;gap:12px;">
+                <select id="emailTplName" onchange="emailTplChanged()"></select>
+                <select id="emailTplSite" onchange="emailTplChanged()" style="display:none;"></select>
+                <select id="emailTplLang" onchange="loadEmailTemplate()" style="display:none;"></select>
             </div>
-            <div class="form-footer" style="display:flex;gap:8px;justify-content:flex-end;">
-                <button onclick="resetEmailTemplate()">Use default</button>
-                <button onclick="previewEmailTemplate()">Preview</button>
-                <button onclick="testEmailTemplate()">Send test</button>
-                <button class="primary" onclick="saveEmailTemplate()">Save</button>
+            <div class="form-row" id="emailTplSubjectRow">
+                <label for="emailTplSubject">Subject</label>
+                <input type="text" id="emailTplSubject" autocomplete="off" spellcheck="false">
             </div>
+            <div class="form-row">
+                <textarea id="emailTplBody" rows="18" spellcheck="false" style="width:100%;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;"></textarea>
+            </div>
+            <div id="emailTplVars" style="font-size:11px;color:var(--text2);font-family:ui-monospace,Menlo,Consolas,monospace;"></div>
+            <div id="emailTplError" class="form-error" style="display:none;"></div>
+        </div>
+        <div class="form-footer" style="display:flex;gap:8px;justify-content:flex-end;">
+            <button onclick="resetEmailTemplate()">Use default</button>
+            <button onclick="previewEmailTemplate()">Preview</button>
+            <button onclick="testEmailTemplate()">Send test</button>
+            <button class="primary" onclick="saveEmailTemplate()">Save</button>
         </div>
     </div>
-</div><!-- /page-shop -->
+</div>
 
 <!-- Audit log (admin) -->
 <div id="page-audit" class="dash-page">
@@ -3110,6 +3114,7 @@ function showPage(name) {
     if (name === 'newsletter' && authToken) loadNewsletter();
     if (name === 'backups' && authToken) loadBackupPage();
     if (name === 'users' && authToken) loadUsers();
+    if (name === 'emails' && authToken) loadEmailsPage();
     activeNavPage = name;
     renderNav();
     document.querySelectorAll('#navDrawerLinks a').forEach(a => {
@@ -3153,6 +3158,7 @@ function renderNav() {
         { page: 'products', label: 'Products', href: '#/products', show: !!authToken && isAdmin, group: 'admin' },
         { page: 'website', label: 'Website', href: '#/website', show: !!authToken && isAdmin, group: 'admin' },
         { page: 'shop', label: 'Shop', href: '#/shop', show: !!authToken && isAdmin, group: 'admin' },
+        { page: 'emails', label: 'Emails', href: '#/emails', show: !!authToken && isAdmin, group: 'admin' },
         { page: 'audit', label: 'Audit', href: '#/audit', show: !!authToken && isAdmin, group: 'admin' },
         { page: 'backups', label: 'Backups', href: '#/backups', show: !!authToken && isAdmin, group: 'admin' },
     ];
@@ -6613,20 +6619,35 @@ let editingRateId = null;      // null = create mode
 async function loadShop() {
     if (!roleIsAdmin(userRole)) return;
     await ensureShopSiteSelect();
-    await Promise.all([loadShopProducts(), loadShopRates(), loadShopOrders(), loadShopSettings(), loadShopCountryCatalogue(), loadEmailTemplate()]);
+    await Promise.all([loadShopProducts(), loadShopRates(), loadShopOrders(), loadShopSettings(), loadShopCountryCatalogue()]);
 }
 
-// ----- Email templates -----
-let emailTplKey = '';
+// ----- Email templates (admin page) -----
+let emailTplList = [];
+let emailTplMeta = null;
 let emailTplDefault = '';
+let emailTplDefaultSubject = '';
 
-async function emailTplRequest(path, bodyMd) {
-    const resp = await fetch(API + '/shop/admin/' + path + wsQ(), {
-        method: 'POST',
+function emailTplSelected() {
+    const id = document.getElementById('emailTplName').value;
+    return emailTplList.find(t => t.id === id) || null;
+}
+
+function emailTplQ() {
+    const sel = document.getElementById('emailTplSite');
+    return (emailTplMeta && emailTplMeta.per_site && sel.value)
+        ? '?site=' + encodeURIComponent(sel.value) : '';
+}
+
+// path '/preview' or '/test' POSTs; '' PUTs (save).
+async function emailTplRequest(path, subject, bodyMd) {
+    const resp = await fetch(API + '/admin/email_templates' + path + emailTplQ(), {
+        method: path ? 'POST' : 'PUT',
         headers: { ...authHeaders(), 'Content-Type': 'application/json' },
         body: JSON.stringify({
-            template: document.getElementById('emailTplName').value,
+            id: document.getElementById('emailTplName').value,
             lang: document.getElementById('emailTplLang').value,
+            subject: subject,
             body_md: bodyMd,
         }),
     });
@@ -6635,18 +6656,71 @@ async function emailTplRequest(path, bodyMd) {
     return data;
 }
 
+async function ensureEmailTplSites() {
+    const sel = document.getElementById('emailTplSite');
+    if (sel.options.length) return;
+    const wsSel = document.getElementById('websiteSiteSelect');
+    if (wsSel && wsSel.options.length) { sel.innerHTML = wsSel.innerHTML; return; }
+    try {
+        const resp = await fetch(API + '/website/pages', { headers: authHeaders() });
+        if (resp.ok) {
+            const data = await resp.json();
+            if (Array.isArray(data.sites)) {
+                sel.innerHTML = data.sites.map(s =>
+                    '<option value="' + escHtml(s.id) + '">' + escHtml(s.name) + '</option>').join('');
+            }
+        }
+    } catch (e) { /* selector stays empty; calls fall back to the default site */ }
+}
+
+async function loadEmailsPage() {
+    const errEl = document.getElementById('emailTplError');
+    errEl.style.display = 'none';
+    try {
+        if (!emailTplList.length) {
+            const resp = await fetch(API + '/admin/email_templates', { headers: authHeaders() });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status));
+            emailTplList = data.templates || [];
+            const groups = [];
+            emailTplList.forEach(t => {
+                let g = groups.find(x => x.name === t.group);
+                if (!g) { g = { name: t.group, items: [] }; groups.push(g); }
+                g.items.push(t);
+            });
+            document.getElementById('emailTplName').innerHTML = groups.map(g =>
+                '<optgroup label="' + escHtml(g.name) + '">' + g.items.map(t =>
+                    '<option value="' + escHtml(t.id) + '">' + escHtml(t.title) + '</option>').join('') + '</optgroup>').join('');
+            await ensureEmailTplSites();
+        }
+        await loadEmailTemplate();
+    } catch (e) { errEl.textContent = e.message; errEl.style.display = ''; }
+}
+
+// Template or site switch: the language list belongs to the new selection.
+function emailTplChanged() {
+    document.getElementById('emailTplLang').value = '';
+    loadEmailTemplate();
+}
+
 async function loadEmailTemplate() {
     const errEl = document.getElementById('emailTplError');
     if (!errEl) return;
     errEl.style.display = 'none';
+    emailTplMeta = emailTplSelected();
+    if (!emailTplMeta) return;
+    document.getElementById('emailTplSite').style.display = emailTplMeta.per_site ? '' : 'none';
     try {
-        const data = await emailTplRequest('email_preview', '');
+        const data = await emailTplRequest('/preview', '', '');
         document.getElementById('emailTplBody').value = data.markdown || '';
-        emailTplKey = data.setting_key || '';
+        document.getElementById('emailTplSubject').value = data.subject_template || '';
+        document.getElementById('emailTplSubjectRow').style.display = data.subject_editable ? '' : 'none';
         emailTplDefault = data.default_markdown || '';
+        emailTplDefaultSubject = data.default_subject || '';
         document.getElementById('emailTplVars').textContent = (data.variables || []).map(v => '{' + v + '}').join('  ');
         const langSel = document.getElementById('emailTplLang');
-        const langs = [''].concat(data.langs || []);
+        const langs = [''].concat((data.langs || []).filter(l => l && l !== 'en'));
+        langSel.style.display = langs.length > 1 ? '' : 'none';
         if (langSel.options.length !== langs.length) {
             const cur = langSel.value;
             langSel.innerHTML = langs.map(l =>
@@ -6660,7 +6734,9 @@ async function previewEmailTemplate() {
     const errEl = document.getElementById('emailTplError');
     errEl.style.display = 'none';
     try {
-        const data = await emailTplRequest('email_preview', document.getElementById('emailTplBody').value);
+        const data = await emailTplRequest('/preview',
+            document.getElementById('emailTplSubject').value,
+            document.getElementById('emailTplBody').value);
         document.getElementById('emailPreviewSubject').textContent = data.subject || '';
         document.getElementById('emailPreviewFrame').srcdoc = data.html || '';
         document.getElementById('emailPreviewModal').classList.add('visible');
@@ -6673,37 +6749,34 @@ async function testEmailTemplate() {
     const errEl = document.getElementById('emailTplError');
     errEl.style.display = 'none';
     try {
-        const data = await emailTplRequest('email_test', document.getElementById('emailTplBody').value);
+        const data = await emailTplRequest('/test',
+            document.getElementById('emailTplSubject').value,
+            document.getElementById('emailTplBody').value);
         toast('Test email sent to ' + (data.sent_to || ''), 'success');
     } catch (e) { errEl.textContent = e.message; errEl.style.display = ''; }
 }
 
-async function saveEmailTemplateValue(value) {
+async function saveEmailTemplateValues(subject, bodyMd, msg) {
     const errEl = document.getElementById('emailTplError');
     errEl.style.display = 'none';
-    if (!emailTplKey) { errEl.textContent = 'Template not loaded'; errEl.style.display = ''; return; }
     try {
-        const body = {};
-        body[emailTplKey] = value;
-        const resp = await fetch(API + '/shop/admin/settings' + wsQ(), {
-            method: 'PUT',
-            headers: { ...authHeaders(), 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
-        });
-        const data = await resp.json().catch(() => ({}));
-        if (!resp.ok) { errEl.textContent = data.error || ('HTTP ' + resp.status); errEl.style.display = ''; return; }
-        toast(value === '' ? 'Template reset to default' : 'Template saved', 'success');
+        await emailTplRequest('', subject, bodyMd);
+        toast(msg, 'success');
         await loadEmailTemplate();
     } catch (e) { errEl.textContent = e.message; errEl.style.display = ''; }
 }
 
 function saveEmailTemplate() {
-    const v = document.getElementById('emailTplBody').value;
-    // Saving the untouched default stores nothing - the default stays live.
-    saveEmailTemplateValue(v.trim() === emailTplDefault.trim() ? '' : v);
+    // Saving untouched defaults stores nothing - the defaults stay live.
+    const subj = document.getElementById('emailTplSubject').value;
+    const body = document.getElementById('emailTplBody').value;
+    saveEmailTemplateValues(
+        subj.trim() === emailTplDefaultSubject.trim() ? '' : subj,
+        body.trim() === emailTplDefault.trim() ? '' : body,
+        'Template saved');
 }
 
-function resetEmailTemplate() { saveEmailTemplateValue(''); }
+function resetEmailTemplate() { saveEmailTemplateValues('', '', 'Template reset to default'); }
 
 // The shop page shares the website section's active site (websiteSite);
 // each page carries its own selector, kept in sync with the other.

@@ -529,26 +529,40 @@ fn notify_workspace(
         ))
     };
 
-    let excerpt_text = excerpt(body);
+    // One render for the whole fan-out; each recipient task clones the
+    // finished strings.
+    let e = crate::email_md::escape;
+    let mut rows_md = String::from("|  |  |\n| --- | --- |\n");
+    for (k, v) in &rows {
+        rows_md.push_str(&format!("| {} | **{}** |\n", e(k), e(v)));
+    }
+    let excerpt_md = excerpt(body)
+        .lines()
+        .map(|l| format!("> {}", e(l)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let button = link
+        .map(|l| format!("{{{{button:Open ticket|{}}}}}", l))
+        .unwrap_or_default();
+    let vars = vec![
+        ("subject", subject.to_string()),
+        ("heading", e(heading)),
+        ("intro", e(intro)),
+        ("rows", rows_md.trim_end().to_string()),
+        ("excerpt", excerpt_md),
+        ("button", button),
+    ];
+    let (subject, doc) =
+        crate::email_templates::render_email(state, "ticket_notification", None, "", &vars, None);
+
     for to in recipients {
         let svc = svc.clone();
-        let subject = subject.to_string();
-        let heading = heading.to_string();
-        let intro = intro.to_string();
-        let rows = rows.clone();
-        let excerpt_text = excerpt_text.clone();
-        let link = link.clone();
+        let subject = subject.clone();
+        let text = doc.text.clone();
+        let html = doc.html.clone();
         tokio::spawn(async move {
             if let Err(e) = svc
-                .send_ticket_notification(
-                    &to,
-                    &subject,
-                    &heading,
-                    &intro,
-                    &rows,
-                    &excerpt_text,
-                    link.as_deref(),
-                )
+                .send_html_rich(&to, &subject, &text, &html, &[], &[], None)
                 .await
             {
                 log::error!("Failed to send ticket notification to {}: {:#}", to, e);

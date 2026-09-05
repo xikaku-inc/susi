@@ -943,7 +943,7 @@ pub(crate) async fn newsletter_mailer_for_site(
 
 /// The name a site's newsletter mail sends and signs as: the relay's
 /// configured From name, falling back to the site name.
-fn site_from_name(site: &crate::sites::SiteConfig) -> String {
+pub(crate) fn site_from_name(site: &crate::sites::SiteConfig) -> String {
     match site_smtp_env(site.id, "FROM_NAME") {
         n if n.is_empty() => site.name.to_string(),
         n => n,
@@ -951,7 +951,7 @@ fn site_from_name(site: &crate::sites::SiteConfig) -> String {
 }
 
 /// What the recipient subscribed to, for the footer and the unsubscribe page.
-fn newsletter_source_phrase(site: &crate::sites::SiteConfig) -> String {
+pub(crate) fn newsletter_source_phrase(site: &crate::sites::SiteConfig) -> String {
     if site.id == crate::sites::DEFAULT_SITE_ID {
         "the newsletter from Susi by LP-Research".to_string()
     } else {
@@ -1144,7 +1144,7 @@ const MAX_SUBSCRIBER_EMAIL: usize = 320; // RFC 5321 max
 
 /// The site's brand mark for the confirmation mail: the uploaded logo asset,
 /// falling back to compiled artwork. None = the mail goes out without one.
-fn site_email_logo(state: &AppState, site: &crate::sites::SiteConfig) -> Option<InlineImage> {
+pub(crate) fn site_email_logo(state: &AppState, site: &crate::sites::SiteConfig) -> Option<InlineImage> {
     const CID: &str = "nl-logo";
     if let Some((name, bytes)) = crate::website::custom_asset(state, site, crate::website::SETTING_LOGO_IMAGE) {
         if let Some(mime) = image_mime(&name.to_ascii_lowercase()) {
@@ -1231,46 +1231,22 @@ pub(crate) async fn handle_subscribe(
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
     let confirm_url = format!("{}/api/v1/newsletter/confirm?token={}", base, token);
 
-    // The default site's newsletter is a company list and signs per the
-    // customer-email rules; every other subscriber site is a personal brand,
-    // hence the first person - signed with the sender's given name, the way
-    // a person signs, while the From line keeps the full name. "\-" follows
-    // the shop order emails: it keeps the dash literal instead of a bullet.
-    let from_name = site_from_name(site);
-    let (thanks, signed) = if site.id == crate::sites::DEFAULT_SITE_ID {
-        (
-            format!("Thank you for subscribing to {}!", newsletter_source_phrase(site)),
-            "Xikaku / LP-Research",
-        )
-    } else {
-        (
-            "Thank you for subscribing to my newsletter!".to_string(),
-            from_name.split_whitespace().next().unwrap_or(site.name),
-        )
-    };
-    let md = format!(
-        "# Confirm your subscription\n\n\
-         {thanks}\n\n\
-         {{{{button:Confirm subscription|{url}}}}}\n\n\
-         If this wasn't you, ignore this email and nothing will be sent.\n\n\
-         \\- {signed}",
-        thanks = thanks,
-        url = confirm_url,
-        signed = signed,
-    );
+    let vars = vec![
+        ("url", confirm_url),
+        ("site", crate::email_md::escape(site.name)),
+    ];
     let logo = site_email_logo(&state, site);
-    let doc = crate::email_md::render(&md, logo.as_ref().map(|l| (l.content_id.as_str(), site.name)));
+    let (subject, doc) = crate::email_templates::render_email(
+        &state,
+        "newsletter_confirm",
+        Some(site),
+        "",
+        &vars,
+        logo.as_ref().map(|l| (l.content_id.as_str(), site.name)),
+    );
     let inline: Vec<InlineImage> = logo.into_iter().collect();
     mailer
-        .send_html_rich(
-            &email,
-            &format!("Confirm your {} newsletter subscription", site.name),
-            &doc.text,
-            &doc.html,
-            &inline,
-            &[],
-            None,
-        )
+        .send_html_rich(&email, &subject, &doc.text, &doc.html, &inline, &[], None)
         .await
         .map_err(|e| {
             log::error!("Newsletter confirmation mail failed (site {}): {:#}", site.id, e);

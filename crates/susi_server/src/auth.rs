@@ -2,6 +2,14 @@
 
 use crate::*;
 
+fn signin_code_vars(username: &str, code: &str) -> Vec<(&'static str, String)> {
+    vec![
+        ("user", crate::email_md::escape(username)),
+        ("code", code.to_string()),
+        ("ttl", SIGNIN_CODE_TTL_MINUTES.to_string()),
+    ]
+}
+
 pub(crate) async fn handle_login(
     State(state): State<Arc<AppState>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -87,8 +95,16 @@ pub(crate) async fn handle_login(
             // Reporting the failure leaks nothing: the caller has already
             // proved the password, and the success response hands back a
             // masked form of the same address anyway.
+            let (subject, doc) = crate::email_templates::render_email(
+                &state,
+                "signin_code",
+                None,
+                "",
+                &signin_code_vars(&username, &code),
+                None,
+            );
             if let Err(e) = email_service
-                .send_signin_code(email_addr, &username, &code, SIGNIN_CODE_TTL_MINUTES)
+                .send_html_rich(email_addr, &subject, &doc.text, &doc.html, &[], &[], None)
                 .await
             {
                 log::error!("Failed to send sign-in code email to {}: {:#}", email_addr, e);
@@ -347,9 +363,17 @@ pub(crate) async fn handle_request_signin_code(
     }
 
     let email_service = state.email.clone().expect("checked above");
+    let (subject, doc) = crate::email_templates::render_email(
+        &state,
+        "signin_code",
+        None,
+        "",
+        &signin_code_vars(&username, &code),
+        None,
+    );
     tokio::spawn(async move {
         if let Err(e) = email_service
-            .send_signin_code(&email_addr, &username, &code, SIGNIN_CODE_TTL_MINUTES)
+            .send_html_rich(&email_addr, &subject, &doc.text, &doc.html, &[], &[], None)
             .await
         {
             log::error!("Failed to send sign-in code email to {}: {:#}", email_addr, e);
@@ -563,11 +587,17 @@ pub(crate) async fn handle_forgot_password(
     );
     let email_service = state.email.clone().expect("checked above");
     let to = email_addr.clone();
-    let uname = username.clone();
-    let ip_str = ip.to_string();
+    let vars = vec![
+        ("user", crate::email_md::escape(&username)),
+        ("link", link),
+        ("ttl", PASSWORD_RESET_TTL_MINUTES.to_string()),
+        ("ip", crate::email_md::escape(&ip.to_string())),
+    ];
+    let (subject, doc) =
+        crate::email_templates::render_email(&state, "password_reset", None, "", &vars, None);
     tokio::spawn(async move {
         if let Err(e) = email_service
-            .send_password_reset(&to, &uname, &link, PASSWORD_RESET_TTL_MINUTES, &ip_str)
+            .send_html_rich(&to, &subject, &doc.text, &doc.html, &[], &[], None)
             .await
         {
             log::error!("Failed to send password-reset email to {}: {:#}", to, e);

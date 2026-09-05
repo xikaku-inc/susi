@@ -4,6 +4,7 @@ mod sites;
 mod website;
 mod email;
 mod email_md;
+mod email_templates;
 mod shop;
 mod invoice_pdf;
 mod contact;
@@ -2282,10 +2283,16 @@ async fn issue_and_send_invitation(
         ));
     };
     let to = email_addr.to_string();
-    let uname = username.to_string();
+    let vars = vec![
+        ("user", email_md::escape(username)),
+        ("link", link),
+        ("ttl", INVITE_TTL_HOURS.to_string()),
+    ];
+    let (subject, doc) =
+        email_templates::render_email(state, "invitation", None, "", &vars, None);
     tokio::spawn(async move {
         if let Err(e) = email_service
-            .send_invitation(&to, &uname, &link, INVITE_TTL_HOURS)
+            .send_html_rich(&to, &subject, &doc.text, &doc.html, &[], &[], None)
             .await
         {
             log::error!("Failed to send invitation email to {}: {:#}", to, e);
@@ -3667,13 +3674,19 @@ async fn main() -> Result<()> {
             get(shop::handle_admin_get_settings)
                 .put(shop::handle_admin_put_settings),
         )
+        // Transactional email templates (JWT, admin) - list, preview,
+        // test-send, and override storage for every template susi sends.
         .route(
-            "/api/v1/shop/admin/email_preview",
-            post(shop::handle_admin_email_preview),
+            "/api/v1/admin/email_templates",
+            get(email_templates::handle_list).put(email_templates::handle_save),
         )
         .route(
-            "/api/v1/shop/admin/email_test",
-            post(shop::handle_admin_email_test),
+            "/api/v1/admin/email_templates/preview",
+            post(email_templates::handle_preview),
+        )
+        .route(
+            "/api/v1/admin/email_templates/test",
+            post(email_templates::handle_test),
         )
         // Site-wide settings (JWT) - analytics IDs and other site-level config.
         .route(
