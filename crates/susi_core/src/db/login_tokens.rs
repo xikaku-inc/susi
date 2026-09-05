@@ -276,4 +276,66 @@ impl LicenseDb {
         Ok(Some(username))
     }
 
+    /// Mint a short-lived single-use SSO ticket (kind = 'sso') that hands an
+    /// existing dashboard session to a site host via a URL fragment.
+    pub fn insert_sso_ticket(
+        &self,
+        token_hash: &str,
+        username: &str,
+        ttl_seconds: i64,
+    ) -> Result<(), LicenseError> {
+        let now = Utc::now();
+        let expires = now + Duration::seconds(ttl_seconds);
+        self.conn
+            .execute(
+                "INSERT INTO login_tokens (token_hash, username, device_fp, device_label, created_at, expires_at, kind)
+                 VALUES (?1, ?2, '', '', ?3, ?4, 'sso')",
+                params![token_hash, username, now.to_rfc3339(), expires.to_rfc3339()],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB insert: {}", e)))?;
+        Ok(())
+    }
+
+    /// Validate an SSO ticket and mark it consumed. Returns the username.
+    /// Single-use; unknown, used, or expired tickets return `Ok(None)`.
+    pub fn consume_sso_ticket(&self, token_hash: &str) -> Result<Option<String>, LicenseError> {
+        let row: Option<(String, String, Option<String>)> = self
+            .conn
+            .query_row(
+                "SELECT username, expires_at, used_at FROM login_tokens
+                 WHERE token_hash = ?1 AND kind = 'sso'",
+                params![token_hash],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?;
+
+        let Some((username, expires_at, used_at)) = row else {
+            return Ok(None);
+        };
+        if used_at.is_some() {
+            return Ok(None);
+        }
+        let expires: DateTime<Utc> = DateTime::parse_from_rfc3339(&expires_at)
+            .map_err(|e| LicenseError::Other(format!("Bad token expires_at: {}", e)))?
+            .with_timezone(&Utc);
+        if Utc::now() > expires {
+            return Ok(None);
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let n = self
+            .conn
+            .execute(
+                "UPDATE login_tokens SET used_at = ?1
+                 WHERE token_hash = ?2 AND used_at IS NULL AND kind = 'sso'",
+                params![now, token_hash],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))?;
+        if n == 0 {
+            return Ok(None);
+        }
+        Ok(Some(username))
+    }
+
 }

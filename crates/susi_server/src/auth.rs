@@ -438,6 +438,56 @@ pub(crate) async fn handle_magic_login(
     })))
 }
 
+/// Mint a short-lived single-use SSO ticket so the dashboard can hand the
+/// current session to a site's canonical host (different origin, same
+/// server). The dashboard appends it as a URL fragment; the site shell
+/// redeems it against its own origin for a session JWT.
+pub(crate) async fn handle_sso_ticket(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    let ticket = random_magic_token();
+    {
+        let db = state.db.lock();
+        let _ = db.purge_old_login_tokens();
+        db.insert_sso_ticket(&hash_token(&ticket), &principal.username, SSO_TICKET_TTL_SECS)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    }
+    Ok(Json(serde_json::json!({ "ticket": ticket })))
+}
+
+/// Redeem an SSO ticket for a session JWT on the site host's own origin.
+/// The ticket was minted by an authenticated session moments ago, so no
+/// further factors apply - this is a session transfer, not a login.
+pub(crate) async fn handle_sso_redeem(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(req): Json<SsoRedeemRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let ip = client_ip(peer, &headers);
+    check_login_rate_limit(&state, ip)?;
+    let username = {
+        let db = state.db.lock();
+        db.consume_sso_ticket(&hash_token(&req.ticket))
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+    }
+    .ok_or_else(|| {
+        error_response(StatusCode::UNAUTHORIZED, "Ticket is invalid, already used, or expired")
+    })?;
+    let role = {
+        let db = state.db.lock();
+        db.get_user_role(&username).unwrap_or_else(|_| "user".into())
+    };
+    let jwt = create_session_jwt(&state, &username, &summarize_user_agent(&req.device_label), ip)?;
+    Ok(Json(serde_json::json!({
+        "token": jwt,
+        "role": role,
+        "username": username,
+    })))
+}
+
 /// Server-side logout: revoke the session row so the JWT dies now, not at
 /// its 30-day expiry. Only needs a structurally valid JWT - revoking an
 /// already-revoked session is a no-op, not an error.

@@ -799,6 +799,10 @@ struct DownloadTicketClaims {
 const DOWNLOAD_TICKET_AUDIENCE: &str = "release-download";
 const DOWNLOAD_TICKET_TTL_SECS: i64 = 60;
 
+/// TTL for the single-use dashboard→site SSO handoff ticket - just long
+/// enough to survive the navigation it rides on.
+const SSO_TICKET_TTL_SECS: i64 = 120;
+
 /// Claims for the unsubscribe link embedded in every newsletter. A dedicated
 /// audience keeps a leaked token useless anywhere else in the API, and there is
 /// deliberately no `exp`: an unsubscribe link must keep working for as long as
@@ -1326,7 +1330,7 @@ fn is_public_api_route(method: &Method, path: &str) -> bool {
             post && matches!(
                 *ep,
                 "login" | "signin-code" | "request-code" | "magic-login"
-                    | "forgot-password" | "reset-password"
+                    | "forgot-password" | "reset-password" | "sso-redeem"
             )
         }
         ["activate"] | ["verify"] | ["deactivate"] => post,
@@ -1854,6 +1858,13 @@ struct MagicLoginRequest {
     token: String,
     #[serde(default)]
     device_fp: String,
+    #[serde(default)]
+    device_label: String,
+}
+
+#[derive(Deserialize)]
+struct SsoRedeemRequest {
+    ticket: String,
     #[serde(default)]
     device_label: String,
 }
@@ -3298,6 +3309,8 @@ async fn main() -> Result<()> {
         .route("/api/v1/auth/signin-code", post(auth::handle_signin_code_exchange))
         .route("/api/v1/auth/request-code", post(auth::handle_request_signin_code))
         .route("/api/v1/auth/magic-login", post(auth::handle_magic_login))
+        .route("/api/v1/auth/sso-ticket", post(auth::handle_sso_ticket))
+        .route("/api/v1/auth/sso-redeem", post(auth::handle_sso_redeem))
         .route("/api/v1/auth/forgot-password", post(auth::handle_forgot_password))
         .route("/api/v1/auth/reset-password", post(auth::handle_reset_password_submit))
         .route("/api/v1/auth/status", get(auth::handle_auth_status))

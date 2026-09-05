@@ -1817,7 +1817,10 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
 <div id="page-website" class="dash-page">
     <div style="margin-top:8px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
         <h2 style="font-size:16px;font-weight:600;">Website</h2>
-        <select id="websiteSiteSelect" onchange="switchWebsiteSite()"></select>
+        <div style="display:flex;align-items:center;gap:8px;">
+            <button class="secondary" onclick="openLiveSite()">Open site</button>
+            <select id="websiteSiteSelect" onchange="switchWebsiteSite()"></select>
+        </div>
     </div>
     <div class="ws-tabs" role="tablist">
         <button class="ws-tab active" data-website-tab="pages" onclick="websiteTab('pages')">Pages</button>
@@ -8340,8 +8343,23 @@ let websitePages = [];
 // Which site the website admin section operates on; every website/site-settings
 // call carries it explicitly since the dashboard host resolves to no site.
 let websiteSite = 'xikaku';
+let websiteSites = [];
 
 function wsQ(sep) { return (sep || '?') + 'site=' + encodeURIComponent(websiteSite); }
+
+// Open the site on its live host, carrying a single-use SSO ticket in the
+// URL fragment so the admin chrome shows up there without a second login.
+// The tab opens synchronously (popup blockers) and navigates once minted.
+function openLiveSite() {
+    const site = websiteSites.find(s => s.id === websiteSite);
+    const base = site && site.public_base ? site.public_base.replace(/\/+$/, '') : '';
+    if (!base) { toast('No public base URL configured for this site', 'error'); return; }
+    const win = window.open('', '_blank');
+    fetch(API + '/auth/sso-ticket', { method: 'POST', headers: authHeaders() })
+        .then(r => (r.ok ? r.json() : {}))
+        .then(d => { win.location = base + '/' + (d.ticket ? '#susi-sso=' + d.ticket : ''); })
+        .catch(() => { win.location = base + '/'; });
+}
 
 function switchWebsiteSite() {
     websiteSite = document.getElementById('websiteSiteSelect').value;
@@ -8429,6 +8447,7 @@ async function loadWebsitePages() {
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
         const data = await resp.json();
         websitePages = data.pages || [];
+        if (Array.isArray(data.sites)) websiteSites = data.sites;
         const sel = document.getElementById('websiteSiteSelect');
         if (sel && !sel.options.length && Array.isArray(data.sites)) {
             sel.innerHTML = data.sites.map(s =>

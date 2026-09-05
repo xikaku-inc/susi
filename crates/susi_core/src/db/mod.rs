@@ -2183,6 +2183,24 @@ mod tests {
     }
 
     #[test]
+    fn test_sso_ticket_consume_once() {
+        let db = test_db();
+        db.seed_admin("hash").unwrap();
+        db.insert_sso_ticket("sso1", "admin", 120).unwrap();
+        assert_eq!(db.consume_sso_ticket("sso1").unwrap().as_deref(), Some("admin"));
+        // Second consume returns None (single-use).
+        assert!(db.consume_sso_ticket("sso1").unwrap().is_none());
+        // Expired ticket never redeems.
+        db.insert_sso_ticket("sso2", "admin", -1).unwrap();
+        assert!(db.consume_sso_ticket("sso2").unwrap().is_none());
+        // SSO tickets are invisible to the device/signin-code consumer and
+        // vice versa (kind scoping).
+        db.insert_sso_ticket("sso3", "admin", 120).unwrap();
+        assert!(db.consume_login_token("sso3").unwrap().is_none());
+        assert_eq!(db.consume_sso_ticket("sso3").unwrap().as_deref(), Some("admin"));
+    }
+
+    #[test]
     fn test_api_token_lifecycle() {
         let db = test_db();
         db.seed_admin("hash").unwrap();
