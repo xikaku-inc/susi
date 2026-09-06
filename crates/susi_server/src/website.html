@@ -2056,7 +2056,7 @@ function renderEditor() {
         ? '<label>Published</label><input id="editPublished" type="date" style="width:150px;">' +
           '<label>Author</label><select id="editAuthor" style="min-width:160px;">' + buildAuthorOptions(author) + '</select>'
         : '<label>Parent</label><select id="editParent" style="min-width:200px;">' + buildParentOptions(parent, currentSlug) + '</select>' +
-          '<label>Order</label><input id="editOrd" type="number" style="width:80px;">';
+          '<label>Order</label><input id="editOrd" type="text" inputmode="numeric" style="width:80px;">';
     c.innerHTML =
         '<div class="edit-meta-row">' +
             '<label>Title</label><input id="editTitle" type="text" style="flex:1;min-width:200px;">' +
