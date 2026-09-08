@@ -1830,8 +1830,9 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
     </div>
 
     <div class="ws-tab-panel active" data-website-panel="pages">
-    <div style="margin-bottom:12px;display:flex;justify-content:flex-end;">
-        <button onclick="showWebsitePageModal()">+ New Page</button>
+    <div style="margin-bottom:12px;display:flex;justify-content:flex-end;gap:8px;">
+        <button onclick="showWebsitePageModal('page')">+ New Page</button>
+        <button onclick="showWebsitePageModal('post')">+ New Post</button>
     </div>
     <div class="card" style="padding:0;">
         <table style="width:100%;" id="websitePagesTable">
@@ -2091,7 +2092,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
 <!-- New Website Page Modal -->
 <div id="websitePageModal" class="modal-overlay" onclick="if(event.target===this&&_overlayMouseDownOnSelf)closeWebsitePageModal()">
     <div class="modal">
-        <h2>New Page</h2>
+        <h2 id="websitePageModalTitle">New Page</h2>
         <div class="modal-body">
             <div class="form-row">
                 <label>Slug</label>
@@ -2101,7 +2102,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                 <label>Title</label>
                 <input type="text" id="websitePageTitle">
             </div>
-            <div class="form-row" style="display:grid;grid-template-columns:1fr 100px;gap:12px;">
+            <div class="form-row" id="websitePagePlacement" style="display:grid;grid-template-columns:1fr 100px;gap:12px;">
                 <div><label>Parent slug (optional)</label><input type="text" id="websitePageParent"></div>
                 <div><label>Ord</label><input type="number" id="websitePageOrd" value="0"></div>
             </div>
@@ -8648,7 +8649,12 @@ async function saveSite() {
     } catch (e) { errEl.textContent = e.message; errEl.style.display = ''; }
 }
 
-function showWebsitePageModal() {
+let websitePageKind = 'page';
+
+function showWebsitePageModal(kind) {
+    websitePageKind = kind === 'post' ? 'post' : 'page';
+    document.getElementById('websitePageModalTitle').textContent = websitePageKind === 'post' ? 'New Post' : 'New Page';
+    document.getElementById('websitePagePlacement').style.display = websitePageKind === 'post' ? 'none' : 'grid';
     document.getElementById('websitePageSlug').value = '';
     document.getElementById('websitePageTitle').value = '';
     document.getElementById('websitePageParent').value = '';
@@ -8684,12 +8690,15 @@ async function createWebsitePage() {
         errEl.style.display = '';
         return;
     }
+    const isPost = websitePageKind === 'post';
     const body = {
         title,
-        body_md: '# ' + title + '\n\nWrite your page content here.\n',
-        parent_slug: parent || null,
-        ord,
+        body_md: '# ' + title + '\n\nWrite your ' + websitePageKind + ' content here.\n',
+        parent_slug: isPost ? null : (parent || null),
+        ord: isPost ? 999 : ord,
         meta_description: '',
+        page_kind: websitePageKind,
+        hidden: isPost,
     };
     try {
         const resp = await fetch(API + '/website/pages/' + encodeURIComponent(slug) + wsQ(), {
@@ -8705,9 +8714,9 @@ async function createWebsitePage() {
         }
         closeWebsitePageModal();
         // Straight into the inline editor to write the content.
-        location.href = '/site/' + encodeURIComponent(slug) + wsQ();
+        location.href = '/site' + (isPost ? '/blog/' : '/') + encodeURIComponent(slug) + wsQ();
     } catch (e) {
-        errEl.textContent = e.message || 'Failed to create page';
+        errEl.textContent = e.message || 'Failed to create ' + websitePageKind;
         errEl.style.display = '';
     }
 }
