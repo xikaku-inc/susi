@@ -1286,10 +1286,11 @@ function updateAdminChrome() {
         document.body.classList.toggle('admin-topbar', isAdmin);
         renderCartBadge();
     }
-    // Back to the backend: same origin under the dashboard preview, the
-    // configured dashboard URL on a canonical host.
+    // Back to this site's Website section: same origin under the dashboard
+    // preview, the configured dashboard URL on a canonical host.
     const dashBtn = document.getElementById('dashBtn');
-    const dashHref = SITE_PATH_PREFIX ? '/' : (SITE.dashboard_url || '');
+    const dashBase = SITE_PATH_PREFIX ? '' : (SITE.dashboard_url || '');
+    const dashHref = (SITE_PATH_PREFIX || dashBase) ? dashBase + '/#/website/' + encodeURIComponent(SITE.id) : '';
     dashBtn.href = dashHref || '/';
     dashBtn.style.display = (isAdmin && dashHref) ? '' : 'none';
     document.getElementById('navLogoutBtn').style.display = isAdmin ? '' : 'none';

@@ -3104,6 +3104,7 @@ function route() {
     if (authToken) {
         if (target === 'licenses') setLicenseRoute(segs[1] || null);
         if (target === 'workspaces') setWorkspaceRoute(segs[1] || null, segs[2] || null, segs[3] || null);
+        if (target === 'website' && websiteSiteFromHash()) switchWebsiteSite();
     }
 }
 
@@ -3735,6 +3736,7 @@ function enterDashboard() {
 
     loadFeatures();
     if (isAdmin) {
+        websiteSiteFromHash();
         loadLicenses();
         loadProducts();
         loadShop();
@@ -8361,8 +8363,24 @@ function openLiveSite() {
         .catch(() => { win.location = base + '/'; });
 }
 
+// #/website/<site-id> (the site chrome's Dashboard button) selects that
+// site. Returns true when it changed the active site.
+function websiteSiteFromHash() {
+    const m = location.hash.match(/^#\/website\/([^/]+)/);
+    if (!m) return false;
+    let id;
+    try { id = decodeURIComponent(m[1]); } catch (_) { return false; }
+    if (id === websiteSite) return false;
+    websiteSite = id;
+    const sel = document.getElementById('websiteSiteSelect');
+    if (sel && sel.options.length) sel.value = id;
+    return true;
+}
+
 function switchWebsiteSite() {
-    websiteSite = document.getElementById('websiteSiteSelect').value;
+    const sel = document.getElementById('websiteSiteSelect');
+    if (sel.options.length) websiteSite = sel.value;
+    if (location.hash.startsWith('#/website')) history.replaceState(null, '', '#/website/' + encodeURIComponent(websiteSite));
     const shopSel = document.getElementById('shopSiteSelect');
     if (shopSel && shopSel.options.length) shopSel.value = websiteSite;
     loadWebsitePages();
