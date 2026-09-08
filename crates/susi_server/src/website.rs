@@ -1869,8 +1869,10 @@ pub(crate) fn render_body_html(body_md: &str) -> String {
 
 /// Rewrite tables whose header cells are all empty - the "grid table"
 /// authoring convention for side-by-side content - into div-based CSS grids
-/// that reflow on narrow screens. Mirrors the client-side renderer in
-/// website.html, which emits the same `div.grid.cols-N` markup.
+/// that reflow on narrow screens. Real tables are wrapped in a
+/// `div.table-scroll` so wide ones scroll horizontally instead of
+/// overflowing the viewport on phones. Mirrors the client-side renderers in
+/// website.html and docs.html, which emit the same markup.
 fn grid_tables_to_divs<'a>(
     parser: impl Iterator<Item = pulldown_cmark::Event<'a>>,
 ) -> Vec<pulldown_cmark::Event<'a>> {
@@ -1906,8 +1908,10 @@ fn grid_tables_to_divs<'a>(
             }
         }
         if !head_empty || cols < 2 {
+            out.push(Event::Html("<div class=\"table-scroll\">".into()));
             out.push(ev);
             out.extend(buf);
+            out.push(Event::Html("</div>\n".into()));
             continue;
         }
         let mut div = format!("<div class=\"grid cols-{cols}\">");
@@ -4636,7 +4640,8 @@ mod tests {
     fn normal_table_still_renders_as_table() {
         let md = "| A | B |\n| --- | --- |\n| 1 | 2 |\n";
         let html = render_body_html(md);
-        assert!(html.contains("<table"), "got: {}", html);
+        assert!(html.contains(r#"<div class="table-scroll"><table"#), "got: {}", html);
+        assert!(html.contains("</table>\n</div>"), "got: {}", html);
         assert!(!html.contains("class=\"grid"), "got: {}", html);
     }
 

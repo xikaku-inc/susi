@@ -275,6 +275,9 @@ body {
     margin-left: auto;
     margin-right: auto;
     width: 100%;
+    /* Grid items default to min-width:auto, so a wide table would stretch
+       the 1fr column past the viewport instead of scrolling in .table-scroll. */
+    min-width: 0;
 }
 .content.full { max-width: none; }
 .content h1 { font-size: 28px; margin: 0 0 16px; font-weight: 600; line-height: 1.3; }
