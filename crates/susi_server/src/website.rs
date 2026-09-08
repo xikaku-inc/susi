@@ -482,6 +482,10 @@ pub struct UpsertPageRequest {
     // body image, then the site card.
     #[serde(default)]
     pub og_image: Option<String>,
+    // Omitted preserves the current flag (new rows: visible). A hidden post
+    // is a draft: it keeps an empty publish date until it first goes live.
+    #[serde(default)]
+    pub hidden: Option<bool>,
 }
 
 pub async fn handle_upsert_page(
@@ -497,7 +501,7 @@ pub async fn handle_upsert_page(
     require_admin_full(&state, &principal)?;
     safe_slug(&slug)?;
 
-    let (id, url) = {
+    let (id, url, hidden) = {
         let mut db = state.db.lock();
         let existing = db.get_website_page(site.id, &lang, &slug).map_err(db_err)?;
         let page_kind = req
@@ -508,6 +512,7 @@ pub async fn handle_upsert_page(
         if page_kind != "page" && page_kind != "post" {
             return Err(error_response(StatusCode::BAD_REQUEST, "page_kind must be 'page' or 'post'"));
         }
+        let hidden = req.hidden.or_else(|| existing.as_ref().map(|r| r.6)).unwrap_or(false);
         let mut published_at = req
             .published_at
             .clone()
@@ -517,7 +522,9 @@ pub async fn handle_upsert_page(
             .to_string();
         if page_kind == "post" {
             if published_at.is_empty() {
-                published_at = chrono::Utc::now().format("%Y-%m-%d").to_string();
+                if !hidden {
+                    published_at = chrono::Utc::now().format("%Y-%m-%d").to_string();
+                }
             } else if chrono::NaiveDate::parse_from_str(&published_at, "%Y-%m-%d").is_err() {
                 return Err(error_response(StatusCode::BAD_REQUEST, "published_at must be YYYY-MM-DD"));
             }
@@ -602,6 +609,9 @@ pub async fn handle_upsert_page(
             Some(&principal.username),
         )
         .map_err(db_err)?;
+        if let Some(h) = req.hidden {
+            db.set_website_page_hidden(site.id, &lang, &slug, h).map_err(db_err)?;
+        }
         let url = if page_kind == "post" {
             canonical_post_url(site, &lang, &slug)
         } else if lang.is_empty() {
@@ -610,10 +620,12 @@ pub async fn handle_upsert_page(
         } else {
             canonical_page_url(site, &lang, &slug, false)
         };
-        (id, url)
+        (id, url, hidden)
     };
     invalidate_page_cache();
-    ping_indexnow(&state, site, vec![url]);
+    if !hidden {
+        ping_indexnow(&state, site, vec![url]);
+    }
     Ok(Json(json!({ "id": id, "slug": slug })))
 }
 
@@ -890,7 +902,13 @@ pub async fn handle_set_page_hidden(
     let (updated, was_post) = {
         let db = state.db.lock();
         let was_post = db.get_website_page(site.id, &lang, &slug).ok().flatten().map(|r| r.7 == "post").unwrap_or(false);
-        (db.set_website_page_hidden(site.id, &lang, &slug, req.hidden).map_err(db_err)?, was_post)
+        let updated = db.set_website_page_hidden(site.id, &lang, &slug, req.hidden).map_err(db_err)?;
+        // Publishing a draft post dates it now; a re-shown post keeps its date.
+        if updated && was_post && !req.hidden {
+            let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+            db.set_website_post_date_if_unset(site.id, &lang, &slug, &today).map_err(db_err)?;
+        }
+        (updated, was_post)
     };
     if !updated {
         return Err(error_response(StatusCode::NOT_FOUND, "Page not found"));

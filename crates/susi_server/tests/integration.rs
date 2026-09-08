@@ -4829,6 +4829,54 @@ fn test_blog_posts() {
     assert_eq!(published.len(), 10, "published_at must default to a YYYY-MM-DD date, got {:?}", published);
 }
 
+#[test]
+fn test_draft_post_publish_dates() {
+    let server = TestServer::start();
+    let token = server.admin_token();
+    let http = server.http();
+    let url = format!("{}/website/pages/wip", server.api_url);
+    let get_admin = || http.get(&url).bearer_auth(&token).send().expect("get").json::<Value>().unwrap();
+
+    // A post created hidden is a draft: admin-only and without a publish date.
+    let resp = http.put(&url).bearer_auth(&token)
+        .json(&json!({ "title": "Wip", "body_md": "# Wip\n\nfirst", "page_kind": "post", "hidden": true }))
+        .send().expect("create draft");
+    assert_eq!(resp.status().as_u16(), 200, "{}", resp.text().unwrap_or_default());
+    let body = get_admin();
+    assert_eq!(body["hidden"], json!(true));
+    assert_eq!(body["page_kind"], json!("post"));
+    assert_eq!(body["published_at"], json!(""), "draft must stay undated");
+    assert_eq!(http.get(&url).send().expect("anon").status().as_u16(), 404);
+
+    // Editing the draft (kind and hidden omitted) keeps it a hidden, undated post.
+    let resp = http.put(&url).bearer_auth(&token)
+        .json(&json!({ "title": "Wip", "body_md": "# Wip\n\nsecond" }))
+        .send().expect("edit draft");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = get_admin();
+    assert_eq!(body["hidden"], json!(true));
+    assert_eq!(body["page_kind"], json!("post"));
+    assert_eq!(body["published_at"], json!(""));
+
+    // Publishing dates the post today; hiding and showing it again keeps that date.
+    let show = |hidden: bool| {
+        let resp = http.post(format!("{}/visibility", url)).bearer_auth(&token)
+            .json(&json!({ "hidden": hidden })).send().expect("visibility");
+        assert_eq!(resp.status().as_u16(), 200);
+    };
+    show(false);
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    assert_eq!(get_admin()["published_at"], json!(today));
+    assert_eq!(http.get(&url).send().expect("anon").status().as_u16(), 200);
+    let resp = http.put(&url).bearer_auth(&token)
+        .json(&json!({ "title": "Wip", "body_md": "# Wip\n\nthird", "published_at": "2026-01-02" }))
+        .send().expect("backdate");
+    assert_eq!(resp.status().as_u16(), 200);
+    show(true);
+    show(false);
+    assert_eq!(get_admin()["published_at"], json!("2026-01-02"), "re-showing must not re-date");
+}
+
 /// Path-level redirect map + bulk page import: the importer creates pages,
 /// assets and legacy-URL redirects per site in one multipart call, and the
 /// mapped WordPress-style paths 301 to their new homes.

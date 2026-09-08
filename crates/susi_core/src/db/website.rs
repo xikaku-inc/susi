@@ -416,6 +416,17 @@ impl LicenseDb {
         Ok(n > 0)
     }
 
+    /// Stamp a post's publish date if it has none yet (first publication).
+    pub fn set_website_post_date_if_unset(&self, site: &str, lang: &str, slug: &str, date: &str) -> Result<(), LicenseError> {
+        self.conn
+            .execute(
+                "UPDATE website_pages SET published_at = ?1 WHERE site = ?2 AND lang = ?3 AND slug = ?4 AND page_kind = 'post' AND published_at = ''",
+                params![date, site, lang, slug],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB set published_at: {}", e)))?;
+        Ok(())
+    }
+
     pub fn delete_website_page(&self, site: &str, lang: &str, slug: &str) -> Result<bool, LicenseError> {
         let n = self
             .conn

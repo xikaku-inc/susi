@@ -1912,6 +1912,7 @@ function renderPage() {
         ? '<div style="display:inline-block;margin-bottom:14px;padding:4px 12px;border-radius:999px;'
           + 'background:rgba(251,191,36,0.15);color:#b45309;font-size:12px;font-weight:600;">'
           + 'Hidden - this page is not visible to the public</div>'
+          + '<button class="btn" style="margin:0 0 14px 8px;" onclick="publishPage()">Publish</button>'
         : '';
     // Same for a retired page: only an admin ever renders one, everyone else
     // has already been redirected away.
@@ -2062,6 +2063,10 @@ function renderEditor() {
         '<div class="edit-meta-row">' +
             '<label>Title</label><input id="editTitle" type="text" style="flex:1;min-width:200px;">' +
             '<label>Slug</label><input id="editSlug" type="text" style="width:160px;">' +
+            '<label>Kind</label><select id="editKind" onchange="switchKind(this.value)">' +
+                '<option value="page"' + (isPost ? '' : ' selected') + '>Page</option>' +
+                '<option value="post"' + (isPost ? ' selected' : '') + '>Post</option>' +
+            '</select>' +
             placementFields +
         '</div>' +
         '<div class="edit-meta-row" style="margin-top:8px;">' +
@@ -2104,6 +2109,13 @@ function renderEditor() {
     document.getElementById('editOgImage').value = ogImage;
     document.getElementById('editRedirect').value = redirect;
     initEasyMDE(body);
+}
+
+// Re-render the editor for the other kind, carrying the current edits along.
+function switchKind(kind) {
+    editDraft = Object.assign(editorValues(), { page_kind: kind });
+    if (easymde) { try { easymde.toTextArea(); } catch (e) {} easymde = null; }
+    renderEditor();
 }
 
 // Authors are loaded lazily on first edit of a post - the list is admin-only,
@@ -2292,6 +2304,7 @@ function editorValues() {
     const publishedEl = document.getElementById('editPublished');
     const authorEl = document.getElementById('editAuthor');
     const redirectEl = document.getElementById('editRedirect');
+    const kindEl = document.getElementById('editKind');
     return {
         title: document.getElementById('editTitle').value.trim(),
         parent: parentEl ? parentEl.value.trim() : '',
@@ -2300,7 +2313,7 @@ function editorValues() {
         meta_description: metaDescEl ? metaDescEl.value.trim() : '',
         og_image: ogImageEl ? ogImageEl.value.trim() : ((currentPage && currentPage.og_image) || ''),
         slug: document.getElementById('editSlug').value.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '-'),
-        page_kind: (currentPage && currentPage.page_kind) || 'page',
+        page_kind: kindEl ? kindEl.value : ((currentPage && currentPage.page_kind) || 'page'),
         published_at: publishedEl ? publishedEl.value : ((currentPage && currentPage.published_at) || ''),
         author_username: authorEl ? authorEl.value : ((currentPage && currentPage.author_username) || ''),
         redirect_to: redirectEl ? redirectEl.value.trim() : ((currentPage && currentPage.redirect_to) || ''),
@@ -2464,8 +2477,9 @@ async function newPage() {
     navigateTo(cleanSlug);
 }
 
-// Create a blog post: kind 'post', published today (server default), no nav
-// placement. Reachable at /blog/{slug} and listed on /blog.
+// Create a blog post as a hidden draft: kind 'post', no nav placement, no
+// publish date until it is published. Reachable at /blog/{slug} (admins only
+// while hidden) and listed on /blog.
 async function newPost() {
     if (!isPotentialAdmin()) { toast('Login required', 'error'); return; }
     const slug = prompt('New post slug (lowercase, no spaces):');
@@ -2476,11 +2490,26 @@ async function newPost() {
     const resp = await fetch(API + '/website/pages/' + encodeURIComponent(cleanSlug) + siteQ(), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken() },
-        body: JSON.stringify({ title, body_md: '# ' + title + '\n\n', parent_slug: null, ord: 999, page_kind: 'post' }),
+        body: JSON.stringify({ title, body_md: '# ' + title + '\n\n', parent_slug: null, ord: 999, page_kind: 'post', hidden: true }),
     });
     if (!resp.ok) { toast('Create failed', 'error'); return; }
+    toast('Draft created', 'success');
     await loadIndex();
     navigateTo(cleanSlug);
+}
+
+// Make a hidden page public. A draft post gets today as its publish date.
+async function publishPage() {
+    if (!currentPage || !isPotentialAdmin()) return;
+    const resp = await fetch(API + '/website/pages/' + encodeURIComponent(currentSlug) + '/visibility' + siteQ(), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken() },
+        body: JSON.stringify({ hidden: false }),
+    });
+    if (!resp.ok) { toast('Publish failed', 'error'); return; }
+    toast('Published', 'success');
+    await loadIndex();
+    await loadPage(currentSlug);
 }
 
 // ---------------------------------------------------------------------------
