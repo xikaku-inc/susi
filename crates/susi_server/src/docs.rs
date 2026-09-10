@@ -1146,7 +1146,7 @@ pub(crate) fn derive_title(slug: &str, body: &str) -> String {
 use axum::body::Bytes;
 use std::sync::LazyLock;
 
-use crate::website::{derive_description, html_escape, iso8601_z, render_body_html};
+use crate::website::{derive_description, html_escape, iso8601_z, json_escape, render_body_html};
 
 /// Canonical public base for documentation URLs (sitemap, canonical, llms).
 pub(crate) const DOCS_PUBLIC_BASE: &str = "https://susi.lp-research.com";
@@ -1249,7 +1249,7 @@ fn docs_seo_head(title: &str, description: &str, canonical: &str, updated_at: &s
     let date_mod = if updated_at.is_empty() {
         String::new()
     } else {
-        format!(",\"dateModified\":\"{}\"", html_escape(&iso8601_z(updated_at)))
+        format!(",\"dateModified\":\"{}\"", json_escape(&iso8601_z(updated_at)))
     };
     head.push_str(&format!(
         concat!(
@@ -1259,9 +1259,9 @@ fn docs_seo_head(title: &str, description: &str, canonical: &str, updated_at: &s
             r#""name":"Xikaku","url":"https://xikaku.com"}}}}</script>"#,
             "\n",
         ),
-        h = html_escape(title),
-        d = html_escape(description),
-        c = html_escape(canonical),
+        h = json_escape(title),
+        d = json_escape(description),
+        c = json_escape(canonical),
         dm = date_mod,
     ));
     // One-shot boot info so the viewer routes to this page without a hash.

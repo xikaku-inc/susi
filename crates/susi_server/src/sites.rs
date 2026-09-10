@@ -332,17 +332,17 @@ pub fn org_jsonld(site: &SiteConfig) -> &'static str {
 }
 
 fn build_org_jsonld(site: &SiteConfig) -> String {
-    use crate::website::html_escape;
+    use crate::website::json_escape;
     let same_as = site
         .social_links
         .iter()
-        .map(|u| format!("\"{}\"", html_escape(u)))
+        .map(|u| format!("\"{}\"", json_escape(u)))
         .collect::<Vec<_>>()
         .join(",");
     let logo = if site.logo_url.is_empty() {
         String::new()
     } else {
-        format!(r#""logo":"{}","#, html_escape(site.logo_url))
+        format!(r#""logo":"{}","#, json_escape(site.logo_url))
     };
     let area = if site.area_served.is_empty() {
         String::new()
@@ -361,15 +361,15 @@ fn build_org_jsonld(site: &SiteConfig) -> String {
     let legal = if site.org_legal_name.is_empty() {
         String::new()
     } else {
-        format!(r#""legalName":"{}","#, html_escape(site.org_legal_name))
+        format!(r#""legalName":"{}","#, json_escape(site.org_legal_name))
     };
     let address = if site.addr_locality.is_empty() && site.addr_country.is_empty() {
         String::new()
     } else {
         format!(
             r#","address":{{"@type":"PostalAddress","addressLocality":"{}","addressCountry":"{}"}}"#,
-            html_escape(site.addr_locality),
-            html_escape(site.addr_country),
+            json_escape(site.addr_locality),
+            json_escape(site.addr_country),
         )
     };
     let contact = if site.contact_email.is_empty() {
@@ -377,7 +377,7 @@ fn build_org_jsonld(site: &SiteConfig) -> String {
     } else {
         format!(
             r#","email":"{email}","contactPoint":{{"@type":"ContactPoint","contactType":"customer support","email":"{email}"{area}}}"#,
-            email = html_escape(site.contact_email),
+            email = json_escape(site.contact_email),
             area = area,
         )
     };
@@ -388,11 +388,11 @@ fn build_org_jsonld(site: &SiteConfig) -> String {
     };
     format!(
         r#"{{"@context":"https://schema.org","@type":"Organization","name":"{name}",{legal}"url":"{url}",{logo}"slogan":"{slogan}"{address}{contact}{same_as}}}"#,
-        name = html_escape(site.name),
+        name = json_escape(site.name),
         legal = legal,
-        url = html_escape(site.public_base),
+        url = json_escape(site.public_base),
         logo = logo,
-        slogan = html_escape(site.tagline),
+        slogan = json_escape(site.tagline),
         address = address,
         contact = contact,
         same_as = same_as,
@@ -456,5 +456,18 @@ mod tests {
         assert!(!j.contains("contactPoint"));
         assert!(j.contains(r#""sameAs":["https://soundcloud.com/x"]"#));
         serde_json::from_str::<serde_json::Value>(j).expect("org JSON-LD must stay valid JSON");
+    }
+
+    #[test]
+    fn org_jsonld_uses_json_escaping_not_html_entities() {
+        let def: SiteDef = serde_json::from_str(
+            r#"{"name":"K's \"Site\"","tagline":"a & b","hosts":["k.example.com"],"public_base":"https://k.example.com","social_links":["https://scholar.example.com/c?user=1&hl=en"]}"#,
+        )
+        .unwrap();
+        let j = org_jsonld(build_config("ktest2", &def, false));
+        let v: serde_json::Value = serde_json::from_str(j).unwrap();
+        assert_eq!(v["name"], "K's \"Site\"");
+        assert_eq!(v["slogan"], "a & b");
+        assert_eq!(v["sameAs"][0], "https://scholar.example.com/c?user=1&hl=en");
     }
 }

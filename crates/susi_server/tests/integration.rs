@@ -4684,7 +4684,7 @@ fn test_blog_posts() {
 
     // Two published posts, one hidden draft, one regular page as home.
     for (slug, title, body, published, meta) in [
-        ("first-post", "First post", "# First post\n\nHello from the first post body.", "2026-07-01", "First post excerpt"),
+        ("first-post", "First post", "# First post\n\nHello from the first post body.", "2026-07-01", "Klaus's first post & excerpt"),
         ("second-post", "Second post", "# Second post\n\nFresh news in the second post.", "2026-07-20", ""),
         ("draft-post", "Draft post", "# Draft post\n\nNot ready yet.", "2026-07-25", ""),
     ] {
@@ -4734,6 +4734,15 @@ fn test_blog_posts() {
     assert!(ssr.contains(r#"article:published_time" content="2026-07-01""#));
     assert!(ssr.contains("July 1, 2026"), "post date line missing");
     assert!(ssr.contains("Hello from the first post body."));
+    // Meta tags are HTML-escaped; JSON-LD is JSON-escaped, not entity-encoded.
+    assert!(ssr.contains(r#"<meta property="og:description" content="Klaus&#39;s first post &amp; excerpt">"#));
+    let ld = ssr.split(r#"<script type="application/ld+json">"#)
+        .map(|s| s.split("</script>").next().unwrap())
+        .find(|s| s.contains(r#""@type":"BlogPosting""#))
+        .expect("BlogPosting block");
+    let ld: Value = serde_json::from_str(ld).expect("BlogPosting JSON-LD must parse");
+    assert_eq!(ld["description"], json!("Klaus's first post & excerpt"));
+    assert_eq!(ld["headline"], json!("First post"));
 
     // A regular page is not served from the /blog/ path.
     let ssr = http.get(format!("{}/site/blog/home", server.url))

@@ -1444,6 +1444,26 @@ pub(crate) fn iso8601_z(sqlite_ts: &str) -> String {
     format!("{}Z", sqlite_ts.replacen(' ', "T", 1))
 }
 
+/// Escape a string for use inside a JSON-LD string literal. `<` is emitted
+/// as a unicode escape so the value can never close the surrounding
+/// `<script>` tag.
+pub(crate) fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '<' => out.push_str("\\u003c"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 pub(crate) fn html_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -1989,8 +2009,8 @@ fn build_breadcrumbs(
                 items.push(format!(
                     r#"{{"@type":"ListItem","position":{},"name":"{}","item":"{}"}}"#,
                     pos,
-                    html_escape(&home_page.1),
-                    html_escape(&canonical_page_url(site, lang, hs, true)),
+                    json_escape(&home_page.1),
+                    json_escape(&canonical_page_url(site, lang, hs, true)),
                 ));
                 pos += 1;
             }
@@ -1999,15 +2019,15 @@ fn build_breadcrumbs(
         items.push(format!(
             r#"{{"@type":"ListItem","position":{},"name":"{}","item":"{}"}}"#,
             pos,
-            html_escape(blog_title),
-            html_escape(&format!("{}{}/blog", site.public_base, lang_prefix(lang))),
+            json_escape(blog_title),
+            json_escape(&format!("{}{}/blog", site.public_base, lang_prefix(lang))),
         ));
         pos += 1;
         items.push(format!(
             r#"{{"@type":"ListItem","position":{},"name":"{}","item":"{}"}}"#,
             pos,
-            html_escape(&by_slug[slug].1),
-            html_escape(&canonical_post_url(site, lang, slug)),
+            json_escape(&by_slug[slug].1),
+            json_escape(&canonical_post_url(site, lang, slug)),
         ));
         return format!(
             r#"{{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{}]}}"#,
@@ -2034,8 +2054,8 @@ fn build_breadcrumbs(
                 items.push(format!(
                     r#"{{"@type":"ListItem","position":{},"name":"{}","item":"{}"}}"#,
                     pos,
-                    html_escape(&home_page.1),
-                    html_escape(&canonical_page_url(site, lang, hs, true)),
+                    json_escape(&home_page.1),
+                    json_escape(&canonical_page_url(site, lang, hs, true)),
                 ));
                 pos += 1;
             }
@@ -2046,8 +2066,8 @@ fn build_breadcrumbs(
         items.push(format!(
             r#"{{"@type":"ListItem","position":{},"name":"{}","item":"{}"}}"#,
             pos,
-            html_escape(&p.1),
-            html_escape(&canonical_page_url(site, lang, &p.0, is_home)),
+            json_escape(&p.1),
+            json_escape(&canonical_page_url(site, lang, &p.0, is_home)),
         ));
         pos += 1;
     }
@@ -2105,54 +2125,54 @@ fn render_seo_head(
         let author_ld = match post_author {
             Some(name) => format!(
                 r#"{{"@type":"Person","name":"{}"}}"#,
-                html_escape(name),
+                json_escape(name),
             ),
             None => format!(
                 r#"{{"@type":"Organization","name":"{}","url":"{}"}}"#,
-                html_escape(site.name),
-                html_escape(site.public_base),
+                json_escape(site.name),
+                json_escape(site.public_base),
             ),
         };
         let publisher_logo = if site.logo_url.is_empty() {
             String::new()
         } else {
-            format!(r#","logo":{{"@type":"ImageObject","url":"{}"}}"#, html_escape(site.logo_url))
+            format!(r#","logo":{{"@type":"ImageObject","url":"{}"}}"#, json_escape(site.logo_url))
         };
         // Google's Article rich result wants an image on the BlogPosting;
         // reuse the page's og:image so both channels stay in sync.
         let image_ld = match og_image.as_deref() {
-            Some(img) => format!(r#","image":"{}""#, html_escape(img)),
+            Some(img) => format!(r#","image":"{}""#, json_escape(img)),
             None => String::new(),
         };
         format!(
             r#"{{"@context":"https://schema.org","@type":"BlogPosting","headline":"{title}","description":"{desc}","url":"{url}"{image_ld},"mainEntityOfPage":{{"@type":"WebPage","@id":"{url}"}},"datePublished":"{published}","dateModified":"{date}","author":{author_ld},"publisher":{{"@type":"Organization","name":"{site_name}","url":"{base}"{publisher_logo}}}}}"#,
-            title = html_escape(page_title),
-            desc = html_escape(description),
-            url = html_escape(&canonical),
+            title = json_escape(page_title),
+            desc = json_escape(description),
+            url = json_escape(&canonical),
             image_ld = image_ld,
-            published = html_escape(published),
-            date = html_escape(&date_modified),
+            published = json_escape(published),
+            date = json_escape(&date_modified),
             author_ld = author_ld,
-            site_name = html_escape(site.name),
-            base = html_escape(site.public_base),
+            site_name = json_escape(site.name),
+            base = json_escape(site.public_base),
             publisher_logo = publisher_logo,
         )
     } else if is_home {
         format!(
             r#"{{"@context":"https://schema.org","@type":"WebSite","name":"{name}","url":"{url}","description":"{desc}","publisher":{{"@type":"Organization","name":"{name}","url":"{url}"}}}}"#,
-            name = html_escape(site.name),
-            url = html_escape(site.public_base),
-            desc = html_escape(description),
+            name = json_escape(site.name),
+            url = json_escape(site.public_base),
+            desc = json_escape(description),
         )
     } else {
         format!(
             r#"{{"@context":"https://schema.org","@type":"WebPage","name":"{title}","description":"{desc}","url":"{url}","dateModified":"{date}","isPartOf":{{"@type":"WebSite","name":"{site_name}","url":"{base}"}},"publisher":{{"@type":"Organization","name":"{site_name}","url":"{base}"}}}}"#,
-            title = html_escape(page_title),
-            desc = html_escape(description),
-            url = html_escape(&canonical),
-            date = html_escape(&date_modified),
-            site_name = html_escape(site.name),
-            base = html_escape(site.public_base),
+            title = json_escape(page_title),
+            desc = json_escape(description),
+            url = json_escape(&canonical),
+            date = json_escape(&date_modified),
+            site_name = json_escape(site.name),
+            base = json_escape(site.public_base),
         )
     };
 
@@ -2287,16 +2307,16 @@ pub(crate) fn product_jsonld_block(
     let img = product_image_abs_url(site, image_asset.as_deref());
     Some(format!(
         r#"{{"@context":"https://schema.org","@type":"Product","name":"{name}","description":"{desc}","sku":"{sku}","brand":{{"@type":"Brand","name":"{brand}"}},"image":"{img}","offers":{{"@type":"Offer","price":"{price}","priceCurrency":"{cur}","availability":"{avail}","url":"{url}","seller":{{"@type":"Organization","name":"{brand}","url":"{base}"}}}}}}"#,
-        name = html_escape(title),
-        desc = html_escape(&derive_description(desc_md)),
-        sku = html_escape(sku),
-        brand = html_escape(site.name),
-        img = html_escape(&img),
+        name = json_escape(title),
+        desc = json_escape(&derive_description(desc_md)),
+        sku = json_escape(sku),
+        brand = json_escape(site.name),
+        img = json_escape(&img),
         price = price,
-        cur = html_escape(&cur),
+        cur = json_escape(&cur),
         avail = avail,
-        url = html_escape(&format!("{}{}/shop/{}", site.public_base, lang_prefix(lang), sku)),
-        base = html_escape(site.public_base),
+        url = json_escape(&format!("{}{}/shop/{}", site.public_base, lang_prefix(lang), sku)),
+        base = json_escape(site.public_base),
     ))
 }
 
@@ -4371,6 +4391,16 @@ pub fn ping_indexnow(state: &Arc<AppState>, site: &SiteConfig, urls: Vec<String>
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn json_escape_keeps_entities_out_of_json_ld() {
+        assert_eq!(json_escape("master's & co"), "master's & co");
+        assert_eq!(json_escape(r#"a"b\c"#), r#"a\"b\\c"#);
+        assert_eq!(json_escape("</script>"), r#"\u003c/script>"#);
+        let doc = format!(r#"{{"d":"{}"}}"#, json_escape(r#"x"y<z"#));
+        let v: serde_json::Value = serde_json::from_str(&doc).unwrap();
+        assert_eq!(v["d"], r#"x"y<z"#);
+    }
+
     use super::*;
 
     #[test]
