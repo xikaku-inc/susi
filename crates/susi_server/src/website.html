@@ -1585,6 +1585,7 @@ async function loadIndex() {
 }
 
 async function loadPage(slug) {
+    if (draftTimer) storeDraft();
     currentSlug = slug;
     // Send the token when present: hidden pages 404 for anonymous visitors
     // but stay reachable for admins so they can be previewed and edited.
@@ -2037,11 +2038,52 @@ function renderToc(headings) {
 
 let easymde = null;
 
+// ----- Unsaved-draft autosave -----
+// Editor text lives only in the browser until Save; mirror it to localStorage
+// so a closed tab, a stray navigation or an expired session doesn't lose it.
+let draftTimer = null;
+
+function draftKey() { return 'susi_draft' + siteQ(':') + ':' + currentSlug; }
+
+function storeDraft() {
+    clearTimeout(draftTimer);
+    draftTimer = null;
+    if (!editMode || !currentPage) return;
+    try { localStorage.setItem(draftKey(), JSON.stringify(editorValues())); } catch (e) {}
+}
+
+function scheduleDraft() {
+    clearTimeout(draftTimer);
+    draftTimer = setTimeout(storeDraft, 1000);
+}
+
+function loadDraft() {
+    try {
+        const d = JSON.parse(localStorage.getItem(draftKey()) || 'null');
+        return d && d.body_md !== (currentPage.body_md || '') ? d : null;
+    } catch (e) { return null; }
+}
+
+function clearDraft() {
+    clearTimeout(draftTimer);
+    draftTimer = null;
+    try { localStorage.removeItem(draftKey()); } catch (e) {}
+}
+
+function discardDraft() {
+    clearDraft();
+    if (easymde) { try { easymde.toTextArea(); } catch (e) {} easymde = null; }
+    renderEditor();
+}
+
 function renderEditor() {
     const c = document.getElementById('content');
-    // A pending draft (returning from preview) takes precedence over saved state.
-    const d = editDraft;
+    // A pending draft (returning from preview) takes precedence over saved
+    // state; failing that, an unsaved draft left behind by an earlier session.
+    let d = editDraft;
     editDraft = null;
+    const restored = !d && loadDraft();
+    if (restored) d = restored;
     const title = d ? d.title : (currentPage.title || '');
     const parent = d ? d.parent : (currentPage.parent_slug || '');
     const ord = d ? d.ord : (currentPage.ord || 0);
@@ -2060,6 +2102,14 @@ function renderEditor() {
         : '<label>Parent</label><select id="editParent" style="min-width:200px;">' + buildParentOptions(parent, currentSlug) + '</select>' +
           '<label>Order</label><input id="editOrd" type="text" inputmode="numeric" style="width:80px;">';
     c.innerHTML =
+        (restored
+            ? '<div class="preview-banner">' +
+                  '<span class="preview-pill">Draft</span>' +
+                  '<span>Restored unsaved changes</span>' +
+                  '<div style="flex:1"></div>' +
+                  '<button class="btn" onclick="discardDraft()">Discard</button>' +
+              '</div>'
+            : '') +
         '<div class="edit-meta-row">' +
             '<label>Title</label><input id="editTitle" type="text" style="flex:1;min-width:200px;">' +
             '<label>Slug</label><input id="editSlug" type="text" style="width:160px;">' +
@@ -2109,6 +2159,8 @@ function renderEditor() {
     document.getElementById('editOgImage').value = ogImage;
     document.getElementById('editRedirect').value = redirect;
     initEasyMDE(body);
+    if (easymde) easymde.codemirror.on('change', scheduleDraft);
+    c.querySelectorAll('input, select').forEach((el) => el.addEventListener('input', scheduleDraft));
 }
 
 // Re-render the editor for the other kind, carrying the current edits along.
@@ -2286,6 +2338,7 @@ function editPost(slug) {
 }
 
 function cancelEdit() {
+    clearDraft();
     if (easymde) { try { easymde.toTextArea(); } catch (e) {} easymde = null; }
     editMode = false;
     previewMode = false;
@@ -2321,6 +2374,7 @@ function editorValues() {
 }
 
 function previewPage() {
+    storeDraft();
     editDraft = editorValues();
     if (easymde) { try { easymde.toTextArea(); } catch (e) {} easymde = null; }
     editMode = false;
@@ -2405,6 +2459,7 @@ async function savePage() {
         return;
     }
     toast('Saved', 'success');
+    clearDraft();
     editMode = false;
     previewMode = false;
     editDraft = null;
@@ -2621,6 +2676,7 @@ async function route() {
 }
 
 window.addEventListener('popstate', route);
+window.addEventListener('pagehide', () => { if (draftTimer) storeDraft(); });
 window.addEventListener('hashchange', () => {
     // Same-page anchor jump: just scroll, don't re-render.
     const anchor = anchorFromLocation();
