@@ -2102,7 +2102,14 @@ function renderEditor() {
           '<label>Author</label><select id="editAuthor" style="min-width:160px;">' + buildAuthorOptions(author) + '</select>'
         : '<label>Parent</label><select id="editParent" style="min-width:200px;">' + buildParentOptions(parent, currentSlug) + '</select>' +
           '<label>Order</label><input id="editOrd" type="text" inputmode="numeric" style="width:80px;">';
+    const isDraft = !!currentPage.hidden;
     c.innerHTML =
+        (isDraft
+            ? '<div class="preview-banner">' +
+                  '<span class="preview-pill">Draft</span>' +
+                  '<span>Not visible to the public until you publish it</span>' +
+              '</div>'
+            : '') +
         (restored
             ? '<div class="preview-banner">' +
                   '<span class="preview-pill">Draft</span>' +
@@ -2135,7 +2142,10 @@ function renderEditor() {
         '</div>' +
         '<textarea id="editBody"></textarea>' +
         '<div class="edit-actions">' +
-            '<button class="btn primary" onclick="savePage()">Save</button>' +
+            (isDraft
+                ? '<button class="btn primary" onclick="savePage(true)">Publish</button>' +
+                  '<button class="btn" onclick="savePage()">Save draft</button>'
+                : '<button class="btn primary" onclick="savePage()">Save</button>') +
             '<button class="btn" onclick="previewPage()" title="See the page as it will appear on the site, without saving">Preview</button>' +
             '<button class="btn" onclick="cancelEdit()">Cancel</button>' +
             '<button class="btn" onclick="openHistory()" title="Page edit history">History</button>' +
@@ -2395,10 +2405,13 @@ function renderPreviewView() {
     const banner =
         '<div class="preview-banner">' +
             '<span class="preview-pill">Preview</span>' +
-            '<span>Unsaved changes - not yet published</span>' +
+            '<span>' + (currentPage.hidden ? 'Draft - not yet published' : 'Unsaved changes - not yet published') + '</span>' +
             '<div style="flex:1"></div>' +
             '<button class="btn" onclick="backToEditor()">Back to editor</button>' +
-            '<button class="btn primary" onclick="savePage()">Save</button>' +
+            (currentPage.hidden
+                ? '<button class="btn primary" onclick="savePage(true)">Publish</button>' +
+                  '<button class="btn" onclick="savePage()">Save draft</button>'
+                : '<button class="btn primary" onclick="savePage()">Save</button>') +
         '</div>';
     const html = banner + renderMarkdown(editDraft.body_md || '');
     const { html: withIds, headings } = injectHeadingIds(html);
@@ -2415,7 +2428,9 @@ function renderPreviewView() {
     }
 }
 
-async function savePage() {
+// With publish set, the save also makes a draft public (a post gets today
+// as its publish date).
+async function savePage(publish) {
     const v = editorValues();
     const title = v.title;
     const parent = v.parent;
@@ -2451,6 +2466,7 @@ async function savePage() {
             page_kind: v.page_kind, published_at: v.published_at,
             author_username: v.author_username,
             redirect_to: v.redirect_to,
+            hidden: publish ? false : undefined,
         }),
     });
     if (resp.status === 401) { handleSessionExpired(body_md); return; }
@@ -2459,7 +2475,7 @@ async function savePage() {
         toast('Save failed: ' + (d.error || resp.status), 'error');
         return;
     }
-    toast('Saved', 'success');
+    toast(publish ? 'Published' : 'Saved', 'success');
     clearDraft();
     editMode = false;
     previewMode = false;
@@ -2528,10 +2544,12 @@ async function newPage() {
     const resp = await fetch(API + '/website/pages/' + encodeURIComponent(cleanSlug) + siteQ(), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken() },
-        body: JSON.stringify({ title, body_md: '# ' + title + '\n\n', parent_slug: null, ord: 999 }),
+        body: JSON.stringify({ title, body_md: '# ' + title + '\n\n', parent_slug: null, ord: 999, hidden: true }),
     });
     if (!resp.ok) { toast('Create failed', 'error'); return; }
+    toast('Draft created', 'success');
     await loadIndex();
+    pendingEdit = cleanSlug;
     navigateTo(cleanSlug);
 }
 
@@ -2553,6 +2571,7 @@ async function newPost() {
     if (!resp.ok) { toast('Create failed', 'error'); return; }
     toast('Draft created', 'success');
     await loadIndex();
+    pendingEdit = cleanSlug;
     navigateTo(cleanSlug);
 }
 
@@ -2648,6 +2667,13 @@ async function route() {
 
     const slug = slugFromLocation();
     const anchor = anchorFromLocation();
+    // ?edit (from the dashboard's New Page) opens the editor straight away.
+    const params = new URLSearchParams(location.search);
+    if (params.has('edit')) {
+        if (slug && isPotentialAdmin()) pendingEdit = slug;
+        params.delete('edit');
+        history.replaceState({}, '', location.pathname + (params.size ? '?' + params : '') + location.hash);
+    }
     // Upgrade legacy hash URLs (#/foo) to the canonical path form. Crawlers
     // don't follow fragments but users still get a clean URL in the address bar.
     // Plain #foo hashes are in-page anchors and stay in the URL.

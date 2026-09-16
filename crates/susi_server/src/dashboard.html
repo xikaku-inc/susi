@@ -8721,7 +8721,7 @@ async function createWebsitePage() {
         }
         closeWebsitePageModal();
         // Straight into the inline editor to write the content.
-        location.href = '/site' + (isPost ? '/blog/' : '/') + encodeURIComponent(slug) + wsQ();
+        location.href = '/site' + (isPost ? '/blog/' : '/') + encodeURIComponent(slug) + wsQ() + '&edit=1';
     } catch (e) {
         errEl.textContent = e.message || 'Failed to create ' + websitePageKind;
         errEl.style.display = '';
