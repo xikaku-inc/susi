@@ -8495,7 +8495,7 @@ function renderWebsitePagesTable() {
         const menuId = 'website-page-menu-' + (lang ? lang + '-' : '') + p.slug.replace(/[^a-zA-Z0-9_-]/g, '_');
         const slugArg = JSON.stringify(p.slug).replace(/"/g, '&quot;');
         const langArg = JSON.stringify(lang).replace(/"/g, '&quot;');
-        const hiddenBadge = p.hidden ? '<span class="badge">hidden</span>' : '';
+        const hiddenBadge = p.hidden ? '<span class="badge">draft</span>' : '';
         const langBadge = lang ? '<span class="badge">' + escHtml(lang) + '</span>' : '';
         const postBadge = p.page_kind === 'post' ? '<span class="badge">post</span>' : '';
         const retiredBadge = p.redirect_to
@@ -8518,7 +8518,7 @@ function renderWebsitePagesTable() {
             +     '<button onclick="toggleDropdown(event,\'' + menuId + '\')">Actions &#9662;</button>'
             +     '<div id="' + menuId + '" class="dropdown-menu" style="display:none;">'
             +       '<a href="' + escHtml(editUrl) + '">Open editor</a>'
-            +       '<button onclick="toggleWebsitePageHidden(' + slugArg + ', ' + (p.hidden ? 'false' : 'true') + ', ' + langArg + ')">' + (p.hidden ? 'Show on site' : 'Hide from site') + '</button>'
+            +       '<button onclick="toggleWebsitePageHidden(' + slugArg + ', ' + (p.hidden ? 'false' : 'true') + ', ' + langArg + ')">' + (p.hidden ? 'Publish' : 'Unpublish') + '</button>'
             +       '<div class="divider"></div>'
             +       '<button class="danger" onclick="deleteWebsitePage(' + slugArg + ', ' + langArg + ')">Delete</button>'
             +     '</div>'
@@ -8542,7 +8542,7 @@ async function toggleWebsitePageHidden(slug, hidden, lang) {
             return;
         }
         await loadWebsitePages();
-        toast(hidden ? 'Page hidden from public site' : 'Page visible on public site', 'success');
+        toast(hidden ? 'Unpublished - hidden from the public site' : 'Published', 'success');
     } catch (e) {
         alert(e.message || 'Failed to update visibility');
     }
@@ -8698,7 +8698,7 @@ async function createWebsitePage() {
         ord: isPost ? 999 : ord,
         meta_description: '',
         page_kind: websitePageKind,
-        hidden: isPost,
+        hidden: true,
     };
     try {
         const resp = await fetch(API + '/website/pages/' + encodeURIComponent(slug) + wsQ(), {

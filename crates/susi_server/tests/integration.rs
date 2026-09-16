@@ -4886,6 +4886,42 @@ fn test_draft_post_publish_dates() {
     assert_eq!(get_admin()["published_at"], json!("2026-01-02"), "re-showing must not re-date");
 }
 
+/// A page created hidden is a draft too: admin-only at its URL, absent from
+/// the public list, nav and sitemap, and public once published.
+#[test]
+fn test_draft_page_publish() {
+    let server = TestServer::start();
+    let token = server.admin_token();
+    let http = server.http();
+    let url = format!("{}/website/pages/wip-page", server.api_url);
+    let resp = http.put(&url).bearer_auth(&token)
+        .json(&json!({ "title": "Wip page", "body_md": "# Wip page
+
+draft", "hidden": true }))
+        .send().expect("create draft page");
+    assert_eq!(resp.status().as_u16(), 200, "{}", resp.text().unwrap_or_default());
+    let body = http.get(&url).bearer_auth(&token).send().expect("admin get").json::<Value>().unwrap();
+    assert_eq!(body["hidden"], json!(true));
+    assert_eq!(body["page_kind"], json!("page"));
+    assert_eq!(http.get(&url).send().expect("anon").status().as_u16(), 404);
+    let listed = http.get(format!("{}/website/pages", server.api_url)).send().expect("list")
+        .json::<Value>().unwrap();
+    assert!(!listed["pages"].as_array().unwrap().iter().any(|p| p["slug"] == "wip-page"),
+        "draft page must not be listed publicly");
+    let sitemap = http.get(format!("{}/sitemap.xml", server.url)).send().expect("sitemap").text().unwrap();
+    assert!(!sitemap.contains("wip-page"), "sitemap must omit draft page: {}", sitemap);
+
+    let resp = http.post(format!("{}/visibility", url)).bearer_auth(&token)
+        .json(&json!({ "hidden": false })).send().expect("publish");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = http.get(&url).send().expect("anon after publish").json::<Value>().unwrap();
+    assert_eq!(body["hidden"], json!(false));
+    assert_eq!(body["published_at"], json!(""), "pages never carry a publish date");
+    let listed = http.get(format!("{}/website/pages", server.api_url)).send().expect("list")
+        .json::<Value>().unwrap();
+    assert!(listed["pages"].as_array().unwrap().iter().any(|p| p["slug"] == "wip-page"));
+}
+
 /// Path-level redirect map + bulk page import: the importer creates pages,
 /// assets and legacy-URL redirects per site in one multipart call, and the
 /// mapped WordPress-style paths 301 to their new homes.

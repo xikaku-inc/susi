@@ -1568,7 +1568,7 @@ fn first_image_url(site: &SiteConfig, body_md: &str) -> Option<String> {
     for ev in Parser::new(body_md) {
         if let Event::Start(Tag::Image { dest_url, .. }) = ev {
             let s = dest_url.into_string();
-            if s.is_empty() || is_video_file(&s) { continue; }
+            if s.is_empty() || is_video_file(&s) || video_ref(&s).is_some() { continue; }
             if s.starts_with("http://") || s.starts_with("https://") {
                 return Some(s);
             }
@@ -4726,6 +4726,38 @@ mod tests {
                 yt
             );
         }
+    }
+
+    /// The CMS chrome (admin buttons, history and asset modals) must not be
+    /// in the served markup at all: display:none is still page content to a
+    /// crawler. Script bodies are skipped since the client builds it there.
+    #[test]
+    fn served_html_carries_no_admin_chrome() {
+        let mut out = String::new();
+        let mut rest = WEBSITE_HTML;
+        while let Some(i) = rest.find("<script") {
+            out.push_str(&rest[..i]);
+            rest = rest[i..].find("</script>").map(|j| &rest[i + j + 9..]).unwrap_or("");
+        }
+        out.push_str(rest);
+        for s in [">Dashboard<", ">Edit<", ">+ Page<", ">+ Post<", ">Logout<", "Page history", "Asset library", "admin-modal\""] {
+            assert!(!out.contains(s), "served HTML contains {}", s);
+        }
+    }
+
+    /// A video page written in image syntax is a player, not a preview
+    /// image: crawlers need a real image URL or the link card is blank.
+    #[test]
+    fn first_image_url_skips_embedded_video_pages() {
+        let site = crate::sites::site_by_id("xikaku").unwrap();
+        let md = "![](https://vimeo.com/1122777937)
+
+![](hero.jpg)";
+        assert_eq!(
+            first_image_url(site, md).as_deref(),
+            Some(&*format!("{}/api/v1/website/assets/hero.jpg", site.public_base))
+        );
+        assert_eq!(first_image_url(site, "![](https://youtu.be/dQw4w9WgXcQ)"), None);
     }
 
     /// Anything else stays an image; a false positive would replace a picture

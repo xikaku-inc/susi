@@ -843,14 +843,11 @@ div.grid.cols-6 { --cols: 6; }
         <img class="logo-light" src="/static/logo.png?v=3" alt="">
     </a>
     <div class="header-right">
-        <a id="dashBtn" class="btn" href="/" style="display:none;">Dashboard</a>
-        <button id="editBtn" class="btn" onclick="enterEditMode()" style="display:none;">Edit</button>
-        <button id="newPageBtn" class="btn" onclick="newPage()" style="display:none;">+ Page</button>
-        <button id="newPostBtn" class="btn" onclick="newPost()" style="display:none;">+ Post</button>
+        <span id="adminChromeL" style="display:contents;"></span>
         <span id="langSwitchTop" class="lang-switch-top" style="display:none;"></span>
         <button id="btnCart" class="btn cart-btn" onclick="openCart()">Cart<span id="cartBadge" class="cart-badge" style="display:none;">0</span></button>
         <button id="btnTheme" class="btn" onclick="cycleTheme()" title="Toggle theme">🌓</button>
-        <button id="navLogoutBtn" class="btn" onclick="logoutFromSite()" style="display:none;">Logout</button>
+        <span id="adminChromeR" style="display:contents;"></span>
     </div>
 </div>
 
@@ -1286,17 +1283,20 @@ function updateAdminChrome() {
         document.body.classList.toggle('admin-topbar', isAdmin);
         renderCartBadge();
     }
-    // Back to this site's Website section: same origin under the dashboard
-    // preview, the configured dashboard URL on a canonical host.
-    const dashBtn = document.getElementById('dashBtn');
+    // The admin buttons are built here rather than shipped in the served
+    // HTML, so anonymous responses carry no CMS chrome for crawlers to index.
+    // Dashboard goes back to this site's Website section: same origin under
+    // the dashboard preview, the configured dashboard URL on a canonical host.
     const dashBase = SITE_PATH_PREFIX ? '' : (SITE.dashboard_url || '');
     const dashHref = (SITE_PATH_PREFIX || dashBase) ? dashBase + '/#/website/' + encodeURIComponent(SITE.id) : '';
-    dashBtn.href = dashHref || '/';
-    dashBtn.style.display = (isAdmin && dashHref) ? '' : 'none';
-    document.getElementById('navLogoutBtn').style.display = isAdmin ? '' : 'none';
-    document.getElementById('newPageBtn').style.display = isAdmin ? '' : 'none';
-    document.getElementById('newPostBtn').style.display = isAdmin ? '' : 'none';
-    document.getElementById('editBtn').style.display = (isAdmin && currentPage) ? '' : 'none';
+    document.getElementById('adminChromeL').innerHTML = isAdmin
+        ? (dashHref ? '<a class="btn" href="' + escHtml(dashHref) + '">Dashboard</a>' : '')
+          + (currentPage ? '<button id="editBtn" class="btn" onclick="enterEditMode()">Edit</button>' : '')
+          + '<button class="btn" onclick="newPage()">+ Page</button>'
+          + '<button class="btn" onclick="newPost()">+ Post</button>'
+        : '';
+    document.getElementById('adminChromeR').innerHTML = isAdmin
+        ? '<button class="btn" onclick="logoutFromSite()">Logout</button>' : '';
 }
 
 function logoutFromSite() {
@@ -1759,7 +1759,8 @@ function renderEmptyState(msg) {
     if (layout) { layout.classList.add('no-toc'); layout.classList.add('no-sidebar'); }
     document.getElementById('content').innerHTML =
         '<div class="empty-state"><h2>' + escHtml(msg) + '</h2></div>';
-    document.getElementById('editBtn').style.display = 'none';
+    const editBtn = document.getElementById('editBtn');
+    if (editBtn) editBtn.remove();
 }
 
 // Public /blog view: optional intro from the "blog" page row, then a page of
@@ -1809,7 +1810,7 @@ async function renderBlogIndexView() {
                 + '<div class="meta"><a href="' + permalink + '">'
                 + escHtml(formatPostDate(p.published_at)) + '</a>'
                 + bylineSuffix(p.author_name)
-                + (p.hidden ? ' (hidden)' : '')
+                + (p.hidden ? ' (draft)' : '')
                 + (p.redirect_to ? ' (retired)' : '') + edit + '</div>'
                 + linkFirstHeading(renderMarkdown(bodies[i]), permalink)
                 + '</article>';
@@ -1912,7 +1913,7 @@ function renderPage() {
     const hiddenNotice = currentPage.hidden
         ? '<div style="display:inline-block;margin-bottom:14px;padding:4px 12px;border-radius:999px;'
           + 'background:rgba(251,191,36,0.15);color:#b45309;font-size:12px;font-weight:600;">'
-          + 'Hidden - this page is not visible to the public</div>'
+          + 'Draft - not visible to the public</div>'
           + '<button class="btn" style="margin:0 0 14px 8px;" onclick="publishPage()">Publish</button>'
         : '';
     // Same for a retired page: only an admin ever renders one, everyone else
@@ -2515,6 +2516,8 @@ async function deletePage() {
     navigateTo(null);
 }
 
+// Create a page as a hidden draft: reachable at its URL for admins only
+// until it is published from the editor or the dashboard.
 async function newPage() {
     if (!isPotentialAdmin()) { toast('Login required', 'error'); return; }
     const slug = prompt('New page slug (lowercase, no spaces):');
@@ -2784,10 +2787,26 @@ document.addEventListener('click', (e) => {
 
 let historyState = { slug: null, revisions: [], selectedId: null };
 
+// Admin modals are created on first open so the served HTML carries none of
+// their markup.
+function adminModal(id, title, closeFn) {
+    let m = document.getElementById(id);
+    if (!m) {
+        m = document.createElement('div');
+        m.id = id;
+        m.className = 'admin-modal';
+        m.innerHTML = '<div class="admin-modal-inner"><div class="admin-modal-head"><h3>' + title + '</h3>'
+            + '<button class="btn" onclick="' + closeFn + '()">Close</button></div>'
+            + '<div id="' + id.replace('Modal', 'Body') + '" class="admin-modal-body"></div></div>';
+        document.body.appendChild(m);
+    }
+    return m;
+}
+
 async function openHistory() {
     if (!currentSlug) { toast('Save the page first to see history', 'error'); return; }
     historyState = { slug: currentSlug, revisions: [], selectedId: null };
-    document.getElementById('historyModal').classList.add('visible');
+    adminModal('historyModal', 'Page history', 'closeHistory').classList.add('visible');
     renderHistory('<div class="empty-state">Loading revisions…</div>');
     try {
         const resp = await fetch(API + '/website/pages/' + encodeURIComponent(currentSlug) + '/revisions' + siteQ(), {
@@ -2896,7 +2915,7 @@ async function restoreRevision(id) {
 let assetsState = { all: [], filter: '', orphansOnly: false };
 
 async function openAssets() {
-    document.getElementById('assetsModal').classList.add('visible');
+    adminModal('assetsModal', 'Asset library', 'closeAssets').classList.add('visible');
     document.getElementById('assetsBody').innerHTML = '<div class="empty-state">Loading assets…</div>';
     try {
         const resp = await fetch(API + '/website/admin/assets' + siteQ(), {
@@ -3691,26 +3710,6 @@ if (LANG) {
     renderCartBadge();
 })();
 </script>
-
-<div id="historyModal" class="admin-modal">
-    <div class="admin-modal-inner">
-        <div class="admin-modal-head">
-            <h3>Page history</h3>
-            <button class="btn" onclick="closeHistory()">Close</button>
-        </div>
-        <div id="historyBody" class="admin-modal-body"></div>
-    </div>
-</div>
-
-<div id="assetsModal" class="admin-modal">
-    <div class="admin-modal-inner">
-        <div class="admin-modal-head">
-            <h3>Asset library</h3>
-            <button class="btn" onclick="closeAssets()">Close</button>
-        </div>
-        <div id="assetsBody" class="admin-modal-body"></div>
-    </div>
-</div>
 
 </body>
 </html>
