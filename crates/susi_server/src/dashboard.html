@@ -1830,7 +1830,9 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
     </div>
 
     <div class="ws-tab-panel active" data-website-panel="pages">
-    <div style="margin-bottom:12px;display:flex;justify-content:flex-end;gap:8px;">
+    <div class="toolbar" style="margin-bottom:12px;gap:8px;">
+        <input type="search" id="websitePageSearch" placeholder="Search pages..." autocomplete="off" readonly onfocus="this.removeAttribute('readonly')" oninput="renderWebsitePagesTable()">
+        <div class="spacer"></div>
         <button onclick="showWebsitePageModal('page')">+ New Page</button>
         <button onclick="showWebsitePageModal('post')">+ New Post</button>
     </div>
@@ -1856,7 +1858,9 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
     </div>
 
     <div class="ws-tab-panel" data-website-panel="assets">
-    <div style="margin-bottom:12px;display:flex;justify-content:flex-end;gap:8px;">
+    <div class="toolbar" style="margin-bottom:12px;gap:8px;">
+        <input type="search" id="websiteAssetSearch" placeholder="Search assets..." autocomplete="off" readonly onfocus="this.removeAttribute('readonly')" oninput="renderWebsiteAssetsTable()">
+        <div class="spacer"></div>
         <button onclick="document.getElementById('websiteAssetFile').click()">+ Upload Asset</button>
         <input type="file" id="websiteAssetFile" style="display:none;" onchange="uploadWebsiteAssetFromPage(this.files[0]);this.value='';">
     </div>
@@ -8481,11 +8485,14 @@ async function loadWebsitePages() {
 
 function renderWebsitePagesTable() {
     const tbody = document.getElementById('websitePagesBody');
-    if (!websitePages.length) {
-        tbody.innerHTML = '<tr><td colspan="7" class="empty-state"><p>No pages yet</p></td></tr>';
+    const q = (document.getElementById('websitePageSearch').value || '').trim().toLowerCase();
+    const shown = q ? websitePages.filter(p =>
+        (p.slug + ' ' + p.title + ' ' + (p.parent_slug || '') + ' ' + (p.lang || '')).toLowerCase().includes(q)) : websitePages;
+    if (!shown.length) {
+        tbody.innerHTML = '<tr><td colspan="7" class="empty-state"><p>' + (q ? 'No matching pages' : 'No pages yet') + '</p></td></tr>';
         return;
     }
-    tbody.innerHTML = websitePages.map(p => {
+    tbody.innerHTML = shown.map(p => {
         const lang = p.lang || '';
         const langSeg = lang ? '/' + encodeURIComponent(lang) : '';
         const editUrl = '/site' + langSeg + (p.page_kind === 'post' ? '/blog/' : '/') + encodeURIComponent(p.slug) + wsQ();
@@ -8769,11 +8776,14 @@ async function loadWebsiteAssets() {
 
 function renderWebsiteAssetsTable() {
     const tbody = document.getElementById('websiteAssetsBody');
-    if (!websiteAssets.length) {
-        tbody.innerHTML = '<tr><td colspan="5" class="empty-state"><p>No assets yet</p></td></tr>';
+    const q = (document.getElementById('websiteAssetSearch').value || '').trim().toLowerCase();
+    const shown = q ? websiteAssets.filter(a =>
+        (a.name + ' ' + (a.pages || []).join(' ')).toLowerCase().includes(q)) : websiteAssets;
+    if (!shown.length) {
+        tbody.innerHTML = '<tr><td colspan="5" class="empty-state"><p>' + (q ? 'No matching assets' : 'No assets yet') + '</p></td></tr>';
         return;
     }
-    tbody.innerHTML = websiteAssets.map((a, i) => {
+    tbody.innerHTML = shown.map((a, i) => {
         const preview = isImageAsset(a.name)
             ? '<img src="' + assetUrl(a.name) + '" loading="lazy" style="width:40px;height:40px;object-fit:cover;border-radius:4px;">'
             : '<span style="color:var(--text2);font-size:11px;">file</span>';
@@ -8826,6 +8836,7 @@ async function uploadWebsiteAssetFromPage(file) {
         const data = await uploadWebsiteAsset(file);
         if (!data) return;
         toast('Uploaded ' + data.name, 'success');
+        document.getElementById('websiteAssetSearch').value = data.name;
         await loadWebsiteAssets();
     } catch (e) { toast('Upload failed: ' + e.message, 'error'); }
 }
