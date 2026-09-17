@@ -43,15 +43,15 @@ impl LicenseDb {
         Ok(id)
     }
 
-    /// List all pages of a release as (slug, title, parent_slug, ord, updated_at).
+    /// List all pages of a release as (slug, title, parent_slug, ord, updated_at, hidden).
     pub fn list_doc_pages(
         &self,
         release_id: i64,
-    ) -> Result<Vec<(String, String, Option<String>, i64, String)>, LicenseError> {
+    ) -> Result<Vec<(String, String, Option<String>, i64, String, bool)>, LicenseError> {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT slug, title, parent_slug, ord, updated_at FROM doc_pages
+                "SELECT slug, title, parent_slug, ord, updated_at, hidden FROM doc_pages
                  WHERE release_id = ?1 ORDER BY parent_slug NULLS FIRST, ord, title",
             )
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
@@ -63,6 +63,7 @@ impl LicenseDb {
                     r.get::<_, Option<String>>(2)?,
                     r.get::<_, i64>(3)?,
                     r.get::<_, String>(4)?,
+                    r.get::<_, i64>(5)? != 0,
                 ))
             })
             .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
@@ -71,14 +72,14 @@ impl LicenseDb {
         Ok(rows)
     }
 
-    /// Fetch a single page (title, body_md, parent_slug, ord, updated_at).
+    /// Fetch a single page (title, body_md, parent_slug, ord, updated_at, hidden).
     pub fn get_doc_page(
         &self,
         release_id: i64,
         slug: &str,
-    ) -> Result<Option<(String, String, Option<String>, i64, String)>, LicenseError> {
+    ) -> Result<Option<(String, String, Option<String>, i64, String, bool)>, LicenseError> {
         match self.conn.query_row(
-            "SELECT title, body_md, parent_slug, ord, updated_at FROM doc_pages
+            "SELECT title, body_md, parent_slug, ord, updated_at, hidden FROM doc_pages
              WHERE release_id = ?1 AND slug = ?2",
             params![release_id, slug],
             |r| {
@@ -88,6 +89,7 @@ impl LicenseDb {
                     r.get::<_, Option<String>>(2)?,
                     r.get::<_, i64>(3)?,
                     r.get::<_, String>(4)?,
+                    r.get::<_, i64>(5)? != 0,
                 ))
             },
         ) {
@@ -95,6 +97,18 @@ impl LicenseDb {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(LicenseError::Other(format!("DB query: {}", e))),
         }
+    }
+
+    /// Draft flag: a hidden page is admin-only. Returns false when no such page.
+    pub fn set_doc_page_hidden(&self, release_id: i64, slug: &str, hidden: bool) -> Result<bool, LicenseError> {
+        let n = self
+            .conn
+            .execute(
+                "UPDATE doc_pages SET hidden = ?1 WHERE release_id = ?2 AND slug = ?3",
+                params![hidden as i64, release_id, slug],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB set doc page hidden: {}", e)))?;
+        Ok(n > 0)
     }
 
     pub fn delete_doc_page(&self, release_id: i64, slug: &str) -> Result<bool, LicenseError> {
@@ -379,8 +393,8 @@ impl LicenseDb {
             .conn
             .execute(
                 "INSERT OR IGNORE INTO doc_pages
-                   (release_id, slug, title, body_md, parent_slug, ord, updated_at, origin)
-                 SELECT ?1, slug, title, body_md, parent_slug, ord, ?2, 'user'
+                   (release_id, slug, title, body_md, parent_slug, ord, updated_at, origin, hidden)
+                 SELECT ?1, slug, title, body_md, parent_slug, ord, ?2, 'user', hidden
                  FROM doc_pages
                  WHERE release_id = ?3 AND origin = 'user'",
                 params![dst_release_id, now, src_release_id],

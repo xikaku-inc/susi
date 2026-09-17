@@ -1351,6 +1351,73 @@ fn test_product_scoped_docs_flow() {
     assert_eq!(resp.status().as_u16(), 409, "product with releases must not delete");
 }
 
+/// A product-docs page saved with hidden=true is a draft: admin-only through
+/// the API and the SSR path, absent from the sitemap and llms-full, carried
+/// into a new release as a draft, and public once saved with hidden=false.
+#[test]
+fn test_doc_page_drafts() {
+    let server = TestServer::start();
+    let token = server.admin_token();
+    let http = server.http();
+    let put = |tag: &str, slug: &str, body: Value| {
+        let resp = http.put(format!("{}/docs/{}/pages/{}", server.api_url, tag, slug))
+            .bearer_auth(&token).json(&body).send().expect("put page");
+        assert_eq!(resp.status().as_u16(), 200, "put {}/{}: {}", tag, slug, resp.text().unwrap_or_default());
+    };
+    put("v1.0", "intro", json!({ "title": "Intro", "body_md": "# Intro\n\nPublic intro." }));
+    put("v1.0", "wip", json!({ "title": "Wip", "body_md": "# Wip\n\nSecret draft.", "hidden": true }));
+
+    // Anonymous readers never see the draft; an admin sees it flagged.
+    let list = http.get(format!("{}/docs/v1.0/pages", server.api_url)).send().expect("anon list").json::<Value>().unwrap();
+    let slugs: Vec<&str> = list["pages"].as_array().unwrap().iter().map(|p| p["slug"].as_str().unwrap()).collect();
+    assert!(slugs.contains(&"intro") && !slugs.contains(&"wip"), "anon list: {:?}", slugs);
+    assert_eq!(http.get(format!("{}/docs/v1.0/pages/wip", server.api_url)).send().expect("anon get").status().as_u16(), 404);
+    let list = http.get(format!("{}/docs/v1.0/pages", server.api_url)).bearer_auth(&token)
+        .send().expect("admin list").json::<Value>().unwrap();
+    let wip = list["pages"].as_array().unwrap().iter().find(|p| p["slug"] == "wip").expect("admin sees draft");
+    assert_eq!(wip["hidden"], json!(true));
+    let page = http.get(format!("{}/docs/v1.0/pages/wip", server.api_url)).bearer_auth(&token)
+        .send().expect("admin get").json::<Value>().unwrap();
+    assert_eq!(page["hidden"], json!(true));
+    assert_eq!(page["body_md"], json!("# Wip\n\nSecret draft."));
+
+    // Editing the draft without the flag keeps it a draft.
+    put("v1.0", "wip", json!({ "title": "Wip", "body_md": "# Wip\n\nStill secret." }));
+    let page = http.get(format!("{}/docs/v1.0/pages/wip", server.api_url)).bearer_auth(&token)
+        .send().expect("admin get").json::<Value>().unwrap();
+    assert_eq!(page["hidden"], json!(true), "an omitted flag must not publish");
+
+    // A new release inherits the user pages, draft state included.
+    put("v2.0", "other", json!({ "title": "Other", "body_md": "# Other\n\nv2 only." }));
+    let page = http.get(format!("{}/docs/v2.0/pages/wip", server.api_url)).bearer_auth(&token)
+        .send().expect("carried draft").json::<Value>().unwrap();
+    assert_eq!(page["hidden"], json!(true), "a carried-over draft stays a draft");
+
+    // The SSR path serves the draft as a noindex shell that still boots the
+    // viewer, so an admin lands in it; the public page renders normally.
+    let resp = http.get(format!("{}/docs/wip", server.url)).send().expect("ssr draft");
+    assert_eq!(resp.status().as_u16(), 404);
+    let html = resp.text().unwrap();
+    assert!(html.contains("noindex") && html.contains("window.__SSR") && !html.contains("Secret draft"), "{}", html);
+    let html = http.get(format!("{}/docs/intro", server.url)).send().expect("ssr public").text().unwrap();
+    assert!(html.contains("Public intro."));
+
+    // Neither the docs sitemap nor llms-full carries the draft.
+    let xml = http.get(format!("{}/sitemap.xml", server.url)).send().unwrap().text().unwrap();
+    assert!(xml.contains("/docs/intro") && !xml.contains("/docs/wip"), "{}", xml);
+    let full = http.get(format!("{}/llms-full.txt", server.url)).send().unwrap().text().unwrap();
+    assert!(full.contains("v2 only.") && !full.contains("Still secret."), "{}", full);
+
+    // Publishing makes it public everywhere.
+    put("v2.0", "wip", json!({ "title": "Wip", "body_md": "# Wip\n\nNow public.", "hidden": false }));
+    let page = http.get(format!("{}/docs/v2.0/pages/wip", server.api_url)).send().expect("anon get").json::<Value>().unwrap();
+    assert_eq!(page["hidden"], json!(false));
+    let resp = http.get(format!("{}/docs/wip", server.url)).send().expect("ssr published");
+    assert_eq!(resp.status().as_u16(), 200);
+    let xml = http.get(format!("{}/sitemap.xml", server.url)).send().unwrap().text().unwrap();
+    assert!(xml.contains("/docs/wip"), "{}", xml);
+}
+
 /// SEO surface for docs: server-rendered pages at path URLs, the docs sitemap
 /// on the docs host, the llms.txt documentation section, and llms-full.txt.
 #[test]

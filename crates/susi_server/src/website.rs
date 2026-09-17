@@ -177,7 +177,7 @@ fn visible_pages(mut pages: Vec<PageRow>) -> Vec<PageRow> {
 
 /// True when the request carries a valid full-admin principal. The public
 /// read endpoints use this to include hidden pages for the dashboard/editor.
-fn is_admin_request(headers: &HeaderMap, state: &AppState) -> bool {
+pub(crate) fn is_admin_request(headers: &HeaderMap, state: &AppState) -> bool {
     validate_principal(headers, state)
         .ok()
         .map(|p| require_admin_full(state, &p).is_ok())

@@ -861,6 +861,8 @@ function syncProductInUrl() {
 function authToken() { return localStorage.getItem('auth_token') || ''; }
 let isAdminUser = false;
 let isWorkspaceEditor = false;
+// Slug whose editor should open as soon as it loads (a freshly created page).
+let pendingEdit = null;
 function canEditDocs() { return isAdminUser || isWorkspaceEditor; }
 function refreshEditButtons() {
     const editBtn = document.getElementById('editBtn');
@@ -1410,7 +1412,8 @@ async function loadPage(slug) {
         return;
     }
     currentPage = await resp.json();
-    editMode = false;
+    editMode = pendingEdit === slug && canEditDocs();
+    pendingEdit = null;
     if (easymde) { try { easymde.toTextArea(); } catch (e) {} easymde = null; }
     renderSidebar();
     renderPage();
@@ -1465,7 +1468,7 @@ function renderSidebar() {
 
 function renderSidebarItem(p, isHead) {
     const cls = (p.slug === currentSlug ? 'active' : '') + (isHead ? ' section-head' : '');
-    return '<a class="' + cls + '" href="' + escHtml(pageHash(p.slug)) + '">' + escHtml(p.title) + '</a>';
+    return '<a class="' + cls + '" href="' + escHtml(pageHash(p.slug)) + '">' + escHtml(p.title) + (p.hidden ? ' (draft)' : '') + '</a>';
 }
 
 function renderEmptyState(msg) {
@@ -1494,7 +1497,14 @@ function renderPage() {
     const meta = '<div class="meta">'
         + (currentWorkspaceId ? '' : 'Release <code>' + escHtml(currentTag) + '</code> · ')
         + 'Updated ' + escHtml(formatDate(currentPage.updated_at)) + '</div>';
-    let html = meta + renderMarkdown(currentPage.body_md || '');
+    // Only admins ever receive a draft, so this notice is admin-only.
+    const draftNotice = currentPage.hidden
+        ? '<div style="display:inline-block;margin-bottom:14px;padding:4px 12px;border-radius:999px;'
+          + 'background:rgba(251,191,36,0.15);color:#b45309;font-size:12px;font-weight:600;">'
+          + 'Draft - not visible to the public</div>'
+          + '<button class="btn" style="margin:0 0 14px 8px;" onclick="publishPage()">Publish</button>'
+        : '';
+    let html = draftNotice + meta + renderMarkdown(currentPage.body_md || '');
     const { html: withIds, headings } = injectHeadingIds(html);
     c.innerHTML = withIds;
     hydrateWsImages(c);
@@ -1669,7 +1679,13 @@ function renderEditor() {
     const ord = currentPage.ord || 0;
     const body = currentPage.body_md || '';
     const parentOptions = buildParentOptions(parent, currentSlug);
+    const isDraft = !!currentPage.hidden;
     c.innerHTML =
+        (isDraft
+            ? '<div style="display:inline-block;margin-bottom:14px;padding:4px 12px;border-radius:999px;'
+              + 'background:rgba(251,191,36,0.15);color:#b45309;font-size:12px;font-weight:600;">'
+              + 'Draft - not visible to the public until you publish it</div>'
+            : '') +
         '<div class="edit-meta-row">' +
             '<label>Title</label><input id="editTitle" type="text" style="flex:1;min-width:200px;">' +
             '<label>Slug</label><input id="editSlug" type="text" style="width:160px;">' +
@@ -1678,7 +1694,10 @@ function renderEditor() {
         '</div>' +
         '<textarea id="editBody"></textarea>' +
         '<div class="edit-actions">' +
-            '<button class="btn primary" onclick="savePage()">Save</button>' +
+            (isDraft
+                ? '<button class="btn primary" onclick="savePage(true)">Publish</button>' +
+                  '<button class="btn" onclick="savePage()">Save draft</button>'
+                : '<button class="btn primary" onclick="savePage()">Save</button>') +
             '<button class="btn" onclick="cancelEdit()">Cancel</button>' +
             '<div style="flex:1"></div>' +
             '<button class="btn danger" onclick="deletePage()">Delete page</button>' +
@@ -1843,7 +1862,8 @@ function cancelEdit() {
     renderPage();
 }
 
-async function savePage() {
+// With publish set, the save also makes a draft public.
+async function savePage(publish) {
     const title = document.getElementById('editTitle').value.trim();
     const parent = document.getElementById('editParent').value.trim();
     const ord = parseInt(document.getElementById('editOrd').value, 10) || 0;
@@ -1871,7 +1891,7 @@ async function savePage() {
     const resp = await fetch(pageUrl(targetSlug), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken() },
-        body: JSON.stringify({ title, body_md, parent_slug: parent || null, ord }),
+        body: JSON.stringify({ title, body_md, parent_slug: parent || null, ord, hidden: publish ? false : undefined }),
     });
     if (resp.status === 401) {
         handleSessionExpired(body_md);
@@ -1882,7 +1902,7 @@ async function savePage() {
         toast('Save failed: ' + (d.error || resp.status), 'error');
         return;
     }
-    toast('Saved', 'success');
+    toast(publish ? 'Published' : 'Saved', 'success');
     editMode = false;
     if (targetSlug !== currentSlug) {
         location.hash = pageHash(targetSlug);
@@ -1945,6 +1965,8 @@ async function deletePage() {
     }
 }
 
+// Product docs start as a draft (admin-only until published) and open in
+// the editor. Workspace docs have no public audience, so they stay as they are.
 async function newPage() {
     if (!canEditDocs()) { toast('Login required', 'error'); return; }
     const slug = prompt('New page slug (lowercase, no spaces):');
@@ -1952,10 +1974,11 @@ async function newPage() {
     const cleanSlug = slug.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '-');
     if (!cleanSlug) { toast('Invalid slug', 'error'); return; }
     const title = prompt('Page title:', cleanSlug) || cleanSlug;
+    const draft = !currentWorkspaceId;
     const resp = await fetch(pageUrl(cleanSlug), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken() },
-        body: JSON.stringify({ title, body_md: '# ' + title + '\n\n', parent_slug: null, ord: 999 }),
+        body: JSON.stringify({ title, body_md: '# ' + title + '\n\n', parent_slug: null, ord: 999, hidden: draft ? true : undefined }),
     });
     if (!resp.ok) {
         let msg = 'Create failed (HTTP ' + resp.status + ')';
@@ -1976,7 +1999,26 @@ async function newPage() {
         document.getElementById('releasePicker').value = currentTag;
     }
     await loadRelease(currentTag);
+    toast('Draft created', 'success');
+    pendingEdit = cleanSlug;
     location.hash = '#/' + currentTag + '/' + cleanSlug;
+}
+
+// Make a draft public without opening the editor.
+async function publishPage() {
+    if (!currentPage || !canEditDocs()) return;
+    const resp = await fetch(pageUrl(currentSlug), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken() },
+        body: JSON.stringify({
+            title: currentPage.title, body_md: currentPage.body_md || '',
+            parent_slug: currentPage.parent_slug || null, ord: currentPage.ord || 0, hidden: false,
+        }),
+    });
+    if (!resp.ok) { toast('Publish failed', 'error'); return; }
+    toast('Published', 'success');
+    await loadRelease(currentTag);
+    await loadPage(currentSlug);
 }
 
 // Start authoring a fresh version for the current product. The release row is

@@ -530,6 +530,7 @@ impl LicenseDb {
                 ord INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL,
                 origin TEXT NOT NULL DEFAULT 'user',
+                hidden INTEGER NOT NULL DEFAULT 0,
                 FOREIGN KEY (release_id) REFERENCES releases(id) ON DELETE CASCADE,
                 UNIQUE(release_id, slug)
             );
@@ -1480,6 +1481,11 @@ impl LicenseDb {
             }
             tx.commit().map_err(|e| LicenseError::Other(format!("DB commit: {}", e)))?;
         }
+
+        // Product docs drafts: a hidden page is admin-only until published.
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE doc_pages ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0;",
+        );
 
         // >> Add new migrations as own execute_batch statements here <<
         Ok(())

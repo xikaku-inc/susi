@@ -275,10 +275,13 @@ pub async fn handle_latest_doc_release_p(
 
 async fn list_doc_pages_impl(
     state: &Arc<AppState>,
+    headers: &HeaderMap,
     product: &str,
     tag: &str,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     safe_tag(tag)?;
+    // Before the lock: the principal check takes the db lock itself.
+    let admin = crate::website::is_admin_request(headers, state);
     let db = state.db.lock();
     let release_id = db
         .get_release_by_product_tag(product, tag)
@@ -288,13 +291,15 @@ async fn list_doc_pages_impl(
     let assets = db.list_doc_assets(release_id).map_err(db_err)?;
     let pages_json: Vec<_> = pages
         .into_iter()
-        .map(|(slug, title, parent_slug, ord, updated_at)| {
+        .filter(|p| admin || !p.5)
+        .map(|(slug, title, parent_slug, ord, updated_at, hidden)| {
             json!({
                 "slug": slug,
                 "title": title,
                 "parent_slug": parent_slug,
                 "ord": ord,
                 "updated_at": updated_at,
+                "hidden": hidden,
             })
         })
         .collect();
@@ -311,26 +316,30 @@ async fn list_doc_pages_impl(
 
 pub async fn handle_list_doc_pages(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(tag): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    list_doc_pages_impl(&state, DEFAULT_PRODUCT, &tag).await
+    list_doc_pages_impl(&state, &headers, DEFAULT_PRODUCT, &tag).await
 }
 
 pub async fn handle_list_doc_pages_p(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path((product, tag)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     safe_product(&product)?;
-    list_doc_pages_impl(&state, &product, &tag).await
+    list_doc_pages_impl(&state, &headers, &product, &tag).await
 }
 
 async fn get_doc_page_impl(
     state: &Arc<AppState>,
+    headers: &HeaderMap,
     product: &str,
     tag: &str,
     slug: &str,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     safe_tag(tag)?;
+    let admin = crate::website::is_admin_request(headers, state);
     let db = state.db.lock();
     let release_id = db
         .get_release_by_product_tag(product, tag)
@@ -340,7 +349,10 @@ async fn get_doc_page_impl(
         .get_doc_page(release_id, slug)
         .map_err(db_err)?
         .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Page not found"))?;
-    let (title, body_md, parent_slug, ord, updated_at) = page;
+    let (title, body_md, parent_slug, ord, updated_at, hidden) = page;
+    if hidden && !admin {
+        return Err(error_response(StatusCode::NOT_FOUND, "Page not found"));
+    }
     Ok(Json(json!({
         "tag": tag,
         "slug": slug,
@@ -349,22 +361,25 @@ async fn get_doc_page_impl(
         "parent_slug": parent_slug,
         "ord": ord,
         "updated_at": updated_at,
+        "hidden": hidden,
     })))
 }
 
 pub async fn handle_get_doc_page(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path((tag, slug)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    get_doc_page_impl(&state, DEFAULT_PRODUCT, &tag, &slug).await
+    get_doc_page_impl(&state, &headers, DEFAULT_PRODUCT, &tag, &slug).await
 }
 
 pub async fn handle_get_doc_page_p(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path((product, tag, slug)): Path<(String, String, String)>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     safe_product(&product)?;
-    get_doc_page_impl(&state, &product, &tag, &slug).await
+    get_doc_page_impl(&state, &headers, &product, &tag, &slug).await
 }
 
 /// Build an `attachment` Content-Disposition for `file_name` that can never
@@ -440,6 +455,10 @@ pub struct UpsertPageRequest {
     /// Optional: create the release row if it doesn't exist yet.
     #[serde(default)]
     pub release_name: Option<String>,
+    /// Draft flag for product docs: omitted preserves the current state (new
+    /// rows: published). Ignored for workspace docs.
+    #[serde(default)]
+    pub hidden: Option<bool>,
 }
 
 async fn upsert_doc_page_impl(
@@ -458,15 +477,20 @@ async fn upsert_doc_page_impl(
         ensure_release_with_seed(state, product, tag, req.release_name.as_deref().unwrap_or(""))?;
     let id = {
         let db = state.db.lock();
-        db.upsert_doc_page(
-            release_id,
-            slug,
-            &req.title,
-            &req.body_md,
-            req.parent_slug.as_deref(),
-            req.ord,
-        )
-        .map_err(db_err)?
+        let id = db
+            .upsert_doc_page(
+                release_id,
+                slug,
+                &req.title,
+                &req.body_md,
+                req.parent_slug.as_deref(),
+                req.ord,
+            )
+            .map_err(db_err)?;
+        if let Some(h) = req.hidden {
+            db.set_doc_page_hidden(release_id, slug, h).map_err(db_err)?;
+        }
+        id
     };
     Ok(Json(json!({ "id": id, "tag": tag, "slug": slug })))
 }
@@ -1313,7 +1337,15 @@ fn docs_ssr_response(
         };
         (page, in_latest)
     };
-    let (title, body_md, _parent, _ord, updated_at) = page;
+    let (title, body_md, _parent, _ord, updated_at, hidden) = page;
+    if hidden {
+        let head = format!(
+            "<title>FusionHub Documentation</title>\n<meta name=\"robots\" content=\"noindex\">\n<script>window.__SSR={};</script>\n",
+            json!({ "tag": tag, "slug": slug }).to_string().replace('<', "\\u003c"),
+        );
+        let html = render_docs_shell(&head, "");
+        return (StatusCode::NOT_FOUND, docs_html_headers(), Bytes::from(html)).into_response();
+    }
     // Older-release URLs canonicalize to the latest form so search engines
     // index one URL per page.
     let canonical = if in_latest {
@@ -1356,7 +1388,8 @@ pub(crate) fn docs_sitemap_entries(state: &AppState) -> Vec<(String, String)> {
     let Ok(pages) = db.list_doc_pages(release_id) else { return Vec::new() };
     pages
         .into_iter()
-        .map(|(slug, _t, _p, _o, upd)| (format!("{}/docs/{}", DOCS_PUBLIC_BASE, slug), upd))
+        .filter(|p| !p.5)
+        .map(|(slug, _t, _p, _o, upd, _h)| (format!("{}/docs/{}", DOCS_PUBLIC_BASE, slug), upd))
         .collect()
 }
 
@@ -1369,7 +1402,8 @@ pub(crate) fn docs_llms_section(state: &AppState) -> String {
     };
     let Ok(pages) = db.list_doc_pages(release_id) else { return String::new() };
     let mut out = String::from("\n## FusionHub Documentation\n");
-    for (slug, title, _parent, _ord, _upd) in &pages {
+    for (slug, title, _parent, _ord, _upd, hidden) in &pages {
+        if *hidden { continue; }
         let desc = db
             .get_doc_page(release_id, slug)
             .ok()
@@ -1406,7 +1440,8 @@ pub async fn handle_llms_full_txt(State(state): State<Arc<AppState>>) -> impl In
                 tag, DOCS_PUBLIC_BASE,
             ));
             if let Ok(pages) = db.list_doc_pages(release_id) {
-                for (slug, title, _parent, _ord, _upd) in &pages {
+                for (slug, title, _parent, _ord, _upd, hidden) in &pages {
+                    if *hidden { continue; }
                     if let Ok(Some((_t, body_md, ..))) = db.get_doc_page(release_id, slug) {
                         body.push_str(&format!(
                             "\n---\n\n# {}\nURL: {}/docs/{}\n\n{}\n",
