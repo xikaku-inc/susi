@@ -71,13 +71,16 @@ pub struct SiteQuery {
     // dashboard passes it when editing a translation. Empty/absent or a code
     // the site doesn't declare = the default language.
     lang: Option<String>,
+    // Set on the dashboard's editor links: skips the redirect map so an
+    // admin reaches a hidden page's editor instead of its 301.
+    edit: Option<String>,
 }
 
 impl SiteQuery {
     /// A query carrying only the ?site= value, for handlers that parse
     /// their query string by hand.
     pub fn for_site(site: Option<String>) -> Self {
-        SiteQuery { site, page: None, lang: None }
+        SiteQuery { site, page: None, lang: None, edit: None }
     }
 }
 
@@ -160,41 +163,16 @@ fn pages_in_lang(pages: &[PageRow], lang: &str) -> Vec<PageRow> {
     pages.iter().filter(|p| p.11 == lang).cloned().collect()
 }
 
-/// True for a retired page: it 301s to `redirect_to` instead of rendering, and
-/// stays out of nav, sitemap, llms.txt, the blog index and the feed.
-fn is_retired(p: &PageRow) -> bool {
-    !p.10.trim().is_empty()
-}
-
 /// True for blog-post rows (`page_kind == 'post'`).
 fn is_post(p: &PageRow) -> bool {
     p.7 == "post"
 }
 
-/// Drop hidden and retired pages - applied before any public-facing use of the
-/// page list (nav, SSR head, sitemap, llms.txt).
+/// Drop hidden pages - applied before any public-facing use of the page
+/// list (nav, SSR head, sitemap, llms.txt).
 fn visible_pages(mut pages: Vec<PageRow>) -> Vec<PageRow> {
-    pages.retain(|p| !p.6 && !is_retired(p));
+    pages.retain(|p| !p.6);
     pages
-}
-
-/// Where a retired page sends visitors. Accepts an absolute URL, a site-root
-/// path, or a bare slug (resolved to its own canonical path, so retiring onto
-/// a post lands on /blog/...). Relative targets keep the `/site` prefix when
-/// the request did not come in on the marketing host.
-fn redirect_location(target: &str, pages: &[PageRow], marketing_host: bool) -> String {
-    let target = target.trim();
-    if target.starts_with("http://") || target.starts_with("https://") {
-        return target.to_string();
-    }
-    let path = if let Some(rest) = target.strip_prefix('/') {
-        format!("/{}", rest)
-    } else if pages.iter().any(|p| p.0 == target && is_post(p)) {
-        format!("/blog/{}", target)
-    } else {
-        format!("/{}", target)
-    };
-    if marketing_host { path } else { format!("/site{}", path) }
 }
 
 /// True when the request carries a valid full-admin principal. The public
@@ -222,7 +200,7 @@ pub async fn handle_list_pages(
     let assets = db.list_website_assets(site.id).map_err(db_err)?;
     let pages_json: Vec<_> = pages
         .into_iter()
-        .map(|(slug, title, parent_slug, ord, updated_at, meta_description, hidden, page_kind, published_at, author_username, redirect_to, lang, translation_of)| {
+        .map(|(slug, title, parent_slug, ord, updated_at, meta_description, hidden, page_kind, published_at, author_username, _redirect_to, lang, translation_of)| {
             let mut row = json!({
                 "slug": slug,
                 "title": title,
@@ -234,7 +212,6 @@ pub async fn handle_list_pages(
                 "page_kind": page_kind,
                 "published_at": published_at,
                 "author_name": display_name(&db, &author_username),
-                "redirect_to": redirect_to,
                 "lang": lang,
                 "translation_of": translation_of,
             });
@@ -273,7 +250,7 @@ pub async fn handle_get_page(
         .get_website_page(site.id, &lang, &slug)
         .map_err(db_err)?
         .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Page not found"))?;
-    let (title, body_md, parent_slug, ord, updated_at, meta_description, hidden, page_kind, published_at, author_username, redirect_to, translation_of, og_image) = page;
+    let (title, body_md, parent_slug, ord, updated_at, meta_description, hidden, page_kind, published_at, author_username, _redirect_to, translation_of, og_image) = page;
     if hidden && !is_admin {
         return Err(error_response(StatusCode::NOT_FOUND, "Page not found"));
     }
@@ -289,7 +266,6 @@ pub async fn handle_get_page(
         "page_kind": page_kind,
         "published_at": published_at,
         "author_name": display_name(&db, &author_username),
-        "redirect_to": redirect_to,
         "lang": lang,
         "translation_of": translation_of,
         "og_image": og_image,
@@ -469,10 +445,6 @@ pub struct UpsertPageRequest {
     // Omitted -> preserve the existing author (new posts: the editing user).
     #[serde(default)]
     pub author_username: Option<String>,
-    // Retire the page: a non-empty target makes the slug 301 there. Omitted
-    // preserves the current setting; an empty string un-retires the page.
-    #[serde(default)]
-    pub redirect_to: Option<String>,
     // For a translated page (?lang= set): the default-language slug it
     // mirrors. Omitted preserves the current link; empty clears it.
     #[serde(default)]
@@ -549,21 +521,6 @@ pub async fn handle_upsert_page(
         } else {
             author_username.clear();
         }
-        let redirect_to = req
-            .redirect_to
-            .clone()
-            .or_else(|| existing.as_ref().map(|r| r.10.clone()))
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        // A page pointing at itself would 301 forever.
-        if !redirect_to.is_empty()
-            && (redirect_to == slug
-                || redirect_to.trim_start_matches('/') == slug
-                || redirect_to.trim_start_matches('/') == format!("blog/{}", slug))
-        {
-            return Err(error_response(StatusCode::BAD_REQUEST, "A page cannot redirect to itself"));
-        }
         // Translation links only exist on translated pages, and must point at
         // a default-language page so hreflang pairs stay resolvable.
         let translation_of = if lang.is_empty() {
@@ -603,7 +560,7 @@ pub async fn handle_upsert_page(
             &page_kind,
             &published_at,
             &author_username,
-            &redirect_to,
+            "",
             &translation_of,
             &og_image,
             Some(&principal.username),
@@ -2350,7 +2307,7 @@ pub async fn handle_website_render_slug(
     // the storefront (the marketing nginx rewrites clean /shop here).
     if let Ok(site) = resolve_site(&headers, &sq) {
         if site.langs.contains(&slug.as_str()) {
-            let sq2 = SiteQuery { site: sq.site.clone(), page: sq.page, lang: Some(slug) };
+            let sq2 = SiteQuery { site: sq.site.clone(), page: sq.page, lang: Some(slug), edit: sq.edit.clone() };
             return render_website(&state, &headers, &sq2, None, false);
         }
         if slug == "shop" && site.has_shop {
@@ -2594,27 +2551,19 @@ fn render_website(
     };
     let lang_pages = pages_in_lang(&pages, &lang);
 
-    // A retired page 301s to its replacement; an unknown slug may still be
-    // covered by the redirect map. Both are checked before rendering and
-    // never cached - a stale 301 is the one redirect a browser will not
-    // re-ask about.
+    // A hidden or unknown slug may be covered by the redirect map (a retired
+    // page is a hidden draft plus a map entry); a live page always wins.
+    // Checked before rendering and never cached - a stale 301 is the one
+    // redirect a browser will not re-ask about.
     if let Some(s) = requested_slug.as_deref() {
-        let row_redirect = {
+        let hidden_or_missing = {
             let db = state.db.lock();
-            db.get_website_page(site.id, &lang, s).ok().flatten().map(|r| r.10)
+            db.get_website_page(site.id, &lang, s).ok().flatten().map_or(true, |r| r.6)
         };
-        match row_redirect {
-            Some(t) if !t.trim().is_empty() => {
-                let to = redirect_location(&t, &pages, is_marketing_host(headers));
-                return (StatusCode::MOVED_PERMANENTLY, [(header::LOCATION, to)]).into_response();
-            }
-            Some(_) => {}
-            None => {
-                let path = if post_path { format!("/blog/{}", s) } else { format!("/{}", s) };
-                if let Some(to) = lookup_site_redirect(state, site, &path) {
-                    let loc = redirect_map_location(&to, is_marketing_host(headers));
-                    return (StatusCode::MOVED_PERMANENTLY, [(header::LOCATION, loc)]).into_response();
-                }
+        if hidden_or_missing && sq.edit.is_none() {
+            if let Some(to) = lookup_site_redirect(state, site, &lookup_path(post_path, s)) {
+                let loc = redirect_map_location(&to, is_marketing_host(headers));
+                return (StatusCode::MOVED_PERMANENTLY, [(header::LOCATION, loc)]).into_response();
             }
         }
     }
@@ -3849,6 +3798,12 @@ fn normalize_redirect_path(path: &str) -> String {
     p
 }
 
+/// The redirect-map key for a page's own address. The lookup is language-
+/// agnostic (nginx strips the /{lang}/ prefix), so no prefix here either.
+fn lookup_path(is_post: bool, slug: &str) -> String {
+    if is_post { format!("/blog/{}", slug) } else { format!("/{}", slug) }
+}
+
 fn lookup_site_redirect(state: &Arc<AppState>, site: &SiteConfig, path: &str) -> Option<String> {
     let db = state.db.lock();
     db.get_site_redirect(site.id, &normalize_redirect_path(path)).ok().flatten()
@@ -3912,7 +3867,7 @@ pub async fn handle_website_render_path(
     // redirect map (WordPress-era /ja/... permalinks).
     if site.langs.contains(&head.as_str()) {
         let rest = rest.trim_end_matches('/');
-        let sq2 = SiteQuery { site: sq.site.clone(), page: sq.page, lang: Some(head.clone()) };
+        let sq2 = SiteQuery { site: sq.site.clone(), page: sq.page, lang: Some(head.clone()), edit: sq.edit.clone() };
         if site.has_shop && rest == "shop/feed.xml" {
             return crate::shop::shop_feed_response(&state, site, &head);
         }
@@ -4063,8 +4018,8 @@ pub struct ImportPageEntry {
     pub redirect_from: Vec<String>,
     #[serde(default)]
     pub hidden: bool,
-    /// Retires the page: it 301s here and leaves nav, sitemap and llms.txt,
-    /// but keeps its content so it can be brought back.
+    /// Retires the page: imported as a hidden draft whose address 301s here
+    /// through the redirect map.
     #[serde(default)]
     pub redirect_to: String,
     /// Content language ("" = the site default); must be one the site
@@ -4194,10 +4149,10 @@ pub async fn handle_import_pages(
             let (from, _to) = validate_redirect_pair(from, &canonical_path)?;
             redirect_from.push(from);
         }
-        let redirect_to = entry.redirect_to.trim().to_string();
-        if !redirect_to.is_empty() {
-            validate_redirect_pair(&canonical_path, &redirect_to)?;
-        }
+        let redirect_to = match entry.redirect_to.trim() {
+            "" => String::new(),
+            t => validate_redirect_pair(&canonical_path, t)?.1,
+        };
         let title = entry.title.unwrap_or_else(|| crate::docs::derive_title(&slug, &body));
         rows.push(ImportRow {
             slug,
@@ -4209,7 +4164,7 @@ pub async fn handle_import_pages(
             page_kind,
             published_at,
             redirect_from,
-            hidden: entry.hidden,
+            hidden: entry.hidden || !redirect_to.is_empty(),
             redirect_to,
             lang: entry.lang,
             translation_of: entry.translation_of,
@@ -4232,7 +4187,7 @@ pub async fn handle_import_pages(
                 &r.page_kind,
                 &r.published_at,
                 "",
-                &r.redirect_to,
+                "",
                 &r.translation_of,
                 "",
                 Some(&principal.username),
@@ -4247,7 +4202,10 @@ pub async fn handle_import_pages(
             for from in &r.redirect_from {
                 db.upsert_site_redirect(site.id, from, &canonical_path).map_err(db_err)?;
             }
-            if !r.hidden && r.redirect_to.is_empty() {
+            if !r.redirect_to.is_empty() {
+                db.upsert_site_redirect(site.id, &lookup_path(r.page_kind == "post", &r.slug), &r.redirect_to).map_err(db_err)?;
+            }
+            if !r.hidden {
                 urls.push(if r.page_kind == "post" {
                     canonical_post_url(site, &r.lang, &r.slug)
                 } else {
@@ -4275,7 +4233,7 @@ pub async fn handle_import_pages(
 
     invalidate_page_cache();
     let n_pages = rows.len();
-    let n_redirects: usize = rows.iter().map(|r| r.redirect_from.len()).sum();
+    let n_redirects: usize = rows.iter().map(|r| r.redirect_from.len() + usize::from(!r.redirect_to.is_empty())).sum();
     ping_indexnow(&state, site, urls);
     log::info!(
         "Website import for site {}: {} page(s), {} asset(s), {} redirect(s)",
@@ -4533,33 +4491,6 @@ mod tests {
         assert!(h.contains("Title"));
         assert!(h.contains("<p>"));
         assert!(h.contains("A paragraph"));
-    }
-
-    #[test]
-    fn redirect_location_resolves_every_target_form() {
-        let page = |slug: &str, kind: &str| (
-            slug.to_string(), "T".to_string(), None, 0, String::new(), String::new(),
-            false, kind.to_string(), String::new(), String::new(), String::new(),
-            String::new(), String::new(),
-        );
-        let pages = vec![page("lpms-curs3", "page"), page("my-post", "post")];
-
-        // A bare slug resolves through its own kind, so a post lands on /blog.
-        assert_eq!(redirect_location("lpms-curs3", &pages, true), "/lpms-curs3");
-        assert_eq!(redirect_location("my-post", &pages, true), "/blog/my-post");
-        // An unknown slug is still treated as a page rather than dropped.
-        assert_eq!(redirect_location("gone", &pages, true), "/gone");
-        // Explicit paths are taken as given.
-        assert_eq!(redirect_location("/blog/my-post", &pages, true), "/blog/my-post");
-        // Off the marketing host the app lives under /site.
-        assert_eq!(redirect_location("lpms-curs3", &pages, false), "/site/lpms-curs3");
-        assert_eq!(redirect_location("my-post", &pages, false), "/site/blog/my-post");
-        // Absolute URLs pass through untouched, prefix included.
-        assert_eq!(
-            redirect_location("https://lp-research.com/x", &pages, false),
-            "https://lp-research.com/x"
-        );
-        assert_eq!(redirect_location("  lpms-curs3  ", &pages, true), "/lpms-curs3");
     }
 
     #[test]
@@ -4854,7 +4785,7 @@ mod tests {
 
     #[test]
     fn brand_site_honors_explicit_site_param() {
-        let q = |s: Option<&str>| SiteQuery { site: s.map(String::from), page: None, lang: None };
+        let q = |s: Option<&str>| SiteQuery { site: s.map(String::from), page: None, lang: None, edit: None };
         let bare = HeaderMap::new();
         assert_eq!(brand_site(&bare, &q(Some("lpr"))).id, "lpr");
         // Unknown or missing param falls back to Host resolution, then default.

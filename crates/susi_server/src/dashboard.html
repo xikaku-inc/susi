@@ -8495,7 +8495,7 @@ function renderWebsitePagesTable() {
     tbody.innerHTML = shown.map(p => {
         const lang = p.lang || '';
         const langSeg = lang ? '/' + encodeURIComponent(lang) : '';
-        const editUrl = '/site' + langSeg + (p.page_kind === 'post' ? '/blog/' : '/') + encodeURIComponent(p.slug) + wsQ();
+        const editUrl = '/site' + langSeg + (p.page_kind === 'post' ? '/blog/' : '/') + encodeURIComponent(p.slug) + wsQ() + '&edit=1';
         const parent = p.parent_slug
             ? '<code>' + escHtml(p.parent_slug) + '</code>'
             : '<span style="color:var(--text2);">-</span>';
@@ -8505,14 +8505,11 @@ function renderWebsitePagesTable() {
         const hiddenBadge = p.hidden ? '<span class="badge">draft</span>' : '';
         const langBadge = lang ? '<span class="badge">' + escHtml(lang) + '</span>' : '';
         const postBadge = p.page_kind === 'post' ? '<span class="badge">post</span>' : '';
-        const retiredBadge = p.redirect_to
-            ? '<span class="badge" title="Redirects to ' + escHtml(p.redirect_to) + '">retired</span>'
-            : '';
-        const tags = langBadge + postBadge + hiddenBadge + retiredBadge;
+        const tags = langBadge + postBadge + hiddenBadge;
         // Dim the content cells individually - opacity on the <tr> would
         // create a stacking context that traps the fixed-position dropdown
         // menu below the following rows.
-        const dim = (p.hidden || p.redirect_to) ? ' style="opacity:0.6;"' : '';
+        const dim = p.hidden ? ' style="opacity:0.6;"' : '';
         return '<tr>'
             + '<td' + dim + '><code>' + escHtml(p.slug) + '</code></td>'
             + '<td' + dim + '>' + escHtml(p.title) + '</td>'

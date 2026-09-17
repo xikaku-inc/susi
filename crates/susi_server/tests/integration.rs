@@ -4977,7 +4977,7 @@ fn test_redirect_map_and_bulk_import() {
     let out = resp.json::<Value>().unwrap();
     assert_eq!(out["pages_written"], json!(4));
     assert_eq!(out["assets_written"], json!(1));
-    assert_eq!(out["redirects_written"], json!(2));
+    assert_eq!(out["redirects_written"], json!(3));
 
     // A manifest "hidden" flag imports the page as a draft: admins see it,
     // the public does not.
@@ -4991,8 +4991,13 @@ fn test_redirect_map_and_bulk_import() {
         .send().expect("admin hidden get").json::<Value>().unwrap();
     assert_eq!(page["hidden"], json!(true));
 
-    // A manifest "redirect_to" retires the page: it 301s and leaves the
-    // sitemap, but keeps its body.
+    // A manifest "redirect_to" retires the page: a hidden draft whose
+    // address 301s through the redirect map and leaves the sitemap.
+    let page = http
+        .get(format!("{}/website/pages/old-overview?site=lpr", server.api_url))
+        .bearer_auth(&token)
+        .send().expect("admin retired get").json::<Value>().unwrap();
+    assert_eq!(page["hidden"], json!(true), "a retired import must be a draft");
     let resp = no_redirect
         .get(format!("{}/site/old-overview", server.url))
         .header("Host", "www.lp-research.com")
@@ -5093,7 +5098,7 @@ fn test_redirect_map_and_bulk_import() {
         .bearer_auth(&token)
         .send().expect("list").json::<Value>().unwrap();
     let redirects = list["redirects"].as_array().unwrap();
-    assert_eq!(redirects.len(), 3);
+    assert_eq!(redirects.len(), 4, "two redirect_from entries, the retired page, and the manual one");
     let id = redirects.iter().find(|r| r["from_path"] == "/old-sensor").unwrap()["id"].as_i64().unwrap();
     let resp = http
         .delete(format!("{}/website/redirects/{}?site=lpr", server.api_url, id))
@@ -5934,10 +5939,11 @@ fn test_blog_post_byline() {
     assert_eq!(body["author_username"], json!(""), "pages must stay unattributed");
 }
 
-/// Retiring a page: the slug 301s to its replacement and disappears from every
-/// public listing, while staying editable so it can be brought back.
+/// Retiring a page is unpublishing it plus a redirect-map entry for its old
+/// address: the map only applies to hidden and unknown slugs, so a live page
+/// always wins, and ?edit lets an admin through to the editor.
 #[test]
-fn test_retired_page_redirects() {
+fn test_hidden_page_follows_redirect_map() {
     let server = TestServer::start();
     let token = server.admin_token();
     let http = server.http();
@@ -5947,36 +5953,39 @@ fn test_retired_page_redirects() {
         .danger_accept_invalid_certs(true)
         .build()
         .expect("client");
+    let set_hidden = |slug: &str, hidden: bool| {
+        let resp = http.post(format!("{}/website/pages/{}/visibility", server.api_url, slug)).bearer_auth(&token)
+            .json(&json!({ "hidden": hidden })).send().expect("visibility");
+        assert_eq!(resp.status().as_u16(), 200);
+    };
+    let add_redirect = |from: &str, to: &str| {
+        let resp = http.put(format!("{}/website/redirects", server.api_url)).bearer_auth(&token)
+            .json(&json!({ "from_path": from, "to_path": to })).send().expect("add redirect");
+        assert!(resp.status().is_success(), "add redirect {}: {}", from, resp.text().unwrap_or_default());
+    };
 
     for (slug, title, ord) in [("home", "Home", 0), ("lpms-curs3", "LPMS-CURS3", 1), ("old-sensor", "Old sensor", 2)] {
         let resp = http
             .put(format!("{}/website/pages/{}", server.api_url, slug))
             .bearer_auth(&token)
-            .json(&json!({ "title": title, "body_md": format!("# {}\n\nBody of {}.", title, slug), "ord": ord }))
+            .json(&json!({ "title": title, "body_md": format!("# {}
+
+Body of {}.", title, slug), "ord": ord }))
             .send()
             .expect("create page");
         assert_eq!(resp.status().as_u16(), 200, "create {}", slug);
     }
-    let resp = http
-        .put(format!("{}/website/pages/gone-post", server.api_url))
-        .bearer_auth(&token)
-        .json(&json!({ "title": "Gone post", "body_md": "# Gone post\n\nRetired.", "page_kind": "post", "published_at": "2026-07-01" }))
-        .send()
-        .expect("create post");
-    assert_eq!(resp.status().as_u16(), 200);
 
-    // Retire the page onto its replacement.
-    let resp = http
-        .put(format!("{}/website/pages/old-sensor", server.api_url))
-        .bearer_auth(&token)
-        .json(&json!({ "title": "Old sensor", "body_md": "# Old sensor\n\nBody of old-sensor.", "redirect_to": "lpms-curs3" }))
-        .send()
-        .expect("retire page");
-    assert_eq!(resp.status().as_u16(), 200, "retire: {}", resp.text().unwrap_or_default());
+    // A map entry for a live page's own address is ignored: the page renders.
+    add_redirect("/old-sensor", "/lpms-curs3");
+    let resp = no_follow.get(format!("{}/site/old-sensor", server.url)).send().expect("live ssr");
+    assert_eq!(resp.status().as_u16(), 200, "a live page must win over the redirect map");
+    assert!(resp.text().unwrap().contains("Body of old-sensor."));
 
-    // The slug now permanently redirects instead of rendering.
+    // Unpublishing the page turns the entry on: the slug permanently redirects.
+    set_hidden("old-sensor", true);
     let resp = no_follow.get(format!("{}/site/old-sensor", server.url)).send().expect("retired ssr");
-    assert_eq!(resp.status().as_u16(), 301, "a retired page must 301");
+    assert_eq!(resp.status().as_u16(), 301, "a hidden page with a map entry must 301");
     assert_eq!(resp.headers()["location"], "/site/lpms-curs3", "off the marketing host the /site prefix stays");
     let resp = no_follow
         .get(format!("{}/site/old-sensor", server.url))
@@ -5989,77 +5998,50 @@ fn test_retired_page_redirects() {
     let body = http.get(format!("{}/website/pages", server.api_url))
         .send().expect("public list").json::<Value>().unwrap();
     let pages = body["pages"].as_array().unwrap();
-    assert!(!pages.iter().any(|p| p["slug"] == "old-sensor"), "retired page must leave the public list");
+    assert!(!pages.iter().any(|p| p["slug"] == "old-sensor"), "hidden page must leave the public list");
     assert!(pages.iter().any(|p| p["slug"] == "lpms-curs3"), "the replacement stays");
     let sitemap = http.get(format!("{}/sitemap.xml", server.url))
         .header("Host", "xikaku.com").send().expect("sitemap").text().unwrap();
-    assert!(!sitemap.contains("old-sensor"), "retired page must leave the sitemap: {}", sitemap);
-    assert!(sitemap.contains("lpms-curs3"));
+    assert!(!sitemap.contains("old-sensor"), "hidden page must leave the sitemap: {}", sitemap);
     let llms = http.get(format!("{}/llms.txt", server.url)).send().expect("llms").text().unwrap();
-    assert!(!llms.contains("old-sensor"), "retired page must leave llms.txt");
+    assert!(!llms.contains("old-sensor"), "hidden page must leave llms.txt");
 
-    // Admins still get it, so the editor can clear the redirect.
+    // The dashboard's editor link (?edit) gets the hidden-page shell (a
+    // noindex 404 whose script loads the draft with the admin token) instead
+    // of the 301, and the admin API still serves the page, so it stays editable.
+    let resp = no_follow.get(format!("{}/site/old-sensor?edit=1", server.url)).send().expect("edit ssr");
+    assert_eq!(resp.status().as_u16(), 404, "?edit must bypass the redirect");
+    assert!(resp.text().unwrap().contains("<script"), "?edit must serve the site shell");
     let body = http.get(format!("{}/website/pages/old-sensor", server.api_url))
         .bearer_auth(&token).send().expect("admin get").json::<Value>().unwrap();
-    assert_eq!(body["redirect_to"], json!("lpms-curs3"));
-    assert_eq!(body["body_md"], json!("# Old sensor\n\nBody of old-sensor."), "the body survives retirement");
+    assert_eq!(body["hidden"], json!(true));
+    assert_eq!(body["body_md"], json!("# Old sensor
 
-    // A retired post redirects too, and drops out of the index and the feed.
+Body of old-sensor."), "the body survives");
+
+    // A hidden post follows the map too, and stays out of the index and feed.
     let resp = http
         .put(format!("{}/website/pages/gone-post", server.api_url))
         .bearer_auth(&token)
-        .json(&json!({ "title": "Gone post", "body_md": "# Gone post\n\nRetired.", "redirect_to": "/blog/other" }))
+        .json(&json!({ "title": "Gone post", "body_md": "# Gone post
+
+Retired.", "page_kind": "post", "published_at": "2026-07-01", "hidden": true }))
         .send()
-        .expect("retire post");
+        .expect("create post");
     assert_eq!(resp.status().as_u16(), 200);
+    add_redirect("/blog/gone-post", "/blog/other");
     let resp = no_follow.get(format!("{}/site/blog/gone-post", server.url)).send().expect("retired post");
     assert_eq!(resp.status().as_u16(), 301);
     assert_eq!(resp.headers()["location"], "/site/blog/other");
     let index = http.get(format!("{}/site/blog", server.url)).send().expect("index").text().unwrap();
-    assert!(!index.contains("Retired."), "a retired post must leave the blog index");
+    assert!(!index.contains("Retired."), "a hidden post must leave the blog index");
     let rss = http.get(format!("{}/site/blog/rss.xml", server.url)).send().expect("rss").text().unwrap();
-    assert!(!rss.contains("gone-post"), "a retired post must leave the feed");
+    assert!(!rss.contains("gone-post"), "a hidden post must leave the feed");
 
-    // A page pointing at itself would loop forever.
-    for target in ["old-sensor", "/old-sensor"] {
-        let resp = http
-            .put(format!("{}/website/pages/old-sensor", server.api_url))
-            .bearer_auth(&token)
-            .json(&json!({ "title": "Old sensor", "body_md": "x", "redirect_to": target }))
-            .send()
-            .expect("self redirect");
-        assert_eq!(resp.status().as_u16(), 400, "self-redirect {} must be rejected", target);
-    }
-
-    // Clearing the target brings the page back.
-    let resp = http
-        .put(format!("{}/website/pages/old-sensor", server.api_url))
-        .bearer_auth(&token)
-        .json(&json!({ "title": "Old sensor", "body_md": "# Old sensor\n\nBack again.", "redirect_to": "" }))
-        .send()
-        .expect("un-retire");
-    assert_eq!(resp.status().as_u16(), 200);
+    // Publishing again brings the page back in front of its map entry.
+    set_hidden("old-sensor", false);
     let ssr = http.get(format!("{}/site/old-sensor", server.url)).send().expect("live again").text().unwrap();
-    assert!(ssr.contains("Back again."), "clearing the target must un-retire the page");
-
-    // An update that omits the field leaves an existing redirect in place.
-    let resp = http
-        .put(format!("{}/website/pages/old-sensor", server.api_url))
-        .bearer_auth(&token)
-        .json(&json!({ "title": "Old sensor", "body_md": "x", "redirect_to": "lpms-curs3" }))
-        .send()
-        .expect("retire again");
-    assert_eq!(resp.status().as_u16(), 200);
-    let resp = http
-        .put(format!("{}/website/pages/old-sensor", server.api_url))
-        .bearer_auth(&token)
-        .json(&json!({ "title": "Old sensor", "body_md": "y" }))
-        .send()
-        .expect("redirect-less update");
-    assert_eq!(resp.status().as_u16(), 200);
-    let body = http.get(format!("{}/website/pages/old-sensor", server.api_url))
-        .bearer_auth(&token).send().expect("get").json::<Value>().unwrap();
-    assert_eq!(body["redirect_to"], json!("lpms-curs3"), "an omitted field must not un-retire");
+    assert!(ssr.contains("Body of old-sensor."), "publishing must bring the page back");
 }
 
 /// Every contact-form field is mandatory - blank company or subject is

@@ -1435,6 +1435,52 @@ impl LicenseDb {
             tx.commit().map_err(|e| LicenseError::Other(format!("DB commit: {}", e)))?;
         }
 
+        // Retired pages (a non-empty redirect_to) become hidden drafts with
+        // their 301 moved into site_redirects, keyed the way the SSR lookup
+        // asks (no lang prefix). One-shot: redirect_to is cleared in the same
+        // transaction; an existing map entry is kept. The dead column stays.
+        {
+            let tx = self
+                .conn
+                .unchecked_transaction()
+                .map_err(|e| LicenseError::Other(format!("DB tx: {}", e)))?;
+            let err = |e: rusqlite::Error| LicenseError::Other(format!("DB retired migration: {}", e));
+            let rows: Vec<(i64, String, String, String, String)> = {
+                let mut st = tx
+                    .prepare("SELECT id, site, slug, page_kind, TRIM(redirect_to) FROM website_pages WHERE TRIM(redirect_to) <> ''")
+                    .map_err(err)?;
+                let it = st
+                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+                    .map_err(err)?;
+                it.collect::<Result<_, _>>().map_err(err)?
+            };
+            let now = Utc::now().to_rfc3339();
+            for (id, site, slug, kind, target) in rows {
+                let from = if kind == "post" { format!("/blog/{}", slug) } else { format!("/{}", slug) };
+                let to = if target.starts_with("http://") || target.starts_with("https://") || target.starts_with('/') {
+                    target
+                } else {
+                    let is_post = tx
+                        .query_row(
+                            "SELECT COUNT(*) FROM website_pages WHERE site = ?1 AND slug = ?2 AND page_kind = 'post'",
+                            params![site, target],
+                            |r| r.get::<_, i64>(0),
+                        )
+                        .map(|n| n > 0)
+                        .unwrap_or(false);
+                    if is_post { format!("/blog/{}", target) } else { format!("/{}", target) }
+                };
+                tx.execute(
+                    "INSERT OR IGNORE INTO site_redirects (site, from_path, to_path, updated_at) VALUES (?1, ?2, ?3, ?4)",
+                    params![site, from, to, now],
+                )
+                .map_err(err)?;
+                tx.execute("UPDATE website_pages SET hidden = 1, redirect_to = '' WHERE id = ?1", params![id])
+                    .map_err(err)?;
+            }
+            tx.commit().map_err(|e| LicenseError::Other(format!("DB commit: {}", e)))?;
+        }
+
         // >> Add new migrations as own execute_batch statements here <<
         Ok(())
     }
@@ -1923,6 +1969,33 @@ mod tests {
 
     fn test_db() -> LicenseDb {
         LicenseDb::open(":memory:").unwrap()
+    }
+
+    /// A retired page (non-empty redirect_to) becomes a hidden draft with its
+    /// 301 in the redirect map; a bare-slug target resolves through its kind,
+    /// and the sweep is a no-op afterwards.
+    #[test]
+    fn test_retired_pages_migrate_to_redirect_map() {
+        let mut db = test_db();
+        let mut page = |slug: &str, kind: &str, redirect_to: &str| {
+            db.upsert_website_page("xikaku", "", slug, slug, "x", None, 0, "", kind, "", "", redirect_to, "", "", None).unwrap();
+        };
+        page("lpms-curs3", "page", "");
+        page("old", "page", "lpms-curs3");
+        page("gone", "post", "https://example.com/x");
+        page("old2", "page", "gone");
+        db.migrate().unwrap();
+        assert_eq!(db.get_site_redirect("xikaku", "/old").unwrap().as_deref(), Some("/lpms-curs3"));
+        assert_eq!(db.get_site_redirect("xikaku", "/blog/gone").unwrap().as_deref(), Some("https://example.com/x"));
+        assert_eq!(db.get_site_redirect("xikaku", "/old2").unwrap().as_deref(), Some("/blog/gone"));
+        let old = db.get_website_page("xikaku", "", "old").unwrap().unwrap();
+        assert!(old.6, "retired page must become hidden");
+        assert_eq!(old.10, "", "redirect_to must be cleared");
+        assert!(!db.get_website_page("xikaku", "", "lpms-curs3").unwrap().unwrap().6);
+        // Re-running changes nothing: a map entry edited since is kept.
+        db.upsert_site_redirect("xikaku", "/old", "/elsewhere").unwrap();
+        db.migrate().unwrap();
+        assert_eq!(db.get_site_redirect("xikaku", "/old").unwrap().as_deref(), Some("/elsewhere"));
     }
 
     /// TOTP + federation secrets round-trip through at-rest encryption, the
