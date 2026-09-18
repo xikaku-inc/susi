@@ -2084,11 +2084,7 @@ fn render_seo_head(
                 r#"{{"@type":"Person","name":"{}"}}"#,
                 json_escape(name),
             ),
-            None => format!(
-                r#"{{"@type":"Organization","name":"{}","url":"{}"}}"#,
-                json_escape(site.name),
-                json_escape(site.public_base),
-            ),
+            None => sites::publisher_jsonld(site, ""),
         };
         let publisher_logo = if site.logo_url.is_empty() {
             String::new()
@@ -2102,7 +2098,7 @@ fn render_seo_head(
             None => String::new(),
         };
         format!(
-            r#"{{"@context":"https://schema.org","@type":"BlogPosting","headline":"{title}","description":"{desc}","url":"{url}"{image_ld},"mainEntityOfPage":{{"@type":"WebPage","@id":"{url}"}},"datePublished":"{published}","dateModified":"{date}","author":{author_ld},"publisher":{{"@type":"Organization","name":"{site_name}","url":"{base}"{publisher_logo}}}}}"#,
+            r#"{{"@context":"https://schema.org","@type":"BlogPosting","headline":"{title}","description":"{desc}","url":"{url}"{image_ld},"mainEntityOfPage":{{"@type":"WebPage","@id":"{url}"}},"datePublished":"{published}","dateModified":"{date}","author":{author_ld},"publisher":{publisher}}}"#,
             title = json_escape(page_title),
             desc = json_escape(description),
             url = json_escape(&canonical),
@@ -2110,26 +2106,26 @@ fn render_seo_head(
             published = json_escape(published),
             date = json_escape(&date_modified),
             author_ld = author_ld,
-            site_name = json_escape(site.name),
-            base = json_escape(site.public_base),
-            publisher_logo = publisher_logo,
+            publisher = sites::publisher_jsonld(site, &publisher_logo),
         )
     } else if is_home {
         format!(
-            r#"{{"@context":"https://schema.org","@type":"WebSite","name":"{name}","url":"{url}","description":"{desc}","publisher":{{"@type":"Organization","name":"{name}","url":"{url}"}}}}"#,
+            r#"{{"@context":"https://schema.org","@type":"WebSite","name":"{name}","url":"{url}","description":"{desc}","publisher":{publisher}}}"#,
             name = json_escape(site.name),
             url = json_escape(site.public_base),
             desc = json_escape(description),
+            publisher = sites::publisher_jsonld(site, ""),
         )
     } else {
         format!(
-            r#"{{"@context":"https://schema.org","@type":"WebPage","name":"{title}","description":"{desc}","url":"{url}","dateModified":"{date}","isPartOf":{{"@type":"WebSite","name":"{site_name}","url":"{base}"}},"publisher":{{"@type":"Organization","name":"{site_name}","url":"{base}"}}}}"#,
+            r#"{{"@context":"https://schema.org","@type":"WebPage","name":"{title}","description":"{desc}","url":"{url}","dateModified":"{date}","isPartOf":{{"@type":"WebSite","name":"{site_name}","url":"{base}"}},"publisher":{publisher}}}"#,
             title = json_escape(page_title),
             desc = json_escape(description),
             url = json_escape(&canonical),
             date = json_escape(&date_modified),
             site_name = json_escape(site.name),
             base = json_escape(site.public_base),
+            publisher = sites::publisher_jsonld(site, ""),
         )
     };
 
@@ -3375,6 +3371,20 @@ pub async fn handle_sitemap_xml(
                 ));
             }
             xml.push_str("  </url>\n");
+        }
+        // The /blog index is a synthetic route, not a page row: list it per
+        // language that has posts, dated by the newest post.
+        if site.has_blog {
+            for lang in std::iter::once("").chain(site.langs.iter().copied()) {
+                if pages.iter().any(|p| p.11 == lang && p.0 == "blog") { continue; }
+                let Some(newest) = sorted_posts(&pages_in_lang(&pages, lang)).first().map(|p| p.4.clone()) else { continue };
+                xml.push_str("  <url>\n");
+                xml.push_str(&format!("    <loc>{}{}</loc>\n", xml_escape(site.public_base), xml_escape(&blog_index_href(lang, 1))));
+                if !newest.is_empty() {
+                    xml.push_str(&format!("    <lastmod>{}</lastmod>\n", xml_escape(&iso8601_z(&newest))));
+                }
+                xml.push_str("  </url>\n");
+            }
         }
     } else {
         for (url, updated_at) in docs_sitemap_entries(&state) {

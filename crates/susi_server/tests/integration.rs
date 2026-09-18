@@ -4869,6 +4869,7 @@ fn test_blog_posts() {
         .header("Host", "xikaku.com")
         .send().expect("sitemap").text().unwrap();
     assert!(sitemap.contains("https://xikaku.com/blog/first-post"), "sitemap: {}", sitemap);
+    assert!(sitemap.contains("<loc>https://xikaku.com/blog</loc>"), "sitemap must list the blog index: {}", sitemap);
     assert!(!sitemap.contains("draft-post"));
 
     // llms.txt: posts live in a dedicated Blog section with their dates.

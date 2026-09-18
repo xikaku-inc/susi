@@ -1926,6 +1926,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                     <div><label>Contact email</label><input type="text" id="siteFieldEmail" autocomplete="off" readonly onfocus="this.removeAttribute('readonly')"></div>
                     <div><label>Legal name</label><input type="text" id="siteFieldLegal" autocomplete="off"></div>
                 </div>
+                <div class="form-row"><label>Person name (personal site)</label><input type="text" id="siteFieldPerson" autocomplete="off"></div>
                 <div class="form-row" style="display:grid;grid-template-columns:1fr 120px;gap:12px;">
                     <div><label>Locality</label><input type="text" id="siteFieldLocality" autocomplete="off"></div>
                     <div><label>Country</label><input type="text" id="siteFieldCountry" autocomplete="off"></div>
@@ -8564,6 +8565,7 @@ function fillSiteIdentity(id, def) {
     document.getElementById('siteFieldPublicBase').value = def.public_base || '';
     document.getElementById('siteFieldEmail').value = def.contact_email || '';
     document.getElementById('siteFieldLegal').value = def.org_legal_name || '';
+    document.getElementById('siteFieldPerson').value = def.person_name || '';
     document.getElementById('siteFieldLocality').value = def.addr_locality || '';
     document.getElementById('siteFieldCountry').value = def.addr_country || '';
     document.getElementById('siteFieldOgImage').value = def.og_image_url || '';
@@ -8618,6 +8620,7 @@ async function saveSite() {
         public_base: val('siteFieldPublicBase'),
         contact_email: val('siteFieldEmail'),
         org_legal_name: val('siteFieldLegal'),
+        person_name: val('siteFieldPerson'),
         addr_locality: val('siteFieldLocality'),
         addr_country: val('siteFieldCountry'),
         og_image_url: val('siteFieldOgImage'),

@@ -36,6 +36,9 @@ pub struct SiteDef {
     pub public_base: String,
     pub contact_email: String,
     pub org_legal_name: String,
+    /// Set for a personal site: the site's JSON-LD entity becomes a Person
+    /// of this name instead of an Organization.
+    pub person_name: String,
     pub addr_locality: String,
     pub addr_country: String,
     /// Absolute og:image URL; empty = the tags that need it are omitted.
@@ -68,6 +71,7 @@ pub struct SiteConfig {
     pub name: &'static str,
     pub tagline: &'static str,
     pub org_legal_name: &'static str,
+    pub person_name: &'static str,
     pub addr_locality: &'static str,
     pub addr_country: &'static str,
     pub contact_email: &'static str,
@@ -136,6 +140,7 @@ fn builtin_defs() -> Vec<(&'static str, SiteDef)> {
                 public_base: "https://xikaku.com".into(),
                 contact_email: "info@xikaku.com".into(),
                 org_legal_name: "LP-Research Inc.".into(),
+                person_name: String::new(),
                 addr_locality: "Tokyo".into(),
                 addr_country: "JP".into(),
                 og_image_url: "https://xikaku.com/static/og-image.png".into(),
@@ -163,6 +168,7 @@ fn builtin_defs() -> Vec<(&'static str, SiteDef)> {
                 public_base: "https://www.lp-research.com".into(),
                 contact_email: "info@lp-research.com".into(),
                 org_legal_name: "LP-Research Inc.".into(),
+                person_name: String::new(),
                 addr_locality: "Tokyo".into(),
                 addr_country: "JP".into(),
                 og_image_url: String::new(),
@@ -206,6 +212,7 @@ fn build_config(id: &str, def: &SiteDef, has_logo: bool) -> &'static SiteConfig 
         name: sstr(&def.name),
         tagline: sstr(&def.tagline),
         org_legal_name: sstr(&def.org_legal_name),
+        person_name: sstr(&def.person_name),
         addr_locality: sstr(&def.addr_locality),
         addr_country: sstr(&def.addr_country),
         contact_email: sstr(&def.contact_email),
@@ -331,6 +338,28 @@ pub fn org_jsonld(site: &SiteConfig) -> &'static str {
     site.org_jsonld
 }
 
+/// The site as a nested JSON-LD `publisher`/`author` value: a Person on a
+/// personal site, otherwise the Organization. `extra` is spliced in before
+/// the closing brace (e.g. a logo).
+pub fn publisher_jsonld(site: &SiteConfig, extra: &str) -> String {
+    use crate::website::json_escape;
+    if site.person_name.is_empty() {
+        format!(
+            r#"{{"@type":"Organization","name":"{}","url":"{}"{}}}"#,
+            json_escape(site.name),
+            json_escape(site.public_base),
+            extra,
+        )
+    } else {
+        format!(
+            r#"{{"@type":"Person","name":"{}","url":"{}"{}}}"#,
+            json_escape(site.person_name),
+            json_escape(site.public_base),
+            extra,
+        )
+    }
+}
+
 fn build_org_jsonld(site: &SiteConfig) -> String {
     use crate::website::json_escape;
     let same_as = site
@@ -386,6 +415,21 @@ fn build_org_jsonld(site: &SiteConfig) -> String {
     } else {
         format!(r#","sameAs":[{}]"#, same_as)
     };
+    if !site.person_name.is_empty() {
+        let email = if site.contact_email.is_empty() {
+            String::new()
+        } else {
+            format!(r#","email":"{}""#, json_escape(site.contact_email))
+        };
+        return format!(
+            r#"{{"@context":"https://schema.org","@type":"Person","name":"{name}","url":"{url}","description":"{desc}"{email}{same_as}}}"#,
+            name = json_escape(site.person_name),
+            url = json_escape(site.public_base),
+            desc = json_escape(site.tagline),
+            email = email,
+            same_as = same_as,
+        );
+    }
     format!(
         r#"{{"@context":"https://schema.org","@type":"Organization","name":"{name}",{legal}"url":"{url}",{logo}"slogan":"{slogan}"{address}{contact}{same_as}}}"#,
         name = json_escape(site.name),
@@ -456,6 +500,22 @@ mod tests {
         assert!(!j.contains("contactPoint"));
         assert!(j.contains(r#""sameAs":["https://soundcloud.com/x"]"#));
         serde_json::from_str::<serde_json::Value>(j).expect("org JSON-LD must stay valid JSON");
+    }
+
+    #[test]
+    fn person_name_switches_site_entity_to_person() {
+        let def: SiteDef = serde_json::from_str(
+            r#"{"name":"K","tagline":"t","hosts":["k.example.com"],"public_base":"https://k.example.com","person_name":"Klaus P","social_links":["https://soundcloud.com/x"]}"#,
+        )
+        .unwrap();
+        let cfg = build_config("ptest", &def, false);
+        let j = org_jsonld(cfg);
+        assert!(j.starts_with(r#"{"@context":"https://schema.org","@type":"Person","name":"Klaus P""#), "{}", j);
+        assert!(j.contains(r#""sameAs":["https://soundcloud.com/x"]"#));
+        assert!(!j.contains("slogan"));
+        serde_json::from_str::<serde_json::Value>(j).expect("person JSON-LD must stay valid JSON");
+        assert_eq!(publisher_jsonld(cfg, ""), r#"{"@type":"Person","name":"Klaus P","url":"https://k.example.com"}"#);
+        assert!(publisher_jsonld(default_site(), "").starts_with(r#"{"@type":"Organization","name":"Xikaku""#));
     }
 
     #[test]
