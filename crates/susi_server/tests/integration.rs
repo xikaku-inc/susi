@@ -1464,6 +1464,14 @@ fn test_docs_seo_ssr_and_indexes() {
     assert!(body.contains("/api/v1/docs/v2.0/assets/shot.png"));
     assert!(body.contains("href=\"/docs/other-page\""));
 
+    // A cross-page section link "/docs/{slug}/{heading-id}" serves the page
+    // from the latest release and hands the anchor to the viewer.
+    let resp = http.get(format!("{}/docs/guide/new-body", server.url)).send().expect("ssr section link");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = resp.text().unwrap();
+    assert!(body.contains("New body.") && body.contains("\"anchor\":\"new-body\""), "{}", body);
+    assert!(body.contains("<link rel=\"canonical\" href=\"https://susi.lp-research.com/docs/guide\">"));
+
     // A pinned release canonicalizes to the latest form when the page exists
     // there, and to itself when it does not.
     let body = http.get(format!("{}/docs/v1.0/guide", server.url)).send().unwrap().text().unwrap();

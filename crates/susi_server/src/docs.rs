@@ -1252,7 +1252,7 @@ fn docs_md_for_ssr(body_md: &str, tag: &str) -> String {
     rewrite_doc_links(&strip_toc(body_md), tag)
 }
 
-fn docs_seo_head(title: &str, description: &str, canonical: &str, updated_at: &str, tag: &str, slug: &str) -> String {
+fn docs_seo_head(title: &str, description: &str, canonical: &str, updated_at: &str, tag: &str, slug: &str, anchor: Option<&str>) -> String {
     let full_title = format!("{} - FusionHub Documentation", title);
     let mut head = format!(
         concat!(
@@ -1290,7 +1290,11 @@ fn docs_seo_head(title: &str, description: &str, canonical: &str, updated_at: &s
     ));
     // One-shot boot info so the viewer routes to this page without a hash.
     // `<` is escaped so a pathological slug cannot close the script tag.
-    let boot = json!({ "tag": tag, "slug": slug }).to_string().replace('<', "\\u003c");
+    let mut boot = json!({ "tag": tag, "slug": slug });
+    if let Some(a) = anchor {
+        boot["anchor"] = json!(a);
+    }
+    let boot = boot.to_string().replace('<', "\\u003c");
     head.push_str(&format!("<script>window.__SSR={};</script>\n", boot));
     head
 }
@@ -1314,15 +1318,28 @@ fn docs_ssr_response(
     slug: String,
 ) -> axum::response::Response {
     let Some(latest) = latest_public_tag(state) else { return docs_ssr_not_found() };
-    let tag = req_tag.unwrap_or_else(|| latest.clone());
+    let mut tag = req_tag.unwrap_or_else(|| latest.clone());
+    let mut slug = slug;
+    let mut anchor: Option<String> = None;
     if safe_tag(&tag).is_err() {
         return docs_ssr_not_found();
     }
     let (page, in_latest) = {
         let db = state.db.lock();
-        let Ok(Some(release_id)) = db.get_release_by_product_tag(DEFAULT_PRODUCT, &tag) else {
-            return docs_ssr_not_found();
-        };
+        let mut release_id = db.get_release_by_product_tag(DEFAULT_PRODUCT, &tag).ok().flatten();
+        if release_id.is_none() {
+            // A cross-page section link "/docs/{slug}/{heading-id}" arrives
+            // here as tag = slug, slug = heading: resolve it against the
+            // latest release and hand the anchor to the viewer.
+            let latest_id = db.get_release_by_product_tag(DEFAULT_PRODUCT, &latest).ok().flatten();
+            if latest_id.and_then(|id| db.get_doc_page(id, &tag).ok().flatten()).is_some() {
+                anchor = Some(slug);
+                slug = tag;
+                tag = latest.clone();
+                release_id = latest_id;
+            }
+        }
+        let Some(release_id) = release_id else { return docs_ssr_not_found() };
         let Ok(Some(page)) = db.get_doc_page(release_id, &slug) else {
             return docs_ssr_not_found();
         };
@@ -1357,7 +1374,7 @@ fn docs_ssr_response(
         let d = derive_description(&strip_toc(&body_md));
         if d.is_empty() { DOCS_DEFAULT_DESCRIPTION.to_string() } else { d }
     };
-    let head = docs_seo_head(&title, &description, &canonical, &updated_at, &tag, &slug);
+    let head = docs_seo_head(&title, &description, &canonical, &updated_at, &tag, &slug, anchor.as_deref());
     let content = render_body_html(&docs_md_for_ssr(&body_md, &tag));
     let html = render_docs_shell(&head, &content);
     (docs_html_headers(), Bytes::from(html)).into_response()
@@ -1483,7 +1500,7 @@ mod tests {
 
     #[test]
     fn docs_seo_head_has_canonical_and_boot() {
-        let h = docs_seo_head("Page", "Desc.", "https://susi.lp-research.com/docs/page", "2026-07-21 10:00:00", "v1", "page");
+        let h = docs_seo_head("Page", "Desc.", "https://susi.lp-research.com/docs/page", "2026-07-21 10:00:00", "v1", "page", None);
         assert!(h.contains("<link rel=\"canonical\" href=\"https://susi.lp-research.com/docs/page\">"));
         assert!(h.contains("Page - FusionHub Documentation</title>"));
         assert!(h.contains("window.__SSR={\"slug\":\"page\",\"tag\":\"v1\"}"));

@@ -2098,6 +2098,7 @@ async function route() {
 
     if (parts.length === 0 && ssr && ssr.tag && ssr.slug) {
         parts.push(ssr.tag, ssr.slug);
+        if (ssr.anchor) parts.push(ssr.anchor);
     }
     if (products.length === 0) await loadProducts();
     if (releases.length === 0) {
