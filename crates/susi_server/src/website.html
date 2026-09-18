@@ -2027,7 +2027,15 @@ function storeDraft() {
     clearTimeout(draftTimer);
     draftTimer = null;
     if (!editMode || !currentPage) return;
-    try { localStorage.setItem(draftKey(), JSON.stringify(editorValues())); } catch (e) {}
+    try {
+        const v = editorValues();
+        // An empty body never overwrites real content: a torn-down or
+        // failed editor reads as empty, and that must not destroy the draft.
+        const prev = JSON.parse(localStorage.getItem(draftKey()) || 'null');
+        const had = (prev && prev.body_md) || currentPage.body_md || '';
+        if (!v.body_md.trim() && had.trim()) return;
+        localStorage.setItem(draftKey(), JSON.stringify(v));
+    } catch (e) {}
 }
 
 function scheduleDraft() {
@@ -2038,7 +2046,8 @@ function scheduleDraft() {
 function loadDraft() {
     try {
         const d = JSON.parse(localStorage.getItem(draftKey()) || 'null');
-        return d && d.body_md !== (currentPage.body_md || '') ? d : null;
+        if (!d || !d.body_md.trim()) return null;
+        return d.body_md !== (currentPage.body_md || '') ? d : null;
     } catch (e) { return null; }
 }
 
@@ -2140,6 +2149,9 @@ function renderEditor() {
     }
     document.getElementById('editMetaDesc').value = metaDesc;
     document.getElementById('editOgImage').value = ogImage;
+    // The plain textarea carries the body too, so a failed editor load
+    // still shows (and autosaves) the content instead of an empty box.
+    document.getElementById('editBody').value = body;
     initEasyMDE(body);
     if (easymde) easymde.codemirror.on('change', scheduleDraft);
     c.querySelectorAll('input, select').forEach((el) => el.addEventListener('input', scheduleDraft));
