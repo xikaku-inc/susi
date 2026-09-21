@@ -103,10 +103,14 @@ body.has-bg .sidebar,
 body.has-bg .toc-rail,
 body.has-bg .site-footer { background: transparent; }
 /* Scrolling happens inside .page-scroll, clipped below the top bar, so
-   content never passes under it. The sticky rails re-anchor to the
+   content never passes under it. Header and scroller are both viewport-fixed
+   rather than sized from 100dvh: Firefox on Android can still shift the root
+   by its toolbar height under overflow: hidden, which pushed the content
+   up behind the transparent header. The sticky rails re-anchor to the
    container top; sticky admin bars anchor to 0 instead of the header. */
 body.has-bg { height: 100dvh; overflow: hidden; }
-body.has-bg .page-scroll { height: calc(100dvh - var(--topbar-h)); overflow-y: auto; }
+body.has-bg .header { position: fixed; top: 0; left: 0; right: 0; }
+body.has-bg .page-scroll { position: fixed; top: var(--topbar-h); left: 0; right: 0; bottom: 0; overflow-y: auto; }
 body.has-bg .sidebar,
 body.has-bg .toc-rail { top: 0; }
 body.has-bg .editor-toolbar { top: 0; }
@@ -195,7 +199,6 @@ a.btn { display: inline-flex; align-items: center; text-decoration: none; }
     font-size: 13px;
 }
 .site-footer a { color: var(--text2); text-decoration: none; }
-.site-footer #langSwitch span { color: var(--text2); }
 .lang-switch-top { font-size: 13px; white-space: nowrap; }
 .lang-switch-top span { color: var(--text2); }
 .lang-switch-top a { color: var(--accent); text-decoration: none; }
@@ -273,7 +276,7 @@ body.no-topbar .layout { min-height: 100vh; }
 body.no-topbar .sidebar { top: 0; max-height: 100vh; }
 body.no-topbar .toc-rail { top: 0; max-height: 100vh; }
 body.no-topbar .nav-overlay { inset: 0; }
-body.no-topbar.has-bg .page-scroll { height: 100dvh; }
+body.no-topbar.has-bg .page-scroll { top: 0; }
 .nav-toggle-float {
     display: none;
     position: fixed; top: 10px; left: 10px; z-index: 160;
@@ -870,7 +873,6 @@ div.grid.cols-6 { --cols: 6; }
     <a href="/privacy" data-site-link="/privacy">Privacy Policy</a>
     <a href="/imprint" data-site-link="/imprint">Imprint</a>
     <a href="#" data-cookie-settings style="display:none">Cookie settings</a>
-    <span id="langSwitch" style="display:none;"></span>
 </footer>
 </div>
 
@@ -1082,8 +1084,11 @@ function previewPageLink(u) {
     } else {
         brand.textContent = SITE.name;
     }
-    // The cart button stays visible even while the shop is paused
-    // (has_shop off) - the drawer just shows an empty cart.
+    // No shop (or a paused one): no cart button.
+    if (!SITE.has_shop) {
+        const cartBtn = document.getElementById('btnCart');
+        if (cartBtn) cartBtn.style.display = 'none';
+    }
 })();
 
 // Same Host-resolution problem for the favicon links and the background
@@ -1152,14 +1157,12 @@ document.querySelectorAll('.site-footer a[data-cookie-settings]').forEach(a => {
     a.textContent = t(a.textContent);
 });
 
-// Footer language switcher: the current page's counterpart in each language,
+// Top-bar language switcher: the current page's counterpart in each language,
 // or that language's home when the page has no translation. Full page loads -
 // the server re-renders the shell in the target language.
 function renderLangSwitch() {
-    const el = document.getElementById('langSwitch');
+    const el = document.getElementById('langSwitchTop');
     if (!el || !LANGS.length) return;
-    // The same switcher also lives in the top bar, next to the cart.
-    const elTop = document.getElementById('langSwitchTop');
     const names = { ja: '日本語' };
     const hrefFor = (l, p) => {
         const seg = p ? (p.page_kind === 'post' ? '/blog/' : '/') + encodeURIComponent(p.slug) : '';
@@ -1190,10 +1193,6 @@ function renderLangSwitch() {
     const html = parts.join(' <span class="lang-sep">·</span> ');
     el.innerHTML = html;
     el.style.display = '';
-    if (elTop) {
-        elTop.innerHTML = html;
-        elTop.style.display = '';
-    }
 }
 function formatPostDate(s) {
     if (!s) return '';
