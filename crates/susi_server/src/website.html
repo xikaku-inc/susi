@@ -874,9 +874,10 @@ div.grid.cols-6 { --cols: 6; }
     <a href="/imprint" data-site-link="/imprint">Imprint</a>
     <a href="#" data-cookie-settings style="display:none">Cookie settings</a>
 </footer>
-</div>
-
+<!-- Inside .page-scroll: on background layouts the fixed scroller is its own
+     stacking context, and the overlay must stay below the sidebar inside it. -->
 <div id="navOverlay" class="nav-overlay" onclick="closeSidebar()"></div>
+</div>
 
 <div id="toast" class="toast"></div>
 
