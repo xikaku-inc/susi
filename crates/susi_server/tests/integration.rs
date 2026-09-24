@@ -5822,6 +5822,7 @@ fn test_dynamic_site_registry() {
             "public_base": "https://klaus.xikaku.com",
             "tagline": "Old school",
             "has_blog": false,
+            "show_updated": false,
         }))
         .send().expect("update site");
     assert_eq!(resp.status().as_u16(), 200, "update: {}", resp.text().unwrap_or_default());
@@ -5830,6 +5831,7 @@ fn test_dynamic_site_registry() {
         .send().expect("shell").text().unwrap();
     assert!(shell.contains(r#""name":"Klaus P.""#), "edit must reach the served shell");
     assert!(shell.contains(r#""has_blog":false"#), "blog flag must reach the shell");
+    assert!(shell.contains(r#""show_updated":false"#), "updated flag must reach the shell");
     let shell = http.get(format!("{}/site", server.url))
         .header("Host", "xikaku.com")
         .send().expect("shell").text().unwrap();

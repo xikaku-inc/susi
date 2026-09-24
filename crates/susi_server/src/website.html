@@ -983,7 +983,7 @@ const API = '/api/v1';
 
 // Per-site config injected by the server (sites.rs). The fallback keeps the
 // shell working if the marker was not replaced (e.g. a stale cached page).
-const SITE = window.__SITE || { id: 'xikaku', name: 'Xikaku', hosts: ['xikaku.com', 'www.xikaku.com'], brand_logo: '/static/logo.png', brand_logo_dark: '/static/logo-dark.png', has_shop: true, has_newsletter: true, newsletter_signup: false, has_blog: true };
+const SITE = window.__SITE || { id: 'xikaku', name: 'Xikaku', hosts: ['xikaku.com', 'www.xikaku.com'], brand_logo: '/static/logo.png', brand_logo_dark: '/static/logo-dark.png', has_shop: true, has_newsletter: true, newsletter_signup: false, has_blog: true, show_updated: true };
 // Content language of this render, injected by the server ("" = default).
 // A translated page lives at the same URLs one /{lang}/ segment deeper.
 const LANG = SITE.lang || '';
@@ -1890,8 +1890,8 @@ function renderPage() {
             ? '<div class="meta">' + escHtml(formatPostDate(currentPage.published_at))
               + bylineSuffix(currentPage.author_name) + '</div>'
             : '')
-        : (currentPage.updated_at
-            ? '<div class="meta">Updated ' + escHtml(formatDate(currentPage.updated_at)) + '</div>'
+        : (currentPage.updated_at && SITE.show_updated !== false
+            ? '<div class="meta">Updated '+ escHtml(formatDate(currentPage.updated_at)) + '</div>'
             : '');
     // Only admins ever receive hidden pages, so this notice is admin-only.
     const hiddenNotice = currentPage.hidden

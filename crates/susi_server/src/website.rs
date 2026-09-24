@@ -2349,6 +2349,7 @@ fn site_config_script(
             // with one accepts public signups.
             "newsletter_signup": site.has_newsletter,
             "has_blog": site.has_blog,
+            "show_updated": site.show_updated,
             "theme": theme,
             "no_topbar": no_topbar,
             "sidebar_logo": sidebar_logo,

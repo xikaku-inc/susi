@@ -1937,6 +1937,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                 <div class="form-row"><label>llms.txt blurb</label><textarea id="siteFieldBlurb" rows="3"></textarea></div>
                 <div class="form-row"><label>Extra languages (one per line)</label><textarea id="siteFieldLangs" rows="2" spellcheck="false"></textarea></div>
                 <div class="toggle-row"><input type="checkbox" id="siteFieldBlog"><label for="siteFieldBlog">Blog</label></div>
+                <div class="toggle-row"><input type="checkbox" id="siteFieldUpdated"><label for="siteFieldUpdated">Updated date on pages</label></div>
                 <div class="toggle-row"><input type="checkbox" id="siteFieldShop"><label for="siteFieldShop">Shop</label></div>
                 <div class="toggle-row"><input type="checkbox" id="siteFieldNewsletter"><label for="siteFieldNewsletter">Newsletter</label></div>
                 <div id="siteIdentityError" class="form-error" style="display:none;"></div>
@@ -8574,6 +8575,7 @@ function fillSiteIdentity(id, def) {
     document.getElementById('siteFieldBlurb').value = def.llms_blurb || '';
     document.getElementById('siteFieldLangs').value = (def.langs || []).join('\n');
     document.getElementById('siteFieldBlog').checked = def.has_blog !== false;
+    document.getElementById('siteFieldUpdated').checked = def.show_updated !== false;
     document.getElementById('siteFieldShop').checked = !!def.has_shop;
     document.getElementById('siteFieldNewsletter').checked = !!def.has_newsletter;
     document.getElementById('siteIdentityError').style.display = 'none';
@@ -8631,6 +8633,7 @@ async function saveSite() {
         has_shop: document.getElementById('siteFieldShop').checked,
         has_newsletter: document.getElementById('siteFieldNewsletter').checked,
         has_blog: document.getElementById('siteFieldBlog').checked,
+        show_updated: document.getElementById('siteFieldUpdated').checked,
     };
     const url = siteCreateMode
         ? API + '/sites'

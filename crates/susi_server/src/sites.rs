@@ -54,6 +54,9 @@ pub struct SiteDef {
     /// content, and configs stored before the flag existed must keep it.
     #[serde(default = "default_true")]
     pub has_blog: bool,
+    /// Show the "Updated <date>" line above page content.
+    #[serde(default = "default_true")]
+    pub show_updated: bool,
     /// Additional content languages beyond the site's default, served under
     /// a /{lang}/ URL prefix (e.g. ["ja"]). Empty = monolingual.
     #[serde(default)]
@@ -85,6 +88,7 @@ pub struct SiteConfig {
     pub has_shop: bool,
     pub has_newsletter: bool,
     pub has_blog: bool,
+    pub show_updated: bool,
     pub langs: &'static [&'static str],
     org_jsonld: &'static str,
 }
@@ -156,6 +160,7 @@ fn builtin_defs() -> Vec<(&'static str, SiteDef)> {
                 has_shop: true,
                 has_newsletter: true,
                 has_blog: true,
+                show_updated: false,
                 langs: Vec::new(),
             },
         ),
@@ -184,6 +189,7 @@ fn builtin_defs() -> Vec<(&'static str, SiteDef)> {
                 has_shop: false,
                 has_newsletter: false,
                 has_blog: true,
+                show_updated: false,
                 langs: s(&["ja"]),
             },
         ),
@@ -225,6 +231,7 @@ fn build_config(id: &str, def: &SiteDef, has_logo: bool) -> &'static SiteConfig 
         has_shop: def.has_shop,
         has_newsletter: def.has_newsletter,
         has_blog: def.has_blog,
+        show_updated: def.show_updated,
         langs: svec(&def.langs),
         org_jsonld: "",
     };
@@ -472,6 +479,7 @@ mod tests {
     fn stored_configs_without_has_blog_keep_the_blog() {
         let def: SiteDef = serde_json::from_str(r#"{"name":"X","hosts":["x.com"],"public_base":"https://x.com"}"#).unwrap();
         assert!(def.has_blog);
+        assert!(def.show_updated);
     }
 
     #[test]
