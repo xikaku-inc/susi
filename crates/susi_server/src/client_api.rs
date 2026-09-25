@@ -132,10 +132,19 @@ pub(crate) async fn handle_verify(
             }
         }
 
-        if !license.is_machine_activated(&req.machine_code) {
+        // A machine removed by an admin is gone from the list. One that merely
+        // let its lease lapse is still listed and may renew here, provided a
+        // seat is free - the same rule /activate applies.
+        if !license.machines.iter().any(|m| m.machine_code == req.machine_code) {
             return Err(error_response(
                 StatusCode::FORBIDDEN,
                 "Machine not authorized for this license",
+            ));
+        }
+        if !license.is_machine_activated(&req.machine_code) && !license.can_add_machine() {
+            return Err(error_response(
+                StatusCode::FORBIDDEN,
+                &format!("Machine limit reached (max {})", license.max_machines),
             ));
         }
 
