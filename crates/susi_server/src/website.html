@@ -246,7 +246,11 @@ a.btn { display: inline-flex; align-items: center; text-decoration: none; }
     width: 14px;
     font-size: 9px;
     color: var(--text2);
+    padding: 8px 6px 8px 24px;
+    margin: -8px 0 -8px -24px;
+    cursor: pointer;
 }
+.sidebar a .chev:hover { color: var(--accent); }
 .sidebar .sidebar-children.collapsed { display: none; }
 .sidebar .sidebar-children a { padding-left: 40px; }
 .sidebar .empty { padding: 16px; color: var(--text2); font-size: 14px; }
@@ -940,9 +944,22 @@ function closeSidebar() {
 }
 document.addEventListener('click', (e) => {
     const sb = document.getElementById('sidebar');
-    if (!sb || !sb.classList.contains('open')) return;
+    if (!sb) return;
     const a = e.target.closest('a');
-    if (a && sb.contains(a)) closeSidebar();
+    if (!a || !sb.contains(a)) return;
+    // The chevron, or the head of the page already shown, folds the group
+    // in place instead of navigating.
+    const kids = a.nextElementSibling;
+    const chev = a.querySelector('.chev');
+    if (chev && kids && kids.classList.contains('sidebar-children')
+        && (e.target === chev || a.classList.contains('active'))) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        const collapsed = kids.classList.toggle('collapsed');
+        chev.textContent = collapsed ? '▶' : '▼';
+        return;
+    }
+    if (sb.classList.contains('open')) closeSidebar();
 });
 
 function cycleTheme() {
