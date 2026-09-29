@@ -801,6 +801,54 @@ fn test_require_signed_binary_in_api_response() {
     assert_eq!(body["require_signed_binary"], false);
 }
 
+/// Lease duration and grace period can be changed via `PUT /licenses/{key}`,
+/// and the next activation carries the new values.
+#[test]
+fn test_update_lease_settings() {
+    let server = TestServer::start();
+    let token = server.admin_token();
+    let key = server.create_license(&token, false);
+    let http = server.http();
+
+    let body: Value = http
+        .put(format!("{}/licenses/{}", server.api_url, key))
+        .bearer_auth(&token)
+        .json(&json!({"lease_duration_hours": 720, "lease_grace_hours": 48}))
+        .send().unwrap()
+        .json().unwrap();
+    assert_eq!(body["lease_duration_hours"], 720);
+    assert_eq!(body["lease_grace_hours"], 48);
+
+    let signed: susi_core::SignedLicense = http
+        .post(format!("{}/activate", server.api_url))
+        .json(&json!({"license_key": key, "machine_code": TEST_MACHINE_CODE}))
+        .send().unwrap()
+        .json().unwrap();
+    let payload: susi_core::LicensePayload = serde_json::from_str(&signed.license_data).unwrap();
+    assert_eq!(payload.lease_grace_period, Some(48));
+    let lease = payload.lease_expires.expect("lease set");
+    let hours = (lease - chrono::Utc::now()).num_hours();
+    assert!((719..=720).contains(&hours), "lease should be ~720 h, got {}", hours);
+
+    // Other fields are left alone when omitted; 0 disables the lease.
+    let body: Value = http
+        .put(format!("{}/licenses/{}", server.api_url, key))
+        .bearer_auth(&token)
+        .json(&json!({"lease_duration_hours": 0}))
+        .send().unwrap()
+        .json().unwrap();
+    assert_eq!(body["lease_duration_hours"], 0);
+    assert_eq!(body["lease_grace_hours"], 48);
+
+    let signed: susi_core::SignedLicense = http
+        .post(format!("{}/activate", server.api_url))
+        .json(&json!({"license_key": key, "machine_code": TEST_MACHINE_CODE}))
+        .send().unwrap()
+        .json().unwrap();
+    let payload: susi_core::LicensePayload = serde_json::from_str(&signed.license_data).unwrap();
+    assert!(payload.lease_expires.is_none(), "lease must be disabled");
+}
+
 /// `require_signed_binary` can be toggled via `PUT /licenses/{key}`.
 ///
 /// After updating a license from `true` to `false`, the next activation must

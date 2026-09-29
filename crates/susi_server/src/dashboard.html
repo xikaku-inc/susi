@@ -1283,6 +1283,14 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                     <div class="field-label">Max Machines (0 = unlimited)</div>
                     <input type="number" id="editMaxMachines" min="0">
                 </div>
+                <div class="detail-field">
+                    <div class="field-label">Lease Duration (hours, 0 = disable lease)</div>
+                    <input type="number" id="editLeaseDuration" min="0">
+                </div>
+                <div class="detail-field">
+                    <div class="field-label">Grace Period (hours)</div>
+                    <input type="number" id="editLeaseGrace" min="0">
+                </div>
                 <div class="detail-field" style="grid-column:1/-1;">
                     <div class="field-label">Features</div>
                     <div id="editFeaturesContainer" class="feature-checkboxes"></div>
@@ -4001,6 +4009,8 @@ function startEditLicense() {
     document.getElementById('editCustomer').value = lic.customer;
     document.getElementById('editProduct').value = lic.product;
     document.getElementById('editMaxMachines').value = lic.max_machines;
+    document.getElementById('editLeaseDuration').value = lic.lease_duration_hours;
+    document.getElementById('editLeaseGrace').value = lic.lease_grace_hours;
     document.getElementById('editRequireSignedBinary').checked = !!lic.require_signed_binary;
     const isPerpetual = lic.expires === 'perpetual';
     document.getElementById('editPerpetual').checked = isPerpetual;
@@ -4040,6 +4050,8 @@ async function saveEditLicense() {
         expires: isPerpetual ? 'perpetual' : (document.getElementById('editExpires').value || null),
         features: features,
         max_machines: parseInt(document.getElementById('editMaxMachines').value) || 0,
+        lease_duration_hours: parseInt(document.getElementById('editLeaseDuration').value) || 0,
+        lease_grace_hours: parseInt(document.getElementById('editLeaseGrace').value) || 0,
         require_signed_binary: document.getElementById('editRequireSignedBinary').checked,
     };
     if (!body.customer) { toast('Customer is required', 'error'); return; }
