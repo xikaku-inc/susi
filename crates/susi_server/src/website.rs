@@ -2408,6 +2408,7 @@ pub(crate) fn render_shell(state: &Arc<AppState>, site: &SiteConfig, lang: &str,
     let font_css = match font.as_str() {
         "mono" => "<style>:root:root{--font-body:ui-monospace,\"SF Mono\",\"Cascadia Code\",Consolas,\"Fira Code\",monospace}</style>",
         "serif" => "<style>:root:root{--font-body:ui-serif,Georgia,\"Times New Roman\",serif}</style>",
+        "inter" => INTER_FONT_HEAD,
         _ => "",
     };
     let mut html = WEBSITE_HTML
@@ -3036,8 +3037,24 @@ pub const SETTING_SIDEBAR_LOGO: &str = "sidebar_logo";
 /// Top bar brand logo height in px (16-120); empty = the 28px default. The
 /// top bar itself grows to logo height + 16px when this exceeds the default.
 pub const SETTING_LOGO_HEIGHT: &str = "logo_height";
-/// Body font preset: "mono" / "serif"; empty = the compiled-in sans stack.
+/// Body font preset: "mono" / "serif" / "inter"; empty = the compiled-in sans stack.
 pub const SETTING_FONT: &str = "font";
+
+/// Self-hosted Inter variable font (served from /docs/, see main.rs). The
+/// Latin slice is preloaded; Latin-ext only downloads when a page uses it.
+/// Japanese text keeps falling through to the system CJK font.
+const INTER_FONT_HEAD: &str = concat!(
+    "<link rel=\"preload\" href=\"/docs/inter-latin.woff2\" as=\"font\" type=\"font/woff2\" crossorigin>",
+    "<style>",
+    "@font-face{font-family:\"Inter\";font-style:normal;font-weight:100 900;font-display:swap;",
+    "src:url(/docs/inter-latin.woff2) format(\"woff2-variations\");",
+    "unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}",
+    "@font-face{font-family:\"Inter\";font-style:normal;font-weight:100 900;font-display:swap;",
+    "src:url(/docs/inter-latin-ext.woff2) format(\"woff2-variations\");",
+    "unicode-range:U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF}",
+    ":root:root{--font-body:\"Inter\",ui-sans-serif,-apple-system,BlinkMacSystemFont,\"Segoe UI\",Ubuntu,\"Helvetica Neue\",sans-serif}",
+    "</style>"
+);
 
 /// Sidebar nav config: JSON array of groups rendered between the ungrouped
 /// pages and nothing else. Items are page slugs, plus the pseudo-slugs
@@ -3601,8 +3618,8 @@ pub async fn handle_admin_put_site_settings(
                 return Err(error_response(StatusCode::BAD_REQUEST, "theme_mode must be \"light\", \"dark\" or empty"));
             }
         } else if k == SETTING_FONT {
-            if !matches!(trimmed, "" | "mono" | "serif") {
-                return Err(error_response(StatusCode::BAD_REQUEST, "font must be \"mono\", \"serif\" or empty"));
+            if !matches!(trimmed, "" | "mono" | "serif" | "inter") {
+                return Err(error_response(StatusCode::BAD_REQUEST, "font must be \"mono\", \"serif\", \"inter\" or empty"));
             }
         } else if !trimmed.is_empty() && !is_valid_analytics_id(trimmed) {
             // The remaining site settings are analytics tag IDs / labels.

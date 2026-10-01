@@ -2880,6 +2880,23 @@ async fn handle_easymde_css() -> impl IntoResponse {
     (headers, include_str!("vendor/easymde.min.css"))
 }
 
+/// Self-hosted Inter variable font (Latin / Latin-ext slices) for the
+/// website "inter" font preset; immutable, so cache for a year.
+fn woff2_response(bytes: &'static [u8]) -> impl IntoResponse {
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, "font/woff2".parse().unwrap());
+    headers.insert(header::CACHE_CONTROL, "public, max-age=31536000, immutable".parse().unwrap());
+    (headers, bytes)
+}
+
+async fn handle_inter_latin() -> impl IntoResponse {
+    woff2_response(include_bytes!("vendor/inter-latin.woff2"))
+}
+
+async fn handle_inter_latin_ext() -> impl IntoResponse {
+    woff2_response(include_bytes!("vendor/inter-latin-ext.woff2"))
+}
+
 async fn handle_health() -> &'static str {
     "OK"
 }
@@ -3269,6 +3286,8 @@ async fn main() -> Result<()> {
         .route("/docs", get(docs::handle_docs_shell))
         .route("/docs/easymde.js", get(handle_easymde_js))
         .route("/docs/easymde.css", get(handle_easymde_css))
+        .route("/docs/inter-latin.woff2", get(handle_inter_latin))
+        .route("/docs/inter-latin-ext.woff2", get(handle_inter_latin_ext))
         .route("/docs/{slug}", get(docs::handle_docs_ssr_latest))
         .route("/docs/{tag}/{slug}", get(docs::handle_docs_ssr_tagged))
         // Public Xikaku website (same EasyMDE assets reused from /docs).

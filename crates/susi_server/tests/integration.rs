@@ -5578,6 +5578,18 @@ fn test_site_chrome_flags() {
     let resp = http
         .put(format!("{}/site/admin/settings?site=lpr", server.api_url))
         .bearer_auth(&token)
+        .json(&json!({ "font": "inter" }))
+        .send().expect("set inter");
+    assert_eq!(resp.status().as_u16(), 200);
+    let shell = lpr_shell();
+    assert!(shell.contains("--font-body:\"Inter\"") && shell.contains("src:url(/docs/inter-latin.woff2)"), "inter preset must self-host the font");
+    let font = http.get(format!("{}/docs/inter-latin.woff2", server.url)).send().expect("font asset");
+    assert_eq!(font.status().as_u16(), 200);
+    assert_eq!(font.headers()["content-type"], "font/woff2");
+    assert_eq!(&font.bytes().expect("font bytes")[..4], b"wOF2");
+    let resp = http
+        .put(format!("{}/site/admin/settings?site=lpr", server.api_url))
+        .bearer_auth(&token)
         .json(&json!({ "font": "" }))
         .send().expect("clear font");
     assert_eq!(resp.status().as_u16(), 200);
