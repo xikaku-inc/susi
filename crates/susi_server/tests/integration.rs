@@ -535,6 +535,65 @@ fn test_expired_lease_kept_as_history_and_seat_freed() {
     assert_eq!(active["lease_active"], true);
 }
 
+/// A machine whose lease lapsed (idle past the lease window, never removed by
+/// an admin) renews through `/verify` as long as a seat is free. It must not
+/// be reported as deactivated.
+#[test]
+fn test_lapsed_lease_renews_via_verify() {
+    let server = TestServer::start();
+    let token = server.admin_token();
+    let license_key = server.create_license(&token, false);
+
+    let license_path = server._dir.path().join("license.json");
+    let client = LicenseClient::with_server(&server.public_key_pem, server.api_url.clone())
+        .expect("LicenseClient")
+        .with_machine_code_override(TEST_MACHINE_CODE);
+    let status = client.activate(&license_path, &license_key, None);
+    assert!(status.is_valid(), "activate: {:?}", status);
+
+    let conn = rusqlite::Connection::open(server._dir.path().join("licenses.db")).expect("db");
+    conn.busy_timeout(Duration::from_secs(5)).expect("busy timeout");
+    let past = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+    let n = conn
+        .execute(
+            "UPDATE machine_activations SET lease_expires_at = ?1",
+            rusqlite::params![past],
+        )
+        .expect("backdate lease");
+    assert_eq!(n, 1);
+    drop(conn);
+
+    let status = client.verify_and_refresh(&license_path, &license_key, None);
+    assert!(
+        matches!(status, LicenseStatus::Valid { .. }),
+        "lapsed lease must renew on verify, got: {:?}",
+        status
+    );
+    assert!(
+        status.lease_expires().expect("lease") > chrono::Utc::now(),
+        "renewed lease must be in the future"
+    );
+    assert!(license_path.exists(), "cached license must survive renewal");
+
+    // A machine an admin removed stays rejected.
+    let resp = server
+        .http()
+        .delete(format!(
+            "{}/licenses/{}/machines/{}",
+            server.api_url, license_key, TEST_MACHINE_CODE
+        ))
+        .bearer_auth(&token)
+        .send()
+        .expect("remove machine");
+    assert!(resp.status().is_success(), "remove: {}", resp.status());
+    let status = client.verify_and_refresh(&license_path, &license_key, None);
+    assert!(
+        matches!(status, LicenseStatus::Deactivated),
+        "removed machine must be deactivated, got: {:?}",
+        status
+    );
+}
+
 /// When the server is unreachable after the license has been cached locally,
 /// [`LicenseClient::verify_and_refresh`] falls back to the cached file and
 /// still returns `Valid`.
@@ -740,6 +799,54 @@ fn test_require_signed_binary_in_api_response() {
         .send().unwrap()
         .json().unwrap();
     assert_eq!(body["require_signed_binary"], false);
+}
+
+/// Lease duration and grace period can be changed via `PUT /licenses/{key}`,
+/// and the next activation carries the new values.
+#[test]
+fn test_update_lease_settings() {
+    let server = TestServer::start();
+    let token = server.admin_token();
+    let key = server.create_license(&token, false);
+    let http = server.http();
+
+    let body: Value = http
+        .put(format!("{}/licenses/{}", server.api_url, key))
+        .bearer_auth(&token)
+        .json(&json!({"lease_duration_hours": 720, "lease_grace_hours": 48}))
+        .send().unwrap()
+        .json().unwrap();
+    assert_eq!(body["lease_duration_hours"], 720);
+    assert_eq!(body["lease_grace_hours"], 48);
+
+    let signed: susi_core::SignedLicense = http
+        .post(format!("{}/activate", server.api_url))
+        .json(&json!({"license_key": key, "machine_code": TEST_MACHINE_CODE}))
+        .send().unwrap()
+        .json().unwrap();
+    let payload: susi_core::LicensePayload = serde_json::from_str(&signed.license_data).unwrap();
+    assert_eq!(payload.lease_grace_period, Some(48));
+    let lease = payload.lease_expires.expect("lease set");
+    let hours = (lease - chrono::Utc::now()).num_hours();
+    assert!((719..=720).contains(&hours), "lease should be ~720 h, got {}", hours);
+
+    // Other fields are left alone when omitted; 0 disables the lease.
+    let body: Value = http
+        .put(format!("{}/licenses/{}", server.api_url, key))
+        .bearer_auth(&token)
+        .json(&json!({"lease_duration_hours": 0}))
+        .send().unwrap()
+        .json().unwrap();
+    assert_eq!(body["lease_duration_hours"], 0);
+    assert_eq!(body["lease_grace_hours"], 48);
+
+    let signed: susi_core::SignedLicense = http
+        .post(format!("{}/activate", server.api_url))
+        .json(&json!({"license_key": key, "machine_code": TEST_MACHINE_CODE}))
+        .send().unwrap()
+        .json().unwrap();
+    let payload: susi_core::LicensePayload = serde_json::from_str(&signed.license_data).unwrap();
+    assert!(payload.lease_expires.is_none(), "lease must be disabled");
 }
 
 /// `require_signed_binary` can be toggled via `PUT /licenses/{key}`.

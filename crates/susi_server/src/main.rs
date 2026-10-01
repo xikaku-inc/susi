@@ -913,6 +913,10 @@ struct UpdateLicenseRequest {
     #[serde(default)]
     max_machines: Option<u32>,
     #[serde(default)]
+    lease_duration_hours: Option<u32>,
+    #[serde(default)]
+    lease_grace_hours: Option<u32>,
+    #[serde(default)]
     require_signed_binary: Option<bool>,
 }
 
