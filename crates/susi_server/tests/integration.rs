@@ -7951,3 +7951,85 @@ fn test_owner_emails_env_promotes_at_startup() {
         .expect("json");
     assert_eq!(status["role"], json!("owner"), "env promotion must apply on boot");
 }
+
+/// GET /workspaces reports the caller's relation to each row: "owner" for
+/// the creator, "member" for a plain membership, "admin" for rows an admin
+/// sees only through admin rights.
+#[test]
+fn test_list_workspaces_reports_role() {
+    let server = TestServer::start();
+    let admin = server.admin_token();
+    let client = server.http();
+
+    let own_ws = client
+        .post(format!("{}/workspaces", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({"name": "Role Own", "product": "fusionhub", "description": ""}))
+        .send()
+        .expect("create ws")
+        .json::<Value>()
+        .expect("ws json")["id"]
+        .as_str()
+        .expect("ws id")
+        .to_string();
+
+    for (name, role) in [("role_user", "user"), ("role_admin2", "admin")] {
+        client
+            .post(format!("{}/auth/users", server.api_url))
+            .bearer_auth(&admin)
+            .json(&json!({"username": name, "email": format!("{}@example.com", name), "role": role, "password": "rolepass123"}))
+            .send()
+            .expect("create user")
+            .error_for_status()
+            .expect("create user ok");
+    }
+    client
+        .post(format!("{}/workspaces/{}/members", server.api_url, own_ws))
+        .bearer_auth(&admin)
+        .json(&json!({"username": "role_user"}))
+        .send()
+        .expect("add member")
+        .error_for_status()
+        .expect("add member ok");
+
+    let admin2 = server.elevated_token("role_admin2", "rolepass123");
+    let other_ws = client
+        .post(format!("{}/workspaces", server.api_url))
+        .bearer_auth(&admin2)
+        .json(&json!({"name": "Role Other", "product": "fusionhub", "description": ""}))
+        .send()
+        .expect("create other ws")
+        .json::<Value>()
+        .expect("ws json")["id"]
+        .as_str()
+        .expect("ws id")
+        .to_string();
+
+    let roles = |token: &str| -> std::collections::HashMap<String, String> {
+        client
+            .get(format!("{}/workspaces", server.api_url))
+            .bearer_auth(token)
+            .send()
+            .expect("list")
+            .json::<Value>()
+            .expect("json")["workspaces"]
+            .as_array()
+            .expect("array")
+            .iter()
+            .map(|w| (w["id"].as_str().unwrap().to_string(), w["role"].as_str().unwrap_or("").to_string()))
+            .collect()
+    };
+
+    let admin_roles = roles(&admin);
+    assert_eq!(admin_roles[&own_ws], "owner");
+    assert_eq!(admin_roles[&other_ws], "admin");
+
+    let admin2_roles = roles(&admin2);
+    assert_eq!(admin2_roles[&other_ws], "owner");
+    assert_eq!(admin2_roles[&own_ws], "admin");
+
+    let user_token = server.elevated_token("role_user", "rolepass123");
+    let user_roles = roles(&user_token);
+    assert_eq!(user_roles[&own_ws], "member");
+    assert!(!user_roles.contains_key(&other_ws), "non-member must not see other ws");
+}
