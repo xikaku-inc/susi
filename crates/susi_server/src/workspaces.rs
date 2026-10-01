@@ -42,14 +42,24 @@ pub(crate) async fn handle_list_workspaces(
     let is_admin = db.get_user_role(&principal.username)
         .map(|r| is_admin_role(&r))
         .unwrap_or(false);
+    let member_rows = db.list_workspaces_for_user(&principal.username)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
     let rows = if is_admin {
         db.list_all_workspaces()
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
     } else {
-        db.list_workspaces_for_user(&principal.username)
-    }
-        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+        member_rows.clone()
+    };
+    let member_ids: std::collections::HashSet<&str> = member_rows.iter().map(|r| r.0.as_str()).collect();
 
     let workspaces: Vec<_> = rows.iter().map(|(id, name, product, desc, created_by, created_at, updated_at)| {
+        let role = if created_by == &principal.username {
+            "owner"
+        } else if member_ids.contains(id.as_str()) {
+            "member"
+        } else {
+            "admin"
+        };
         serde_json::json!({
             "id": id,
             "name": name,
@@ -58,6 +68,7 @@ pub(crate) async fn handle_list_workspaces(
             "created_by": created_by,
             "created_at": created_at,
             "updated_at": updated_at,
+            "role": role,
         })
     }).collect();
 
