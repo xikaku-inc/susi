@@ -1754,7 +1754,7 @@ function renderSidebarItem(p, isHead, hasChildren, expanded) {
     const cls = (p.slug === currentSlug ? 'active' : '') + (isHead ? ' section-head' : '');
     const chev = hasChildren ? '<span class="chev">' + (expanded ? '▼' : '▶') + '</span>' : '';
     return '<a class="' + cls + '" href="' + pageHref(p.slug) + '">'
-        + chev + escHtml(p.title) + '</a>';
+        + chev + escHtml(p.nav_title || p.title) + '</a>';
 }
 
 function renderEmptyState(msg) {
@@ -2095,6 +2095,7 @@ function renderEditor() {
     const body = d ? d.body_md : (currentPage.body_md || '');
     const metaDesc = d ? d.meta_description : (currentPage.meta_description || '');
     const ogImage = d ? (d.og_image || '') : (currentPage.og_image || '');
+    const navTitle = d ? (d.nav_title || '') : (currentPage.nav_title || '');
     const slugVal = d ? d.slug : currentSlug;
     const isPost = (d ? d.page_kind : currentPage.page_kind) === 'post';
     const published = d ? (d.published_at || '') : (currentPage.published_at || '');
@@ -2123,6 +2124,7 @@ function renderEditor() {
             : '') +
         '<div class="edit-meta-row">' +
             '<label>Title</label><input id="editTitle" type="text" style="flex:1;min-width:200px;">' +
+            '<label title="Short label for the sidebar. Empty = the title.">Menu label</label><input id="editNavTitle" type="text" maxlength="100" style="width:160px;">' +
             '<label>Slug</label><input id="editSlug" type="text" style="width:160px;">' +
             '<label>Kind</label><select id="editKind" onchange="switchKind(this.value)">' +
                 '<option value="page"' + (isPost ? '' : ' selected') + '>Page</option>' +
@@ -2167,6 +2169,7 @@ function renderEditor() {
     }
     document.getElementById('editMetaDesc').value = metaDesc;
     document.getElementById('editOgImage').value = ogImage;
+    document.getElementById('editNavTitle').value = navTitle;
     // The plain textarea carries the body too, so a failed editor load
     // still shows (and autosaves) the content instead of an empty box.
     document.getElementById('editBody').value = body;
@@ -2363,6 +2366,7 @@ function editorValues() {
     if (previewMode && editDraft) return editDraft;
     const metaDescEl = document.getElementById('editMetaDesc');
     const ogImageEl = document.getElementById('editOgImage');
+    const navTitleEl = document.getElementById('editNavTitle');
     // Posts render a date input instead of parent/order controls.
     const parentEl = document.getElementById('editParent');
     const ordEl = document.getElementById('editOrd');
@@ -2376,6 +2380,7 @@ function editorValues() {
         body_md: easymde ? easymde.value() : document.getElementById('editBody').value,
         meta_description: metaDescEl ? metaDescEl.value.trim() : '',
         og_image: ogImageEl ? ogImageEl.value.trim() : ((currentPage && currentPage.og_image) || ''),
+        nav_title: navTitleEl ? navTitleEl.value.trim() : ((currentPage && currentPage.nav_title) || ''),
         slug: document.getElementById('editSlug').value.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '-'),
         page_kind: kindEl ? kindEl.value : ((currentPage && currentPage.page_kind) || 'page'),
         published_at: publishedEl ? publishedEl.value : ((currentPage && currentPage.published_at) || ''),
@@ -2461,7 +2466,7 @@ async function savePage(publish) {
         headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken() },
         body: JSON.stringify({
             title, body_md, parent_slug: parent || null, ord, meta_description,
-            og_image: v.og_image,
+            og_image: v.og_image, nav_title: v.nav_title,
             page_kind: v.page_kind, published_at: v.published_at,
             author_username: v.author_username,
             hidden: publish ? false : undefined,

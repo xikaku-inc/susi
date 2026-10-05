@@ -155,8 +155,8 @@ fn safe_slug(slug: &str) -> Result<&str, (StatusCode, Json<ErrorResponse>)> {
 /// Row shape returned by `list_website_pages`:
 /// (slug, title, parent_slug, ord, updated_at, meta_description, hidden,
 ///  page_kind, published_at, author_username, redirect_to, lang,
-///  translation_of).
-type PageRow = (String, String, Option<String>, i64, String, String, bool, String, String, String, String, String, String);
+///  translation_of, nav_title).
+type PageRow = (String, String, Option<String>, i64, String, String, bool, String, String, String, String, String, String, String);
 
 /// The rows belonging to one content language ("" = default).
 fn pages_in_lang(pages: &[PageRow], lang: &str) -> Vec<PageRow> {
@@ -200,10 +200,11 @@ pub async fn handle_list_pages(
     let assets = db.list_website_assets(site.id).map_err(db_err)?;
     let pages_json: Vec<_> = pages
         .into_iter()
-        .map(|(slug, title, parent_slug, ord, updated_at, meta_description, hidden, page_kind, published_at, author_username, _redirect_to, lang, translation_of)| {
+        .map(|(slug, title, parent_slug, ord, updated_at, meta_description, hidden, page_kind, published_at, author_username, _redirect_to, lang, translation_of, nav_title)| {
             let mut row = json!({
                 "slug": slug,
                 "title": title,
+                "nav_title": nav_title,
                 "parent_slug": parent_slug,
                 "ord": ord,
                 "updated_at": updated_at,
@@ -250,7 +251,7 @@ pub async fn handle_get_page(
         .get_website_page(site.id, &lang, &slug)
         .map_err(db_err)?
         .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Page not found"))?;
-    let (title, body_md, parent_slug, ord, updated_at, meta_description, hidden, page_kind, published_at, author_username, _redirect_to, translation_of, og_image) = page;
+    let (title, body_md, parent_slug, ord, updated_at, meta_description, hidden, page_kind, published_at, author_username, _redirect_to, translation_of, og_image, nav_title) = page;
     if hidden && !is_admin {
         return Err(error_response(StatusCode::NOT_FOUND, "Page not found"));
     }
@@ -269,6 +270,7 @@ pub async fn handle_get_page(
         "lang": lang,
         "translation_of": translation_of,
         "og_image": og_image,
+        "nav_title": nav_title,
     });
     if is_admin {
         out["author_username"] = json!(author_username);
@@ -454,6 +456,10 @@ pub struct UpsertPageRequest {
     // body image, then the site card.
     #[serde(default)]
     pub og_image: Option<String>,
+    // Short sidebar label. Omitted preserves the current one; empty falls
+    // back to the title.
+    #[serde(default)]
+    pub nav_title: Option<String>,
     // Omitted preserves the current flag (new rows: visible). A hidden post
     // is a draft: it keeps an empty publish date until it first goes live.
     #[serde(default)]
@@ -548,6 +554,16 @@ pub async fn handle_upsert_page(
             .unwrap_or_default()
             .trim()
             .to_string();
+        let nav_title = req
+            .nav_title
+            .clone()
+            .or_else(|| existing.as_ref().map(|r| r.13.clone()))
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if nav_title.len() > 100 {
+            return Err(error_response(StatusCode::BAD_REQUEST, "nav_title must be at most 100 bytes"));
+        }
         let id = db.upsert_website_page(
             site.id,
             &lang,
@@ -563,6 +579,7 @@ pub async fn handle_upsert_page(
             "",
             &translation_of,
             &og_image,
+            &nav_title,
             Some(&principal.username),
         )
         .map_err(db_err)?;
@@ -659,11 +676,11 @@ pub async fn handle_restore_page_revision(
     let (title, body_md, parent_slug, ord, _captured_at, _author) = rev;
     // Preserve the current meta_description, kind, publish date and author
     // when restoring prior body/title.
-    let (existing_meta, existing_kind, existing_pub, existing_author, existing_redirect, existing_tr, existing_og) = db
+    let (existing_meta, existing_kind, existing_pub, existing_author, existing_redirect, existing_tr, existing_og, existing_nav) = db
         .get_website_page(site.id, &lang, &slug)
         .map_err(db_err)?
-        .map(|(_t, _b, _p, _o, _u, m, _h, k, pd, au, rd, tr, og)| (m, k, pd, au, rd, tr, og))
-        .unwrap_or_else(|| (String::new(), "page".to_string(), String::new(), String::new(), String::new(), String::new(), String::new()));
+        .map(|(_t, _b, _p, _o, _u, m, _h, k, pd, au, rd, tr, og, nav)| (m, k, pd, au, rd, tr, og, nav))
+        .unwrap_or_else(|| (String::new(), "page".to_string(), String::new(), String::new(), String::new(), String::new(), String::new(), String::new()));
     let new_id = db.upsert_website_page(
         site.id, &lang, &slug, &title, &body_md, parent_slug.as_deref(), ord,
         &existing_meta,
@@ -673,6 +690,7 @@ pub async fn handle_restore_page_revision(
         &existing_redirect,
         &existing_tr,
         &existing_og,
+        &existing_nav,
         Some(&principal.username),
     ).map_err(db_err)?;
     let url = if existing_kind == "post" {
@@ -1004,7 +1022,7 @@ pub(crate) fn seed_legal_pages(state: &Arc<AppState>) {
         let mut db = state.db.lock();
         let exists = db.get_website_page(site.id, "", slug).ok().flatten().is_some();
         if !exists {
-            match db.upsert_website_page(site.id, "", slug, title, body, None, 900, "", "page", "", "", "", "", "", None) {
+            match db.upsert_website_page(site.id, "", slug, title, body, None, 900, "", "page", "", "", "", "", "", "", None) {
                 Ok(_) => log::info!("Seeded website page '{}'", slug),
                 Err(e) => log::error!("Failed to seed website page '{}': {}", slug, e),
             }
@@ -2609,7 +2627,7 @@ fn render_website(
             // head, no body - the SPA shows "Page not found" to visitors.
             // The /blog/ path only serves posts.
             match row {
-                Some((t, body, _p, _o, upd, meta, false, kind, published, _au, _rd, _tr, og))
+                Some((t, body, _p, _o, upd, meta, false, kind, published, _au, _rd, _tr, og, _nav))
                     if !post_path || kind == "post" =>
                 {
                     let desc = if !meta.trim().is_empty() {
@@ -2707,7 +2725,7 @@ fn render_blog_index(
         db.get_website_page(site.id, lang, "blog").unwrap_or(None)
     };
     let (title, intro_md, updated_at, meta) = match row {
-        Some((t, body, _p, _o, upd, m, false, _k, _pd, _au, _rd, _tr, _og)) => (t, body, upd, m),
+        Some((t, body, _p, _o, upd, m, false, _k, _pd, _au, _rd, _tr, _og, _nav)) => (t, body, upd, m),
         _ => ("Blog".to_string(), String::new(), String::new(), String::new()),
     };
     let lang_pages = pages_in_lang(pages, lang);
@@ -3362,7 +3380,7 @@ pub async fn handle_sitemap_xml(
             visible_pages(db.list_website_pages(site.id).unwrap_or_default())
         };
         let home_slug = first_default_slug(&pages_in_lang(&pages, "")).map(|s| s.to_string());
-        for (slug, _title, _parent, _ord, updated_at, _meta, _hidden, kind, _published, _author, _rd, lang, translation_of) in &pages {
+        for (slug, _title, _parent, _ord, updated_at, _meta, _hidden, kind, _published, _author, _rd, lang, translation_of, _nav) in &pages {
             let is_post_kind = kind == "post";
             // Home detection: the default home, or a translation of it.
             let is_home = if lang.is_empty() {
@@ -3451,7 +3469,7 @@ pub async fn handle_llms_txt(
     }
 
     body.push_str("## Pages\n");
-    for (slug, title, parent, _ord, _upd, meta, _hidden, kind, _published, _author, _rd, _lang, _tr) in &pages {
+    for (slug, title, parent, _ord, _upd, meta, _hidden, kind, _published, _author, _rd, _lang, _tr, _nav) in &pages {
         if kind == "post" {
             continue;
         }
@@ -4057,6 +4075,9 @@ pub struct ImportPageEntry {
     /// For a translated page: the default-language slug it mirrors.
     #[serde(default)]
     pub translation_of: String,
+    /// Short sidebar label (empty = the title).
+    #[serde(default)]
+    pub nav_title: String,
 }
 
 pub async fn handle_import_pages(
@@ -4137,6 +4158,7 @@ pub async fn handle_import_pages(
         redirect_to: String,
         lang: String,
         translation_of: String,
+        nav_title: String,
     }
     let mut rows: Vec<ImportRow> = Vec::with_capacity(page_bodies.len());
     for (slug, body) in page_bodies {
@@ -4196,6 +4218,7 @@ pub async fn handle_import_pages(
             redirect_to,
             lang: entry.lang,
             translation_of: entry.translation_of,
+            nav_title: entry.nav_title.trim().to_string(),
         });
     }
 
@@ -4218,6 +4241,7 @@ pub async fn handle_import_pages(
                 "",
                 &r.translation_of,
                 "",
+                &r.nav_title,
                 Some(&principal.username),
             )
             .map_err(db_err)?;

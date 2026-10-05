@@ -8045,3 +8045,51 @@ fn test_list_workspaces_reports_role() {
     assert_eq!(user_roles[&own_ws], "member");
     assert!(!user_roles.contains_key(&other_ws), "non-member must not see other ws");
 }
+
+#[test]
+fn test_page_nav_title() {
+    let server = TestServer::start();
+    let token = server.admin_token();
+    let http = server.http();
+    let put = |body: Value| {
+        http.put(format!("{}/website/pages/lpms-ig1", server.api_url))
+            .bearer_auth(&token)
+            .json(&body)
+            .send()
+            .expect("put")
+            .status()
+            .as_u16()
+    };
+    let get = || {
+        http.get(format!("{}/website/pages/lpms-ig1", server.api_url))
+            .send().expect("get").json::<Value>().unwrap()
+    };
+
+    // A home page first, so the sensor page renders as an ordinary page.
+    let resp = http.put(format!("{}/website/pages/home", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "title": "Home", "body_md": "# Home", "ord": 0 }))
+        .send().expect("home");
+    assert_eq!(resp.status().as_u16(), 200);
+
+    // The label round-trips through the single-page and list endpoints; the
+    // SEO title stays untouched.
+    assert_eq!(put(json!({ "title": "LPMS-IG1 High-Precision 9-Axis IMU", "body_md": "# x", "ord": 10, "nav_title": " LPMS-IG1 " })), 200);
+    let body = get();
+    assert_eq!(body["title"].as_str().unwrap(), "LPMS-IG1 High-Precision 9-Axis IMU");
+    assert_eq!(body["nav_title"].as_str().unwrap(), "LPMS-IG1");
+    let list = http.get(format!("{}/website/pages", server.api_url))
+        .send().expect("list").json::<Value>().unwrap();
+    let row = list["pages"].as_array().unwrap().iter().find(|p| p["slug"] == "lpms-ig1").unwrap();
+    assert_eq!(row["nav_title"].as_str().unwrap(), "LPMS-IG1");
+    let ssr = http.get(format!("{}/site/lpms-ig1", server.url))
+        .send().expect("ssr").text().unwrap();
+    assert!(ssr.contains("<title>LPMS-IG1 High-Precision 9-Axis IMU"), "SEO title unchanged: {}", ssr);
+
+    // Omitted preserves, empty clears, overlong is rejected.
+    assert_eq!(put(json!({ "title": "LPMS-IG1 High-Precision 9-Axis IMU", "body_md": "# y" })), 200);
+    assert_eq!(get()["nav_title"].as_str().unwrap(), "LPMS-IG1");
+    assert_eq!(put(json!({ "title": "LPMS-IG1 High-Precision 9-Axis IMU", "body_md": "# y", "nav_title": "" })), 200);
+    assert_eq!(get()["nav_title"].as_str().unwrap(), "");
+    assert_eq!(put(json!({ "title": "t", "body_md": "# y", "nav_title": "x".repeat(101) })), 400);
+}

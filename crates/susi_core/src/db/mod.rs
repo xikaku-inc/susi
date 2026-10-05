@@ -1407,6 +1407,11 @@ impl LicenseDb {
             "ALTER TABLE website_pages ADD COLUMN og_image TEXT NOT NULL DEFAULT '';",
         );
 
+        // Short sidebar label (empty = the page title).
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE website_pages ADD COLUMN nav_title TEXT NOT NULL DEFAULT '';",
+        );
+
         // Per-site newsletters: existing issues belong to the default site.
         let _ = self.conn.execute_batch(
             "ALTER TABLE newsletter_issues ADD COLUMN site TEXT NOT NULL DEFAULT 'xikaku';",
@@ -1986,7 +1991,7 @@ mod tests {
     fn test_retired_pages_migrate_to_redirect_map() {
         let mut db = test_db();
         let mut page = |slug: &str, kind: &str, redirect_to: &str| {
-            db.upsert_website_page("xikaku", "", slug, slug, "x", None, 0, "", kind, "", "", redirect_to, "", "", None).unwrap();
+            db.upsert_website_page("xikaku", "", slug, slug, "x", None, 0, "", kind, "", "", redirect_to, "", "", "", None).unwrap();
         };
         page("lpms-curs3", "page", "");
         page("old", "page", "lpms-curs3");
@@ -2184,7 +2189,7 @@ mod tests {
         db.seed_admin("hash").unwrap();
         db.create_user("writer", "hash", "user").unwrap();
         db.set_user_name("writer", "Klaus", "Petersen").unwrap();
-        db.upsert_website_page("xikaku", "", "post-1", "Post", "# Post", None, 0, "", "post", "2026-08-05", "writer", "", "", "", None)
+        db.upsert_website_page("xikaku", "", "post-1", "Post", "# Post", None, 0, "", "post", "2026-08-05", "writer", "", "", "", "", None)
             .unwrap();
         assert_eq!(db.get_website_page("xikaku", "", "post-1").unwrap().unwrap().9, "writer");
 
@@ -4024,7 +4029,7 @@ mod tests {
     fn test_asset_usage_and_rename_covers_shop_products() {
         let mut db = test_db();
         db.upsert_website_asset("xikaku", "sensor.png", 123).unwrap();
-        db.upsert_website_page("xikaku", "", "intro", "Intro", "![img](sensor.png)", None, 0, "", "page", "", "", "", "", "", None)
+        db.upsert_website_page("xikaku", "", "intro", "Intro", "![img](sensor.png)", None, 0, "", "page", "", "", "", "", "", "", None)
             .unwrap();
         db.upsert_product("xikaku", "lpms-b2", "LPMS-B2", "", 34900, "usd", Some("sensor.png"), "txcd", true, 0, "", "", 0)
             .unwrap();
@@ -4054,7 +4059,7 @@ mod tests {
     #[test]
     fn test_website_page_hidden_flag() {
         let mut db = test_db();
-        db.upsert_website_page("xikaku", "", "about", "About", "# About", None, 0, "", "page", "", "", "", "", "", None)
+        db.upsert_website_page("xikaku", "", "about", "About", "# About", None, 0, "", "page", "", "", "", "", "", "", None)
             .unwrap();
 
         // New pages default to visible.
@@ -4066,7 +4071,7 @@ mod tests {
         // Hide, verify, and check that editing the page keeps it hidden.
         assert!(db.set_website_page_hidden("xikaku", "", "about", true).unwrap());
         assert!(db.get_website_page("xikaku", "", "about").unwrap().unwrap().6);
-        db.upsert_website_page("xikaku", "", "about", "About v2", "# About v2", None, 0, "", "page", "", "", "", "", "", None)
+        db.upsert_website_page("xikaku", "", "about", "About v2", "# About v2", None, 0, "", "page", "", "", "", "", "", "", None)
             .unwrap();
         assert!(
             db.get_website_page("xikaku", "", "about").unwrap().unwrap().6,
@@ -4086,9 +4091,9 @@ mod tests {
     #[test]
     fn test_website_pages_are_site_scoped() {
         let mut db = test_db();
-        db.upsert_website_page("xikaku", "", "contact", "Contact X", "# X", None, 0, "", "page", "", "", "", "", "", None)
+        db.upsert_website_page("xikaku", "", "contact", "Contact X", "# X", None, 0, "", "page", "", "", "", "", "", "", None)
             .unwrap();
-        db.upsert_website_page("lpr", "", "contact", "Contact LP", "# LP", None, 0, "", "page", "", "", "", "", "", None)
+        db.upsert_website_page("lpr", "", "contact", "Contact LP", "# LP", None, 0, "", "page", "", "", "", "", "", "", None)
             .unwrap();
 
         assert_eq!(db.get_website_page("xikaku", "", "contact").unwrap().unwrap().0, "Contact X");
@@ -4105,9 +4110,9 @@ mod tests {
         // that site's page bodies.
         db.upsert_website_asset("xikaku", "hero.png", 1).unwrap();
         db.upsert_website_asset("lpr", "hero.png", 2).unwrap();
-        db.upsert_website_page("lpr", "", "home", "Home", "![h](hero.png)", None, 0, "", "page", "", "", "", "", "", None)
+        db.upsert_website_page("lpr", "", "home", "Home", "![h](hero.png)", None, 0, "", "page", "", "", "", "", "", "", None)
             .unwrap();
-        db.upsert_website_page("xikaku", "", "home", "Home", "![h](hero.png)", None, 0, "", "page", "", "", "", "", "", None)
+        db.upsert_website_page("xikaku", "", "home", "Home", "![h](hero.png)", None, 0, "", "page", "", "", "", "", "", "", None)
             .unwrap();
         let (ok, n) = db.rename_website_asset("lpr", "hero.png", "banner.png").unwrap();
         assert!(ok);
@@ -4119,7 +4124,7 @@ mod tests {
 
         // Revisions are site-scoped too (both 'home' pages were edited zero
         // times, so seed one revision on lpr only).
-        db.upsert_website_page("lpr", "", "home", "Home v2", "![h](banner.png) more", None, 0, "", "page", "", "", "", "", "", Some("k"))
+        db.upsert_website_page("lpr", "", "home", "Home v2", "![h](banner.png) more", None, 0, "", "page", "", "", "", "", "", "", Some("k"))
             .unwrap();
         assert_eq!(db.list_page_revisions("lpr", "", "home").unwrap().len(), 1);
         assert_eq!(db.list_page_revisions("xikaku", "", "home").unwrap().len(), 0);
@@ -4202,7 +4207,7 @@ mod tests {
         let mut db = LicenseDb::open(&p).unwrap();
         assert_eq!(db.get_website_page("xikaku", "", "about").unwrap().unwrap().0, "About");
         assert_eq!(db.list_website_assets("xikaku").unwrap(), vec![("logo.png".to_string(), 42)]);
-        db.upsert_website_page("lpr", "", "about", "About LP", "", None, 0, "", "page", "", "", "", "", "", None)
+        db.upsert_website_page("lpr", "", "about", "About LP", "", None, 0, "", "page", "", "", "", "", "", "", None)
             .unwrap();
         assert_eq!(db.list_website_pages("xikaku").unwrap().len(), 1);
         assert_eq!(db.list_website_pages("lpr").unwrap().len(), 1);
@@ -4302,7 +4307,7 @@ mod tests {
         assert_eq!(db.get_website_page("xikaku", "", "old-post").unwrap().unwrap().9, "");
 
         db.set_user_name("legacy", "Klaus", "Petersen").unwrap();
-        db.upsert_website_page("xikaku", "", "old-post", "Old", "# Old", None, 0, "", "post", "2020-01-01", "legacy", "", "", "", None)
+        db.upsert_website_page("xikaku", "", "old-post", "Old", "# Old", None, 0, "", "post", "2020-01-01", "legacy", "", "", "", "", None)
             .unwrap();
         assert_eq!(db.get_website_page("xikaku", "", "old-post").unwrap().unwrap().9, "legacy");
         assert_eq!(db.list_users().unwrap()[0].last_name, "Petersen");

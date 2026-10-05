@@ -24,6 +24,7 @@ impl LicenseDb {
         redirect_to: &str,
         translation_of: &str,
         og_image: &str,
+        nav_title: &str,
         author: Option<&str>,
     ) -> Result<i64, LicenseError> {
         let now = Utc::now().to_rfc3339();
@@ -65,8 +66,8 @@ impl LicenseDb {
         }
 
         tx.execute(
-            "INSERT INTO website_pages (site, lang, slug, title, body_md, parent_slug, ord, updated_at, meta_description, page_kind, published_at, author_username, redirect_to, translation_of, og_image)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+            "INSERT INTO website_pages (site, lang, slug, title, body_md, parent_slug, ord, updated_at, meta_description, page_kind, published_at, author_username, redirect_to, translation_of, og_image, nav_title)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
              ON CONFLICT(site, lang, slug) DO UPDATE SET
                title = excluded.title,
                body_md = excluded.body_md,
@@ -79,8 +80,9 @@ impl LicenseDb {
                author_username = excluded.author_username,
                redirect_to = excluded.redirect_to,
                translation_of = excluded.translation_of,
-               og_image = excluded.og_image",
-            params![site, lang, slug, title, body_md, parent_slug, ord, now, meta_description, page_kind, published_at, author_username, redirect_to, translation_of, og_image],
+               og_image = excluded.og_image,
+               nav_title = excluded.nav_title",
+            params![site, lang, slug, title, body_md, parent_slug, ord, now, meta_description, page_kind, published_at, author_username, redirect_to, translation_of, og_image, nav_title],
         )
         .map_err(|e| LicenseError::Other(format!("DB upsert website page: {}", e)))?;
         let id = tx
@@ -261,14 +263,14 @@ impl LicenseDb {
         Ok((true, n_pages))
     }
 
-    /// All languages; the two trailing fields are (lang, translation_of).
+    /// All languages; the three trailing fields are (lang, translation_of, nav_title).
     pub fn list_website_pages(
         &self,
         site: &str,
-    ) -> Result<Vec<(String, String, Option<String>, i64, String, String, bool, String, String, String, String, String, String)>, LicenseError> {
+    ) -> Result<Vec<(String, String, Option<String>, i64, String, String, bool, String, String, String, String, String, String, String)>, LicenseError> {
         let mut stmt = self.conn
             .prepare(
-                "SELECT slug, title, parent_slug, ord, updated_at, meta_description, hidden, page_kind, published_at, author_username, redirect_to, lang, translation_of FROM website_pages
+                "SELECT slug, title, parent_slug, ord, updated_at, meta_description, hidden, page_kind, published_at, author_username, redirect_to, lang, translation_of, nav_title FROM website_pages
                  WHERE site = ?1
                  ORDER BY parent_slug NULLS FIRST, ord, title",
             )
@@ -289,6 +291,7 @@ impl LicenseDb {
                     r.get::<_, String>(10)?,
                     r.get::<_, String>(11)?,
                     r.get::<_, String>(12)?,
+                    r.get::<_, String>(13)?,
                 ))
             })
             .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
@@ -297,15 +300,15 @@ impl LicenseDb {
         Ok(rows)
     }
 
-    /// The two trailing fields are (translation_of, og_image).
+    /// The three trailing fields are (translation_of, og_image, nav_title).
     pub fn get_website_page(
         &self,
         site: &str,
         lang: &str,
         slug: &str,
-    ) -> Result<Option<(String, String, Option<String>, i64, String, String, bool, String, String, String, String, String, String)>, LicenseError> {
+    ) -> Result<Option<(String, String, Option<String>, i64, String, String, bool, String, String, String, String, String, String, String)>, LicenseError> {
         match self.conn.query_row(
-            "SELECT title, body_md, parent_slug, ord, updated_at, meta_description, hidden, page_kind, published_at, author_username, redirect_to, translation_of, og_image FROM website_pages
+            "SELECT title, body_md, parent_slug, ord, updated_at, meta_description, hidden, page_kind, published_at, author_username, redirect_to, translation_of, og_image, nav_title FROM website_pages
              WHERE site = ?1 AND lang = ?2 AND slug = ?3",
             params![site, lang, slug],
             |r| {
@@ -323,6 +326,7 @@ impl LicenseDb {
                     r.get::<_, String>(10)?,
                     r.get::<_, String>(11)?,
                     r.get::<_, String>(12)?,
+                    r.get::<_, String>(13)?,
                 ))
             },
         ) {
