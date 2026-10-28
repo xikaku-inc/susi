@@ -3,7 +3,7 @@ pub mod workspace;
 
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use rsa::RsaPublicKey;
 use susi_core::{
     crypto::{public_key_from_pem, verify_license},
@@ -20,6 +20,10 @@ pub(crate) fn blocking_run<F: std::future::Future>(fut: F) -> F::Output {
         .expect("Failed to build tokio runtime for blocking susi_client call")
         .block_on(fut)
 }
+
+/// How far the clock may lag behind the latest time already seen (NTP steps,
+/// a wrong time zone setting) before it counts as set back.
+pub const CLOCK_TOLERANCE_HOURS: i64 = 24;
 
 /// Result of a license verification.
 #[derive(Debug)]
@@ -56,6 +60,11 @@ pub enum LicenseStatus {
     /// No cached license on disk - the install has never been activated on
     /// this machine, or was explicitly deactivated. User must click Activate.
     NotActivated,
+    /// The system clock is earlier than a time this machine already saw: the
+    /// license creation, an earlier check or the license server's time.
+    ClockRollback {
+        last_seen: DateTime<Utc>,
+    },
     TokenNotFound,
     FileNotFound(String),
     Error(String),
@@ -117,6 +126,12 @@ impl LicenseStatus {
     }
 }
 
+/// The server's clock from the response `Date` header.
+fn server_time(response: &reqwest::Response) -> Option<DateTime<Utc>> {
+    let date = response.headers().get(reqwest::header::DATE)?.to_str().ok()?;
+    DateTime::parse_from_rfc2822(date).ok().map(|t| t.with_timezone(&Utc))
+}
+
 /// Client for verifying licenses. Embedded in the FusionHub application.
 pub struct LicenseClient {
     public_key: RsaPublicKey,
@@ -129,6 +144,9 @@ pub struct LicenseClient {
     /// entirely. For hosts that own machine-code resolution (env overrides,
     /// container-synthesised ids).
     machine_code_override: Option<String>,
+    /// Optional file remembering the latest time seen, so a clock set back
+    /// cannot revive an expired license.
+    clock_guard: Option<PathBuf>,
 }
 
 impl LicenseClient {
@@ -140,6 +158,7 @@ impl LicenseClient {
             server_url: None,
             machine_code_cache: None,
             machine_code_override: None,
+            clock_guard: None,
         })
     }
 
@@ -167,6 +186,45 @@ impl LicenseClient {
     pub fn with_machine_code_override<S: Into<String>>(mut self, code: S) -> Self {
         self.machine_code_override = Some(code.into());
         self
+    }
+
+    /// Remember the latest time seen in `path` and reject a clock set back
+    /// before it by more than [`CLOCK_TOLERANCE_HOURS`].
+    pub fn with_clock_guard<P: Into<PathBuf>>(mut self, path: P) -> Self {
+        self.clock_guard = Some(path.into());
+        self
+    }
+
+    fn read_clock_guard(&self) -> Option<DateTime<Utc>> {
+        let text = std::fs::read_to_string(self.clock_guard.as_ref()?).ok()?;
+        DateTime::parse_from_rfc3339(text.trim()).ok().map(|t| t.with_timezone(&Utc))
+    }
+
+    fn write_clock_guard(&self, time: DateTime<Utc>) {
+        if let Some(path) = &self.clock_guard {
+            let _ = std::fs::write(path, time.to_rfc3339());
+        }
+    }
+
+    /// The license server's clock is trusted: it replaces the remembered
+    /// time, which also heals a mark left by a clock that once ran ahead.
+    fn trust_server_time(&self, server_time: Option<DateTime<Utc>>) {
+        if let Some(t) = server_time {
+            self.write_clock_guard(t);
+        }
+    }
+
+    fn check_clock(&self, payload: &LicensePayload) -> Option<LicenseStatus> {
+        let now = Utc::now();
+        let remembered = self.read_clock_guard();
+        let last_seen = remembered.map_or(payload.created, |t| t.max(payload.created));
+        if now + Duration::hours(CLOCK_TOLERANCE_HOURS) < last_seen {
+            return Some(LicenseStatus::ClockRollback { last_seen });
+        }
+        if remembered.map_or(true, |t| now > t) {
+            self.write_clock_guard(now);
+        }
+        None
     }
 
     fn current_machine_code(&self) -> Result<String, LicenseError> {
@@ -244,6 +302,10 @@ impl LicenseClient {
     }
 
     fn evaluate_payload(&self, payload: LicensePayload, activation_code: &str) -> LicenseStatus {
+        if let Some(status) = self.check_clock(&payload) {
+            return status;
+        }
+
         if payload.is_expired() {
             return LicenseStatus::Expired {
                 expired_at: payload.expires.unwrap(),
@@ -321,7 +383,8 @@ impl LicenseClient {
 
         if let Some(ref server_url) = self.server_url {
             match self.try_online_verify_async(server_url, license_key).await {
-                Ok(signed) => {
+                Ok((signed, server_time)) => {
+                    self.trust_server_time(server_time);
                     if let Ok(json) = serde_json::to_string_pretty(&signed) {
                         let _ = tokio::fs::write(path, json).await;
                     }
@@ -385,7 +448,8 @@ impl LicenseClient {
             .try_online_activate_async(&server_url, license_key, friendly_name)
             .await
         {
-            Ok(signed) => {
+            Ok((signed, server_time)) => {
+                self.trust_server_time(server_time);
                 if let Ok(json) = serde_json::to_string_pretty(&signed) {
                     let _ = tokio::fs::write(path, json).await;
                 }
@@ -406,7 +470,7 @@ impl LicenseClient {
         &self,
         server_url: &str,
         license_key: &str,
-    ) -> Result<SignedLicense, LicenseError> {
+    ) -> Result<(SignedLicense, Option<DateTime<Utc>>), LicenseError> {
         let machine_code = self
             .current_machine_code()
             .map_err(|e| LicenseError::Other(format!("Fingerprint error: {}", e)))?;
@@ -436,9 +500,11 @@ impl LicenseClient {
 
         let status = response.status().as_u16();
         if (200..300).contains(&status) {
+            let server_time = server_time(&response);
             return response
                 .json::<SignedLicense>()
                 .await
+                .map(|signed| (signed, server_time))
                 .map_err(|e| LicenseError::Other(format!("Invalid server response: {}", e)));
         }
 
@@ -470,7 +536,7 @@ impl LicenseClient {
         server_url: &str,
         license_key: &str,
         friendly_name: Option<&str>,
-    ) -> Result<SignedLicense, LicenseError> {
+    ) -> Result<(SignedLicense, Option<DateTime<Utc>>), LicenseError> {
         let machine_code = self
             .current_machine_code()
             .map_err(|e| LicenseError::Other(format!("Fingerprint error: {}", e)))?;
@@ -510,9 +576,11 @@ impl LicenseClient {
 
         let status = response.status().as_u16();
         if (200..300).contains(&status) {
+            let server_time = server_time(&response);
             return response
                 .json::<SignedLicense>()
                 .await
+                .map(|signed| (signed, server_time))
                 .map_err(|e| LicenseError::Other(format!("Invalid server response: {}", e)));
         }
 
@@ -915,6 +983,14 @@ mod tests {
     /// Serve a single canned HTTP response on a free port and return the base URL.
     /// Minimal - just enough to exercise the /activate response parsing.
     async fn spawn_canned_http_response(status: u16, body: &'static str) -> String {
+        spawn_canned_http_response_with_headers(status, body, String::new()).await
+    }
+
+    async fn spawn_canned_http_response_with_headers(
+        status: u16,
+        body: &'static str,
+        headers: String,
+    ) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
 
@@ -931,8 +1007,8 @@ mod tests {
                     _ => "OK",
                 };
                 let resp = format!(
-                    "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    status, reason, body.len(), body
+                    "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{}Connection: close\r\n\r\n{}",
+                    status, reason, body.len(), headers, body
                 );
                 let _ = sock.write_all(resp.as_bytes()).await;
                 let _ = sock.shutdown().await;
@@ -1096,6 +1172,155 @@ mod tests {
         assert!(tmp.exists(), "cached license must survive a generic 403");
 
         let _ = tokio::fs::remove_file(&tmp).await;
+    }
+
+    fn clock_guard_path(name: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("susi-clock-{}-{}", std::process::id(), name));
+        let _ = std::fs::remove_file(&path);
+        path
+    }
+
+    fn guarded_client(pub_pem: &str, guard: &std::path::Path) -> LicenseClient {
+        new_test_client(pub_pem).with_clock_guard(guard)
+    }
+
+    fn remembered(guard: &std::path::Path) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(std::fs::read_to_string(guard).unwrap().trim())
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    #[test]
+    fn test_clock_before_license_creation_is_rollback() {
+        let (_, pub_pem, private) = make_keypair_pems();
+        let client = new_test_client(&pub_pem);
+        let mut payload = make_valid_payload(None);
+        payload.created = Utc::now() + Duration::days(3);
+        let status = client.verify_signed(&sign_license(&private, &payload).unwrap());
+        assert!(matches!(status, LicenseStatus::ClockRollback { .. }), "got {:?}", status);
+
+        payload.created = Utc::now() + Duration::hours(1);
+        assert!(client.verify_signed(&sign_license(&private, &payload).unwrap()).is_valid());
+    }
+
+    #[test]
+    fn test_clock_guard_rejects_a_clock_set_back() {
+        let (_, pub_pem, private) = make_keypair_pems();
+        let guard = clock_guard_path("set-back");
+        let seen = DateTime::parse_from_rfc3339(&(Utc::now() + Duration::days(30)).to_rfc3339())
+            .unwrap()
+            .with_timezone(&Utc);
+        std::fs::write(&guard, seen.to_rfc3339()).unwrap();
+        let signed = sign_license(&private, &make_valid_payload(None)).unwrap();
+
+        let status = guarded_client(&pub_pem, &guard).verify_signed(&signed);
+
+        assert!(
+            matches!(status, LicenseStatus::ClockRollback { last_seen } if last_seen == seen),
+            "got {:?}",
+            status
+        );
+        assert_eq!(remembered(&guard), seen, "a rejected check must not lower the mark");
+    }
+
+    #[test]
+    fn test_clock_guard_tolerates_a_small_step_back() {
+        let (_, pub_pem, private) = make_keypair_pems();
+        let guard = clock_guard_path("tolerance");
+        let seen = Utc::now() + Duration::hours(CLOCK_TOLERANCE_HOURS - 1);
+        std::fs::write(&guard, seen.to_rfc3339()).unwrap();
+        let signed = sign_license(&private, &make_valid_payload(None)).unwrap();
+
+        assert!(guarded_client(&pub_pem, &guard).verify_signed(&signed).is_valid());
+        assert_eq!(remembered(&guard), seen);
+    }
+
+    #[test]
+    fn test_clock_guard_remembers_the_latest_time() {
+        let (_, pub_pem, private) = make_keypair_pems();
+        let signed = sign_license(&private, &make_valid_payload(None)).unwrap();
+        let before = Utc::now();
+
+        let fresh = clock_guard_path("fresh");
+        assert!(guarded_client(&pub_pem, &fresh).verify_signed(&signed).is_valid());
+        assert!(remembered(&fresh) >= before);
+
+        let old = clock_guard_path("old");
+        std::fs::write(&old, (Utc::now() - Duration::days(1)).to_rfc3339()).unwrap();
+        assert!(guarded_client(&pub_pem, &old).verify_signed(&signed).is_valid());
+        assert!(remembered(&old) >= before);
+    }
+
+    #[test]
+    fn test_clock_guard_applies_to_license_files_and_tokens() {
+        let (_, pub_pem, private) = make_keypair_pems();
+        let guard = clock_guard_path("file");
+        std::fs::write(&guard, (Utc::now() + Duration::days(30)).to_rfc3339()).unwrap();
+        let client = guarded_client(&pub_pem, &guard);
+        let signed = sign_license(&private, &make_valid_payload(None)).unwrap();
+
+        let file = clock_guard_path("license.json");
+        std::fs::write(&file, serde_json::to_string(&signed).unwrap()).unwrap();
+        let status = client.verify_file(&file);
+        assert!(matches!(status, LicenseStatus::ClockRollback { .. }), "got {:?}", status);
+
+        let status = client.verify_signed_with_activation_code(&signed, "usb:SERIAL");
+        assert!(matches!(status, LicenseStatus::ClockRollback { .. }), "got {:?}", status);
+    }
+
+    fn server_license(private: &rsa::RsaPrivateKey) -> &'static str {
+        let mut payload = make_valid_payload(None);
+        payload.lease_expires = Some(Utc::now() + Duration::hours(72));
+        let body = serde_json::to_string(&sign_license(private, &payload).unwrap()).unwrap();
+        Box::leak(body.into_boxed_str())
+    }
+
+    fn date_header(time: DateTime<Utc>) -> String {
+        format!("Date: {}\r\n", time.format("%a, %d %b %Y %H:%M:%S GMT"))
+    }
+
+    fn server_client(pub_pem: &str, url: String, guard: &std::path::Path) -> LicenseClient {
+        new_test_client_with_server(pub_pem, url).with_clock_guard(guard)
+    }
+
+    /// The server's clock replaces the remembered time: it heals a mark left
+    /// by a local clock that once ran ahead.
+    #[tokio::test]
+    async fn test_server_time_heals_a_mark_from_a_clock_that_ran_ahead() {
+        let (_, pub_pem, private) = make_keypair_pems();
+        let guard = clock_guard_path("heal");
+        std::fs::write(&guard, (Utc::now() + Duration::days(30)).to_rfc3339()).unwrap();
+        let license = server_license(&private);
+        let url = spawn_canned_http_response_with_headers(200, license, date_header(Utc::now())).await;
+        let cache = clock_guard_path("heal-cache.json");
+        std::fs::write(&cache, license).unwrap();
+
+        let status = server_client(&pub_pem, url, &guard)
+            .verify_and_refresh_async(&cache, "ANY-KEY", None)
+            .await;
+
+        assert!(status.is_valid(), "got {:?}", status);
+        assert!(remembered(&guard) < Utc::now() + Duration::hours(1));
+    }
+
+    /// A local clock far behind the license server is a clock set back, also
+    /// when the server answers.
+    #[tokio::test]
+    async fn test_server_time_reveals_a_clock_set_back() {
+        let (_, pub_pem, private) = make_keypair_pems();
+        let guard = clock_guard_path("server-ahead");
+        let url = spawn_canned_http_response_with_headers(
+            200,
+            server_license(&private),
+            date_header(Utc::now() + Duration::days(30)),
+        )
+        .await;
+
+        let status = server_client(&pub_pem, url, &guard)
+            .activate_async(&clock_guard_path("server-ahead-cache.json"), "ANY-KEY", None)
+            .await;
+
+        assert!(matches!(status, LicenseStatus::ClockRollback { .. }), "got {:?}", status);
     }
 
     #[tokio::test]
