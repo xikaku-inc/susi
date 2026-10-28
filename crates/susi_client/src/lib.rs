@@ -553,18 +553,19 @@ impl LicenseClient {
     /// Verify a license from a connected USB hardware token.
     /// Scans all connected USB mass storage devices for a valid token.
     pub fn verify_token(&self) -> LicenseStatus {
-        let devices = match susi_core::usb::enumerate_usb_devices() {
-            Ok(d) => d,
-            Err(e) => return LicenseStatus::Error(format!("USB enumeration failed: {}", e)),
-        };
-
-        if devices.is_empty() {
-            return LicenseStatus::TokenNotFound;
+        match susi_core::usb::enumerate_usb_devices() {
+            Ok(devices) => self.verify_token_on(&devices),
+            Err(e) => LicenseStatus::Error(format!("USB enumeration failed: {}", e)),
         }
+    }
 
+    /// Verify the tokens on the given USB devices. A readable but invalid
+    /// token reports its own status (e.g. Expired) so the caller can show why.
+    pub fn verify_token_on(&self, devices: &[susi_core::usb::UsbDevice]) -> LicenseStatus {
+        let mut last_invalid = None;
         let mut last_error = String::new();
 
-        for device in &devices {
+        for device in devices {
             let token_path = susi_core::token::token_file_path(&device.mount_path);
             if !token_path.exists() {
                 continue;
@@ -577,11 +578,7 @@ impl LicenseClient {
                     if status.is_valid() {
                         return status;
                     }
-                    last_error = format!(
-                        "Token on {} invalid: {:?}",
-                        device.mount_path.display(),
-                        status
-                    );
+                    last_invalid = Some(status);
                 }
                 Err(e) => {
                     last_error = format!(
@@ -594,7 +591,9 @@ impl LicenseClient {
             }
         }
 
-        if last_error.is_empty() {
+        if let Some(status) = last_invalid {
+            status
+        } else if last_error.is_empty() {
             LicenseStatus::TokenNotFound
         } else {
             LicenseStatus::Error(format!(
@@ -1146,6 +1145,60 @@ mod tests {
             assert!(tmp.exists(), "{}: activate must not delete the cache", body);
             let _ = std::fs::remove_file(&tmp);
         }
+    }
+
+    fn token_device(private: &rsa::RsaPrivateKey, payload: &LicensePayload, serial: &str) -> susi_core::usb::UsbDevice {
+        let mount = std::env::temp_dir().join(format!("susi-token-test-{}-{}", std::process::id(), serial));
+        let _ = std::fs::remove_dir_all(&mount);
+        std::fs::create_dir_all(&mount).unwrap();
+        let signed = sign_license(private, payload).unwrap();
+        susi_core::token::write_token(&mount, &signed, serial).unwrap();
+        susi_core::usb::UsbDevice { serial: serial.into(), mount_path: mount, name: "test".into() }
+    }
+
+    #[test]
+    fn test_verify_token_on_valid_token() {
+        let (_, pub_pem, private) = make_keypair_pems();
+        let client = new_test_client(&pub_pem);
+        let device = token_device(&private, &make_valid_payload(None), "SERIAL-VALID");
+        assert!(client.verify_token_on(&[device]).is_valid());
+    }
+
+    #[test]
+    fn test_verify_token_on_reports_expired_token() {
+        let (_, pub_pem, private) = make_keypair_pems();
+        let client = new_test_client(&pub_pem);
+        let mut payload = make_valid_payload(None);
+        payload.expires = Some(Utc::now() - Duration::days(1));
+        let device = token_device(&private, &payload, "SERIAL-EXPIRED");
+        let status = client.verify_token_on(&[device]);
+        assert!(matches!(status, LicenseStatus::Expired { .. }), "got {:?}", status);
+    }
+
+    #[test]
+    fn test_verify_token_on_prefers_a_valid_token() {
+        let (_, pub_pem, private) = make_keypair_pems();
+        let client = new_test_client(&pub_pem);
+        let mut expired = make_valid_payload(None);
+        expired.expires = Some(Utc::now() - Duration::days(1));
+        let devices = [
+            token_device(&private, &expired, "SERIAL-A"),
+            token_device(&private, &make_valid_payload(None), "SERIAL-B"),
+        ];
+        assert!(client.verify_token_on(&devices).is_valid());
+    }
+
+    #[test]
+    fn test_verify_token_on_without_token() {
+        let (_, pub_pem, _) = make_keypair_pems();
+        let client = new_test_client(&pub_pem);
+        assert!(matches!(client.verify_token_on(&[]), LicenseStatus::TokenNotFound));
+        let empty = susi_core::usb::UsbDevice {
+            serial: "S".into(),
+            mount_path: std::env::temp_dir().join("susi-token-test-empty-mount"),
+            name: "empty".into(),
+        };
+        assert!(matches!(client.verify_token_on(&[empty]), LicenseStatus::TokenNotFound));
     }
 
     #[tokio::test]
