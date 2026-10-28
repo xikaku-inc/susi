@@ -347,6 +347,11 @@ impl LicenseClient {
                     let _ = tokio::fs::remove_file(path).await;
                     return LicenseStatus::UnsignedBinary;
                 }
+                Err(LicenseError::Expired(_)) => {
+                    log::warn!("License expired on server - removing cached file");
+                    let _ = tokio::fs::remove_file(path).await;
+                    return LicenseStatus::Expired { expired_at: Utc::now() };
+                }
                 Err(e) => {
                     log::warn!("Online license verify failed, using cached file: {}", e);
                 }
@@ -394,6 +399,7 @@ impl LicenseClient {
             Err(LicenseError::Revoked) => LicenseStatus::Revoked,
             Err(LicenseError::Deactivated) => LicenseStatus::Deactivated,
             Err(LicenseError::NotFound) => LicenseStatus::InvalidLicenseKey,
+            Err(LicenseError::Expired(_)) => LicenseStatus::Expired { expired_at: Utc::now() },
             Err(LicenseError::MachineLimitReached(max)) => {
                 LicenseStatus::Error(format!("Machine limit reached: {}", max))
             }
@@ -1096,6 +1102,50 @@ mod tests {
         assert!(tmp.exists(), "cached license must survive a generic 403");
 
         let _ = tokio::fs::remove_file(&tmp).await;
+    }
+
+    fn seed_cache(private: &rsa::RsaPrivateKey, name: &str) -> std::path::PathBuf {
+        let signed = sign_license(private, &make_valid_payload(None)).unwrap();
+        let tmp = std::env::temp_dir().join(name);
+        std::fs::write(&tmp, serde_json::to_string_pretty(&signed).unwrap()).unwrap();
+        tmp
+    }
+
+    /// An expiry set on the server is final: the cached lease must not keep
+    /// the license alive.
+    #[tokio::test]
+    async fn test_verify_and_refresh_clears_cache_on_server_expiry() {
+        let url = spawn_canned_http_response(403, r#"{"error":"License has expired"}"#).await;
+        let (_, pub_pem, private) = make_keypair_pems();
+        let client = new_test_client_with_server(&pub_pem, url);
+        let tmp = seed_cache(&private, "test_server_expiry_cache.json");
+
+        let status = client.verify_and_refresh_async(&tmp, "ANY-KEY", None).await;
+        assert!(matches!(status, LicenseStatus::Expired { .. }), "got {:?}", status);
+        assert!(!tmp.exists(), "cached license file must be deleted on server expiry");
+    }
+
+    /// A failed activation reports the server's answer but never touches the
+    /// cache: the key may differ from the one currently in use.
+    #[tokio::test]
+    async fn test_activate_reports_server_answer_and_keeps_cache() {
+        let cases: [(u16, &'static str, fn(&LicenseStatus) -> bool); 4] = [
+            (403, r#"{"error":"License has expired"}"#, |s| matches!(s, LicenseStatus::Expired { .. })),
+            (403, r#"{"error":"License has been revoked"}"#, |s| matches!(s, LicenseStatus::Revoked)),
+            (404, r#"{"error":"License key not found"}"#, |s| matches!(s, LicenseStatus::InvalidLicenseKey)),
+            (403, r#"{"error":"Machine limit reached (max 1)"}"#, |s| matches!(s, LicenseStatus::Error(_))),
+        ];
+        let (_, pub_pem, private) = make_keypair_pems();
+        for (i, (code, body, expected)) in cases.into_iter().enumerate() {
+            let url = spawn_canned_http_response(code, body).await;
+            let client = new_test_client_with_server(&pub_pem, url);
+            let tmp = seed_cache(&private, &format!("test_activate_keeps_cache_{}.json", i));
+
+            let status = client.activate_async(&tmp, "OTHER-KEY", None).await;
+            assert!(expected(&status), "{}: got {:?}", body, status);
+            assert!(tmp.exists(), "{}: activate must not delete the cache", body);
+            let _ = std::fs::remove_file(&tmp);
+        }
     }
 
     #[tokio::test]
