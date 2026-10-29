@@ -1,3 +1,4 @@
+pub mod clock;
 pub mod crypto;
 #[cfg(feature = "db")]
 pub mod db;

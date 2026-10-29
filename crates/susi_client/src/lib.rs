@@ -65,6 +65,8 @@ pub enum LicenseStatus {
     ClockRollback {
         last_seen: DateTime<Utc>,
     },
+    /// Every remembered time was changed or written on another machine.
+    ClockRecordInvalid,
     TokenNotFound,
     FileNotFound(String),
     Error(String),
@@ -147,7 +149,32 @@ pub struct LicenseClient {
     /// Optional file remembering the latest time seen, so a clock set back
     /// cannot revive an expired license.
     clock_guard: Option<PathBuf>,
+    /// Optional `HKEY_CURRENT_USER` subkey keeping a second copy of the
+    /// latest time seen (Windows only).
+    clock_registry: Option<String>,
 }
+
+const CLOCK_REGISTRY_VALUE: &str = "LicenseClock";
+
+#[cfg(windows)]
+fn read_clock_registry(subkey: &str) -> Option<Vec<u8>> {
+    windows_registry::CURRENT_USER.open(subkey).ok()?.get_value(CLOCK_REGISTRY_VALUE).ok().map(|v| v.to_vec())
+}
+
+#[cfg(windows)]
+fn write_clock_registry(subkey: &str, blob: &[u8]) {
+    if let Ok(key) = windows_registry::CURRENT_USER.create(subkey) {
+        let _ = key.set_bytes(CLOCK_REGISTRY_VALUE, windows_registry::Type::Bytes, blob);
+    }
+}
+
+#[cfg(not(windows))]
+fn read_clock_registry(_: &str) -> Option<Vec<u8>> {
+    None
+}
+
+#[cfg(not(windows))]
+fn write_clock_registry(_: &str, _: &[u8]) {}
 
 impl LicenseClient {
     /// Create a new client from a PEM-encoded public key string.
@@ -159,6 +186,7 @@ impl LicenseClient {
             machine_code_cache: None,
             machine_code_override: None,
             clock_guard: None,
+            clock_registry: None,
         })
     }
 
@@ -195,14 +223,49 @@ impl LicenseClient {
         self
     }
 
-    fn read_clock_guard(&self) -> Option<DateTime<Utc>> {
-        let text = std::fs::read_to_string(self.clock_guard.as_ref()?).ok()?;
-        DateTime::parse_from_rfc3339(text.trim()).ok().map(|t| t.with_timezone(&Utc))
+    /// Also keep the latest time seen in the registry under `subkey`, so
+    /// deleting the guard file does not reset it. No effect off Windows.
+    pub fn with_clock_registry<S: Into<String>>(mut self, subkey: S) -> Self {
+        self.clock_registry = Some(subkey.into());
+        self
+    }
+
+    /// The latest remembered time, or `Err` if every stored copy was changed
+    /// or written on another machine.
+    fn read_clock_guard(&self) -> Result<Option<DateTime<Utc>>, ()> {
+        let Ok(code) = self.current_machine_code() else {
+            return Ok(None);
+        };
+        let blobs = self
+            .clock_guard
+            .as_ref()
+            .and_then(|p| std::fs::read(p).ok())
+            .into_iter()
+            .chain(self.clock_registry.as_deref().and_then(read_clock_registry));
+        let (mut latest, mut invalid) = (None, false);
+        for blob in blobs {
+            match susi_core::clock::open_time(&blob, &code) {
+                Some(t) => latest = latest.max(Some(t)),
+                None => invalid = true,
+            }
+        }
+        if invalid && latest.is_none() {
+            Err(())
+        } else {
+            Ok(latest)
+        }
     }
 
     fn write_clock_guard(&self, time: DateTime<Utc>) {
+        let Ok(code) = self.current_machine_code() else {
+            return;
+        };
+        let blob = susi_core::clock::seal_time(time, &code);
         if let Some(path) = &self.clock_guard {
-            let _ = std::fs::write(path, time.to_rfc3339());
+            let _ = std::fs::write(path, &blob);
+        }
+        if let Some(subkey) = &self.clock_registry {
+            write_clock_registry(subkey, &blob);
         }
     }
 
@@ -216,14 +279,14 @@ impl LicenseClient {
 
     fn check_clock(&self, payload: &LicensePayload) -> Option<LicenseStatus> {
         let now = Utc::now();
-        let remembered = self.read_clock_guard();
+        let Ok(remembered) = self.read_clock_guard() else {
+            return Some(LicenseStatus::ClockRecordInvalid);
+        };
         let last_seen = remembered.map_or(payload.created, |t| t.max(payload.created));
         if now + Duration::hours(CLOCK_TOLERANCE_HOURS) < last_seen {
             return Some(LicenseStatus::ClockRollback { last_seen });
         }
-        if remembered.map_or(true, |t| now > t) {
-            self.write_clock_guard(now);
-        }
+        self.write_clock_guard(remembered.map_or(now, |t| t.max(now)));
         None
     }
 
@@ -1185,9 +1248,13 @@ mod tests {
     }
 
     fn remembered(guard: &std::path::Path) -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339(std::fs::read_to_string(guard).unwrap().trim())
-            .unwrap()
-            .with_timezone(&Utc)
+        susi_core::clock::open_time(&std::fs::read(guard).unwrap(), TEST_MACHINE_CODE).unwrap()
+    }
+
+    /// Store `time` as this machine's remembered time and return it as stored.
+    fn mark(guard: &std::path::Path, time: DateTime<Utc>) -> DateTime<Utc> {
+        std::fs::write(guard, susi_core::clock::seal_time(time, TEST_MACHINE_CODE)).unwrap();
+        remembered(guard)
     }
 
     #[test]
@@ -1207,10 +1274,7 @@ mod tests {
     fn test_clock_guard_rejects_a_clock_set_back() {
         let (_, pub_pem, private) = make_keypair_pems();
         let guard = clock_guard_path("set-back");
-        let seen = DateTime::parse_from_rfc3339(&(Utc::now() + Duration::days(30)).to_rfc3339())
-            .unwrap()
-            .with_timezone(&Utc);
-        std::fs::write(&guard, seen.to_rfc3339()).unwrap();
+        let seen = mark(&guard, Utc::now() + Duration::days(30));
         let signed = sign_license(&private, &make_valid_payload(None)).unwrap();
 
         let status = guarded_client(&pub_pem, &guard).verify_signed(&signed);
@@ -1227,8 +1291,7 @@ mod tests {
     fn test_clock_guard_tolerates_a_small_step_back() {
         let (_, pub_pem, private) = make_keypair_pems();
         let guard = clock_guard_path("tolerance");
-        let seen = Utc::now() + Duration::hours(CLOCK_TOLERANCE_HOURS - 1);
-        std::fs::write(&guard, seen.to_rfc3339()).unwrap();
+        let seen = mark(&guard, Utc::now() + Duration::hours(CLOCK_TOLERANCE_HOURS - 1));
         let signed = sign_license(&private, &make_valid_payload(None)).unwrap();
 
         assert!(guarded_client(&pub_pem, &guard).verify_signed(&signed).is_valid());
@@ -1246,7 +1309,7 @@ mod tests {
         assert!(remembered(&fresh) >= before);
 
         let old = clock_guard_path("old");
-        std::fs::write(&old, (Utc::now() - Duration::days(1)).to_rfc3339()).unwrap();
+        mark(&old, Utc::now() - Duration::days(1));
         assert!(guarded_client(&pub_pem, &old).verify_signed(&signed).is_valid());
         assert!(remembered(&old) >= before);
     }
@@ -1255,7 +1318,7 @@ mod tests {
     fn test_clock_guard_applies_to_license_files_and_tokens() {
         let (_, pub_pem, private) = make_keypair_pems();
         let guard = clock_guard_path("file");
-        std::fs::write(&guard, (Utc::now() + Duration::days(30)).to_rfc3339()).unwrap();
+        mark(&guard, Utc::now() + Duration::days(30));
         let client = guarded_client(&pub_pem, &guard);
         let signed = sign_license(&private, &make_valid_payload(None)).unwrap();
 
@@ -1266,6 +1329,76 @@ mod tests {
 
         let status = client.verify_signed_with_activation_code(&signed, "usb:SERIAL");
         assert!(matches!(status, LicenseStatus::ClockRollback { .. }), "got {:?}", status);
+    }
+
+    #[test]
+    fn test_changed_clock_record_is_invalid() {
+        let (_, pub_pem, private) = make_keypair_pems();
+        let signed = sign_license(&private, &make_valid_payload(None)).unwrap();
+
+        let edited = clock_guard_path("edited");
+        std::fs::write(&edited, Utc::now().to_rfc3339()).unwrap();
+        let status = guarded_client(&pub_pem, &edited).verify_signed(&signed);
+        assert!(matches!(status, LicenseStatus::ClockRecordInvalid), "got {:?}", status);
+
+        let copied = clock_guard_path("copied");
+        std::fs::write(&copied, susi_core::clock::seal_time(Utc::now(), "OTHER-MACHINE")).unwrap();
+        let status = guarded_client(&pub_pem, &copied).verify_signed(&signed);
+        assert!(matches!(status, LicenseStatus::ClockRecordInvalid), "got {:?}", status);
+    }
+
+    #[cfg(windows)]
+    struct TestRegistryKey(String);
+
+    #[cfg(windows)]
+    impl TestRegistryKey {
+        fn new(name: &str) -> Self {
+            let key = Self(format!(r"Software\susi-test-{}-{}", std::process::id(), name));
+            let _ = windows_registry::CURRENT_USER.remove_tree(&key.0);
+            key
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for TestRegistryKey {
+        fn drop(&mut self) {
+            let _ = windows_registry::CURRENT_USER.remove_tree(&self.0);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_clock_registry_copy_survives_a_deleted_or_changed_file() {
+        let (_, pub_pem, private) = make_keypair_pems();
+        let signed = sign_license(&private, &make_valid_payload(None)).unwrap();
+        let guard = clock_guard_path("registry");
+        let key = TestRegistryKey::new("survives");
+        let client = guarded_client(&pub_pem, &guard).with_clock_registry(&key.0);
+
+        client.write_clock_guard(Utc::now() + Duration::days(30));
+        std::fs::remove_file(&guard).unwrap();
+        let status = client.verify_signed(&signed);
+        assert!(matches!(status, LicenseStatus::ClockRollback { .. }), "got {:?}", status);
+
+        std::fs::write(&guard, Utc::now().to_rfc3339()).unwrap();
+        let status = client.verify_signed(&signed);
+        assert!(matches!(status, LicenseStatus::ClockRollback { .. }), "got {:?}", status);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_clock_registry_copy_restores_a_deleted_file() {
+        let (_, pub_pem, private) = make_keypair_pems();
+        let signed = sign_license(&private, &make_valid_payload(None)).unwrap();
+        let guard = clock_guard_path("restore");
+        let key = TestRegistryKey::new("restore");
+        let client = guarded_client(&pub_pem, &guard).with_clock_registry(&key.0);
+        let seen = Utc::now() + Duration::hours(1);
+
+        client.write_clock_guard(seen);
+        std::fs::remove_file(&guard).unwrap();
+        assert!(client.verify_signed(&signed).is_valid());
+        assert_eq!(remembered(&guard).timestamp_micros(), seen.timestamp_micros());
     }
 
     fn server_license(private: &rsa::RsaPrivateKey) -> &'static str {
@@ -1289,7 +1422,7 @@ mod tests {
     async fn test_server_time_heals_a_mark_from_a_clock_that_ran_ahead() {
         let (_, pub_pem, private) = make_keypair_pems();
         let guard = clock_guard_path("heal");
-        std::fs::write(&guard, (Utc::now() + Duration::days(30)).to_rfc3339()).unwrap();
+        mark(&guard, Utc::now() + Duration::days(30));
         let license = server_license(&private);
         let url = spawn_canned_http_response_with_headers(200, license, date_header(Utc::now())).await;
         let cache = clock_guard_path("heal-cache.json");
@@ -1301,6 +1434,23 @@ mod tests {
 
         assert!(status.is_valid(), "got {:?}", status);
         assert!(remembered(&guard) < Utc::now() + Duration::hours(1));
+    }
+
+    #[tokio::test]
+    async fn test_server_time_heals_a_changed_clock_record() {
+        let (_, pub_pem, private) = make_keypair_pems();
+        let guard = clock_guard_path("heal-invalid");
+        std::fs::write(&guard, "edited").unwrap();
+        let license = server_license(&private);
+        let url = spawn_canned_http_response_with_headers(200, license, date_header(Utc::now())).await;
+        let cache = clock_guard_path("heal-invalid-cache.json");
+        std::fs::write(&cache, license).unwrap();
+
+        let status = server_client(&pub_pem, url, &guard)
+            .verify_and_refresh_async(&cache, "ANY-KEY", None)
+            .await;
+
+        assert!(status.is_valid(), "got {:?}", status);
     }
 
     /// A local clock far behind the license server is a clock set back, also
