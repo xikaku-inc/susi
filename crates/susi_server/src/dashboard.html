@@ -4426,7 +4426,7 @@ function renderMyLicenses() {
                 '<div><strong>' + esc(m.friendly_name || 'Unknown') + '</strong>' + machineStatusBadge(m) +
                 '<br><span class="machine-code">' + esc(m.machine_code) + '</span>' +
                 machineSeenLine(m) + '</div>' +
-                '<button class="danger" onclick="myDeactivateMachine(\'' + esc(lic.license_key) + '\',\'' + esc(m.machine_code) + '\')">Remove</button>' +
+                (m.offline ? '' : '<button class="danger" onclick="myDeactivateMachine(\'' + esc(lic.license_key) + '\',\'' + esc(m.machine_code) + '\')">Remove</button>') +
                 '</div>').join('')
             : '<div style="color:var(--text2);font-size:13px;padding:8px 0;">No machines activated</div>';
         return '<div class="card" style="margin-bottom:16px;">' +

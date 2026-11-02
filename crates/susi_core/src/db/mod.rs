@@ -353,6 +353,7 @@ impl LicenseDb {
                 activated_at TEXT NOT NULL,
                 last_seen_at TEXT NOT NULL DEFAULT '',
                 lease_expires_at TEXT NOT NULL DEFAULT '',
+                offline INTEGER NOT NULL DEFAULT 0,
                 FOREIGN KEY (license_id) REFERENCES licenses(id),
                 UNIQUE(license_id, machine_code)
             );
@@ -1106,6 +1107,18 @@ impl LicenseDb {
             "ALTER TABLE machine_activations ADD COLUMN last_seen_at TEXT NOT NULL DEFAULT '';",
         );
 
+        // Mark activations backed by an offline artifact (license file / USB
+        // token). Backfill once: only USB tokens are identifiable by code.
+        if self
+            .conn
+            .execute_batch("ALTER TABLE machine_activations ADD COLUMN offline INTEGER NOT NULL DEFAULT 0;")
+            .is_ok()
+        {
+            let _ = self.conn.execute_batch(
+                "UPDATE machine_activations SET offline = 1 WHERE machine_code LIKE 'usb:%';",
+            );
+        }
+
         // Distinguish doc-only collections ('docs') from software releases
         // ('software') so release listings can exclude them. Backfill runs
         // exactly once, when the column is first added: existing doc-only
@@ -1634,7 +1647,7 @@ impl LicenseDb {
             .collect::<Vec<_>>()
             .join(",");
         let sql = format!(
-            "SELECT license_id, machine_code, friendly_name, activated_at, last_seen_at, lease_expires_at
+            "SELECT license_id, machine_code, friendly_name, activated_at, last_seen_at, lease_expires_at, offline
              FROM machine_activations WHERE license_id IN ({})",
             placeholders,
         );
@@ -1655,11 +1668,12 @@ impl LicenseDb {
                     row.get::<_, String>(3)?,
                     row.get::<_, String>(4)?,
                     row.get::<_, String>(5)?,
+                    row.get::<_, bool>(6)?,
                 ))
             })
             .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?;
         for r in rows.flatten() {
-            let (license_id, machine_code, friendly_name, activated_str, seen_str, lease_str) = r;
+            let (license_id, machine_code, friendly_name, activated_str, seen_str, lease_str, offline) = r;
             let Some(activated_at) = DateTime::parse_from_rfc3339(&activated_str)
                 .ok()
                 .map(|d| d.with_timezone(&Utc))
@@ -1683,6 +1697,7 @@ impl LicenseDb {
                 activated_at,
                 last_seen_at,
                 lease_expires_at,
+                offline,
             });
         }
         Ok(out)
@@ -1695,7 +1710,7 @@ impl LicenseDb {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT machine_code, friendly_name, activated_at, last_seen_at, lease_expires_at
+                "SELECT machine_code, friendly_name, activated_at, last_seen_at, lease_expires_at, offline
              FROM machine_activations WHERE license_id = ?1",
             )
             .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
@@ -1708,11 +1723,12 @@ impl LicenseDb {
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, String>(4)?,
+                    row.get::<_, bool>(5)?,
                 ))
             })
             .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?
             .filter_map(|r| r.ok())
-            .filter_map(|(machine_code, friendly_name, activated_str, seen_str, lease_str)| {
+            .filter_map(|(machine_code, friendly_name, activated_str, seen_str, lease_str, offline)| {
                 let activated_at = DateTime::parse_from_rfc3339(&activated_str)
                     .ok()?
                     .with_timezone(&Utc);
@@ -1735,6 +1751,7 @@ impl LicenseDb {
                     activated_at,
                     last_seen_at,
                     lease_expires_at,
+                    offline,
                 })
             })
             .collect();
@@ -1770,6 +1787,16 @@ impl LicenseDb {
                 ],
             )
             .map_err(|e| LicenseError::Other(format!("DB insert: {}", e)))?;
+        Ok(())
+    }
+
+    pub fn mark_machine_offline(&self, license_id: &str, machine_code: &str) -> Result<(), LicenseError> {
+        self.conn
+            .execute(
+                "UPDATE machine_activations SET offline = 1 WHERE license_id = ?1 AND machine_code = ?2",
+                params![license_id, machine_code],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))?;
         Ok(())
     }
 
@@ -2432,6 +2459,49 @@ mod tests {
             .unwrap();
         assert_eq!(retrieved.machines.len(), 1);
         assert_eq!(retrieved.machines[0].machine_code, "machine2");
+    }
+
+    #[test]
+    fn test_offline_flag_survives_online_renewal() {
+        let db = test_db();
+        let license = License::new("FusionHub".into(), "Test".into(), None, vec![], 2);
+        db.insert_license(&license).unwrap();
+        db.add_machine_activation(&license.id, "m1", "File", None).unwrap();
+        db.mark_machine_offline(&license.id, "m1").unwrap();
+        db.add_machine_activation(&license.id, "m1", "File", lease_expires(168)).unwrap();
+        db.add_machine_activation(&license.id, "m2", "Online", lease_expires(168)).unwrap();
+        let lic = db.get_license_by_key(&license.license_key).unwrap().unwrap();
+        let offline = |c: &str| lic.machines.iter().find(|m| m.machine_code == c).unwrap().offline;
+        assert!(offline("m1"));
+        assert!(!offline("m2"));
+    }
+
+    /// Only USB tokens are backfilled; pre-existing file exports are not
+    /// identifiable and stay user-removable.
+    #[test]
+    fn test_offline_column_migration_flags_usb_tokens() {
+        let path = std::env::temp_dir()
+            .join(format!("susi_offline_mig_{}.db", std::process::id()));
+        let p = path.to_str().unwrap().to_string();
+        let _ = std::fs::remove_file(&path);
+        let license = License::new("FusionHub".into(), "Test".into(), None, vec![], 0);
+        {
+            let db = LicenseDb::open(&p).unwrap();
+            db.insert_license(&license).unwrap();
+            db.conn
+                .execute_batch("ALTER TABLE machine_activations DROP COLUMN offline;")
+                .unwrap();
+            db.add_machine_activation(&license.id, "usb:ABC123", "Token", None).unwrap();
+            db.add_machine_activation(&license.id, "file-machine", "File", None).unwrap();
+        }
+        let db = LicenseDb::open(&p).unwrap();
+        let lic = db.get_license_by_key(&license.license_key).unwrap().unwrap();
+        let offline = |c: &str| lic.machines.iter().find(|m| m.machine_code == c).unwrap().offline;
+        assert!(offline("usb:ABC123"));
+        assert!(!offline("file-machine"));
+
+        drop(db);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
