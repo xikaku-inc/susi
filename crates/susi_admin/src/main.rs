@@ -432,6 +432,7 @@ fn cmd_export(
         friendly_name.to_string()
     };
     db.add_machine_activation(&license.id, &machine_code, &name, None)?;
+    db.mark_machine_offline(&license.id, &machine_code)?;
 
     // Re-fetch license with the new activation
     let license = db.get_license_by_key(key)?.unwrap();
@@ -613,6 +614,7 @@ fn cmd_export_token(
         friendly_name.to_string()
     };
     db.add_machine_activation(&license.id, &activation_code, &name, None)?;
+    db.mark_machine_offline(&license.id, &activation_code)?;
     
     let payload = susi_core::LicensePayload {
         id: license.id.clone(),
