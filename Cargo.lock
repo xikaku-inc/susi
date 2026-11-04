@@ -3739,6 +3739,7 @@ dependencies = [
  "susi_core",
  "thiserror",
  "tokio",
+ "windows-registry",
 ]
 
 [[package]]

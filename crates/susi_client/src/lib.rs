@@ -3,7 +3,8 @@ pub mod workspace;
 
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Utc};
+use base64::{engine::general_purpose::STANDARD as B64, Engine};
+use chrono::{DateTime, Duration, Utc};
 use rsa::RsaPublicKey;
 use susi_core::{
     crypto::{public_key_from_pem, verify_license},
@@ -20,6 +21,10 @@ pub(crate) fn blocking_run<F: std::future::Future>(fut: F) -> F::Output {
         .expect("Failed to build tokio runtime for blocking susi_client call")
         .block_on(fut)
 }
+
+/// How far the clock may lag behind the latest time already seen (NTP steps,
+/// a wrong time zone setting) before it counts as set back.
+pub const CLOCK_TOLERANCE_HOURS: i64 = 24;
 
 /// Result of a license verification.
 #[derive(Debug)]
@@ -56,6 +61,13 @@ pub enum LicenseStatus {
     /// No cached license on disk - the install has never been activated on
     /// this machine, or was explicitly deactivated. User must click Activate.
     NotActivated,
+    /// The system clock is earlier than a time this machine already saw: the
+    /// license creation, an earlier check or the license server's time.
+    ClockRollback {
+        last_seen: DateTime<Utc>,
+    },
+    /// Every remembered time was changed or written on another machine.
+    ClockRecordInvalid,
     TokenNotFound,
     FileNotFound(String),
     Error(String),
@@ -117,6 +129,12 @@ impl LicenseStatus {
     }
 }
 
+/// The server's clock from the response `Date` header.
+fn server_time(response: &reqwest::Response) -> Option<DateTime<Utc>> {
+    let date = response.headers().get(reqwest::header::DATE)?.to_str().ok()?;
+    DateTime::parse_from_rfc2822(date).ok().map(|t| t.with_timezone(&Utc))
+}
+
 /// Client for verifying licenses. Embedded in the FusionHub application.
 pub struct LicenseClient {
     public_key: RsaPublicKey,
@@ -129,7 +147,58 @@ pub struct LicenseClient {
     /// entirely. For hosts that own machine-code resolution (env overrides,
     /// container-synthesised ids).
     machine_code_override: Option<String>,
+    /// Optional file remembering the latest time seen, so a clock set back
+    /// cannot revive an expired license.
+    clock_guard: Option<PathBuf>,
+    /// Optional `HKEY_CURRENT_USER` subkey keeping a second copy of the
+    /// latest time seen (Windows only).
+    clock_registry: Option<String>,
 }
+
+const CLOCK_REGISTRY_VALUE: &str = "LicenseClock";
+
+/// Field in a license file holding the latest time seen, encrypted with the
+/// license signature so it moves with the file.
+const LICENSE_CLOCK_FIELD: &str = "last_checked";
+
+/// File beside a USB token's license holding the latest time seen.
+const TOKEN_CLOCK_FILE: &str = "clock.bin";
+
+/// How often a check writes the latest time seen to a USB token.
+pub const TOKEN_CLOCK_INTERVAL_HOURS: i64 = 6;
+
+/// A remembered time carried with the license: encrypted blob and its key.
+type Carried<'a> = Option<(&'a [u8], &'a str)>;
+
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, path)
+}
+
+fn token_clock_path(usb_mount: &Path) -> PathBuf {
+    susi_core::token::token_file_path(usb_mount).with_file_name(TOKEN_CLOCK_FILE)
+}
+
+#[cfg(windows)]
+fn read_clock_registry(subkey: &str) -> Option<Vec<u8>> {
+    windows_registry::CURRENT_USER.open(subkey).ok()?.get_value(CLOCK_REGISTRY_VALUE).ok().map(|v| v.to_vec())
+}
+
+#[cfg(windows)]
+fn write_clock_registry(subkey: &str, blob: &[u8]) {
+    if let Ok(key) = windows_registry::CURRENT_USER.create(subkey) {
+        let _ = key.set_bytes(CLOCK_REGISTRY_VALUE, windows_registry::Type::Bytes, blob);
+    }
+}
+
+#[cfg(not(windows))]
+fn read_clock_registry(_: &str) -> Option<Vec<u8>> {
+    None
+}
+
+#[cfg(not(windows))]
+fn write_clock_registry(_: &str, _: &[u8]) {}
 
 impl LicenseClient {
     /// Create a new client from a PEM-encoded public key string.
@@ -140,6 +209,8 @@ impl LicenseClient {
             server_url: None,
             machine_code_cache: None,
             machine_code_override: None,
+            clock_guard: None,
+            clock_registry: None,
         })
     }
 
@@ -169,6 +240,81 @@ impl LicenseClient {
         self
     }
 
+    /// Remember the latest time seen in `path` and reject a clock set back
+    /// before it by more than [`CLOCK_TOLERANCE_HOURS`].
+    pub fn with_clock_guard<P: Into<PathBuf>>(mut self, path: P) -> Self {
+        self.clock_guard = Some(path.into());
+        self
+    }
+
+    /// Also keep the latest time seen in the registry under `subkey`, so
+    /// deleting the guard file does not reset it. No effect off Windows.
+    pub fn with_clock_registry<S: Into<String>>(mut self, subkey: S) -> Self {
+        self.clock_registry = Some(subkey.into());
+        self
+    }
+
+    /// The latest remembered time, counting `carried`, a copy that travels
+    /// with the license (blob, key). `Err` if every stored copy was changed
+    /// or written for another machine or license.
+    fn read_clock_guard(&self, carried: Carried) -> Result<Option<DateTime<Utc>>, ()> {
+        let mut marks = Vec::new();
+        if let Ok(code) = self.current_machine_code() {
+            let blobs = self
+                .clock_guard
+                .as_ref()
+                .and_then(|p| std::fs::read(p).ok())
+                .into_iter()
+                .chain(self.clock_registry.as_deref().and_then(read_clock_registry));
+            marks.extend(blobs.map(|b| susi_core::clock::open_time(&b, &code)));
+        }
+        if let Some((blob, key)) = carried {
+            marks.push(susi_core::clock::open_time(blob, key));
+        }
+        let latest = marks.iter().flatten().max().copied();
+        if latest.is_none() && !marks.is_empty() {
+            Err(())
+        } else {
+            Ok(latest)
+        }
+    }
+
+    fn write_clock_guard(&self, time: DateTime<Utc>) {
+        let Ok(code) = self.current_machine_code() else {
+            return;
+        };
+        let blob = susi_core::clock::seal_time(time, &code);
+        if let Some(path) = &self.clock_guard {
+            let _ = std::fs::write(path, &blob);
+        }
+        if let Some(subkey) = &self.clock_registry {
+            write_clock_registry(subkey, &blob);
+        }
+    }
+
+    /// The license server's clock is trusted: it replaces the remembered
+    /// time, which also heals a mark left by a clock that once ran ahead.
+    fn trust_server_time(&self, server_time: Option<DateTime<Utc>>) {
+        if let Some(t) = server_time {
+            self.write_clock_guard(t);
+        }
+    }
+
+    /// Returns the latest time seen, now remembered on this machine.
+    fn check_clock(&self, payload: &LicensePayload, carried: Carried) -> Result<DateTime<Utc>, LicenseStatus> {
+        let now = Utc::now();
+        let remembered = self
+            .read_clock_guard(carried)
+            .map_err(|_| LicenseStatus::ClockRecordInvalid)?;
+        let last_seen = remembered.map_or(payload.created, |t| t.max(payload.created));
+        if now + Duration::hours(CLOCK_TOLERANCE_HOURS) < last_seen {
+            return Err(LicenseStatus::ClockRollback { last_seen });
+        }
+        let seen = remembered.map_or(now, |t| t.max(now));
+        self.write_clock_guard(seen);
+        Ok(seen)
+    }
+
     fn current_machine_code(&self) -> Result<String, LicenseError> {
         if let Some(code) = &self.machine_code_override {
             return Ok(code.clone());
@@ -191,41 +337,34 @@ impl LicenseClient {
             Err(e) => return LicenseStatus::FileNotFound(format!("{}: {}", path.display(), e)),
         };
 
-        let signed: SignedLicense = match serde_json::from_str(&content) {
+        let mut doc: serde_json::Value = match serde_json::from_str(&content) {
+            Ok(d) => d,
+            Err(e) => return LicenseStatus::Error(format!("Invalid license file format: {}", e)),
+        };
+        let signed: SignedLicense = match serde_json::from_value(doc.clone()) {
             Ok(s) => s,
             Err(e) => return LicenseStatus::Error(format!("Invalid license file format: {}", e)),
         };
 
-        self.verify_signed(&signed)
+        let carried = doc
+            .get(LICENSE_CLOCK_FIELD)
+            .map(|v| v.as_str().and_then(|s| B64.decode(s).ok()).unwrap_or_default());
+        let (status, seen) =
+            self.verify_carried(&signed, None, carried.as_deref().map(|b| (b, signed.signature.as_str())));
+        if let Some(t) = seen {
+            let blob = susi_core::clock::seal_time(t, &signed.signature);
+            doc[LICENSE_CLOCK_FIELD] = B64.encode(blob).into();
+            if let Ok(json) = serde_json::to_string_pretty(&doc) {
+                let _ = write_atomic(path, json.as_bytes());
+            }
+        }
+        status
     }
 
     /// Verify a SignedLicense object (e.g. received from server or loaded from disk).
     /// Use local machine code for machine check.
     pub fn verify_signed(&self, signed: &SignedLicense) -> LicenseStatus {
-        let payload = match verify_license(&self.public_key, signed) {
-            Ok(p) => p,
-            Err(LicenseError::InvalidSignature) => return LicenseStatus::InvalidSignature,
-            Err(e) => return LicenseStatus::Error(format!("Verification error: {}", e)),
-        };
-
-        // Only resolve the hardware fingerprint when the license actually pins
-        // to specific machines. A transient WMI / disk-serial failure must not
-        // invalidate a generic, unrestricted license.
-        let activation_code = if payload.machine_codes.is_empty() {
-            String::new()
-        } else {
-            match self.current_machine_code() {
-                Ok(c) => c,
-                Err(e) => {
-                    return LicenseStatus::Error(format!(
-                        "Could not compute machine fingerprint: {}",
-                        e
-                    ));
-                }
-            }
-        };
-
-        self.evaluate_payload(payload, &activation_code)
+        self.verify_carried(signed, None, None).0
     }
 
     /// Verify a SignedLicense object (e.g. received from server or loaded from disk).
@@ -235,12 +374,43 @@ impl LicenseClient {
         signed: &SignedLicense,
         activation_code: &str,
     ) -> LicenseStatus {
+        self.verify_carried(signed, Some(activation_code), None).0
+    }
+
+    /// Verify `signed`, also counting a remembered time carried with it. Returns
+    /// the latest time seen if the clock check passed.
+    fn verify_carried(
+        &self,
+        signed: &SignedLicense,
+        activation_code: Option<&str>,
+        carried: Carried,
+    ) -> (LicenseStatus, Option<DateTime<Utc>>) {
         let payload = match verify_license(&self.public_key, signed) {
             Ok(p) => p,
-            Err(LicenseError::InvalidSignature) => return LicenseStatus::InvalidSignature,
-            Err(e) => return LicenseStatus::Error(format!("Verification error: {}", e)),
+            Err(LicenseError::InvalidSignature) => return (LicenseStatus::InvalidSignature, None),
+            Err(e) => return (LicenseStatus::Error(format!("Verification error: {}", e)), None),
         };
-        self.evaluate_payload(payload, activation_code)
+        let seen = match self.check_clock(&payload, carried) {
+            Ok(t) => t,
+            Err(status) => return (status, None),
+        };
+
+        // Only resolve the hardware fingerprint when the license actually pins
+        // to specific machines. A transient WMI / disk-serial failure must not
+        // invalidate a generic, unrestricted license.
+        let activation_code = match activation_code {
+            Some(c) => c.to_string(),
+            None if payload.machine_codes.is_empty() => String::new(),
+            None => match self.current_machine_code() {
+                Ok(c) => c,
+                Err(e) => {
+                    let msg = format!("Could not compute machine fingerprint: {}", e);
+                    return (LicenseStatus::Error(msg), Some(seen));
+                }
+            },
+        };
+
+        (self.evaluate_payload(payload, &activation_code), Some(seen))
     }
 
     fn evaluate_payload(&self, payload: LicensePayload, activation_code: &str) -> LicenseStatus {
@@ -321,7 +491,8 @@ impl LicenseClient {
 
         if let Some(ref server_url) = self.server_url {
             match self.try_online_verify_async(server_url, license_key).await {
-                Ok(signed) => {
+                Ok((signed, server_time)) => {
+                    self.trust_server_time(server_time);
                     if let Ok(json) = serde_json::to_string_pretty(&signed) {
                         let _ = tokio::fs::write(path, json).await;
                     }
@@ -385,7 +556,8 @@ impl LicenseClient {
             .try_online_activate_async(&server_url, license_key, friendly_name)
             .await
         {
-            Ok(signed) => {
+            Ok((signed, server_time)) => {
+                self.trust_server_time(server_time);
                 if let Ok(json) = serde_json::to_string_pretty(&signed) {
                     let _ = tokio::fs::write(path, json).await;
                 }
@@ -406,7 +578,7 @@ impl LicenseClient {
         &self,
         server_url: &str,
         license_key: &str,
-    ) -> Result<SignedLicense, LicenseError> {
+    ) -> Result<(SignedLicense, Option<DateTime<Utc>>), LicenseError> {
         let machine_code = self
             .current_machine_code()
             .map_err(|e| LicenseError::Other(format!("Fingerprint error: {}", e)))?;
@@ -436,9 +608,11 @@ impl LicenseClient {
 
         let status = response.status().as_u16();
         if (200..300).contains(&status) {
+            let server_time = server_time(&response);
             return response
                 .json::<SignedLicense>()
                 .await
+                .map(|signed| (signed, server_time))
                 .map_err(|e| LicenseError::Other(format!("Invalid server response: {}", e)));
         }
 
@@ -470,7 +644,7 @@ impl LicenseClient {
         server_url: &str,
         license_key: &str,
         friendly_name: Option<&str>,
-    ) -> Result<SignedLicense, LicenseError> {
+    ) -> Result<(SignedLicense, Option<DateTime<Utc>>), LicenseError> {
         let machine_code = self
             .current_machine_code()
             .map_err(|e| LicenseError::Other(format!("Fingerprint error: {}", e)))?;
@@ -510,9 +684,11 @@ impl LicenseClient {
 
         let status = response.status().as_u16();
         if (200..300).contains(&status) {
+            let server_time = server_time(&response);
             return response
                 .json::<SignedLicense>()
                 .await
+                .map(|signed| (signed, server_time))
                 .map_err(|e| LicenseError::Other(format!("Invalid server response: {}", e)));
         }
 
@@ -564,10 +740,8 @@ impl LicenseClient {
                 continue;
             }
 
-            match susi_core::token::read_token(&device.mount_path, &device.serial) {
-                Ok(signed) => {
-                    let activation_code = format!("usb:{}", device.serial);
-                    let status = self.verify_signed_with_activation_code(&signed, &activation_code);
+            match self.verify_token_device(&device.mount_path, &device.serial, false) {
+                Ok(status) => {
                     if status.is_valid() {
                         return status;
                     }
@@ -596,6 +770,45 @@ impl LicenseClient {
                 last_error
             ))
         }
+    }
+
+    /// Write the latest time seen to every connected USB token. Call on
+    /// shutdown; checks only write it every [`TOKEN_CLOCK_INTERVAL_HOURS`].
+    pub fn record_token_clock(&self) {
+        for device in susi_core::usb::enumerate_usb_devices().unwrap_or_default() {
+            if susi_core::token::token_file_path(&device.mount_path).exists() {
+                let _ = self.verify_token_device(&device.mount_path, &device.serial, true);
+            }
+        }
+    }
+
+    /// Verify the token on one device, counting the time remembered on it,
+    /// and write the latest time seen back when it advanced by the interval
+    /// (or at all, with `force`).
+    fn verify_token_device(
+        &self,
+        mount: &Path,
+        serial: &str,
+        force: bool,
+    ) -> Result<LicenseStatus, LicenseError> {
+        let signed = susi_core::token::read_token(mount, serial)?;
+        let clock_path = token_clock_path(mount);
+        let carried = std::fs::read(&clock_path).ok();
+        let key = signed.signature.as_str();
+        let activation_code = format!("usb:{}", serial);
+        let (status, seen) = self.verify_carried(
+            &signed,
+            Some(&activation_code),
+            carried.as_deref().map(|b| (b, key)),
+        );
+        if let Some(t) = seen {
+            let stored = carried.as_deref().and_then(|b| susi_core::clock::open_time(b, key));
+            let interval = if force { Duration::zero() } else { Duration::hours(TOKEN_CLOCK_INTERVAL_HOURS) };
+            if stored.map_or(true, |s| t - s > interval) {
+                let _ = write_atomic(&clock_path, &susi_core::clock::seal_time(t, key));
+            }
+        }
+        Ok(status)
     }
 
     /// Get the machine code for the current machine.
@@ -915,6 +1128,14 @@ mod tests {
     /// Serve a single canned HTTP response on a free port and return the base URL.
     /// Minimal - just enough to exercise the /activate response parsing.
     async fn spawn_canned_http_response(status: u16, body: &'static str) -> String {
+        spawn_canned_http_response_with_headers(status, body, String::new()).await
+    }
+
+    async fn spawn_canned_http_response_with_headers(
+        status: u16,
+        body: &'static str,
+        headers: String,
+    ) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
 
@@ -931,8 +1152,8 @@ mod tests {
                     _ => "OK",
                 };
                 let resp = format!(
-                    "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    status, reason, body.len(), body
+                    "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{}Connection: close\r\n\r\n{}",
+                    status, reason, body.len(), headers, body
                 );
                 let _ = sock.write_all(resp.as_bytes()).await;
                 let _ = sock.shutdown().await;
@@ -1096,6 +1317,349 @@ mod tests {
         assert!(tmp.exists(), "cached license must survive a generic 403");
 
         let _ = tokio::fs::remove_file(&tmp).await;
+    }
+
+    fn clock_guard_path(name: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("susi-clock-{}-{}", std::process::id(), name));
+        let _ = std::fs::remove_file(&path);
+        path
+    }
+
+    fn guarded_client(pub_pem: &str, guard: &std::path::Path) -> LicenseClient {
+        new_test_client(pub_pem).with_clock_guard(guard)
+    }
+
+    fn remembered(guard: &std::path::Path) -> DateTime<Utc> {
+        susi_core::clock::open_time(&std::fs::read(guard).unwrap(), TEST_MACHINE_CODE).unwrap()
+    }
+
+    /// Store `time` as this machine's remembered time and return it as stored.
+    fn mark(guard: &std::path::Path, time: DateTime<Utc>) -> DateTime<Utc> {
+        std::fs::write(guard, susi_core::clock::seal_time(time, TEST_MACHINE_CODE)).unwrap();
+        remembered(guard)
+    }
+
+    #[test]
+    fn test_clock_before_license_creation_is_rollback() {
+        let (_, pub_pem, private) = make_keypair_pems();
+        let client = new_test_client(&pub_pem);
+        let mut payload = make_valid_payload(None);
+        payload.created = Utc::now() + Duration::days(3);
+        let status = client.verify_signed(&sign_license(&private, &payload).unwrap());
+        assert!(matches!(status, LicenseStatus::ClockRollback { .. }), "got {:?}", status);
+
+        payload.created = Utc::now() + Duration::hours(1);
+        assert!(client.verify_signed(&sign_license(&private, &payload).unwrap()).is_valid());
+    }
+
+    #[test]
+    fn test_clock_guard_rejects_a_clock_set_back() {
+        let (_, pub_pem, private) = make_keypair_pems();
+        let guard = clock_guard_path("set-back");
+        let seen = mark(&guard, Utc::now() + Duration::days(30));
+        let signed = sign_license(&private, &make_valid_payload(None)).unwrap();
+
+        let status = guarded_client(&pub_pem, &guard).verify_signed(&signed);
+
+        assert!(
+            matches!(status, LicenseStatus::ClockRollback { last_seen } if last_seen == seen),
+            "got {:?}",
+            status
+        );
+        assert_eq!(remembered(&guard), seen, "a rejected check must not lower the mark");
+    }
+
+    #[test]
+    fn test_clock_guard_tolerates_a_small_step_back() {
+        let (_, pub_pem, private) = make_keypair_pems();
+        let guard = clock_guard_path("tolerance");
+        let seen = mark(&guard, Utc::now() + Duration::hours(CLOCK_TOLERANCE_HOURS - 1));
+        let signed = sign_license(&private, &make_valid_payload(None)).unwrap();
+
+        assert!(guarded_client(&pub_pem, &guard).verify_signed(&signed).is_valid());
+        assert_eq!(remembered(&guard), seen);
+    }
+
+    #[test]
+    fn test_clock_guard_remembers_the_latest_time() {
+        let (_, pub_pem, private) = make_keypair_pems();
+        let signed = sign_license(&private, &make_valid_payload(None)).unwrap();
+        let before = Utc::now();
+
+        let fresh = clock_guard_path("fresh");
+        assert!(guarded_client(&pub_pem, &fresh).verify_signed(&signed).is_valid());
+        assert!(remembered(&fresh) >= before);
+
+        let old = clock_guard_path("old");
+        mark(&old, Utc::now() - Duration::days(1));
+        assert!(guarded_client(&pub_pem, &old).verify_signed(&signed).is_valid());
+        assert!(remembered(&old) >= before);
+    }
+
+    #[test]
+    fn test_clock_guard_applies_to_license_files_and_tokens() {
+        let (_, pub_pem, private) = make_keypair_pems();
+        let guard = clock_guard_path("file");
+        mark(&guard, Utc::now() + Duration::days(30));
+        let client = guarded_client(&pub_pem, &guard);
+        let signed = sign_license(&private, &make_valid_payload(None)).unwrap();
+
+        let file = clock_guard_path("license.json");
+        std::fs::write(&file, serde_json::to_string(&signed).unwrap()).unwrap();
+        let status = client.verify_file(&file);
+        assert!(matches!(status, LicenseStatus::ClockRollback { .. }), "got {:?}", status);
+
+        let status = client.verify_signed_with_activation_code(&signed, "usb:SERIAL");
+        assert!(matches!(status, LicenseStatus::ClockRollback { .. }), "got {:?}", status);
+    }
+
+    #[test]
+    fn test_changed_clock_record_is_invalid() {
+        let (_, pub_pem, private) = make_keypair_pems();
+        let signed = sign_license(&private, &make_valid_payload(None)).unwrap();
+
+        let edited = clock_guard_path("edited");
+        std::fs::write(&edited, Utc::now().to_rfc3339()).unwrap();
+        let status = guarded_client(&pub_pem, &edited).verify_signed(&signed);
+        assert!(matches!(status, LicenseStatus::ClockRecordInvalid), "got {:?}", status);
+
+        let copied = clock_guard_path("copied");
+        std::fs::write(&copied, susi_core::clock::seal_time(Utc::now(), "OTHER-MACHINE")).unwrap();
+        let status = guarded_client(&pub_pem, &copied).verify_signed(&signed);
+        assert!(matches!(status, LicenseStatus::ClockRecordInvalid), "got {:?}", status);
+    }
+
+    #[cfg(windows)]
+    struct TestRegistryKey(String);
+
+    #[cfg(windows)]
+    impl TestRegistryKey {
+        fn new(name: &str) -> Self {
+            let key = Self(format!(r"Software\susi-test-{}-{}", std::process::id(), name));
+            let _ = windows_registry::CURRENT_USER.remove_tree(&key.0);
+            key
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for TestRegistryKey {
+        fn drop(&mut self) {
+            let _ = windows_registry::CURRENT_USER.remove_tree(&self.0);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_clock_registry_copy_survives_a_deleted_or_changed_file() {
+        let (_, pub_pem, private) = make_keypair_pems();
+        let signed = sign_license(&private, &make_valid_payload(None)).unwrap();
+        let guard = clock_guard_path("registry");
+        let key = TestRegistryKey::new("survives");
+        let client = guarded_client(&pub_pem, &guard).with_clock_registry(&key.0);
+
+        client.write_clock_guard(Utc::now() + Duration::days(30));
+        std::fs::remove_file(&guard).unwrap();
+        let status = client.verify_signed(&signed);
+        assert!(matches!(status, LicenseStatus::ClockRollback { .. }), "got {:?}", status);
+
+        std::fs::write(&guard, Utc::now().to_rfc3339()).unwrap();
+        let status = client.verify_signed(&signed);
+        assert!(matches!(status, LicenseStatus::ClockRollback { .. }), "got {:?}", status);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_clock_registry_copy_restores_a_deleted_file() {
+        let (_, pub_pem, private) = make_keypair_pems();
+        let signed = sign_license(&private, &make_valid_payload(None)).unwrap();
+        let guard = clock_guard_path("restore");
+        let key = TestRegistryKey::new("restore");
+        let client = guarded_client(&pub_pem, &guard).with_clock_registry(&key.0);
+        let seen = Utc::now() + Duration::hours(1);
+
+        client.write_clock_guard(seen);
+        std::fs::remove_file(&guard).unwrap();
+        assert!(client.verify_signed(&signed).is_valid());
+        assert_eq!(remembered(&guard).timestamp_micros(), seen.timestamp_micros());
+    }
+
+    fn license_file_time(file: &std::path::Path) -> Option<DateTime<Utc>> {
+        let doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(file).unwrap()).unwrap();
+        let blob = B64.decode(doc[LICENSE_CLOCK_FIELD].as_str()?).unwrap();
+        susi_core::clock::open_time(&blob, doc["signature"].as_str().unwrap())
+    }
+
+    fn set_license_file_time(file: &std::path::Path, value: serde_json::Value) {
+        let mut doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(file).unwrap()).unwrap();
+        doc[LICENSE_CLOCK_FIELD] = value;
+        std::fs::write(file, doc.to_string()).unwrap();
+    }
+
+    #[test]
+    fn test_license_file_carries_the_latest_time() {
+        let (_, pub_pem, private) = make_keypair_pems();
+        let signed = sign_license(&private, &make_valid_payload(None)).unwrap();
+        let file = clock_guard_path("carried.json");
+        std::fs::write(&file, serde_json::to_string(&signed).unwrap()).unwrap();
+        let client = new_test_client(&pub_pem);
+        let before = Utc::now();
+
+        assert!(client.verify_file(&file).is_valid());
+        assert!(license_file_time(&file).unwrap() >= before);
+        assert!(client.verify_file(&file).is_valid(), "the added field must keep the signature valid");
+
+        let ahead = B64.encode(susi_core::clock::seal_time(Utc::now() + Duration::days(30), &signed.signature));
+        set_license_file_time(&file, ahead.into());
+        let status = client.verify_file(&file);
+        assert!(matches!(status, LicenseStatus::ClockRollback { .. }), "got {:?}", status);
+    }
+
+    #[test]
+    fn test_changed_license_file_time_is_invalid() {
+        let (_, pub_pem, private) = make_keypair_pems();
+        let signed = sign_license(&private, &make_valid_payload(None)).unwrap();
+        let file = clock_guard_path("carried-changed.json");
+        std::fs::write(&file, serde_json::to_string(&signed).unwrap()).unwrap();
+        let other = B64.encode(susi_core::clock::seal_time(Utc::now(), "another license"));
+
+        for value in [serde_json::json!("edited"), serde_json::json!(other)] {
+            set_license_file_time(&file, value);
+            let status = new_test_client(&pub_pem).verify_file(&file);
+            assert!(matches!(status, LicenseStatus::ClockRecordInvalid), "got {:?}", status);
+        }
+
+        let guard = clock_guard_path("carried-changed-guard");
+        mark(&guard, Utc::now());
+        assert!(guarded_client(&pub_pem, &guard).verify_file(&file).is_valid());
+        assert!(license_file_time(&file).is_some(), "a valid check rewrites the field");
+    }
+
+    fn usb_token(name: &str, private: &rsa::RsaPrivateKey) -> (std::path::PathBuf, SignedLicense) {
+        let mount = std::env::temp_dir().join(format!("susi-usb-{}-{}", std::process::id(), name));
+        let _ = std::fs::remove_dir_all(&mount);
+        let signed = sign_license(private, &make_valid_payload(Some("usb:SERIAL".into()))).unwrap();
+        susi_core::token::write_token(&mount, &signed, "SERIAL").unwrap();
+        (mount, signed)
+    }
+
+    fn token_time(mount: &std::path::Path, signed: &SignedLicense) -> Option<DateTime<Utc>> {
+        susi_core::clock::open_time(&std::fs::read(token_clock_path(mount)).ok()?, &signed.signature)
+    }
+
+    #[test]
+    fn test_usb_token_carries_the_latest_time() {
+        let (_, pub_pem, private) = make_keypair_pems();
+        let (mount, signed) = usb_token("carries", &private);
+        let client = new_test_client(&pub_pem);
+        let before = Utc::now();
+
+        assert!(client.verify_token_device(&mount, "SERIAL", false).unwrap().is_valid());
+        assert!(token_time(&mount, &signed).unwrap() >= before);
+
+        let ahead = susi_core::clock::seal_time(Utc::now() + Duration::days(30), &signed.signature);
+        std::fs::write(token_clock_path(&mount), ahead).unwrap();
+        let status = client.verify_token_device(&mount, "SERIAL", false).unwrap();
+        assert!(matches!(status, LicenseStatus::ClockRollback { .. }), "got {:?}", status);
+
+        std::fs::write(token_clock_path(&mount), "edited").unwrap();
+        let status = client.verify_token_device(&mount, "SERIAL", false).unwrap();
+        assert!(matches!(status, LicenseStatus::ClockRecordInvalid), "got {:?}", status);
+        let _ = std::fs::remove_dir_all(&mount);
+    }
+
+    #[test]
+    fn test_usb_token_time_is_written_every_interval_or_when_forced() {
+        let (_, pub_pem, private) = make_keypair_pems();
+        let (mount, signed) = usb_token("interval", &private);
+        let client = new_test_client(&pub_pem);
+        let write = |t: DateTime<Utc>| {
+            std::fs::write(token_clock_path(&mount), susi_core::clock::seal_time(t, &signed.signature)).unwrap();
+            token_time(&mount, &signed).unwrap()
+        };
+
+        let recent = write(Utc::now() - Duration::hours(TOKEN_CLOCK_INTERVAL_HOURS - 1));
+        assert!(client.verify_token_device(&mount, "SERIAL", false).unwrap().is_valid());
+        assert_eq!(token_time(&mount, &signed), Some(recent), "no write within the interval");
+
+        assert!(client.verify_token_device(&mount, "SERIAL", true).unwrap().is_valid());
+        assert!(token_time(&mount, &signed).unwrap() > recent, "a forced write records now");
+
+        let old = write(Utc::now() - Duration::hours(TOKEN_CLOCK_INTERVAL_HOURS + 1));
+        assert!(client.verify_token_device(&mount, "SERIAL", false).unwrap().is_valid());
+        assert!(token_time(&mount, &signed).unwrap() > old, "a write after the interval");
+        let _ = std::fs::remove_dir_all(&mount);
+    }
+
+    fn server_license(private: &rsa::RsaPrivateKey) -> &'static str {
+        let mut payload = make_valid_payload(None);
+        payload.lease_expires = Some(Utc::now() + Duration::hours(72));
+        let body = serde_json::to_string(&sign_license(private, &payload).unwrap()).unwrap();
+        Box::leak(body.into_boxed_str())
+    }
+
+    fn date_header(time: DateTime<Utc>) -> String {
+        format!("Date: {}\r\n", time.format("%a, %d %b %Y %H:%M:%S GMT"))
+    }
+
+    fn server_client(pub_pem: &str, url: String, guard: &std::path::Path) -> LicenseClient {
+        new_test_client_with_server(pub_pem, url).with_clock_guard(guard)
+    }
+
+    /// The server's clock replaces the remembered time: it heals a mark left
+    /// by a local clock that once ran ahead.
+    #[tokio::test]
+    async fn test_server_time_heals_a_mark_from_a_clock_that_ran_ahead() {
+        let (_, pub_pem, private) = make_keypair_pems();
+        let guard = clock_guard_path("heal");
+        mark(&guard, Utc::now() + Duration::days(30));
+        let license = server_license(&private);
+        let url = spawn_canned_http_response_with_headers(200, license, date_header(Utc::now())).await;
+        let cache = clock_guard_path("heal-cache.json");
+        std::fs::write(&cache, license).unwrap();
+
+        let status = server_client(&pub_pem, url, &guard)
+            .verify_and_refresh_async(&cache, "ANY-KEY", None)
+            .await;
+
+        assert!(status.is_valid(), "got {:?}", status);
+        assert!(remembered(&guard) < Utc::now() + Duration::hours(1));
+    }
+
+    #[tokio::test]
+    async fn test_server_time_heals_a_changed_clock_record() {
+        let (_, pub_pem, private) = make_keypair_pems();
+        let guard = clock_guard_path("heal-invalid");
+        std::fs::write(&guard, "edited").unwrap();
+        let license = server_license(&private);
+        let url = spawn_canned_http_response_with_headers(200, license, date_header(Utc::now())).await;
+        let cache = clock_guard_path("heal-invalid-cache.json");
+        std::fs::write(&cache, license).unwrap();
+
+        let status = server_client(&pub_pem, url, &guard)
+            .verify_and_refresh_async(&cache, "ANY-KEY", None)
+            .await;
+
+        assert!(status.is_valid(), "got {:?}", status);
+    }
+
+    /// A local clock far behind the license server is a clock set back, also
+    /// when the server answers.
+    #[tokio::test]
+    async fn test_server_time_reveals_a_clock_set_back() {
+        let (_, pub_pem, private) = make_keypair_pems();
+        let guard = clock_guard_path("server-ahead");
+        let url = spawn_canned_http_response_with_headers(
+            200,
+            server_license(&private),
+            date_header(Utc::now() + Duration::days(30)),
+        )
+        .await;
+
+        let status = server_client(&pub_pem, url, &guard)
+            .activate_async(&clock_guard_path("server-ahead-cache.json"), "ANY-KEY", None)
+            .await;
+
+        assert!(matches!(status, LicenseStatus::ClockRollback { .. }), "got {:?}", status);
     }
 
     #[tokio::test]
