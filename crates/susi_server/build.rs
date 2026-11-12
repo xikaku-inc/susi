@@ -8,6 +8,10 @@
 // If conan is missing or the build fails the script prints a warning and
 // continues - the Rust test suite marks the C++ test as skipped rather than
 // failed in that case.
+//
+// Everything is built in Release, because conancenter has prebuilt binaries of
+// the dependencies only for Release. Set SUSI_CONAN_LOCKFILE (relative to cpp/)
+// to lock the dependency versions, as CI does with conan-ci.lock.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -26,6 +30,8 @@ fn main() {
     println!("cargo:rerun-if-changed=../../cpp/test_package/CMakeLists.txt");
     println!("cargo:rerun-if-changed=../../cpp/test_package/conanfile.py");
     println!("cargo:rerun-if-changed=../../cpp/test_package/conanfile_build.py");
+    println!("cargo:rerun-if-changed=../../cpp/conan-ci.lock");
+    println!("cargo:rerun-if-env-changed=SUSI_CONAN_LOCKFILE");
 
     if !conan_available() {
         println!("cargo:warning=conan not found - C++ integration test will be skipped");
@@ -53,13 +59,20 @@ fn main() {
     let build_dir     = out_dir.join("cpp_test_build");
     std::fs::create_dir_all(&build_dir).expect("create cpp build dir");
 
+    // The lockfile doesn't contain susi itself, so conan create writes one that
+    // does, for the install step.
+    let lockfile = std::env::var_os("SUSI_CONAN_LOCKFILE").map(|f| cpp_dir.join(f));
+    let susi_lockfile = out_dir.join("susi.lock");
+
     // Step 1: conan create the main library so it is in the local cache.
     // --test-folder "" skips running the test_package binary (which requires
     // server args we don't have at package-creation time).
-    if !run("conan create", Command::new("conan")
-        .args(["create", ".", "--build=missing", "-s", "build_type=Debug", "--test-folder", ""])
-        .current_dir(&cpp_dir))
-    {
+    let mut create = Command::new("conan");
+    create.args(["create", ".", "--build=missing", "-s", "build_type=Release", "--test-folder", ""]);
+    if let Some(lockfile) = &lockfile {
+        create.arg("--lockfile").arg(lockfile).arg("--lockfile-out").arg(&susi_lockfile);
+    }
+    if !run("conan create", create.current_dir(&cpp_dir)) {
         println!("cargo:warning=conan create failed - C++ integration test will fail");
         println!("cargo:rustc-env=SUSI_CPP_BUILD_ERROR=conan create failed");
         return;
@@ -69,15 +82,17 @@ fn main() {
     // susi/1.0.0 require) so that CMakeDeps generates susiConfig.cmake directly
     // into --output-folder without any build/<type>/generators/ nesting.
     let build_conanfile = test_pkg_dir.join("conanfile_build.py");
-    if !run("conan install (test_package)", Command::new("conan")
-        .args([
-            "install", build_conanfile.to_str().unwrap(),
-            "--build=missing",
-            "-s", "build_type=Debug",
-            "--output-folder", build_dir.to_str().unwrap(),
-        ])
-        .current_dir(&build_dir))
-    {
+    let mut install = Command::new("conan");
+    install.args([
+        "install", build_conanfile.to_str().unwrap(),
+        "--build=missing",
+        "-s", "build_type=Release",
+        "--output-folder", build_dir.to_str().unwrap(),
+    ]);
+    if lockfile.is_some() {
+        install.arg("--lockfile").arg(&susi_lockfile);
+    }
+    if !run("conan install (test_package)", install.current_dir(&build_dir)) {
         println!("cargo:warning=conan install failed - C++ integration test will fail");
         println!("cargo:rustc-env=SUSI_CPP_BUILD_ERROR=conan install (test_package) failed");
         return;
@@ -93,7 +108,7 @@ fn main() {
             "-S", test_pkg_dir.to_str().unwrap(),
             "-B", build_dir.to_str().unwrap(),
             &format!("-DCMAKE_TOOLCHAIN_FILE={}", toolchain.display()),
-            "-DCMAKE_BUILD_TYPE=Debug",
+            "-DCMAKE_BUILD_TYPE=Release",
         ])
         .current_dir(&build_dir))
     {
@@ -103,7 +118,7 @@ fn main() {
     }
 
     if !run("cmake build", Command::new("cmake")
-        .args(["--build", build_dir.to_str().unwrap(), "--config", "Debug"])
+        .args(["--build", build_dir.to_str().unwrap(), "--config", "Release"])
         .current_dir(&build_dir))
     {
         println!("cargo:warning=cmake build failed - C++ integration test will fail");
@@ -162,10 +177,10 @@ fn find_binary(build_dir: &Path, name: &str) -> Option<PathBuf> {
     let candidates = [
         build_dir.join(name),
         build_dir.join(format!("{}.exe", name)),
-        build_dir.join("Debug").join(name),
-        build_dir.join("Debug").join(format!("{}.exe", name)),
-        build_dir.join("build").join("Debug").join(name),
-        build_dir.join("build").join("Debug").join(format!("{}.exe", name)),
+        build_dir.join("Release").join(name),
+        build_dir.join("Release").join(format!("{}.exe", name)),
+        build_dir.join("build").join("Release").join(name),
+        build_dir.join("build").join("Release").join(format!("{}.exe", name)),
     ];
     candidates.into_iter().find(|p| p.exists())
 }
