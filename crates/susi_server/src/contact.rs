@@ -3,7 +3,7 @@
 //! Hardening stack:
 //!   - hidden honeypot field that real browsers leave empty
 //!   - Cloudflare Turnstile siteverify (when SUSI_TURNSTILE_SECRET is set)
-//!   - per-IP sliding-window rate limit (3 / hour, 20 / day)
+//!   - per-IP sliding-window rate limit (3 / hour)
 //!   - every field mandatory (name, company, email, subject, message)
 //!   - field length caps + minimum body length
 //!   - sender email syntactically validated; no HTML in outbound mail body
