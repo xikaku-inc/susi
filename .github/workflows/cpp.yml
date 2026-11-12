@@ -1,0 +1,40 @@
+name: C++
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  test:
+
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    runs-on: ${{ matrix.os }}
+
+    defaults:
+      run:
+        working-directory: cpp
+
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+    - name: Install Conan
+      run: |
+        pip install conan
+        conan profile detect
+    # cpp/conan-ci.lock pins the dependency versions and recipe revisions, so that
+    # new conancenter releases can't turn prebuilt dependencies into source builds.
+    # To update it, delete it and run in cpp/ with a current Conan, first on Linux:
+    #   conan lock create . -o "&:build_tests=True" --lockfile-out=conan-ci.lock
+    # then on Windows:
+    #   conan lock create . -o "&:build_tests=True" --lockfile=conan-ci.lock --lockfile-out=conan-ci.lock
+    - name: Build
+      run: conan build . -o "&:build_tests=True" --build=missing --lockfile=conan-ci.lock
+    - name: Run tests
+      run: ctest --preset conan-release --output-on-failure

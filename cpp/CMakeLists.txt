@@ -11,7 +11,7 @@ cmake_minimum_required(VERSION 3.16)
 #   add_subdirectory(susi/cpp)
 #   target_link_libraries(your_target PRIVATE susi)
 
-if(NOT CMAKE_PROJECT_NAME)
+if(CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
     project(susi LANGUAGES CXX)
 endif()
 
@@ -29,10 +29,13 @@ endif()
 #   3. Parent project: set(SUSI_REQUIRE_SIGNED_BINARY ON) before add_subdirectory()
 option(SUSI_REQUIRE_SIGNED_BINARY
     "Abort at startup if the binary is not code-signed" OFF)
+# Set by Conan with -o "&:build_tests=True".
+option(SUSI_BUILD_TESTS "Build the tests in tests/" OFF)
 
-add_library(susi STATIC src/susi.cpp include/susi.h)
+add_library(susi STATIC src/susi.cpp src/file_io.cpp src/file_io.h include/susi.h)
 target_include_directories(susi PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(susi PUBLIC cxx_std_17)
+target_compile_options(susi PRIVATE "$<$<CXX_COMPILER_ID:MSVC>:/utf-8>")
 
 # OpenSSL
 find_package(OpenSSL REQUIRED)
@@ -64,3 +67,8 @@ endif()
 
 set_target_properties(susi PROPERTIES PUBLIC_HEADER "include/susi.h")
 install(TARGETS susi)
+
+if(SUSI_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()

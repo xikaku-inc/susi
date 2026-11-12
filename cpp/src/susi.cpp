@@ -1,4 +1,5 @@
 #include "susi.h"
+#include "file_io.h"
 
 #include <algorithm>
 #include <chrono>
@@ -676,7 +677,8 @@ SusiClient::LicenseStatus SusiClient::verifySignedLicenseJson(const std::string&
         return LicenseStatus::Error;
     }
 
-    if (!signedLicense.contains("license_data") || !signedLicense.contains("signature")) {
+    if (!signedLicense.contains("license_data") || !signedLicense.contains("signature") ||
+        !signedLicense.at("license_data").is_string() || !signedLicense.at("signature").is_string()) {
         SUSI_LOG("License missing required fields (license_data, signature)");
         return LicenseStatus::Error;
     }
@@ -814,14 +816,13 @@ SusiClient::LicenseStatus SusiClient::checkLicense(const std::filesystem::path& 
     m_leaseExpiresEpoch = 0;
     m_graceHours = DEFAULT_LEASE_GRACE_HOURS;
 
-    std::ifstream licenseFile(licensePath);
-    if (!licenseFile.is_open()) {
+    std::string licenseContents;
+    if (!susi::details::readWholeFile(licensePath, licenseContents)) {
         SUSI_LOG("License file not found: %s", licensePath.string().c_str());
         m_isValid = false;
         return LicenseStatus::FileNotFound;
     }
 
-    std::string licenseContents((std::istreambuf_iterator<char>(licenseFile)), std::istreambuf_iterator<char>());
     auto status = verifySignedLicenseJson(licenseContents);
     m_isValid = (status == LicenseStatus::Valid || status == LicenseStatus::ValidGracePeriod);
     return status;
@@ -862,16 +863,14 @@ SusiClient::LicenseStatus SusiClient::checkLicenseAndRefresh(const std::filesyst
             auto status = verifySignedLicenseJson(response);
             m_isValid = (status == LicenseStatus::Valid || status == LicenseStatus::ValidGracePeriod);
 
-            if (m_isValid) {
-                std::ofstream f(licensePath);
-                if (f.is_open()) {
-                    f << response;
-                }
+            if (m_isValid && !susi::details::writeFileReplace(licensePath, response)) {
+                SUSI_LOG("Failed to write license file: %s", licensePath.string().c_str());
             }
 
             return status;
         } else if (httpCode == 403) {
-            std::filesystem::remove(licensePath);
+            std::error_code ec;
+            std::filesystem::remove(licensePath, ec);
             m_isValid = false;
 
             if (response.find("revoked") != std::string::npos){
@@ -892,7 +891,8 @@ SusiClient::LicenseStatus SusiClient::checkLicenseAndRefresh(const std::filesyst
             }
         } else if (httpCode == 404) {
             SUSI_LOG("License not found on server (HTTP 404) - removing cached file");
-            std::filesystem::remove(licensePath);
+            std::error_code ec;
+            std::filesystem::remove(licensePath, ec);
             m_isValid = false;
             return LicenseStatus::InvalidLicenseKey;
         } else {
@@ -903,14 +903,13 @@ SusiClient::LicenseStatus SusiClient::checkLicenseAndRefresh(const std::filesyst
     }
 
     // Fall back to local file
-    std::ifstream licenseFile(licensePath);
-    if (!licenseFile.is_open()) {
+    std::string licenseContents;
+    if (!susi::details::readWholeFile(licensePath, licenseContents)) {
         SUSI_LOG("Cached license file cannot be found: %s", licensePath.string().c_str());
         m_isValid = false;
         return LicenseStatus::FileNotFound;
     }
 
-    std::string licenseContents((std::istreambuf_iterator<char>(licenseFile)), std::istreambuf_iterator<char>());
     auto status = verifySignedLicenseJson(licenseContents);
     m_isValid = (status == LicenseStatus::Valid || status == LicenseStatus::ValidGracePeriod);
     return status;

@@ -4129,6 +4129,10 @@ function showCreateModal() {
     document.getElementById('createLeaseDuration').value = '';
     document.getElementById('createLeaseGrace').value = '';
     document.getElementById('createRequireSignedBinary').checked = false;
+    document.getElementById('createMaxMachines').placeholder = LICENSE_DEFAULTS.maxMachines;
+    document.getElementById('createLeaseDuration').placeholder = LICENSE_DEFAULTS.leaseDurationHours;
+    document.getElementById('createLeaseGrace').placeholder = LICENSE_DEFAULTS.leaseGraceHours;
+    updateExpiryFields();
     document.getElementById('createModal').classList.add('visible');
     document.getElementById('createCustomer').focus();
 }
@@ -4190,13 +4194,14 @@ async function createLicense() {
     const customer = document.getElementById('createCustomer').value.trim();
     if (!customer) { toast('Customer name is required', 'error'); return; }
 
+    const intOr = (id, def) => { const v = parseInt(document.getElementById(id).value); return Number.isNaN(v) ? def : v; };
     const body = {
         product: document.getElementById('createProduct').value.trim() || 'FusionHub',
         customer: customer,
         features: getSelectedFeatures(),
-        max_machines: parseInt(document.getElementById('createMaxMachines').value) || LICENSE_DEFAULTS.maxMachines,
-        lease_duration_hours: (() => { const v = parseInt(document.getElementById('createLeaseDuration').value); return Number.isNaN(v) ? LICENSE_DEFAULTS.leaseDurationHours : v; })(),
-        lease_grace_hours: parseInt(document.getElementById('createLeaseGrace').value) || LICENSE_DEFAULTS.leaseGraceHours,
+        max_machines: intOr('createMaxMachines', LICENSE_DEFAULTS.maxMachines),
+        lease_duration_hours: intOr('createLeaseDuration', LICENSE_DEFAULTS.leaseDurationHours),
+        lease_grace_hours: intOr('createLeaseGrace', LICENSE_DEFAULTS.leaseGraceHours),
         require_signed_binary: document.getElementById('createRequireSignedBinary').checked,
     };
 

@@ -21,6 +21,37 @@ pub(crate) fn blocking_run<F: std::future::Future>(fut: F) -> F::Output {
         .block_on(fut)
 }
 
+/// Write `contents` to a temporary file next to `path` and rename it over `path`,
+/// so that readers see either the old or the new file, never a partial one.
+/// On Windows the rename also succeeds while another process holds `path` open,
+/// as long as it opened it with `FILE_SHARE_DELETE` (as `std::fs::File` does).
+async fn write_replace(path: &Path, contents: &str) -> std::io::Result<()> {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use tokio::io::AsyncWriteExt;
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(format!(
+        ".{}.{}.tmp",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let tmp = PathBuf::from(tmp);
+    let result = async {
+        let mut f = tokio::fs::File::create(&tmp).await?;
+        f.write_all(contents.as_bytes()).await?;
+        f.flush().await?;
+        f.sync_all().await?;
+        drop(f);
+        tokio::fs::rename(&tmp, path).await
+    }
+    .await;
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(&tmp).await;
+    }
+    result
+}
+
 /// Result of a license verification.
 #[derive(Debug)]
 pub enum LicenseStatus {
@@ -323,7 +354,9 @@ impl LicenseClient {
             match self.try_online_verify_async(server_url, license_key).await {
                 Ok(signed) => {
                     if let Ok(json) = serde_json::to_string_pretty(&signed) {
-                        let _ = tokio::fs::write(path, json).await;
+                        if let Err(e) = write_replace(path, &json).await {
+                            log::warn!("Failed to write license file {}: {}", path.display(), e);
+                        }
                     }
                     return self.verify_signed(&signed);
                 }
@@ -387,7 +420,9 @@ impl LicenseClient {
         {
             Ok(signed) => {
                 if let Ok(json) = serde_json::to_string_pretty(&signed) {
-                    let _ = tokio::fs::write(path, json).await;
+                    if let Err(e) = write_replace(path, &json).await {
+                        log::warn!("Failed to write license file {}: {}", path.display(), e);
+                    }
                 }
                 self.verify_signed(&signed)
             }
@@ -1121,5 +1156,143 @@ mod tests {
         assert!(status.is_valid());
 
         let _ = tokio::fs::remove_file(&tmp).await;
+    }
+
+    /// Create an empty directory for one test, so it can check for leftover temporary files.
+    fn empty_test_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("susi_{}_{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn entry_count(dir: &Path) -> usize {
+        std::fs::read_dir(dir).unwrap().count()
+    }
+
+    #[tokio::test]
+    async fn test_write_replace_while_reader_holds_file() {
+        use std::io::Read;
+        let dir = empty_test_dir("replace_held");
+        let path = dir.join("license.json");
+        std::fs::write(&path, "old").unwrap();
+        let mut held = std::fs::File::open(&path).unwrap();
+
+        write_replace(&path, "new").await.unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+        let mut seen = String::new();
+        held.read_to_string(&mut seen).unwrap();
+        assert_eq!(
+            seen, "old",
+            "an open handle must keep reading the replaced file"
+        );
+        drop(held);
+        assert_eq!(entry_count(&dir), 1, "temporary file left behind");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A reader that doesn't share delete access (e.g. MSVC's std::ifstream)
+    /// blocks the rename on Windows. The write must then fail without touching
+    /// the existing file or leaving the temporary file behind.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn test_write_replace_fails_cleanly_when_reader_denies_delete() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 0x1;
+        const FILE_SHARE_WRITE: u32 = 0x2;
+
+        let dir = empty_test_dir("replace_denied");
+        let path = dir.join("license.json");
+        std::fs::write(&path, "old").unwrap();
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(&path)
+            .unwrap();
+
+        assert!(write_replace(&path, "new").await.is_err());
+
+        drop(held);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "old");
+        assert_eq!(entry_count(&dir), 1, "temporary file left behind");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Regression: verify_file must never see a partly written license while
+    /// another task keeps rewriting the file.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_verify_file_during_concurrent_writes() {
+        let (_, pub_pem, private) = make_keypair_pems();
+        let client = new_test_client(&pub_pem);
+        let mut payload = make_valid_payload(None);
+        let a = serde_json::to_string_pretty(&sign_license(&private, &payload).unwrap()).unwrap();
+        payload.features = (0..200).map(|i| format!("feature_{}", i)).collect();
+        let b = serde_json::to_string_pretty(&sign_license(&private, &payload).unwrap()).unwrap();
+
+        let dir = empty_test_dir("replace_concurrent");
+        let path = dir.join("license.json");
+        write_replace(&path, &a).await.unwrap();
+
+        let writer = tokio::spawn({
+            let path = path.clone();
+            async move {
+                for i in 0..200 {
+                    write_replace(&path, if i % 2 == 0 { &b } else { &a })
+                        .await
+                        .unwrap();
+                }
+            }
+        });
+        let mut reads = 0;
+        while !writer.is_finished() {
+            let status = client.verify_file_async(&path).await;
+            assert!(status.is_valid(), "read {}: {:?}", reads, status);
+            reads += 1;
+        }
+        writer.await.unwrap();
+        assert!(reads > 0);
+        assert_eq!(entry_count(&dir), 1, "temporary file left behind");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Regression: a refresh must replace the cached license file instead of
+    /// rewriting it in place, so that a reader holding it open keeps a complete copy.
+    #[tokio::test]
+    async fn test_verify_and_refresh_replaces_cached_file() {
+        use std::io::Read;
+        let (_, pub_pem, private) = make_keypair_pems();
+        let mut payload = make_valid_payload(None);
+        let old = serde_json::to_string_pretty(&sign_license(&private, &payload).unwrap()).unwrap();
+        payload.lease_expires = Some(Utc::now() + Duration::hours(72));
+        let refreshed = sign_license(&private, &payload).unwrap();
+        let body: &'static str =
+            Box::leak(serde_json::to_string(&refreshed).unwrap().into_boxed_str());
+        let url = spawn_canned_http_response(200, body).await;
+        let client = new_test_client_with_server(&pub_pem, url);
+
+        let dir = empty_test_dir("refresh_replace");
+        let path = dir.join("license.json");
+        std::fs::write(&path, &old).unwrap();
+        let mut held = std::fs::File::open(&path).unwrap();
+
+        let status = client
+            .verify_and_refresh_async(&path, "ANY-KEY", None)
+            .await;
+
+        assert!(status.is_valid(), "got {:?}", status);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            serde_json::to_string_pretty(&refreshed).unwrap()
+        );
+        let mut seen = String::new();
+        held.read_to_string(&mut seen).unwrap();
+        assert_eq!(
+            seen, old,
+            "an open handle must keep reading the replaced file"
+        );
+        drop(held);
+        assert_eq!(entry_count(&dir), 1, "temporary file left behind");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
