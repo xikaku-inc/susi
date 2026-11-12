@@ -446,6 +446,28 @@ body:has(.modal-overlay.visible) { overflow: hidden; }
     margin: 4px 0;
 }
 
+.user-picker { position: relative; flex: 1; }
+.user-picker input { width: 100%; box-sizing: border-box; }
+.user-picker-menu {
+    position: absolute;
+    left: 0; right: 0; top: calc(100% + 2px);
+    max-height: 320px;
+    overflow-y: auto;
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.25);
+    z-index: 1000;
+    padding: 4px 0;
+}
+.user-picker-menu div { padding: 6px 12px; cursor: pointer; font-size: 13px; }
+.user-picker-menu div.active { background: var(--bg3); }
+.user-picker-menu .up-sub { color: var(--text2); font-size: 12px; }
+
+.pager { display: flex; align-items: center; gap: 12px; font-size: 13px; color: var(--text2); }
+.pager:empty { display: none; }
+.pager button:disabled { opacity: 0.4; cursor: default; }
+
 .machines-list { margin-top: 4px; }
 .machine-item {
     display: flex;
@@ -1056,7 +1078,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                 <div class="detail-section-title">Members</div>
                 <div id="wsDetailMembers" class="machines-list"></div>
                 <div id="wsAddMemberRow" style="display:flex;gap:8px;margin-top:8px;">
-                    <select id="wsNewMember" style="flex:1;"><option value="">Select user...</option></select>
+                    <div class="user-picker"><input type="search" id="wsNewMember"></div>
                     <button onclick="addWsMember()">Add</button>
                 </div>
             </div>
@@ -1078,7 +1100,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                     </label>
                     <label style="display:flex;flex-direction:column;gap:4px;">
                         <span class="field-label">Created By</span>
-                        <select id="wsEditCreatedBy"></select>
+                        <div class="user-picker"><input type="search" id="wsEditCreatedBy"></div>
                     </label>
                     <div>
                         <button onclick="saveWsProperties()">Save</button>
@@ -1237,8 +1259,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                     <div class="field-label">Assigned Users (self-serve portal access)</div>
                     <div class="machines-list" id="detailUsers"></div>
                     <div style="display:flex;gap:8px;margin-top:8px;">
-                        <input type="text" id="assignUserInput" list="assignUserList" style="flex:1;" onkeydown="if(event.key==='Enter')assignLicenseUser()">
-                        <datalist id="assignUserList"></datalist>
+                        <div class="user-picker"><input type="search" id="assignUserInput"></div>
                         <button onclick="assignLicenseUser()">Assign</button>
                     </div>
                 </div>
@@ -3943,6 +3964,7 @@ function selectLicense(key) {
         if (licenses.length) { toast('License not found', 'error'); closeDetail(); }
         return;
     }
+    if (roleIsAdmin(userRole)) loadAssignableUsers();
 
     const status = getStatus(lic);
     document.getElementById('detailTitle').textContent = 'License: ' + lic.customer;
@@ -4255,23 +4277,85 @@ async function loadAssignableUsers() {
         const resp = await fetch(API + '/auth/users', { headers: authHeaders() });
         if (!resp.ok) return;
         assignableUsers = await resp.json();
-        const dl = document.getElementById('assignUserList');
-        if (dl) dl.innerHTML = assignableUsers
-            .filter(u => !roleIsAdmin(u.role))
-            .map(u => '<option value="' + esc(u.username) + '">' + esc(u.email || '') + '</option>').join('');
     } catch (e) {}
 }
+
+// Turn an input inside a .user-picker into a search box over assignableUsers.
+// exclude(u) hides candidates, onEnter fires on Enter with no highlighted match.
+const USER_PICKER_LIMIT = 50;
+function attachUserPicker(inputId, opts) {
+    const input = document.getElementById(inputId);
+    input.autocomplete = 'off';
+    input.readOnly = true;
+    const menu = document.createElement('div');
+    menu.className = 'user-picker-menu';
+    menu.style.display = 'none';
+    input.parentNode.appendChild(menu);
+    let items = [], active = -1;
+    const close = () => { menu.style.display = 'none'; active = -1; };
+    const highlight = i => {
+        active = i;
+        [...menu.children].forEach((el, j) => el.classList.toggle('active', j === i));
+        if (menu.children[i]) menu.children[i].scrollIntoView({ block: 'nearest' });
+    };
+    const pick = u => { input.value = u.username; close(); };
+    const render = () => {
+        const q = input.value.trim().toLowerCase();
+        items = assignableUsers.filter(u => !(opts.exclude && opts.exclude(u)) &&
+            (!q || (u.username + ' ' + fullNameOf(u) + ' ' + (u.email || '')).toLowerCase().includes(q)))
+            .slice(0, USER_PICKER_LIMIT);
+        if (!items.length) { close(); return; }
+        menu.innerHTML = items.map(u => {
+            const sub = [fullNameOf(u), u.email].filter(Boolean).join(' - ');
+            return '<div><strong>' + esc(u.username) + '</strong>' +
+                (sub ? '<span class="up-sub" style="display:block;">' + esc(sub) + '</span>' : '') + '</div>';
+        }).join('');
+        [...menu.children].forEach((el, i) => {
+            el.onmousedown = e => { e.preventDefault(); pick(items[i]); };
+        });
+        menu.style.display = '';
+        highlight(-1);
+    };
+    input.addEventListener('focus', () => { input.readOnly = false; render(); });
+    input.addEventListener('input', render);
+    input.addEventListener('blur', close);
+    input.addEventListener('keydown', e => {
+        const open = menu.style.display !== 'none';
+        if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            if (!open) render(); else highlight(Math.min(active + 1, items.length - 1));
+        } else if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            if (open) highlight(Math.max(active - 1, 0));
+        } else if (e.key === 'Escape') {
+            e.preventDefault();
+            close();
+        } else if (e.key === 'Enter') {
+            e.preventDefault();
+            if (open && active >= 0) pick(items[active]);
+            else { close(); if (opts.onEnter) opts.onEnter(); }
+        }
+    });
+}
+attachUserPicker('assignUserInput', {
+    exclude: u => roleIsAdmin(u.role) ||
+        ((licenses.find(l => l.license_key === selectedKey) || {}).users || []).includes(u.username),
+    onEnter: assignLicenseUser,
+});
+attachUserPicker('wsNewMember', { exclude: u => wsMemberNames.has(u.username), onEnter: addWsMember });
+attachUserPicker('wsEditCreatedBy', {});
 
 // Resolve a username-or-email to an existing account. Returns the username
 // or null. User creation is manual - use the Users page.
 async function ensurePortalUser(identifier) {
     const id = identifier.trim();
     if (!id) return null;
-    // Refresh before matching: a user created moments ago (e.g. via the Users
-    // page) must be found here, not shadowed by a stale login-time snapshot.
-    await loadAssignableUsers();
-    const user = assignableUsers.find(u => u.username === id) ||
-                 assignableUsers.find(u => (u.email || '').toLowerCase() === id.toLowerCase());
+    const find = () => assignableUsers.find(u => u.username === id) ||
+                       assignableUsers.find(u => (u.email || '').toLowerCase() === id.toLowerCase());
+    // Refresh on a miss: a user created moments ago (e.g. via the Users page)
+    // must be found here, not shadowed by a stale snapshot.
+    if (!find()) await loadAssignableUsers();
+    const user = find();
     if (user) return user.username;
     toast('No user "' + id + '" - create the account on the Users page first', 'error');
     return null;
@@ -5847,42 +5931,10 @@ async function showWsDetail(id, tab, sub) {
             document.getElementById('wsEditName').value = ws.name || '';
             document.getElementById('wsEditProduct').value = ws.product || '';
             document.getElementById('wsEditDesc').value = ws.description || '';
-            // Populate the Created By selector with all known users so admins
-            // can re-attribute the workspace. Fetched once per panel open.
-            const cbSel = document.getElementById('wsEditCreatedBy');
-            try {
-                const uResp = await fetch(API + '/auth/users', { headers: authHeaders() });
-                if (uResp.ok) {
-                    const allUsers = await uResp.json();
-                    cbSel.innerHTML = allUsers
-                        .map(u => '<option value="' + esc(u.username) + '">' + esc(u.username) + '</option>')
-                        .join('');
-                    cbSel.value = ws.created_by || '';
-                }
-            } catch (_) {}
-        }
-        if (showMemberMgmt) {
-            const memberNames = new Set(members.map(m => m.username));
-            const sel = document.getElementById('wsNewMember');
-            try {
-                const uResp = await fetch(API + '/auth/users', { headers: authHeaders() });
-                if (!uResp.ok) {
-                    sel.innerHTML = '<option value="">Failed to load users (HTTP ' + uResp.status + ')</option>';
-                } else {
-                    const allUsers = await uResp.json();
-                    const candidates = allUsers.filter(u => !memberNames.has(u.username));
-                    if (candidates.length === 0) {
-                        sel.innerHTML = '<option value="">No other users - add one via Actions → Users</option>';
-                    } else {
-                        sel.innerHTML = '<option value="">Select user...</option>' +
-                            candidates
-                                .map(u => '<option value="' + esc(u.username) + '">' + esc(u.username) + '</option>')
-                                .join('');
-                    }
-                }
-            } catch (e) {
-                sel.innerHTML = '<option value="">Failed to load users: ' + esc(e.message) + '</option>';
-            }
+            document.getElementById('wsEditCreatedBy').value = ws.created_by || '';
+            wsMemberNames = new Set(members.map(m => m.username));
+            document.getElementById('wsNewMember').value = '';
+            loadAssignableUsers();
         }
 
         loadWsConfigs(id);
@@ -6512,10 +6564,11 @@ async function submitTicketModal() {
 }
 
 
+let wsMemberNames = new Set();
 async function addWsMember() {
-    const username = document.getElementById('wsNewMember').value;
-    if (!username) { toast('Select a user first', 'error'); return; }
     if (!selectedWsId) return;
+    const username = await ensurePortalUser(document.getElementById('wsNewMember').value);
+    if (!username) return;
     try {
         const resp = await fetch(API + '/workspaces/' + selectedWsId + '/members', {
             method: 'POST',
@@ -6559,7 +6612,9 @@ async function saveWsProperties() {
     const name = document.getElementById('wsEditName').value.trim();
     if (!name) { toast('Name is required', 'error'); return; }
     // created_by is optional server-side; an empty value leaves it unchanged.
-    const created_by = document.getElementById('wsEditCreatedBy').value || null;
+    const cbInput = document.getElementById('wsEditCreatedBy').value.trim();
+    const created_by = cbInput ? await ensurePortalUser(cbInput) : null;
+    if (cbInput && !created_by) return;
     try {
         const resp = await fetch(API + '/workspaces/' + selectedWsId, {
             method: 'PUT',
