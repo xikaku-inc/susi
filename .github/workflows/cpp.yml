@@ -28,7 +28,15 @@ jobs:
       run: |
         pip install conan
         conan profile detect
+    # cpp/conan-ci.lock pins the dependency versions and recipe revisions, so that
+    # new conancenter releases can't turn prebuilt dependencies into source builds.
+    # To update it, delete it and run in cpp/ with a current Conan, first on Linux:
+    #   conan lock create . --lockfile-out=conan-ci.lock
+    #   conan lock create tests --lockfile=conan-ci.lock --lockfile-out=conan-ci.lock
+    # then on Windows:
+    #   conan lock create . --lockfile=conan-ci.lock --lockfile-out=conan-ci.lock
+    #   conan lock create tests --lockfile=conan-ci.lock --lockfile-out=conan-ci.lock
     - name: Build
-      run: conan build . --build=missing
+      run: conan build . --build=missing --lockfile=../conan-ci.lock
     - name: Run tests
       run: ctest --preset conan-release --output-on-failure
