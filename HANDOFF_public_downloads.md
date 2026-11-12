@@ -30,7 +30,7 @@ Product decision already made by Klaus: **fully public download** (no login, no 
 
 1. **Keep installers in the release system** (single source of truth, versioned, already feeds the in-app updater). Do NOT copy binaries into the public website asset store.
 2. **Per-product `download_public` flag** rather than hardcoding `fusionhub`. Keeps the multi-product design honest and gives a reversible admin toggle. Migration enables it for `fusionhub` once, on first column creation, so a later admin toggle-off is not clobbered on restart.
-3. **Public bypass only for *global* releases.** Workspace-scoped releases stay gated by membership even when the product is public.
+3. **Public bypass applies to every release of the product.** Releases are global per product; workspace-scoped releases were retired and folded into workspace files, so there is no membership branch left to gate.
 4. **Extension-based platform detection** (`.msi`/`.exe` = Windows, `.dmg`/`.pkg` = macOS, `.appimage`/`.deb`/`.rpm` = Linux). Robust against the existing asset names; no need to rename anything.
 5. **Stable "latest installer" redirect** `/download/{product}/{platform}` so xikaku.com links never need editing per release. It resolves newest-first, **prefers a stable release, falls back to the newest prerelease** (important right now because every release is an `-rc`). For macOS it walks back to the newest release that actually shipped a dmg, so the Mac button never dead-ends as long as *some* recent release built one.
 
@@ -54,7 +54,7 @@ Product decision already made by Klaus: **fully public download** (no login, no 
 
 ### `crates/susi_server/src/main.rs`
 - `ProductRequest` and `UpdateProductRequest` gained `#[serde(default)] download_public: bool`.
-- `authorize_release_download` - early return `Ok("public")` for a global release of a `download_public` product, before the license/principal requirement. Workspace and global-entitlement branches unchanged.
+- `authorize_release_download` - early return `Ok("public")` for a global release of a `download_public` product, before the license/principal requirement. The global-entitlement branch is unchanged.
 - Registered route: `.route("/download/{product}/{platform}", get(releases::handle_public_latest_download))` next to the other `/api/v1/updates/...` routes.
 
 ### `crates/susi_server/src/dashboard.html`

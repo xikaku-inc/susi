@@ -1,38 +1,40 @@
 # susi
 
-*Susi* (Tagalog for "key") - a self-hosted backend platform written in Rust. It started as a software-licensing server and has grown to bundle everything a small product company needs around a downloadable application: signed licensing, release distribution, a documentation knowledge base, a public website, a Stripe-backed shop, and a contact form - all served from a single binary with a SQLite store.
+*Susi* (Tagalog for "key") - a self-hosted backend platform written in Rust. It started as a software-licensing server and has grown to bundle everything a small product company needs around a downloadable application: signed licensing, release distribution, a documentation knowledge base, any number of public websites with blogs and newsletters, a Stripe-backed shop, customer workspaces, and a contact form - all served from a single binary with a SQLite store.
 
 ## Features
 
 ### Licensing
 - **RSA-SHA256 signed license files** - tamper-proof, offline-verifiable
 - **Node-locked licenses** - bind licenses to specific machines via hardware fingerprint
-- **Feature flags, expiry dates, machine limits** - fine-grained per-license policy
+- **Feature flags, expiry dates, machine limits** - fine-grained per-license policy, editable after creation
 - **Lease-based seat management** - time-limited activations that expire automatically, preventing unauthorized concurrent usage
 - **USB hardware tokens** - bind a license to a physical USB stick instead of a machine
-- **Binary signing enforcement** - optionally require the consuming binary to carry a valid code signature, making tampering detectable at license-verification time
-- **Cross-platform** - Linux and Windows support
+- **Binary signing enforcement** - optionally require the consuming binary to carry a valid code signature; the server can additionally pin the signing CA
+- **Customer portal** - licenses are assigned to user accounts; customers see their own licenses in the dashboard and export offline activation files themselves
+- **Cross-platform** - Linux, Windows, and macOS support
 - **Rust + C++ client libraries** - drop-in verification for both ecosystems
 
-### Releases & workspaces
-- **Workspaces** - group licenses, files, configs, and docs per product/team
-- **Workspace files & docs** - flat member-writable file share and documentation per workspace
-- **Workspace tickets** - customer-visible issue list per workspace with comments; admins get a cross-workspace queue
-- **Versioned config revisions** - push, fetch, and roll back JSON configs per workspace
-- **Binary release channel** - upload signed installers/binaries; clients fetch via license-key-protected `/api/v1/updates`
+### Products, releases & workspaces
+- **Products** - a catalog of products, each owning its releases and doc sets; a product flagged `download_public` serves license-free installers through stable `/download/{product}/{platform}` links
+- **Binary release channel** - upload installers; licensed clients fetch via `/api/v1/updates`, with short-lived download tickets for browsers
+- **Workspaces** - per-customer collaboration space: member-writable file share, flat docs tree, versioned JSON config revisions, tickets with comments, a shared node graph with optimistic locking, federation secret + peer registry for the FusionHub data plane, and S3-backed recordings
 
-### Documentation & website
-- **Documentation knowledge base** - per-release doc sets at `/docs`, with Markdown editor, asset uploads, bulk import, and origin tagging (pipeline-generated vs. user-edited pages)
-- **Public marketing website** - `/site` with in-browser Markdown editor, asset library, page revision history, and per-page SEO (`robots.txt`, `sitemap.xml`, `llms.txt`)
+### Documentation & websites
+- **Documentation knowledge base** - per-product, per-release doc sets at `/docs`, server-rendered with SEO meta, Markdown editor, drafts, asset uploads, bulk import, and origin tagging (pipeline-generated vs. user-edited pages)
+- **Multi-site CMS** - any number of public sites resolved from the Host header, each with pages, blog posts, drafts, revision history, redirect maps, nav structure, translations, branding, font presets, SEO (`sitemap.xml`, `robots.txt`, `llms.txt`, IndexNow, JSON-LD), and a consent-gated analytics layer
+- **Newsletter** - per-site double-opt-in subscriber lists, Markdown issues with inline images and video posters, test sends, delivery reports, public archive, RFC 8058 one-click unsubscribe, SMTP or Gmail OAuth relay
+- **Email templates** - every transactional email editable from the dashboard, with per-site and per-language overrides
 
 ### Commerce
-- **Stripe-backed shop** - products, shipping rates, automatic-tax checkout, branded order confirmations with PDF invoices, and an admin fulfillment workflow
-- **Public contact form** - Cloudflare Turnstile + honeypot + per-IP rate limit, served at the `/site` chrome
+- **Stripe-backed shop** - per-site shops with their own Stripe keys, bilingual en/ja catalog with USD and JPY pricing, shipping rates and destination countries, automatic-tax checkout, locally rendered paid-invoice PDFs, Merchant Center feed, and an admin fulfillment workflow
+- **Public contact form** - Cloudflare Turnstile + honeypot + per-IP rate limit, served in the site chrome
 
 ### Auth & ops
-- **Multi-user dashboard** with Argon2id passwords, **TOTP 2FA + backup codes**, **emailed sign-in code for new devices**, **trusted-device list**, **password reset via email**, and **API tokens** for headless clients
-- **Optional activation server** - HTTP server for online activation, lease renewal, and machine management
-- **One-command deploy** - Docker + Compose with separate production / staging environments
+- **Multi-user dashboard** with three roles (user / admin / owner), **Argon2id passwords**, **TOTP 2FA + backup codes**, **emailed sign-in code for new devices**, **trusted devices**, **session list + revocation**, **invitation and password-reset email**, and **API tokens** for headless clients
+- **Audit log**, **self-serve data export and account deletion**, scheduled data-retention purges
+- **Encrypted offsite backups** to Dropbox with grandfather-father-son rotation
+- **One-command deploy** - Docker image built locally and shipped to the host; separate production / staging environments behind nginx
 - **Cross-platform clients** - Linux, Windows, macOS
 
 ## Architecture
@@ -43,12 +45,13 @@
 │  (CLI tool)      │     │       (HTTP server + UI)           │     │  (Rust library)     │
 │                  │     │                                    │     │                     │
 │  keygen          │     │  /api/v1/{auth, licenses,          │     │  verify signature   │
-│  create license  │     │           activate, verify,        │     │  check expiry       │
-│  export / list   │     │           workspaces, releases,    │     │  check machine      │
-│  export-token    │     │           docs, website, shop,     │     │  check features     │
-│  revoke          │     │           contact, ...}            │     │  check lease        │
-│                  │     │                                    │     │  verify USB token   │
-│                  │     │  Dashboard + /site + /docs + /shop │     │  workspace client   │
+│  create license  │     │    activate, verify, products,     │     │  check expiry       │
+│  export / list   │     │    releases, updates, workspaces,  │     │  check machine      │
+│  export-token    │     │    docs, website, sites,           │     │  check features     │
+│  revoke          │     │    newsletter, shop, contact,      │     │  check lease        │
+│                  │     │    audit, admin/backup, ...}       │     │  verify USB token   │
+│                  │     │                                    │     │  workspace client   │
+│                  │     │  Dashboard + /site + /docs + /shop │     │                     │
 └────────┬─────────┘     └────────────────────┬───────────────┘     └─────────────────────┘
          │                                    │
          └────────────────┬───────────────────┘
@@ -67,14 +70,14 @@
 
 | Crate | Type | Description |
 |---|---|---|
-| `susi_core` | Library | Shared types, RSA crypto, hardware fingerprinting, USB token encryption, SQLite storage |
-| `susi_client` | Library | Verification library + workspace/release/docs HTTP client (sync + async APIs) |
+| `susi_core` | Library | Shared types, RSA crypto, hardware fingerprinting, USB token encryption; SQLite storage behind the `db` feature (one module per domain under `src/db/`) |
+| `susi_client` | Library | Verification library + workspace/config HTTP client (sync + async APIs) |
 | `susi_admin` | Binary | CLI tool for key generation, license creation, and management |
-| `susi_server` | Binary | HTTP server with SQLite backend - licensing, releases, docs, website, shop, contact |
+| `susi_server` | Binary | HTTP server with SQLite backend - everything listed above |
 | `susi_helper` | Binary | End-user utility for retrieving machine fingerprints and USB serial numbers |
-| `cpp/` | C++ Library | Standalone verification client for C++ applications |
+| `cpp/` | C++ Library | Standalone verification client for C++ applications (Conan or `add_subdirectory`) |
 
-`susi_server` is split into one module per surface area (`docs.rs`, `website.rs`, `shop.rs`, `contact.rs`, `email.rs`, `invoice_pdf.rs` plus the licensing/auth core in `main.rs`) so each feature can be reasoned about independently.
+`susi_server` is split into one module per surface area: `auth.rs` / `users.rs` (sessions, 2FA, accounts), `licenses.rs` / `client_api.rs` (admin and client licensing), `releases.rs` (products, releases, public downloads), `workspaces.rs` / `tickets.rs`, `docs.rs`, `website.rs` / `sites.rs` (multi-site CMS), `newsletter.rs`, `email_templates.rs` / `email_md.rs` / `email.rs` (transactional mail), `shop.rs` / `invoice_pdf.rs` / `countries.rs`, `contact.rs`, `backup.rs`, `s3.rs`, with the router, auth middleware, rate limiters, security headers, and retention jobs in `main.rs`. The dashboard, docs viewer, and site shell are single-file HTML apps embedded in the binary (`dashboard.html`, `docs.html`, `website.html`).
 
 ## Quick Start
 
@@ -542,18 +545,23 @@ Backup Stick      XYZ789000000
 
 ## Server
 
-`susi-server` is the single HTTP server that hosts the dashboard, the licensing API, the workspace / release / docs / website / shop / contact endpoints, and the public-facing pages. Run it with:
+`susi-server` is the single HTTP server that hosts the dashboard, the licensing API, the product / release / workspace / docs / website / newsletter / shop / contact endpoints, and all public-facing pages. Run it with:
 
 ```bash
 susi-server \
   --private-key ./keys/private.pem \
   --db licenses.db \
+  --data-dir ./data \
   --listen 0.0.0.0:3100
 ```
 
-On first run, the server creates an `admin` user with a random one-time password printed once to the server log. Open the dashboard in your browser to log in and manage users.
+`--data-dir` (default `/data`) holds the at-rest secrets (`jwt_secret.bin`, `db_secret.bin`), release assets, doc assets, website assets, and workspace files. Every integration (SMTP, Stripe, Dropbox, S3, ...) is configured through environment variables or the matching `--flag`; see [Configure environment variables](#3a-configure-environment-variables) for the full list. `--trusted-signing-ca <pem>` pins a code-signing CA: licenses with `require_signed_binary` then only activate when the client proves its signing certificate chains to that CA. Without the flag such licenses fail closed (503).
 
-The remainder of this section documents the licensing API specifically. See [Workspaces](#workspaces--config-revisions), [Releases](#releases), [Documentation Knowledge Base](#documentation-knowledge-base), [Public Website](#public-website), [Shop](#shop), and [Public Contact Form](#public-contact-form) for the other modules.
+On first run, the server creates an `admin` owner account with a random one-time password printed once to the server log (`SUSI_SEED_ADMIN_PASSWORD` overrides it for test rigs). Open the dashboard, log in, change the password, and enable TOTP - admin endpoints refuse browser sessions without it.
+
+`susi-server decrypt-backup <archive.tar.gz.enc> --key <hex>` decrypts a Dropbox backup archive (see [Dropbox Backups](#dropbox-backups)).
+
+The remainder of this section documents the licensing API and authentication. See [Workspaces](#workspaces), [Products & Releases](#products--releases), [Documentation Knowledge Base](#documentation-knowledge-base), [Public Websites](#public-websites), [Newsletter](#newsletter), [Email Templates](#email-templates), [Shop](#shop), [Public Contact Form](#public-contact-form), [Audit Log & Data Protection](#audit-log--data-protection), and [Dropbox Backups](#dropbox-backups) for the other modules.
 
 ### Licensing API endpoints
 
@@ -561,72 +569,110 @@ The remainder of this section documents the licensing API specifically. See [Wor
 |---|---|---|---|
 | `POST` | `/api/v1/activate` | Public | Activate a license on a machine (grants/renews lease) |
 | `POST` | `/api/v1/verify` | Public | Verify a license and renew its lease (heartbeat) |
-| `POST` | `/api/v1/deactivate` | Public | Remove a machine activation |
-| `GET` | `/api/v1/licenses/{key}/status` | Public | Lightweight status probe for a license key |
-| `GET` | `/api/v1/licenses` | JWT | List all licenses |
-| `POST` | `/api/v1/licenses` | JWT | Create a new license |
-| `GET` / `PUT` / `DELETE` | `/api/v1/licenses/{key}` | JWT | Get / update / delete a license |
-| `POST` | `/api/v1/licenses/{key}/revoke` | JWT | Revoke a license |
-| `POST` | `/api/v1/licenses/{key}/export` | JWT | Export a signed license file |
-| `POST` | `/api/v1/licenses/{key}/export-token` | JWT | Export a signed license file bound to a USB token |
-| `DELETE` | `/api/v1/licenses/{key}/machines/{code}` | JWT | Deactivate a machine |
-| `DELETE` | `/api/v1/licenses/{key}/machines/{code}/tombstone` | JWT | Clear the deactivation tombstone (allow re-activation) |
+| `POST` | `/api/v1/deactivate` | Public | Remove a machine activation (no tombstone) |
+| `GET` | `/api/v1/licenses/{key}/status` | Public | Lightweight status probe; the key in the path is the credential |
+| `GET` | `/api/v1/features` | Public | Static list of feature flags with labels |
+| `GET` | `/api/v1/licenses` | Admin | List all licenses, including assigned portal users |
+| `POST` | `/api/v1/licenses` | Admin | Create a license (`customer`, `product`, `days` / `expires` / `perpetual`, `features`, `max_machines`, `lease_duration_hours`, `lease_grace_hours`, `require_signed_binary`, `assign_to[]`) |
+| `GET` / `PUT` / `DELETE` | `/api/v1/licenses/{key}` | Admin | Get / update / delete. `PUT` takes any subset of `customer`, `product`, `expires` (`YYYY-MM-DD` or `"perpetual"`), `features`, `max_machines`, `lease_duration_hours`, `lease_grace_hours`, `require_signed_binary` |
+| `POST` | `/api/v1/licenses/{key}/revoke` | Admin | Revoke a license |
+| `POST` | `/api/v1/licenses/{key}/export` | Admin | Export a signed license file for a machine code |
+| `POST` | `/api/v1/licenses/{key}/export-token` | Admin | Export a signed license file bound to a USB token |
+| `POST` / `DELETE` | `/api/v1/licenses/{key}/users[/{username}]` | Admin | Assign / unassign a user account (customer portal access) |
+| `DELETE` | `/api/v1/licenses/{key}/machines/{code}` | Admin | Deactivate a machine (24 h re-activation tombstone) |
+| `DELETE` | `/api/v1/licenses/{key}/machines/{code}/tombstone` | Admin | Clear the tombstone (allow immediate re-activation) |
+| `GET` | `/api/v1/my/licenses` | Any user | Licenses assigned to the caller |
+| `POST` | `/api/v1/my/licenses/{key}/export` | Any user | Self-serve offline activation file for an assigned license |
+| `DELETE` | `/api/v1/my/licenses/{key}/machines/{code}` | Any user | Self-serve seat release (24 h tombstone) |
 | `GET` | `/health` | None | Health check |
 
-Admin endpoints require JWT authentication (see below).
+The public client endpoints share a per-IP limit of 60 requests per minute. "Admin" means a session JWT (with TOTP enabled) or an API token of an admin or owner account.
 
 ### Web Dashboard
 
-The server includes a built-in web dashboard at the root URL (`http://localhost:3100/`). It provides a browser-based interface for managing licenses, viewing activations, and administering users - no API calls required.
+The server includes a built-in web dashboard at the root URL (`http://localhost:3100/`). Sections: Licenses, My Licenses (customer portal), Products, Releases, Workspaces (files, docs, configs, tickets), Tickets (cross-workspace admin queue), Website (sites, pages, posts, assets, redirects, settings), Newsletter, Shop, Emails (template editor), Users, Audit, and Backups. The account menu covers profile, sessions, 2FA, and API tokens. Non-admin users only see the customer-facing sections they have access to.
+
+Each public site's admin chrome has a Dashboard button, and the dashboard hands a session to the site's own origin through a single-use SSO ticket (`/api/v1/auth/sso-ticket` + `/api/v1/auth/sso-redeem`, 120 s TTL), so editing a site never requires a second login.
 
 ### Authentication & Multi-User Support
 
 The server uses JWT-based authentication with multi-user support. Each team member gets their own account with independent credentials and optional 2FA.
 
-**Default credentials** - on first run, the server seeds an `admin` user with a random one-time password printed once to the server log. This must be changed on first login.
+**Default credentials** - on first run, the server seeds an `admin` owner with a random one-time password printed once to the server log. This must be changed on first login.
 
 #### Auth Endpoints
 
 | Method | Endpoint | Auth | Description |
 |---|---|---|---|
-| `POST` | `/api/v1/auth/login` | None | Login with username + password (+ TOTP if enabled) |
+| `POST` | `/api/v1/auth/login` | None | Login with username or email + password (+ TOTP if enabled); new devices get an emailed sign-in code |
 | `POST` | `/api/v1/auth/signin-code` | None | Exchange an emailed 6-digit sign-in code for a JWT |
+| `POST` | `/api/v1/auth/request-code` | None | Re-request a sign-in code |
+| `POST` | `/api/v1/auth/magic-login` | None | Redeem an invitation link (non-admin accounts only) |
 | `POST` | `/api/v1/auth/forgot-password` | None | Request a password-reset email (accepts username or email) |
-| `POST` | `/api/v1/auth/reset-password` | None | Submit a new password against a reset token |
-| `GET` | `/api/v1/auth/status` | JWT | Check session status, get username and 2FA/password state |
-| `POST` | `/api/v1/auth/change-password` | JWT | Change own password |
-| `POST` | `/api/v1/auth/setup-2fa` | JWT | Generate TOTP secret and QR code |
-| `POST` | `/api/v1/auth/verify-2fa` | JWT | Verify TOTP code to enable 2FA |
-| `POST` | `/api/v1/auth/disable-2fa` | JWT | Disable 2FA (requires valid TOTP code) |
+| `POST` | `/api/v1/auth/reset-password` | None | Submit a new password against a reset or invitation token |
+| `POST` | `/api/v1/auth/sso-ticket` / `sso-redeem` | JWT / None | Dashboard-to-site session handoff |
+| `GET` | `/api/v1/auth/status` | JWT | Session status: role, email, name, 2FA state, backup codes left |
+| `POST` | `/api/v1/auth/logout` | JWT | Revoke the current session server-side |
+| `POST` | `/api/v1/auth/change-password` | JWT | Change own password (revokes all other sessions and API tokens) |
+| `POST` | `/api/v1/auth/setup-2fa` / `verify-2fa` / `disable-2fa` | JWT | TOTP enrolment (returns 8 backup codes) and removal |
 | `POST` | `/api/v1/auth/regenerate-backup-codes` | JWT | Issue a fresh set of one-shot backup codes |
-| `PUT` | `/api/v1/auth/me/email` | JWT | Set own contact email (used for sign-in code / password reset) |
-| `GET` | `/api/v1/auth/me/devices` | JWT | List trusted devices |
-| `DELETE` | `/api/v1/auth/me/devices/{fp}` | JWT | Revoke a trusted device |
-| `POST` | `/api/v1/auth/api-tokens` | JWT | Create a personal API token (`susi_pat_…`) |
-| `GET` | `/api/v1/auth/api-tokens` | JWT | List own API tokens |
-| `DELETE` | `/api/v1/auth/api-tokens/{id}` | JWT | Revoke own API token |
-| `GET` | `/api/v1/auth/api-tokens/all` | JWT (admin) | List every user's API tokens |
-| `GET` / `POST` | `/api/v1/auth/users` | JWT (admin) | List / create users |
-| `DELETE` | `/api/v1/auth/users/{username}` | JWT (admin) | Delete a user (cannot delete self or last user) |
-| `PUT` | `/api/v1/auth/users/{username}/email` | JWT (admin) | Set a user's email |
-| `POST` | `/api/v1/auth/users/{username}/rename` | JWT (admin) | Rename a user |
-| `POST` | `/api/v1/auth/users/{username}/reset-password` | JWT (admin) | Force-reset a user's password |
+| `PUT` | `/api/v1/auth/me/{email,name,username,newsletter}` | JWT | Edit own profile and newsletter consent |
+| `GET` | `/api/v1/auth/me/export` | JWT | Download everything stored about the caller as JSON |
+| `DELETE` | `/api/v1/auth/me` | JWT + password | Delete own account (refused for the last owner) |
+| `GET` / `DELETE` | `/api/v1/auth/me/devices[/{fp}]` | JWT | List / revoke trusted devices |
+| `GET` / `DELETE` | `/api/v1/auth/me/sessions[/{id}]` | JWT | List / revoke sessions; `POST .../sessions/revoke-others` drops all but the current one |
+| `POST` / `GET` / `DELETE` | `/api/v1/auth/api-tokens[/{id}]` | JWT | Create (`susi_pat_...`, shown once, 365-day expiry) / list / revoke own API tokens |
+| `GET` / `DELETE` | `/api/v1/auth/api-tokens/all[/{id}]` | Admin | List / revoke every user's API tokens |
+| `POST` | `/api/v1/auth/api-tokens[/all]/{id}/delete` | JWT / Admin | Permanently delete a revoked or expired API token (own / any user's) |
+| `GET` / `POST` | `/api/v1/auth/users` | Admin | List / create users (explicit password or invitation email) |
+| `DELETE` | `/api/v1/auth/users/{username}` | Admin | Delete a user (cannot delete self or last user) |
+| `PUT` | `/api/v1/auth/users/{username}/{email,profile,role}` | Admin | Set a user's email, name, or role (`user` / `admin` / `owner`) |
+| `POST` | `/api/v1/auth/users/{username}/{rename,reset-password,resend-invitation}` | Admin | Rename across every table, force a password reset, re-send the invitation |
+| `PUT` / `POST` | `/api/v1/auth/users/{username}/newsletter`, `/api/v1/auth/newsletter-bulk` | Owner | Set newsletter consent for one or up to 5000 accounts |
+| `GET` | `/api/v1/audit` | Admin | Audit log, newest first (`?limit=` up to 500, `?before=` cursor) |
 
 #### Security
 
 - Three roles, each a superset of the one below: **user** (customer portal),
-  **admin** (full site administration), **owner** (admin plus the newsletter and
-  the ability to grant or revoke ownership). Ownership is closed - only an owner
-  can create one, and only an owner can administer an owner account (change its
-  role, reset its password, repoint its email, or delete it), since any of those
-  is a route to taking it over. Bootstrap with `SUSI_OWNER_EMAILS`.
-- Passwords are hashed with **Argon2id**
-- Sessions use **HS256 JWT tokens** with 24-hour expiry
-- 2FA uses **TOTP** with one-shot **backup codes**, plus **trusted-device fingerprints** so a known browser doesn't re-prompt every login
-- **Emailed sign-in code** is required the first time a user signs in from a new device - a 6-digit code is sent to the registered email (15-minute TTL); enabled when SMTP is configured
-- **Password reset** sends a time-limited token to the user's email
-- New users and password resets force a password change on next login
-- Login, shop checkout, Stripe webhook, and the contact form are each rate-limited per source IP (sliding window). When fronted by the on-host nginx proxy, `X-Forwarded-For` is honoured so the limiter sees the real client
+  **admin** (full site administration), **owner** (admin plus the newsletter,
+  site creation, and the ability to grant or revoke ownership). Ownership is
+  closed - only an owner can create one, and only an owner can administer an
+  owner account (change its role, reset its password, repoint its email, or
+  delete it), since any of those is a route to taking it over. Bootstrap with
+  `SUSI_OWNER_EMAILS`.
+- Passwords are hashed with **Argon2id** (off the async runtime)
+- Sessions use **HS256 JWT tokens** with a 30-day lifetime and a 7-day idle
+  timeout. Every session has a server-side row, so logout, "revoke other
+  sessions", password changes, and admin resets kill tokens immediately
+- 2FA uses **TOTP** (replay-protected) with one-shot **backup codes**, plus
+  **trusted-device fingerprints** (30-day trust) so a known browser doesn't
+  re-prompt for the emailed code. Admins and owners must enable TOTP before any
+  admin endpoint accepts their browser session
+- **Emailed sign-in code** is required the first time a user signs in from a
+  new device - a 6-digit code is sent to the registered email (15-minute TTL);
+  enabled when SMTP and `SUSI_MAGIC_LINK_BASE_URL` are configured. Five wrong
+  guesses invalidate every outstanding code for the account
+- **Per-account login lockout** after 8 failed password/TOTP attempts in 15
+  minutes, checked before the password hash is even computed
+- **Invitations** - new users can be created without a password; they receive
+  a 7-day invitation link and choose their own. Password reset uses the same
+  link flow with a 30-minute token. New users and admin resets force a password
+  change on next login
+- **Per-IP sliding-window rate limits**: 10/min on every login-adjacent
+  endpoint, 60/min on the license client API, 10/min on shop checkout, 300/min
+  on the Stripe webhook, 5/hour on newsletter signup, 3/hour on the contact
+  form. `X-Forwarded-For` / `X-Real-IP` are honoured only from trusted proxy
+  peers (loopback and private IPv4 ranges by default, or the CIDRs in
+  `SUSI_TRUSTED_PROXIES`)
+- **Default-deny API middleware**: every `/api/v1/...` request needs a valid
+  principal unless the method + path is on an explicit public allow-list
+- **Security headers** on every response: a CSP (self plus the analytics,
+  Turnstile, and video-embed hosts the sites use), `X-Frame-Options: DENY`,
+  `nosniff`, `Referrer-Policy`, `Permissions-Policy`, and
+  `Cross-Origin-Opener-Policy`. HSTS is added by nginx
+- TOTP secrets, Stripe keys entered in the dashboard, the Gmail and Dropbox
+  refresh tokens, and workspace federation secrets are sealed at rest with
+  `db_secret.bin`
 
 #### If email breaks, you can be locked out
 
@@ -650,9 +696,9 @@ Two behaviours worth knowing:
   It does not pretend to have sent anything.
 
 **Prepare a break-glass credential before you need it.** Mint an admin API
-token (Dashboard -> Actions -> API Tokens) and keep it in a password manager,
-off the server. API tokens skip the trusted-device gate, the password-change
-gate and TOTP, so one turns a lockout into a `curl` call.
+token (Dashboard -> account menu -> API Tokens) and keep it in a password
+manager, off the server. API tokens skip the trusted-device gate, the
+password-change gate and TOTP, so one turns a lockout into a `curl` call.
 
 **Recovery without a token:** on the host, clear the SMTP host in
 `/opt/susi/.env` and restart. That puts the server back on the bootstrap path
@@ -666,15 +712,16 @@ cd /opt/susi && docker compose up -d
 # `docker compose up -d` once more.
 ```
 
-#### API tokens (`susi_pat_…`) and 2FA
+#### API tokens (`susi_pat_...`) and 2FA
 
 API tokens are long-lived bearers for headless clients (CI, scripts) and **bypass interactive 2FA**. The trade-off is deliberate: requiring a TOTP seed alongside an API token in CI raises attack surface without raising the bar - anyone with access to the bearer would also have access to the seed.
 
 Operational consequences:
 
 - Treat each API token as equivalent to a password + 2FA. Store it in a secret manager, never check it into git.
-- Tokens are SHA-256-hashed at rest and revocable from the dashboard. Rotate them on any suspected compromise and on every team-member departure.
-- For day-to-day admin work in the browser, use a JWT login - TOTP is enforced on every admin write that uses a JWT principal.
+- Tokens expire after 365 days, are SHA-256-hashed at rest, and are revocable from the dashboard. Rotate them on any suspected compromise and on every team-member departure. A password change or admin reset revokes all of the account's tokens.
+- Tokens cannot mint or revoke other tokens, list or revoke sessions, or delete the account - those need a browser session.
+- For day-to-day admin work in the browser, use a JWT login - TOTP is enforced on every admin endpoint that uses a JWT principal.
 - Limit API tokens to the smallest set of users that need them, and audit `/api/v1/auth/api-tokens/all` periodically (admin-only).
 
 ### Activate a license
@@ -685,7 +732,7 @@ curl -X POST http://localhost:3100/api/v1/activate \
   -d '{"license_key": "XXXXX-XXXXX-XXXXX-XXXXX", "machine_code": "a1b2c3...", "friendly_name": "Server-1"}'
 ```
 
-Returns a `SignedLicense` JSON that can be saved to disk for offline verification. The response includes a `lease_expires` timestamp - the client must call activate or verify again before this time to renew the lease.
+Returns a `SignedLicense` JSON that can be saved to disk for offline verification. The response includes a `lease_expires` timestamp - the client must call activate or verify again before this time to renew the lease. When the license requires a signed binary and the server pins a CA, the request must also carry `signing_cert_chain` (base64 DER certificates, leaf first).
 
 ### Create a license via API
 
@@ -789,7 +836,9 @@ Customer tries to run on both:
 | `--lease-duration` | `72` (3 days) | Lease duration in hours. `0` disables lease enforcement. |
 | `--lease-grace` | `24` (1 day) | Grace period in hours after lease expiry. The software continues working during the grace period but should attempt to renew urgently. |
 
-Lease parameters are set per-license at creation time, so different customers can have different lease windows.
+Lease parameters are set per license at creation time and can be changed later on an existing license (dashboard edit, or `PUT /api/v1/licenses/{key}` with `lease_duration_hours` / `lease_grace_hours`). The new values apply from the next activation or heartbeat.
+
+A machine whose lease lapsed stays listed on the license and renews on its next `/verify` as long as a seat is free. A machine an admin removed is gone from the license and gets 403 until it activates again (after the 24 h tombstone).
 
 ### Client-Side States
 
@@ -820,49 +869,45 @@ susi-admin revoke --key "XXXXX-XXXXX-XXXXX-XXXXX"
 susi-admin deactivate --key "XXXXX-XXXXX-XXXXX-XXXXX" --machine-code "a1b2c3..."
 ```
 
-## Workspaces & Config Revisions
+## Workspaces
 
-Workspaces are the unit of grouping for everything customer-facing: licenses, files, docs, and config revisions can all be scoped to a workspace. Each workspace has a `name`, `product`, optional `description`, a `created_by` user, and a member list with one of three roles:
+Workspaces are the unit of grouping for everything customer-facing: a workspace has a `name`, `product`, optional `description`, a `created_by` user, and a flat member list. Membership grants full read and write access to everything inside the workspace; creating, deleting, re-attributing, and managing members is reserved for site admins. Non-admin users only see workspaces they belong to. The list endpoint reports the caller's relationship to each workspace as `role`: `owner` (creator), `member`, or `admin` (a site admin looking at a workspace they are not a member of).
 
-| Role | Read | Edit pages / configs | Manage members | Delete workspace |
-|---|---|---|---|---|
-| `viewer` | yes | no | no | no |
-| `editor` | yes | yes | no | no |
-| `owner` | yes | yes | yes | no (admin-only) |
-
-Site admins can create, rename, re-attribute, and delete workspaces; non-admin members only see workspaces they belong to.
+| Method | Endpoint | Auth | Description |
+|---|---|---|---|
+| `GET` / `POST` | `/api/v1/workspaces` | JWT / admin | List own (all for admins) / create |
+| `GET` / `PUT` / `DELETE` | `/api/v1/workspaces/{id}` | member / member / admin | Read with members / update name, product, description (`created_by` is admin-only) / delete incl. files on disk |
+| `POST` / `DELETE` | `/api/v1/workspaces/{id}/members[/{username}]` | admin | Add / remove a member |
+| `GET` | `/api/v1/workspaces/{id}/releases` | member | Back-compat shim, always empty - releases are global per product |
 
 ### Config revisions
 
-Each workspace has an append-only history of JSON configs. Push a new revision and clients can fetch either a specific id or `…/configs/latest`. Useful for shipping operating parameters to deployed installations without rebuilding the binary.
+Each workspace has an append-only history of JSON configs. Push a new revision and clients can fetch either a specific id or `.../configs/latest`. Useful for shipping operating parameters to deployed installations without rebuilding the binary.
 
 | Method | Endpoint | Auth | Description |
 |---|---|---|---|
-| `GET` / `POST` | `/api/v1/workspaces` | JWT | List own / create (admin) |
-| `GET` / `PUT` / `DELETE` | `/api/v1/workspaces/{id}` | JWT | Read / update / delete |
-| `POST` | `/api/v1/workspaces/{id}/members` | JWT (admin) | Add a member |
-| `DELETE` | `/api/v1/workspaces/{id}/members/{username}` | JWT (admin) | Remove a member |
-| `GET` / `POST` | `/api/v1/workspaces/{id}/configs` | JWT | List / push a config revision |
-| `GET` | `/api/v1/workspaces/{id}/configs/latest` | JWT | Fetch the most recent revision |
-| `GET` / `PUT` / `DELETE` | `/api/v1/workspaces/{id}/configs/{config_id}` | JWT | Read / update metadata / delete |
+| `GET` / `POST` | `/api/v1/workspaces/{id}/configs` | member | List / push a revision (body must be valid JSON) |
+| `GET` | `/api/v1/workspaces/{id}/configs/latest` | member | Fetch the most recent revision |
+| `GET` / `PUT` / `DELETE` | `/api/v1/workspaces/{id}/configs/{config_id}` | member | Read / update metadata or body / delete |
 
-`susi_client::workspace` provides a typed Rust client (sync + async) over these endpoints.
+`susi_client::workspace` provides a typed Rust client (sync + async) over the workspace and config endpoints.
 
-### Workspace files & docs
+### Files & docs
 
-Each workspace has a flat, member-writable file share (bytes on disk under the data dir) and its own flat documentation page tree, both independent of the release concept. The `?auth=` query parameter carries the JWT where browsers can't set an Authorization header (`<a href>` downloads, `<img>` loads).
+Each workspace has a flat, member-writable file share (bytes on disk under `{data_dir}/workspaces/{id}/files`) and its own flat documentation page tree, edited in the same viewer as product docs (`/docs?workspace={id}`). Browsers that cannot set an `Authorization` header download files through a 60-second single-file ticket.
 
 | Method | Endpoint | Auth | Description |
 |---|---|---|---|
-| `GET` / `POST` | `/api/v1/workspaces/{id}/files` | JWT (member) | List / upload files (multipart, up to 500 MB) |
-| `GET` / `DELETE` | `/api/v1/workspaces/{id}/files/{file}` | JWT (member) | Download / delete a file |
-| `GET` | `/api/v1/workspaces/{id}/docs/pages` | JWT (member) | List pages + assets |
-| `GET` / `PUT` / `DELETE` | `/api/v1/workspaces/{id}/docs/pages/{slug}` | JWT (member) | Read / upsert / delete a page |
-| `POST` | `/api/v1/workspaces/{id}/docs/pages/{slug}/rename` | JWT (member) | Rename a page (cascades to children) |
-| `POST` | `/api/v1/workspaces/{id}/docs/assets` | JWT (member) | Upload a doc asset (up to 100 MB) |
-| `GET` / `DELETE` | `/api/v1/workspaces/{id}/docs/assets/{file}` | JWT (member) | Fetch / delete a doc asset |
+| `GET` / `POST` | `/api/v1/workspaces/{id}/files` | member | List / upload files (multipart, repeated `file`, up to 500 MB; re-upload overwrites) |
+| `GET` / `DELETE` | `/api/v1/workspaces/{id}/files/{file}` | member or `?ticket=` | Download / delete a file |
+| `POST` | `/api/v1/workspaces/{id}/files/{file}/ticket` | member | Mint a 60 s download ticket |
+| `GET` | `/api/v1/workspaces/{id}/docs/pages` | member | List pages + assets |
+| `GET` / `PUT` / `DELETE` | `/api/v1/workspaces/{id}/docs/pages/{slug}` | member | Read / upsert / delete a page |
+| `POST` | `/api/v1/workspaces/{id}/docs/pages/{slug}/rename` | member | Rename a page |
+| `POST` | `/api/v1/workspaces/{id}/docs/assets` | member | Upload a doc asset (up to 100 MB) |
+| `GET` / `DELETE` | `/api/v1/workspaces/{id}/docs/assets/{file}` | member | Fetch / delete a doc asset |
 
-### Workspace tickets
+### Tickets
 
 The shared record of customer-reported problems, scoped to a workspace so a report sits next to the config revisions, recordings and files that reproduce it. Status is `open`, `in_progress` or `closed`.
 
@@ -872,116 +917,232 @@ Ticket events send **no email**. The notification path (workspace members plus s
 
 | Method | Endpoint | Auth | Description |
 |---|---|---|---|
-| `GET` / `POST` | `/api/v1/workspaces/{id}/tickets` | JWT (member) | List / open a ticket |
-| `GET` / `PUT` / `DELETE` | `/api/v1/workspaces/{id}/tickets/{tid}` | JWT (member) | Read with comments / update / delete |
-| `POST` | `/api/v1/workspaces/{id}/tickets/{tid}/comments` | JWT (member) | Add a comment |
-| `DELETE` | `/api/v1/workspaces/{id}/tickets/{tid}/comments/{cid}` | JWT (member) | Delete a comment |
-| `GET` | `/api/v1/admin/tickets` | JWT (admin) | Every workspace's tickets, `?status=` optional |
+| `GET` / `POST` | `/api/v1/workspaces/{id}/tickets` | member | List (open first) / open a ticket (title up to 200 chars, body up to 20 000) |
+| `GET` / `PUT` / `DELETE` | `/api/v1/workspaces/{id}/tickets/{tid}` | member (delete: author or admin) | Read with comments / update title, body, status / delete |
+| `POST` | `/api/v1/workspaces/{id}/tickets/{tid}/comments` | member | Add a comment |
+| `DELETE` | `/api/v1/workspaces/{id}/tickets/{tid}/comments/{cid}` | author or admin | Delete a comment |
+| `GET` | `/api/v1/admin/tickets` | admin | Every workspace's tickets, `?status=` optional |
 
-## Releases
+### Federation, graph & recordings
 
-Upload signed binaries (installers, archives, etc.) and let licensed clients fetch them through an authenticated update channel. Releases are global per product; per-customer builds belong in workspace files instead.
+These endpoints back the FusionHub data plane: hubs in a workspace share one symmetric channel secret, discover each other through a peer registry, and synchronise one node graph.
+
+- **Federation secret** - 32 random bytes, created on first fetch and stored sealed at rest. Rotating it forces every connected hub to re-fetch and rekey. The response also carries `relay_url` (`SUSI_RELAY_URL`, empty when no relay is configured) and the current `graph_version` so hubs only pull the graph body when behind.
+- **Peers** - idempotent on `(workspace, host_id)`; URLs must be `ws`, `wss`, `http`, or `https` without embedded credentials. Private-range hosts are allowed on purpose for LAN federation.
+- **Graph** - one JSON document per workspace with an optimistic-lock `graph_version`; a `PUT` with a stale `expected_version` returns 409 carrying the current version.
+- **Recordings** - two-phase S3 upload. Susi presigns a 15-minute `PUT` URL under `workspaces/{id}/recordings/`, the client uploads directly to S3, then calls `complete`; downloads are 5-minute presigned `GET`s. Bytes never pass through susi. Requires `SUSI_S3_BUCKET` and `SUSI_S3_REGION` plus AWS credentials from the default provider chain; otherwise these endpoints answer 503.
 
 | Method | Endpoint | Auth | Description |
 |---|---|---|---|
-| `GET` | `/api/v1/updates/releases` | License key | List releases the caller can download |
-| `GET` | `/api/v1/updates/download/{tag}/{asset}` | License key, JWT, or `?ticket=` | Stream a release asset to the caller |
-| `POST` | `/api/v1/updates/download-ticket` | License key or JWT | Mint a 60 s single-asset ticket for the download URL |
-| `GET` | `/api/v1/releases` | JWT | List all releases (admin view) |
-| `POST` | `/api/v1/releases` | JWT | Upload a new release (multipart, up to 500 MB) |
-| `PUT` / `DELETE` | `/api/v1/releases/{tag}` | JWT | Update metadata / delete |
+| `GET` | `/api/v1/workspaces/{id}/federation` | member | Channel secret, peers, relay URL, graph version |
+| `POST` | `/api/v1/workspaces/{id}/federation/rotate` | member | Mint a new channel secret |
+| `POST` / `DELETE` | `/api/v1/workspaces/{id}/peers[/{host_id}]` | member | Register / remove a peer |
+| `GET` / `PUT` | `/api/v1/workspaces/{id}/graph` | member | Fetch / replace the shared graph (`{expected_version, config}`) |
+| `GET` / `POST` | `/api/v1/workspaces/{id}/recordings` | member | List / start a recording upload (returns presigned `upload_url`) |
+| `POST` | `/api/v1/workspaces/{id}/recordings/{rid}/complete` | member | Confirm the upload landed (409 until the object exists) |
+| `GET` / `DELETE` | `/api/v1/workspaces/{id}/recordings/{rid}[/download]` | member | Presigned download URL / delete |
 
-When a binary upload creates a new release, the previous release's user-edited doc set is **seeded forward** so hand-authored docs carry over automatically.
+## Products & Releases
+
+Products are the catalog that releases and doc sets hang off. The default product is `fusionhub`. A product flagged `download_public` serves its installers to anyone, without a license or login, which is how the public download buttons on the marketing site work; everything else stays gated.
+
+| Method | Endpoint | Auth | Description |
+|---|---|---|---|
+| `GET` | `/api/v1/products` | None | Catalog with `download_public` flags |
+| `POST` | `/api/v1/products` | admin | Create (`slug`, `name`, `description`, `ord`, `download_public`) |
+| `PUT` / `DELETE` | `/api/v1/products/{product}` | admin | Update (slug immutable) / delete (refused for the default product or while releases exist) |
+| `GET` | `/api/v1/updates/releases?product=` | License key, JWT, or public product | List releases + assets the caller can download |
+| `POST` | `/api/v1/updates/download-ticket` | License key or JWT | Mint a 60 s single-asset ticket for the download URL |
+| `GET` | `/api/v1/updates/download/{tag}/{asset}?product=` | License key, JWT, `?ticket=`, or public product | Stream a release asset |
+| `GET` | `/download/{product}/{platform}` | None | 302 to the newest installer for `windows`, `macos`, or `linux` (public products only) |
+| `GET` / `POST` | `/api/v1/releases` | admin | List all releases / upload (multipart `tag`, `product`, `name`, `body`, `prerelease`, repeated `file`; up to 500 MB) |
+| `PUT` / `DELETE` | `/api/v1/releases/{tag}?product=` | admin | Update metadata / delete release and its files |
+| `POST` | `/api/v1/releases/{tag}/assets/{file}/replace` | admin | Replace one asset in place |
+| `DELETE` | `/api/v1/releases/{tag}/assets/{file}?product=` | admin | Delete one asset |
+
+Download authorization for non-public products: a license key only entitles its own product; a logged-in user needs to be a site admin, hold an assigned license for that product, or belong to a workspace whose `product` matches. Releases are global per product; per-customer builds belong in workspace files. Re-uploading an existing tag upserts, so a CI retry keeps the doc pages that were already attached to the release.
+
+The `/download/{product}/{platform}` redirect picks by file extension (`.msi`/`.exe`, `.dmg`/`.pkg`, `.appimage`/`.deb`/`.rpm`), prefers the newest stable release, and falls back to the newest prerelease that shipped that platform - so a site can link to it once and never edit the link per release.
+
+When an upload creates a new release, the previous release's user-edited doc set is **seeded forward** so hand-authored docs carry over automatically.
 
 ## Documentation Knowledge Base
 
-The `/docs` page is a per-release documentation site with an in-browser editor (EasyMDE, vendored). Each release has its own collection of pages and assets, addressed by tag. Workspace documentation uses the same viewer/editor (`/docs?workspace={id}`) but is a single flat page tree per workspace (see above).
+The `/docs` page is a per-release documentation site with an in-browser editor (EasyMDE, vendored). Each product has its own releases, and each release its own collection of pages and assets, addressed by tag. Workspace documentation uses the same viewer/editor (`/docs?workspace={id}`) but is a single flat page tree per workspace (see above).
 
-Pages carry an **origin tag** of either `pipeline` (generated from a build pipeline / bulk import) or `user` (hand-edited in the dashboard). Pipeline pages are replaced wholesale on the next bulk import; user pages are preserved across imports and copied forward into newly-created releases.
+Pages carry an **origin tag** of either `pipeline` (generated from a build pipeline / bulk import) or `user` (hand-edited in the dashboard). Pipeline pages are replaced wholesale on the next bulk import; user pages are preserved across imports and copied forward into newly created releases. New pages start as hidden drafts and go live with a Publish step; hidden pages are invisible to anonymous readers and excluded from the sitemap and `llms` files.
+
+Every doc page is also server-rendered for crawlers and direct links: `/docs/{slug}` resolves against the latest public release, `/docs/{tag}/{slug}` pins a release, and `/docs/{slug}/{heading}` deep-links a section. `/llms-full.txt` concatenates the whole latest release as one Markdown document.
 
 | Method | Endpoint | Auth | Description |
 |---|---|---|---|
-| `GET` | `/docs` | None | HTML viewer + editor |
-| `GET` | `/api/v1/docs/releases` | None | List doc releases |
-| `GET` | `/api/v1/docs/releases/latest` | None | Latest release |
-| `GET` | `/api/v1/docs/{tag}/pages` | None | List pages in a release |
-| `GET` | `/api/v1/docs/{tag}/pages/{slug}` | None | Get a page (markdown + rendered HTML) |
-| `GET` | `/api/v1/docs/{tag}/assets/{file}` | None | Fetch an asset |
-| `PUT` / `DELETE` | `/api/v1/docs/{tag}/pages/{slug}` | JWT | Upsert / delete a page |
-| `POST` | `/api/v1/docs/{tag}/pages/{slug}/rename` | JWT | Rename a slug |
-| `POST` | `/api/v1/docs/{tag}/import` | JWT | Bulk import a tarball of pages + assets |
-| `POST` / `DELETE` | `/api/v1/docs/{tag}/assets[/{file}]` | JWT | Upload / delete an asset |
+| `GET` | `/docs`, `/docs/{slug}`, `/docs/{tag}/{slug}` | None | Viewer + editor shell, server-rendered with SEO meta |
+| `GET` | `/api/v1/products/{product}/docs/releases[/latest]` | None | Doc releases of a product (only releases with pages) |
+| `GET` | `/api/v1/products/{product}/docs/{tag}/pages[/{slug}]` | None | List pages + assets / get a page (markdown + rendered HTML) |
+| `PUT` / `DELETE` | `/api/v1/products/{product}/docs/{tag}/pages/{slug}` | admin | Upsert (optional `hidden`) / delete a page |
+| `POST` | `/api/v1/products/{product}/docs/{tag}/pages/{slug}/rename` | admin | Rename a slug (cascades to children) |
+| `POST` | `/api/v1/products/{product}/docs/{tag}/import` | admin | Bulk import: multipart `release_name`, `manifest` (JSON keyed by slug: `title`, `parent_slug`, `ord`), repeated `page` (`<slug>.md`) and `asset` fields |
+| `POST` / `GET` / `DELETE` | `/api/v1/products/{product}/docs/{tag}/assets[/{file}]` | admin / None / admin | Upload / fetch / delete an asset |
+| `GET` | `/llms-full.txt` | None | Latest public release as one Markdown file |
+
+The legacy `/api/v1/docs/...` routes (same shapes, no product segment) are a compatibility shim for the default product. `scripts/migrate_lpms_docs.py` shows the import format end to end: it fetches a Confluence space, converts it to Markdown, and bulk-imports it as a product.
 
 > **Editing rule:** never `PUT` a full page from outside the dashboard - fetch first, then send a targeted patch to `body_md`. Wholesale overwrites trash user edits.
 
-## Public Website
+## Public Websites
 
-A small CMS that powers the marketing site at `/site`. Pages are Markdown, edited through the dashboard, and served with per-page SEO meta. There's no release concept here - all content is hand-authored.
+A small CMS that serves any number of public marketing sites from one server. The site is resolved from the request's `Host` header (exact match against each site's host list; `?site=` overrides for previews; unknown hosts fall back to the default site `xikaku`). Pages are Markdown, edited in the site's own admin chrome or the dashboard, and server-rendered with per-page SEO meta and JSON-LD. There is no release concept here - all content is hand-authored.
+
+### Sites
+
+The site registry is seeded from two built-in definitions (`xikaku` and `lpr`) on first boot and then managed from the dashboard. Each site definition holds: `name`, `tagline`, `hosts` (bare hostnames, including the staging name), `public_base` (canonical `https://` origin used for every canonical, sitemap, and RSS URL), `contact_email`, `org_legal_name`, `person_name` (non-empty switches the JSON-LD entity from Organization to Person), `addr_locality` / `addr_country`, `og_image_url`, `social_links`, `area_served`, `llms_blurb`, feature flags `has_shop`, `has_newsletter`, `has_blog`, `show_updated`, and `langs` (extra content languages served under `/{lang}/`).
+
+Per-site settings (dashboard Website -> Site Settings) cover analytics (`google_analytics_id`, `google_ads_id` + conversion labels, `reddit_pixel_id`), `nav_structure` (JSON groups of page slugs, `__blog__` / `__shop__` pseudo-entries, relabeled pages, and external links), branding (`logo_image`, `logo_dark_image`, `logo_height`, `favicon_image`, `bg_image`, `bg_veil`, `bg_parallax`, `theme_mode`, `no_topbar`, `sidebar_logo`), and `font` (`mono`, `serif`, or the self-hosted `inter` preset). Brand images are uploaded website assets; sites without a logo show their name as text.
+
+Analytics and ad pixels load only after the visitor accepts the consent banner, which is shown to browsers in a European timezone or an EU territory; the choice is stored in `localStorage` and can be reopened from a `[data-cookie-settings]` link.
+
+### Pages and posts
+
+- **Kinds** - `page` or `post`. Posts form the blog (`/blog`, 3 per page, RSS at `/blog/rss.xml`), get a `published_at` date on first publish, and carry an author byline.
+- **Drafts** - new pages and posts start `hidden`; Publish flips the flag. Hidden pages are invisible to anonymous readers and excluded from nav, sitemap, and `llms.txt`.
+- **Navigation** - `ord` for sorting, `parent_slug` for one level of nesting, `nav_title` for a short sidebar label, and the site-level `nav_structure` for grouping.
+- **SEO** - `meta_description` (derived from the body when empty), optional `og_image` override (asset name, path, or URL; falls back to the first body image, then the site card), canonical URLs from `public_base`, hreflang alternates from `translation_of`, JSON-LD (`WebSite`, `WebPage`, `BlogPosting`, `BreadcrumbList`, `Organization` / `Person`).
+- **Translations** - a page in an extra language links to its default-language page via `translation_of`; nginx maps `/{lang}/...` onto the same routes with `?lang=`.
+- **Revisions** - every changing update snapshots the previous title, body, parent, and order; old revisions can be viewed and restored.
+- **Redirect map** - per-site 301 table for retired slugs and legacy (WordPress) permalinks, including multi-segment paths. A page can also be retired by setting `redirect_to`, which hides it and installs the redirect in one step.
+- **Shortcodes** - `{{newsletter-signup}}`, `{{newsletter-archive}}`, `{{contact-form}}`, and `{{email:user@domain}}` (click-to-reveal, never a plaintext address in the HTML). Images accept Pandoc-style attributes (`![alt](file.png){width=400px}`), `.mp4` / `.webm` become inline videos, and YouTube / Vimeo URLs in image syntax become embeds.
+- **Markdown** - tables, footnotes, strikethrough, task lists, smart punctuation; sanitized with ammonia. Tables with an empty header row render as CSS grids; real tables scroll horizontally on phones.
+- **Legal pages** - `privacy` and `imprint` are seeded once for the default site from `content/`.
+- **IndexNow** - every content change pings `api.indexnow.org` with the affected URLs; the key file is served at `/api/v1/indexnow/{key}.txt`.
+
+Rendered pages are cached for 5 minutes per site, language, and slug; every content or settings write clears the cache.
 
 | Method | Endpoint | Auth | Description |
 |---|---|---|---|
-| `GET` | `/site`, `/site/{slug}` | None | Public-rendered HTML |
-| `GET` | `/api/v1/website/pages[/{slug}]` | None | List / fetch a page |
-| `PUT` / `DELETE` | `/api/v1/website/pages/{slug}` | JWT | Upsert / delete |
-| `POST` | `/api/v1/website/pages/{slug}/rename` | JWT | Rename a slug |
-| `GET` | `/api/v1/website/pages/{slug}/revisions` | JWT | Page revision history |
-| `GET` | `/api/v1/website/pages/{slug}/revisions/{id}` | JWT | Fetch an old revision |
-| `POST` | `/api/v1/website/pages/{slug}/revisions/{id}/restore` | JWT | Restore an old revision |
-| `GET` / `POST` / `DELETE` | `/api/v1/website/assets[/{file}]` | mixed | Public read; JWT for upload / delete |
-| `POST` | `/api/v1/website/assets/{file}/rename` | JWT | Rename an asset |
-| `GET` | `/api/v1/website/admin/assets` | JWT | List assets with usage info |
-| `GET` | `/robots.txt`, `/sitemap.xml`, `/llms.txt` | None | SEO / crawler metadata |
+| `GET` | `/site`, `/site/{slug}`, `/site/blog/{slug}`, `/site/{lang}/...` | None | Public-rendered HTML (nginx rewrites `/{slug}` to `/site/{slug}` on the marketing hosts) |
+| `GET` | `/site/blog/rss.xml`, `/robots.txt`, `/sitemap.xml`, `/llms.txt` | None | Feeds and crawler metadata for the resolved site |
+| `GET` | `/api/v1/website/pages[/{slug}]` | None | List pages, assets, nav, and sites / fetch a page (hidden pages for admins only) |
+| `PUT` / `DELETE` | `/api/v1/website/pages/{slug}` | admin | Upsert / delete |
+| `POST` | `/api/v1/website/pages/{slug}/rename` | admin | Rename a slug (cascades parent and translation links) |
+| `POST` | `/api/v1/website/pages/{slug}/visibility` | admin | Publish / unpublish |
+| `GET` | `/api/v1/website/pages/{slug}/revisions[/{id}]` | admin | Revision history / one revision |
+| `POST` | `/api/v1/website/pages/{slug}/revisions/{id}/restore` | admin | Restore an old revision |
+| `GET` / `POST` / `DELETE` | `/api/v1/website/assets[/{file}]` | None / admin / admin | Serve (with `Range` support) / upload (up to 100 MB) / delete |
+| `POST` | `/api/v1/website/assets/{file}/rename` | admin | Rename an asset, rewriting references in pages and products |
+| `GET` | `/api/v1/website/admin/assets` | admin | Assets with usage counts |
+| `GET` / `PUT` / `DELETE` | `/api/v1/website/redirects[/{id}]` | admin | Redirect map CRUD; `POST .../redirects/import` bulk-loads up to 5000 |
+| `POST` | `/api/v1/website/import` | admin | Bulk import: multipart `manifest` (JSON keyed by slug), repeated `page` and `asset` fields; `tools/wp_migrate` builds one from a WordPress export |
+| `GET` / `PUT` | `/api/v1/site/admin/settings` | admin | Per-site settings |
+| `GET` / `POST` / `PUT` | `/api/v1/sites[/{id}]` | admin / owner / owner | Site registry |
+| `GET` | `/static/logo.png`, `/static/logo-dark.png`, `/static/icon.png`, `/static/favicon-*.png`, `/favicon.ico`, `/static/bg.jpg`, `/static/og-image.png` | None | Per-site brand assets (uploaded, else compiled-in for the built-in sites) |
 
-Brand assets (`/static/logo.png`, `/static/og-image.png`, `/favicon.ico`, etc.) are embedded in the binary.
+## Newsletter
+
+Each site with `has_newsletter` has its own double-opt-in subscriber list and its own issues; the audience of an issue is exactly that site's confirmed subscribers. Public signup goes through the `{{newsletter-signup}}` shortcode on any page, mails a confirmation link (14-day TTL), and uses a honeypot plus a 5/hour per-IP limit. Account-level newsletter consent in the dashboard is a view over the default site's list keyed by the account email.
+
+Issues are Markdown and share the site's asset library: local images are embedded as inline attachments (raster only, 4 MB cap), YouTube / Vimeo links become a poster frame linking to the video, and `[TOC]` renders a table of contents. Every campaign mail carries a `List-Unsubscribe` header and a footer link; the unsubscribe token never expires so archived mail keeps working, and the endpoint supports RFC 8058 one-click. Sent issues can be flagged `public` to appear in the site's `{{newsletter-archive}}`.
+
+Sending is owner-only. An issue goes `draft` -> `sending` -> `sent`: the send call snapshots the audience into delivery rows and returns immediately; a background sender drains them at `SUSI_NEWSLETTER_RATE_PER_MIN` (default 30) with up to 3 attempts per address, and resumes after a restart without re-mailing. Transport per site: the default site uses `SUSI_NEWSLETTER_SMTP_*` or the Gmail OAuth connector; every other site needs its own `SUSI_NEWSLETTER_SMTP_*_{SITE}` relay (site id uppercased, `-` -> `_`). There is deliberately no fallback to the account-mail relay. Staging blanks all newsletter transports so a test can never mail the real list.
+
+| Method | Endpoint | Auth | Description |
+|---|---|---|---|
+| `POST` | `/api/v1/newsletter/subscribe` | None (5/hour per IP) | Public signup, sends the confirmation mail |
+| `GET` | `/api/v1/newsletter/confirm?token=` | None | Double-opt-in confirmation |
+| `GET` / `POST` | `/api/v1/newsletter/unsubscribe?token=` | None | Unsubscribe page / one-click unsubscribe |
+| `GET` | `/api/v1/newsletter/public` | None | Issues flagged for the public archive |
+| `GET` | `/api/v1/newsletter/config` | owner | Transport state (relay kind, Gmail account, rate, env suffix for the site) |
+| `GET` | `/api/v1/newsletter/audience` | owner | Confirmed and pending counts plus a small sample |
+| `GET` / `POST` | `/api/v1/newsletter/issues` | owner | List / create a draft |
+| `GET` / `PUT` / `DELETE` | `/api/v1/newsletter/issues/{id}` | owner | Read / edit / delete (drafts only) |
+| `POST` | `/api/v1/newsletter/preview` | owner | Render `body_md` exactly as a send would |
+| `POST` | `/api/v1/newsletter/issues/{id}/test` | owner | Send a `[TEST]` copy to the caller |
+| `POST` | `/api/v1/newsletter/issues/{id}/send` | owner | Queue the issue for its audience (optional `expect_recipients` guard) |
+| `GET` | `/api/v1/newsletter/issues/{id}/deliveries` | owner | Per-address delivery report |
+| `POST` | `/api/v1/newsletter/issues/{id}/visibility` | owner | Show / hide a sent issue in the archive |
+| `GET` / `DELETE` | `/api/v1/newsletter/subscribers[?email=]` | owner | List / remove subscribers of the site |
+| `GET` | `/api/v1/newsletter/google/authorize`, `/callback`; `POST .../disconnect` | owner / None / owner | Gmail OAuth connector (see [3b](#3b-gmail-connector-for-newsletters-optional)) |
+
+## Email Templates
+
+All transactional mail is rendered from Markdown templates whose defaults live in code and whose overrides live in the database, so an untouched template keeps receiving upstream improvements. Templates: `signin_code`, `password_reset`, `invitation`, `ticket_notification`, `newsletter_confirm`, `order_confirmation`, and `order_shipped`. Body is always editable; subject is editable everywhere except the ticket notification. `newsletter_confirm` and the two shop templates can be overridden per site and per language (`ja` for the shop).
+
+The renderer produces one consistent layout (centered logo, one heading size, one body size, black text everywhere) plus a plain-text twin derived from the same Markdown. Two shortcodes exist: `{{code:483920}}` for a large one-time code box and `{{button:Label|https://...}}` for a call-to-action button with a paste-link fallback. Lines that reference a variable with no value are dropped, so optional sections disappear cleanly.
+
+| Method | Endpoint | Auth | Description |
+|---|---|---|---|
+| `GET` / `PUT` | `/api/v1/admin/email_templates` | admin | List templates / save an override for `{id, lang, site}` (empty body and subject reset to the default) |
+| `POST` | `/api/v1/admin/email_templates/preview` | admin | Render with sample data; also returns the default subject, body, and variables |
+| `POST` | `/api/v1/admin/email_templates/test` | admin | Send a `[Test]` copy to the caller |
 
 ## Shop
 
-Stripe-backed checkout for physical goods. The cart lives in the browser (`localStorage`); the server looks up authoritative prices from the DB at checkout time and hands the line items to Stripe Checkout with `automatic_tax: true`. Stripe collects address + payment, computes tax, and redirects to `success_url` / `cancel_url`. Set `STRIPE_SECRET_KEY` (and `STRIPE_WEBHOOK_SECRET`) to enable; otherwise the public product pages still render but checkout returns 503.
+Stripe-backed checkout for physical goods, per site: every shop endpoint resolves the site from the Host header and answers 404 when the site has no shop. Products, shipping rates, orders, and settings are scoped per site. The cart lives in the browser (`localStorage`); the server looks up authoritative prices from the DB at checkout time and hands the line items to Stripe Checkout with `automatic_tax: true`, address and phone collection, and Stripe invoice creation. Stripe collects address + payment, computes tax, and redirects to `success_url` / `cancel_url`.
+
+Stripe keys come from the per-shop settings (entered in the dashboard, sealed at rest) or, as fallback, from the environment: `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` for the default site and `STRIPE_SECRET_KEY_{SITE}` / `STRIPE_WEBHOOK_SECRET_{SITE}` for other sites. Without a secret key the public product pages still render but checkout returns 503. The webhook identifies the site by which configured signing secret verifies the payload.
+
+Products carry an English and a Japanese title and description plus a base price in the product's currency and an optional whole-yen `price_jpy`. A Japanese storefront (`/ja/shop`) checks out in JPY; mixed currencies in one cart are rejected. Shipping is restricted to the admin-enabled destination countries (default `US`, `CA`) and the regions of the active shipping rates. A product whose title contains "pre-order" gets pre-order copy in the confirmation email and is left out of the Merchant Center feed.
 
 After a successful checkout, susi:
 
-1. Verifies the Stripe webhook signature (HMAC-SHA256, 5-minute timestamp tolerance)
-2. De-duplicates webhook deliveries
-3. Renders a paid-invoice PDF locally and emails the customer a branded confirmation with the PDF attached
+1. Verifies the Stripe webhook signature (HMAC-SHA256, 5-minute timestamp tolerance, constant-time compare)
+2. De-duplicates webhook deliveries and records `pending_payment` until Stripe reports the session paid (delayed payment methods are handled through the `async_payment_*` events)
+3. Renders a paid-invoice PDF locally (Stripe's own PDF is frozen at "amount due") and emails the customer a branded confirmation in the site's language with the PDF attached
 4. Notifies the configured admin recipients
 
 | Method | Endpoint | Auth | Description |
 |---|---|---|---|
-| `GET` | `/shop`, `/shop/{sku}`, `/shop/success`, `/shop/cancel` | None | Public HTML shell |
-| `GET` | `/api/v1/shop/products[/{sku}]` | None | Public catalog |
-| `POST` | `/api/v1/shop/checkout` | None | Create a Stripe Checkout Session |
-| `POST` | `/api/v1/shop/webhook` | Stripe sig | Stripe webhook handler |
-| `GET` / `PUT` / `DELETE` | `/api/v1/shop/admin/products[/{sku}]` | JWT | Product CRUD |
-| `GET` / `POST` / `PUT` / `DELETE` | `/api/v1/shop/admin/shipping_rates[/{id}]` | JWT | Shipping-rate CRUD |
-| `GET` | `/api/v1/shop/admin/orders[/{id}]` | JWT | Orders list / detail |
-| `POST` | `/api/v1/shop/admin/orders/{id}/ship` | JWT | Mark shipped (sends customer email) |
-| `PUT` | `/api/v1/shop/admin/orders/{id}/notes` | JWT | Update internal notes |
-| `GET` / `PUT` | `/api/v1/shop/admin/settings` | JWT | Admin notification recipients, customer email toggles, support contact |
-
-Checkout is restricted to a configured set of destination countries. SKUs are validated, product image references are sanitized, and admin-authored thank-you HTML is sanitized before being inlined into customer mail.
+| `GET` | `/shop`, `/shop/{sku}`, `/shop/success`, `/shop/cancel` | None | Public HTML shell (product pages carry `Product` JSON-LD) |
+| `GET` | `/shop/feed.xml?lang=` | None | Google Merchant Center product feed |
+| `GET` | `/api/v1/shop/products[/{sku}]` | None | Public catalog (active products) |
+| `GET` | `/api/v1/shop/shipping_countries` | None | Enabled destination countries |
+| `POST` | `/api/v1/shop/checkout` | None (10/min per IP) | Create a Stripe Checkout Session (`items`, `country`, `currency`, `lang`) |
+| `POST` | `/api/v1/shop/webhook` | Stripe signature | Stripe webhook handler |
+| `GET` / `PUT` / `DELETE` | `/api/v1/shop/admin/products[/{sku}]` | admin | Product CRUD (image must be an uploaded website asset) |
+| `GET` / `POST` / `PUT` / `DELETE` | `/api/v1/shop/admin/shipping_rates[/{id}]` | admin | Shipping-rate CRUD (label, amount, currency, delivery window, regions) |
+| `GET` | `/api/v1/shop/admin/countries` | admin | Full country catalog for the settings UI |
+| `GET` / `DELETE` | `/api/v1/shop/admin/orders[/{id}]` | admin | Orders list (`?status=`) / detail with Stripe link / erase an order |
+| `POST` | `/api/v1/shop/admin/orders/{id}/ship` | admin | Mark shipped with carrier + tracking (optionally emails the customer) |
+| `PUT` | `/api/v1/shop/admin/orders/{id}/notes` | admin | Update internal notes |
+| `GET` / `PUT` | `/api/v1/shop/admin/settings` | admin | `notification_emails`, `customer_email_enabled`, `support_contact`, `shipping_countries`, `invoice_from`, `stripe_secret_key`, `stripe_webhook_secret` (secrets returned masked) |
 
 ## Public Contact Form
 
-Served at the `/site` chrome and disabled (503) unless `SUSI_CONTACT_TO_ADDR` and SMTP are both set. Hardening stack:
+Served in the site chrome (`{{contact-form}}` shortcode) and disabled (503) unless a recipient (the site's `contact_email`, falling back to `SUSI_CONTACT_TO_ADDR`) and SMTP are both set. Hardening stack:
 
-- Hidden honeypot field that real browsers leave empty
+- Hidden honeypot field that real browsers leave empty (a filled honeypot gets a fake success)
 - Cloudflare Turnstile siteverify when `SUSI_TURNSTILE_SECRET` is set (otherwise honeypot + rate limit only)
-- Per-IP sliding-window rate limit (3/hour, 20/day)
+- Per-IP sliding-window rate limit (3 per hour)
 - All fields mandatory (name, company, email, subject, message) - filters low-effort scam inquiries
-- Field length caps + minimum body length
-- Sender email syntactically validated; outbound mail body is plain text
+- Field length caps + minimum body length; sender email syntactically validated and CRLF-free
+- Mail is sent from the server's own address (SPF/DKIM stay valid) with the visitor's address in the body, subject prefixed with the site name, body plain text
 
 | Method | Endpoint | Auth | Description |
 |---|---|---|---|
 | `GET` | `/api/v1/contact/config` | None | Returns whether the form is enabled and the public Turnstile site key |
 | `POST` | `/api/v1/contact` | None | Submit a contact-form message |
 
+## Audit Log & Data Protection
+
+Every administrative action (user, role, token, license, release, workspace, ticket, shop, newsletter, template, and backup changes, plus auth anomalies) writes an `audit_log` row with actor, action, target, and details. `GET /api/v1/audit` pages through it newest first; the dashboard's Audit section is a view over the same endpoint. Writes are best-effort and never fail the request.
+
+Personal data has a defined lifecycle:
+
+- **Self-serve export** - `GET /api/v1/auth/me/export` returns account fields, devices, sessions, tokens, licenses, newsletter deliveries, audit entries, and shop orders matched by email as one JSON download.
+- **Deletion** - self-serve (`DELETE /api/v1/auth/me`) or by an admin. Account rows are deleted and the username is scrubbed from every table that keeps history (tickets, pages, revisions, configs, audit log, deliveries), since usernames may be email addresses. Shop orders can be erased individually by an admin.
+- **Retention** - a scheduled job (every 5 minutes) deletes sessions past their 30-day lifetime, audit rows older than 365 days, trusted devices unseen for 180 days, anonymises newsletter deliveries 365 days after the send, and scrubs customer details from shop orders after 3 years while keeping amounts and line items for accounting. Login and invitation tokens are purged 24 hours after use or expiry.
+- **Consent** - analytics and ad pixels on the public sites load only after the visitor accepts the banner.
+- **Logs** - container stdout is capped by the compose logging driver (5 x 20 MB).
+
 ## Dropbox Backups
 
-Rotating, encrypted offsite backups of the whole `/data` volume (SQLite DB via
-`VACUUM INTO`, `private.pem`, `db_secret.bin`, `jwt_secret.bin`, `docs/`,
-optionally `releases/`) to a Dropbox App Folder. Redundant to the primary AWS
-backups; managed from the dashboard's admin-only Backups page.
+Rotating, encrypted offsite backups to a Dropbox App Folder, managed from the
+dashboard's admin-only Backups page. The archive contains a consistent SQLite
+snapshot (`VACUUM INTO`), the `docs/` and `website/` asset directories, and
+optionally `releases/`. It deliberately **excludes** `private.pem`,
+`db_secret.bin`, and `jwt_secret.bin`, so one leaked backup key cannot
+collapse every layer of key separation - keep those three files offline
+separately, you need them for a restore. Workspace files and recordings are not
+part of the archive either.
 
 Setup:
 
@@ -998,10 +1159,11 @@ Setup:
    paste the one-time code back), then enable the nightly backup.
 
 Scheduling: one backup per day at the configured UTC hour, retried hourly on
-failure. Rotation is grandfather-father-son - newest archive per day/week/month
-up to the configured counts (default 7/4/12), and nothing younger than 48 h is
-ever deleted. The OAuth refresh token is stored sealed with the DB at-rest key;
-access tokens are minted per run and never persisted.
+failure; a manual run is refused while another is in progress. Rotation is
+grandfather-father-son - newest archive per day/week/month up to the configured
+counts (default 7/4/12), and nothing younger than 48 h is ever deleted. The
+OAuth refresh token is stored sealed with the DB at-rest key; access tokens are
+minted per run and never persisted.
 
 Restore:
 
@@ -1009,27 +1171,28 @@ Restore:
 # Download the archive from Dropbox (Apps/<app name>/), then:
 susi-server decrypt-backup prod-backup-20260706-030000.tar.gz.enc --key <SUSI_BACKUP_KEY>
 tar -xzf prod-backup-20260706-030000.tar.gz   # unpack into a fresh /data volume
+# then copy private.pem, db_secret.bin and jwt_secret.bin from your offline copy
 ```
 
 | Method | Endpoint | Auth | Description |
 |---|---|---|---|
-| `GET` | `/api/v1/admin/backup/status` | Admin JWT | Settings, connection state, run history |
-| `PUT` | `/api/v1/admin/backup/settings` | Admin JWT | Schedule + retention |
-| `GET` | `/api/v1/admin/backup/connect-url` | Admin JWT | Dropbox consent URL |
-| `POST` | `/api/v1/admin/backup/connect` | Admin JWT | Exchange pasted code for a refresh token |
-| `POST` | `/api/v1/admin/backup/disconnect` | Admin JWT | Revoke + forget the connection |
-| `POST` | `/api/v1/admin/backup/run` | Admin JWT | Trigger a manual backup |
+| `GET` | `/api/v1/admin/backup/status` | Admin | Settings, connection state, quota, run history |
+| `PUT` | `/api/v1/admin/backup/settings` | Admin | Schedule, retention counts, include releases |
+| `GET` | `/api/v1/admin/backup/connect-url` | Admin | Dropbox consent URL |
+| `POST` | `/api/v1/admin/backup/connect` | Admin | Exchange pasted code for a refresh token |
+| `POST` | `/api/v1/admin/backup/disconnect` | Admin | Revoke + forget the connection |
+| `POST` | `/api/v1/admin/backup/run` | Admin | Trigger a manual backup |
 
 ## Deploying to AWS Lightsail
 
-The project includes a Dockerfile, docker-compose.yml, and a deploy script for one-command deployment to an AWS Lightsail (or any EC2/VPS) instance.
+The project includes a Dockerfile, two compose files, and a deploy script for one-command deployment to an AWS Lightsail (or any EC2/VPS) instance. The image is built locally and shipped to the host - the 2 GB Lightsail box cannot build the server without swapping.
 
 ### 1. Create a Lightsail instance
 
 1. Go to [AWS Lightsail Console](https://lightsail.aws.amazon.com/)
-2. Create an instance: **Linux/Unix** → **OS Only** → **Ubuntu 22.04 LTS** (or 24.04)
-3. Choose a plan - **$5/mo (1 GB RAM, 1 vCPU)** is sufficient
-4. Under **Networking**, add a firewall rule: **Custom TCP, Port 3100**
+2. Create an instance: **Linux/Unix** -> **OS Only** -> **Ubuntu 22.04 LTS** (or 24.04)
+3. Choose a plan - **$5/mo (1 GB RAM, 1 vCPU)** runs it; 2 GB is more comfortable
+4. Under **Networking**, open **22, 80, 443** only. The containers bind to loopback and are reached through nginx (step 8)
 
 ### 2. Install Docker on the instance
 
@@ -1053,39 +1216,42 @@ docker compose version
 
 ### 3. Deploy
 
-From your **local machine**, in the susi project root:
+From your **local machine** (on Windows: from WSL, since Git Bash lacks rsync), in the susi project root:
 
 ```bash
-# Production (port 3100, volume susi-data, compose file docker-compose.yml)
+# Production (port 3100, volume susi-data, compose file docker-compose.yml, env /opt/susi/.env)
 ./deploy.sh ubuntu@<YOUR_INSTANCE_IP> ~/.ssh/LightsailDefaultKey-*.pem
 
-# Staging (port 3101, volume susi-data-staging, compose file docker-compose.staging.yml)
+# Staging (port 3101, volume susi-data-staging, compose file docker-compose.staging.yml, env /opt/susi/.env.staging)
 ./deploy.sh ubuntu@<YOUR_INSTANCE_IP> ~/.ssh/LightsailDefaultKey-*.pem --staging
 ```
 
-> **Important:** run `deploy.sh` from the `external/susi` directory only. The rsync step has no `--delete` flag, but running from a parent directory will copy unrelated files into `/opt/susi` and pollute the deploy.
-
 The script will:
-1. Create `/opt/susi` on the server and rsync project files
-2. Generate a **4096-bit RSA keypair** if none exists in the data volume
-3. Build the Docker image and start the container
+1. Build the `susi:latest` image locally, `docker save | gzip` it, and `scp` it to the host
+2. Copy only the two compose files to `/opt/susi` and create an empty `.env` / `.env.staging` on first deploy
+3. Generate a **4096-bit RSA keypair** if none exists in the data volume
+4. `docker load` the image and `docker compose up -d --force-recreate` with the matching env file
 
-On first run, the server creates an `admin` user with a random one-time password printed once to the server log (`docker compose logs`). Log in at `http://<YOUR_INSTANCE_IP>:3100/` and change the password immediately.
+Both environments ship the same image; they differ only in compose file, env file, port, and data volume. Deploy to staging first, verify, then deploy to production.
+
+On first run, the server creates an `admin` owner with a random one-time password printed once to the server log (`docker compose logs`). Log in and change the password immediately.
 
 ### 3a. Configure environment variables
 
-The container reads optional integrations from `/opt/susi/.env`. The deploy script creates an empty file on first deploy; add settings manually as needed:
+The container reads integrations from `/opt/susi/.env` (production) or `/opt/susi/.env.staging`. The deploy script creates an empty file on first deploy; add settings as needed. Staging keeps its own file on purpose: the lower-trust instance must not carry live Stripe keys or the production backup key, and its compose file blanks every newsletter transport.
 
 ```bash
 # /opt/susi/.env  (chmod 600)
 
-# Sign-in code / password-reset / outbound mail (Gmail SMTP relay shown)
+# Sign-in code / password-reset / invitation / order / contact mail (Gmail SMTP relay shown)
 SUSI_SMTP_HOST=smtp.gmail.com
 SUSI_SMTP_PORT=587
 SUSI_SMTP_USER=you@example.com
 SUSI_SMTP_PASSWORD=<google-app-password>
 SUSI_SMTP_FROM_NAME=Susi
 SUSI_SMTP_FROM_ADDR=noreply@example.com
+# Public dashboard origin, used in every emailed link. Empty disables the
+# sign-in code and newsletter sending.
 SUSI_MAGIC_LINK_BASE_URL=https://susi.example.com
 
 # Newsletter. Deliberately SEPARATE credentials from the relay above:
@@ -1106,42 +1272,69 @@ SUSI_NEWSLETTER_RATE_PER_MIN=30
 # Per-site newsletters (any non-default site with has_newsletter) send over
 # their own relay: SUSI_NEWSLETTER_SMTP_{HOST|PORT|USER|PASSWORD|FROM_NAME|
 # FROM_ADDR}_{SITE} with the site id uppercased and '-' becoming '_', same
-# convention as the per-site Stripe keys. No cross-site fallback: without
-# these, that site's sends respond 503 while drafts and previews still work.
-# Their audience is the site's own double-opt-in subscriber list (public
-# signup on the site's /newsletter page), not user accounts.
+# convention as the per-site Stripe keys. No cross-site fallback. The compose
+# file must pass the variables through - add a block for each new site.
 SUSI_NEWSLETTER_SMTP_HOST_KLAUS=smtp.example.com
 SUSI_NEWSLETTER_SMTP_USER_KLAUS=news@klaus.example.com
 SUSI_NEWSLETTER_SMTP_PASSWORD_KLAUS=<app-password>
 SUSI_NEWSLETTER_SMTP_FROM_ADDR_KLAUS=news@klaus.example.com
 
 # Gmail connector (optional alternative to SUSI_NEWSLETTER_SMTP_USER/_PASSWORD).
-# With these set, an admin connects a Google Workspace account from the
+# With these set, an owner connects a Google Workspace account from the
 # Newsletter page and campaign mail goes out over Gmail with OAuth - no app
 # password on the host. Static credentials above take precedence if both exist.
 SUSI_GOOGLE_CLIENT_ID=<id>.apps.googleusercontent.com
 SUSI_GOOGLE_CLIENT_SECRET=<secret>
 
 # Accounts promoted to the `owner` role on every start (comma-separated).
-# Owner is the only role that can send newsletters or grant ownership, and it
-# can only be granted by an existing owner - so this is how the first one
-# exists on a database that predates the role, and the way back in if the last
-# owner is ever lost. Applied idempotently on each boot.
+# Owner is the only role that can send newsletters, create sites, or grant
+# ownership, and it can only be granted by an existing owner - so this is how
+# the first one exists on a database that predates the role, and the way back
+# in if the last owner is ever lost. Applied idempotently on each boot.
 SUSI_OWNER_EMAILS=you@example.com,you@other-domain.com
 
-# Shop (leave empty to disable checkout - product pages still render)
-STRIPE_SECRET_KEY=sk_live_…
-STRIPE_WEBHOOK_SECRET=whsec_…
+# Shop (leave empty to disable checkout - product pages still render).
+# Bare keys serve the default site. Other sites read STRIPE_SECRET_KEY_{SITE} /
+# STRIPE_WEBHOOK_SECRET_{SITE}; the compose files map the LPR shop from
+# STRIPE_*_LPR_LIVE (production) and STRIPE_*_LPR_TEST (staging) so a sandbox
+# key can never reach production. Keys can also be entered per shop in the
+# dashboard, which takes precedence over the environment.
+STRIPE_SECRET_KEY=sk_live_...
+STRIPE_WEBHOOK_SECRET=whsec_...
+STRIPE_SECRET_KEY_LPR_LIVE=sk_live_...
+STRIPE_WEBHOOK_SECRET_LPR_LIVE=whsec_...
 SUSI_SHOP_BASE_URL=https://susi.example.com
 SUSI_SHOP_NOTIFY_ADDR=orders@example.com
 
-# Contact form (empty contact_to_addr disables; turnstile keys are optional)
+# Contact form (empty recipient disables unless the site has a contact_email;
+# turnstile keys are optional)
 SUSI_CONTACT_TO_ADDR=hello@example.com
-SUSI_TURNSTILE_SECRET=…
-SUSI_TURNSTILE_SITE_KEY=…
+SUSI_TURNSTILE_SECRET=...
+SUSI_TURNSTILE_SITE_KEY=...
+
+# FusionHub relay URL handed to workspace members on federation fetch.
+# Empty disables the relay (hubs reach each other directly).
+SUSI_RELAY_URL=wss://fusionhub.example.com/api/relay
+
+# S3 for workspace recordings. Empty bucket disables the recording endpoints.
+SUSI_S3_BUCKET=
+SUSI_S3_REGION=
+AWS_ACCESS_KEY_ID=
+AWS_SECRET_ACCESS_KEY=
+
+# Dropbox backups (see Dropbox Backups). All three empty = feature disabled.
+SUSI_DROPBOX_APP_KEY=
+SUSI_DROPBOX_APP_SECRET=
+SUSI_BACKUP_KEY=<64 hex chars>
+SUSI_BACKUP_PREFIX=prod
+
+# CIDRs whose X-Forwarded-For / X-Real-IP headers are trusted. Empty =
+# loopback plus all private IPv4 ranges (covers the Docker bridge nginx
+# proxies through).
+SUSI_TRUSTED_PROXIES=
 ```
 
-Re-run `docker compose -f <file> up -d` after editing `.env` to pick up changes.
+Re-run `docker compose --env-file <env> -f <file> up -d` after editing the file to pick up changes.
 
 ### 3b. Gmail connector for newsletters (optional)
 
@@ -1178,7 +1371,7 @@ Notes:
 ### 4. Verify
 
 ```bash
-curl http://<YOUR_INSTANCE_IP>:3100/health
+curl https://<dashboard host>/health
 # → {"status":"ok"}
 ```
 
@@ -1197,10 +1390,10 @@ Embed this key in:
 
 ### 6. Create and activate licenses
 
-Use the web dashboard at `http://<YOUR_INSTANCE_IP>:3100/` to create licenses and manage users. Or use the API:
+Use the web dashboard at `https://<dashboard host>/` to create licenses and manage users. Or use the API:
 
 ```bash
-SERVER="http://<YOUR_INSTANCE_IP>:3100"
+SERVER="https://<dashboard host>"
 
 # Login to get a JWT token
 TOKEN=$(curl -s -X POST $SERVER/api/v1/auth/login \
@@ -1348,19 +1541,23 @@ instances that the per-site flags merely show or hide.
 | Item | Location |
 |---|---|
 | Server binary | Docker container `susi-server` (prod) / `susi-server-staging` |
-| Private key | Docker volume `susi-data` → `/data/private.pem` |
-| Public key | Docker volume `susi-data` → `/data/public.pem` |
-| Database | Docker volume `susi-data` → `/data/licenses.db` |
-| Release assets | Docker volume `susi-data` → `/data/releases/{tag}/` |
-| Doc pages + assets | Docker volume `susi-data` → `/data/docs/{tag}/` |
-| Website assets | Docker volume `susi-data` → `/data/website/assets/` |
-| Dashboard | `http://<IP>:3100/` (or your TLS hostname) |
-| Public website | `http://<IP>:3100/site` |
-| Documentation | `http://<IP>:3100/docs` |
-| Shop | `http://<IP>:3100/shop` |
+| Private key | Docker volume `susi-data` -> `/data/private.pem` |
+| Public key | Docker volume `susi-data` -> `/data/public.pem` |
+| At-rest secrets | Docker volume `susi-data` -> `/data/jwt_secret.bin`, `/data/db_secret.bin` |
+| Database | Docker volume `susi-data` -> `/data/licenses.db` |
+| Release assets | Docker volume `susi-data` -> `/data/releases/{tag}/` |
+| Doc pages + assets | Docker volume `susi-data` -> `/data/docs/{tag}/` (default product) or `/data/docs/{product}/{tag}/` |
+| Website assets | Docker volume `susi-data` -> `/data/website/assets/{site}/` |
+| Workspace files + docs | Docker volume `susi-data` -> `/data/workspaces/{id}/` |
+| Env files | `/opt/susi/.env` (prod), `/opt/susi/.env.staging` |
+| nginx vhosts | `nginx/*.conf` in the repo, copied to `/etc/nginx/conf.d/` on the box |
+| Dashboard | `https://<dashboard host>/` (prod `:3100`, staging `:3101` behind nginx) |
+| Public websites | each site's hosts, e.g. `https://xikaku.com/` (nginx rewrites `/{slug}` to `/site/{slug}`) |
+| Documentation | `https://<dashboard host>/docs` |
+| Shop | `https://<site host>/shop` |
 | Default login | `admin` / random one-time password from the server log (must change on first login) |
 | Logs | `docker compose logs -f` in `/opt/susi` |
-| Health check | `GET http://<IP>:3100/health` |
+| Health check | `GET /health` |
 
 ## Building
 
@@ -1370,35 +1567,41 @@ cargo build --workspace --release
 
 Binaries are output to `target/release/`:
 - `susi-admin` - CLI management tool
-- `susi-server` - HTTP activation server
+- `susi-server` - HTTP server
 - `susi-helper` - end-user utility for fingerprinting and USB serial lookup
+
+The Docker image only builds `susi-server` (`rust:1.95` builder, `debian:bookworm-slim` runtime, `--locked` against the committed `Cargo.lock`).
 
 ## Testing
 
 ```bash
 cargo test --workspace
+cargo test -p susi_core --features db      # the SQLite tests are feature-gated
+cargo test -p susi_server --test integration
 ```
+
+The integration suite starts the real `susi-server` binary on an ephemeral port per test and drives it through the Rust client, raw HTTP, and (when Conan is available) the C++ `PackageTest` binary. It covers licensing, workspaces, docs, website, newsletter, shop (with synthetic signed Stripe webhooks), backups (against a mock Dropbox endpoint), and auth. GitHub Actions runs `cargo build` and `cargo test` on every push and pull request to `main`.
 
 ## Dependencies
 
 Key dependencies:
 - [`rsa`](https://crates.io/crates/rsa) - RSA key generation, signing, verification
 - [`sha2`](https://crates.io/crates/sha2) - SHA-256 hashing
-- [`aes-gcm`](https://crates.io/crates/aes-gcm) - AES-256-GCM encryption for USB tokens
+- [`aes-gcm`](https://crates.io/crates/aes-gcm) - AES-256-GCM for USB tokens, sealed secrets, and backup archives
 - [`hkdf`](https://crates.io/crates/hkdf) - HKDF-SHA256 key derivation for USB tokens
-- [`axum`](https://crates.io/crates/axum) - HTTP server with multipart support (susi_server only)
-- [`tower-http`](https://crates.io/crates/tower-http) - CORS middleware (susi_server only)
-- [`argon2`](https://crates.io/crates/argon2) - Argon2id password hashing (susi_server only)
-- [`jsonwebtoken`](https://crates.io/crates/jsonwebtoken) - JWT session tokens (susi_server only)
-- [`totp-rs`](https://crates.io/crates/totp-rs) - TOTP 2FA (susi_server only)
-- [`lettre`](https://crates.io/crates/lettre) - SMTP client for sign-in code / order / contact email (susi_server only)
+- [`axum`](https://crates.io/crates/axum) / [`tower-http`](https://crates.io/crates/tower-http) - HTTP server, multipart, CORS, security headers, path normalisation (susi_server only)
+- [`rusqlite`](https://crates.io/crates/rusqlite) - SQLite storage (bundled; server/admin only) behind a poison-free [`parking_lot`](https://crates.io/crates/parking_lot) mutex
+- [`argon2`](https://crates.io/crates/argon2), [`jsonwebtoken`](https://crates.io/crates/jsonwebtoken), [`totp-rs`](https://crates.io/crates/totp-rs) - password hashing, sessions and tickets, TOTP 2FA (susi_server only)
+- [`x509-cert`](https://crates.io/crates/x509-cert) / [`ring`](https://crates.io/crates/ring) - signing-certificate chain pinning on activate / verify (susi_server only)
+- [`lettre`](https://crates.io/crates/lettre) - SMTP client for all outbound mail, including XOAUTH2 for the Gmail connector (susi_server only)
+- [`pulldown-cmark`](https://crates.io/crates/pulldown-cmark) / [`ammonia`](https://crates.io/crates/ammonia) - Markdown rendering and HTML sanitising for pages, docs, newsletters, and email (susi_server only)
 - [`hmac`](https://crates.io/crates/hmac) - Stripe webhook signature verification (susi_server only)
 - [`printpdf`](https://crates.io/crates/printpdf) - paid-invoice PDF generation (susi_server only)
-- [`ammonia`](https://crates.io/crates/ammonia) - HTML sanitizer for admin-authored content in customer email (susi_server only)
-- [`rusqlite`](https://crates.io/crates/rusqlite) - SQLite storage (server/admin only, bundled)
-- [`reqwest`](https://crates.io/crates/reqwest) - HTTP client for online refresh, Stripe API, Turnstile siteverify
+- [`aws-sdk-s3`](https://crates.io/crates/aws-sdk-s3) - presigned URLs for workspace recordings (susi_server only)
+- [`tar`](https://crates.io/crates/tar) / [`flate2`](https://crates.io/crates/flate2) - backup archives (susi_server only)
+- [`reqwest`](https://crates.io/crates/reqwest) - HTTP client for online refresh, Stripe, Turnstile, Dropbox, IndexNow, and oEmbed
 
-The `susi_client` crate is intentionally lightweight - it only pulls in the crypto and HTTP dependencies needed for verification and the workspace/release/docs API client.
+The `susi_client` crate is intentionally lightweight - it only pulls in the crypto and HTTP dependencies needed for verification and the workspace API client.
 
 ## License
 
