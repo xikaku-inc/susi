@@ -20,7 +20,7 @@ class SusiRecipe(ConanFile):
     exports_sources = "CMakeLists.txt", "src/*", "include/*"
 
     def requirements(self):
-        self.requires("openssl/3.6.1")
+        self.requires("openssl/3.6.5")
         self.requires("nlohmann_json/[~3.11]")
         self.requires("libcurl/[>=7.85 <9]")
 
