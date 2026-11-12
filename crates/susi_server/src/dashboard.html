@@ -966,11 +966,13 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
     <div id="workspaceListSection">
     <h2 style="font-size:16px;font-weight:600;margin-top:32px;margin-bottom:16px;">Workspaces</h2>
     <div class="toolbar">
-        <input type="search" id="wsSearch" placeholder="Search workspaces..." autocomplete="off" readonly onfocus="this.removeAttribute('readonly')" oninput="renderWorkspaces()">
+        <input type="search" id="wsSearch" placeholder="Search workspaces..." autocomplete="off" readonly onfocus="this.removeAttribute('readonly')" oninput="onWsSearch()">
+        <span id="wsCount" style="font-size:12px;color:var(--text2);white-space:nowrap;"></span>
         <div class="spacer"></div>
         <button id="btnCreateWorkspace" onclick="showCreateWorkspaceModal()">+ New Workspace</button>
     </div>
-    <div id="workspacesContainer" style="margin-bottom:20px;"></div>
+    <div id="workspacesContainer" style="margin-bottom:12px;"></div>
+    <div id="wsPager" class="pager" style="margin-bottom:20px;"></div>
     </div><!-- /workspaceListSection -->
 
     <!-- Workspace detail panel (routed: #/workspaces/{id}/{tab} replaces the list view) -->
@@ -1838,7 +1840,7 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
         </div>
     </div>
     <div style="margin-bottom:20px;">
-        <button class="secondary" id="usersShowMore" style="display:none;" onclick="showMoreUsers()">Show more</button>
+        <div id="usersPager" class="pager"></div>
     </div>
 </div><!-- /page-users -->
 
@@ -3136,6 +3138,7 @@ function route() {
     }
     if (authToken && target === 'users' && segs[1]) {
         document.getElementById('userSearch').value = segs[1];
+        usersPage = 0;
     }
     showPage(target);
     if (authToken) {
@@ -4840,8 +4843,22 @@ async function disable2FA() {
 // User management
 let allUsers = [];
 const usersExpanded = new Set();
-const USERS_PAGE_SIZE = 100;
-let usersShownCount = USERS_PAGE_SIZE;
+const PAGE_SIZE = 25;
+let usersPage = 0;
+
+function clampPage(page, total) {
+    return Math.max(0, Math.min(page, Math.ceil(total / PAGE_SIZE) - 1));
+}
+
+function renderPager(id, page, total, go) {
+    const el = document.getElementById(id);
+    const pages = Math.ceil(total / PAGE_SIZE);
+    if (pages <= 1) { el.innerHTML = ''; return; }
+    el.innerHTML =
+        '<button class="secondary"' + (page === 0 ? ' disabled' : '') + ' onclick="' + go + '(' + (page - 1) + ')">Prev</button>' +
+        '<span>' + (page * PAGE_SIZE + 1) + '-' + Math.min(total, (page + 1) * PAGE_SIZE) + ' of ' + total + '</span>' +
+        '<button class="secondary"' + (page >= pages - 1 ? ' disabled' : '') + ' onclick="' + go + '(' + (page + 1) + ')">Next</button>';
+}
 
 async function loadUsers() {
     try {
@@ -4873,12 +4890,12 @@ function closeAddUserModal() {
 }
 
 function onUserSearch() {
-    usersShownCount = USERS_PAGE_SIZE;
+    usersPage = 0;
     renderUsers();
 }
 
-function showMoreUsers() {
-    usersShownCount += 2 * USERS_PAGE_SIZE;
+function goUsersPage(p) {
+    usersPage = p;
     renderUsers();
 }
 
@@ -4905,13 +4922,11 @@ function filteredUsers() {
 function renderUsers() {
     const tbody = document.getElementById('usersTableBody');
     const filtered = filteredUsers();
-    const shown = filtered.slice(0, usersShownCount);
-    const countEl = document.getElementById('userCount');
-    countEl.textContent = shown.length < filtered.length
-        ? shown.length + ' of ' + filtered.length + ' users'
-        : filtered.length + ' user' + (filtered.length === 1 ? '' : 's');
-    document.getElementById('usersShowMore').style.display =
-        shown.length < filtered.length ? '' : 'none';
+    usersPage = clampPage(usersPage, filtered.length);
+    const shown = filtered.slice(usersPage * PAGE_SIZE, (usersPage + 1) * PAGE_SIZE);
+    document.getElementById('userCount').textContent =
+        filtered.length + ' user' + (filtered.length === 1 ? '' : 's');
+    renderPager('usersPager', usersPage, filtered.length, 'goUsersPage');
     if (!shown.length) {
         tbody.innerHTML = '<tr><td colspan="6" style="color:var(--text2);">No matching users.</td></tr>';
         return;
@@ -5782,6 +5797,17 @@ async function deleteProduct(slug) {
 
 let workspaces = [];
 let selectedWsId = null;
+let wsPage = 0;
+
+function onWsSearch() {
+    wsPage = 0;
+    renderWorkspaces();
+}
+
+function goWsPage(p) {
+    wsPage = p;
+    renderWorkspaces();
+}
 
 async function loadWorkspaces() {
     const container = document.getElementById('workspacesContainer');
@@ -5803,13 +5829,20 @@ async function loadWorkspaces() {
 
 function renderWorkspaces() {
     const container = document.getElementById('workspacesContainer');
+    document.getElementById('wsPager').innerHTML = '';
+    document.getElementById('wsCount').textContent = '';
     if (workspaces.length === 0) {
         container.innerHTML = '<div class="empty-state" style="width:100%;padding:24px;"><p>No workspaces yet.</p></div>';
         return;
     }
     const q = (document.getElementById('wsSearch').value || '').trim().toLowerCase();
-    const shown = q ? workspaces.filter(ws =>
+    const filtered = q ? workspaces.filter(ws =>
         (ws.name + ' ' + (ws.product || '') + ' ' + (ws.description || '') + ' ' + (ws.created_by || '')).toLowerCase().includes(q)) : workspaces;
+    wsPage = clampPage(wsPage, filtered.length);
+    const shown = filtered.slice(wsPage * PAGE_SIZE, (wsPage + 1) * PAGE_SIZE);
+    document.getElementById('wsCount').textContent =
+        filtered.length + ' workspace' + (filtered.length === 1 ? '' : 's');
+    renderPager('wsPager', wsPage, filtered.length, 'goWsPage');
     if (shown.length === 0) {
         container.innerHTML = '<div class="empty-state" style="width:100%;padding:24px;"><p>No matching workspaces.</p></div>';
         return;
