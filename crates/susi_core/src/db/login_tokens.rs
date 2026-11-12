@@ -229,6 +229,24 @@ impl LicenseDb {
         Ok(count > 0)
     }
 
+    pub fn pending_invitation_usernames(
+        &self,
+    ) -> Result<std::collections::HashSet<String>, LicenseError> {
+        let now = Utc::now().to_rfc3339();
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT DISTINCT username FROM login_tokens
+                 WHERE kind = 'invite' AND used_at IS NULL AND expires_at > ?1",
+            )
+            .map_err(|e| LicenseError::Other(format!("DB prepare: {}", e)))?;
+        let rows = stmt
+            .query_map(params![now], |r| r.get(0))
+            .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|e| LicenseError::Other(format!("DB row: {}", e)))
+    }
+
     /// Validate a password-reset or invitation token and mark it consumed.
     /// Returns the username on success. Single-use; matches `kind IN
     /// ('reset','invite')` so the same `/#/reset/<token>` flow lets a new

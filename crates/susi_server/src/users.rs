@@ -18,10 +18,11 @@ pub(crate) async fn handle_list_users(
             serde_json::json!({ "license_key": license_key, "product": product }),
         );
     }
+    let pending_invites = db.pending_invitation_usernames().unwrap_or_default();
     let out = users
         .into_iter()
         .map(|u| {
-            let pending = db.has_pending_invitation(&u.username).unwrap_or(false);
+            let pending = pending_invites.contains(&u.username);
             let licenses = licenses_by_user.remove(&u.username).unwrap_or_default();
             serde_json::json!({
                 "username": u.username,

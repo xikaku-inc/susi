@@ -3964,6 +3964,7 @@ mod tests {
         db.insert_invitation_token("inv-1", "alice", 7 * 24 * 3600)
             .unwrap();
         assert!(db.has_pending_invitation("alice").unwrap());
+        assert!(db.pending_invitation_usernames().unwrap().contains("alice"));
 
         // Same consume function handles both kinds - invitee uses the
         // existing /#/reset/<token> endpoint to pick their initial password.
@@ -3974,6 +3975,7 @@ mod tests {
         assert!(db.consume_password_reset_token("inv-1").unwrap().is_none());
         // Consumed → no longer "pending".
         assert!(!db.has_pending_invitation("alice").unwrap());
+        assert!(db.pending_invitation_usernames().unwrap().is_empty());
     }
 
     #[test]
@@ -4002,6 +4004,7 @@ mod tests {
 
         db.insert_invitation_token("stale", "carol", -1).unwrap();
         assert!(!db.has_pending_invitation("carol").unwrap());
+        assert!(db.pending_invitation_usernames().unwrap().is_empty());
         assert!(db.consume_password_reset_token("stale").unwrap().is_none());
     }
 
