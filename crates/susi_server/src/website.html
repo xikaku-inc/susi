@@ -1020,6 +1020,8 @@ const L10N = {
         'Online Shop': 'オンラインショップ',
         'Support': 'サポート', 'Documentation': 'ドキュメント',
         'Customer Area': 'カスタマーエリア',
+        'Shipping to the United States or Canada?': '米国・カナダへの配送をご希望ですか？',
+        'Order from the Xikaku store.': 'Xikakuストアでご注文ください。',
         'Thanks - your message is on its way.': 'お問い合わせありがとうございます。メッセージを送信しました。',
         'show email': 'メールを表示',
         // Shop storefront chrome.
@@ -3307,6 +3309,17 @@ async function loadShopProducts() {
 }
 
 // ---- Shop renderers ----
+// The US and Canada are served by the Xikaku store, so they are absent from
+// this shop's destination list. Point those visitors across instead of
+// letting them reach the country picker and find no match.
+function northAmericaNotice(margin) {
+    if (SITE.id !== 'lpr') return '';
+    return '<div style="background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px;margin:' + (margin || '0 0 24px') + ';">'
+        + escHtml(t('Shipping to the United States or Canada?')) + ' '
+        + '<a href="https://xikaku.com/shop" rel="noopener">' + escHtml(t('Order from the Xikaku store.')) + '</a>'
+        + '</div>';
+}
+
 function renderShopGrid() {
     currentSlug = '__shop__';
     const c = document.getElementById('content');
@@ -3339,6 +3352,7 @@ function renderShopGrid() {
             : 'Order ' + SITE.name + ' products directly.');
     c.innerHTML = '<h1>' + escHtml(t('Shop')) + '</h1>'
         + '<p style="color:var(--text2);">' + escHtml(intro) + '</p>'
+        + northAmericaNotice()
         + '<div class="shop-grid">' + cards + '</div>';
 }
 
@@ -3369,6 +3383,7 @@ function renderShopDetail(sku) {
         +       '<input id="detailQty" type="number" min="1" value="1">'
         +       '<button class="btn primary" onclick="addToCart(\'' + escHtml(p.sku) + '\', document.getElementById(\'detailQty\').value)">' + escHtml(t('Add to cart')) + '</button>'
         +     '</div>'
+        +     northAmericaNotice('24px 0 0')
         +   '</div>'
         + '</div>';
 }
