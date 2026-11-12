@@ -33,6 +33,7 @@ option(SUSI_REQUIRE_SIGNED_BINARY
 add_library(susi STATIC src/susi.cpp src/file_io.cpp src/file_io.h include/susi.h)
 target_include_directories(susi PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(susi PUBLIC cxx_std_17)
+target_compile_options(susi PRIVATE "$<$<CXX_COMPILER_ID:MSVC>:/utf-8>")
 
 # OpenSSL
 find_package(OpenSSL REQUIRED)
