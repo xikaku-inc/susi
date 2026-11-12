@@ -11,7 +11,7 @@ cmake_minimum_required(VERSION 3.16)
 #   add_subdirectory(susi/cpp)
 #   target_link_libraries(your_target PRIVATE susi)
 
-if(NOT CMAKE_PROJECT_NAME)
+if(CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
     project(susi LANGUAGES CXX)
 endif()
 
