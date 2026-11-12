@@ -14,3 +14,5 @@ CMakeUserPresets.json
 __pycache__/
 
 .vscode
+# Claude Code: machine-specific settings stay local; .claude/memory/ is committed on purpose
+.claude/settings.local.json
