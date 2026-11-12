@@ -29,6 +29,8 @@ endif()
 #   3. Parent project: set(SUSI_REQUIRE_SIGNED_BINARY ON) before add_subdirectory()
 option(SUSI_REQUIRE_SIGNED_BINARY
     "Abort at startup if the binary is not code-signed" OFF)
+# Set by Conan with -o "&:build_tests=True".
+option(SUSI_BUILD_TESTS "Build the tests in tests/" OFF)
 
 add_library(susi STATIC src/susi.cpp src/file_io.cpp src/file_io.h include/susi.h)
 target_include_directories(susi PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -65,3 +67,8 @@ endif()
 
 set_target_properties(susi PROPERTIES PUBLIC_HEADER "include/susi.h")
 install(TARGETS susi)
+
+if(SUSI_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()

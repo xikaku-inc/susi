@@ -5,6 +5,7 @@
         "openssl/3.6.5#3c1311f37543e7140f33fe5989f315c2%1790692982.113",
         "nlohmann_json/3.11.3#45828be26eb619a2e04ca517bb7b828d%1701220705.259",
         "libcurl/8.23.0#edd8c65a093575a81c27cd8c1c20502c%1793708023.146",
+        "cpp-httplib/0.65.0#374686d50198267c77ae79bbbec810ec%1793962960.454",
         "catch2/3.16.1#0dc3f5041f5a681061a45f17e7be0fed%1793091288.859"
     ],
     "build_requires": [

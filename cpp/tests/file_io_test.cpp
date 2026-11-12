@@ -1,19 +1,11 @@
 #include "file_io.h"
+#include "test_helpers.h"
 
 #include <catch2/catch_test_macros.hpp>
 
 #include <atomic>
-#include <fstream>
-#include <iterator>
 #include <string>
 #include <thread>
-
-#ifdef _WIN32
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#endif
 
 namespace fs = std::filesystem;
 using susi::details::readWholeFile;
@@ -21,54 +13,12 @@ using susi::details::writeFileReplace;
 
 namespace {
 
-fs::path emptyTestDir(const std::string& name)
-{
-    fs::path dir = fs::temp_directory_path() / ("susi_cpp_" + name);
-    fs::remove_all(dir);
-    fs::create_directories(dir);
-    return dir;
-}
-
-size_t entryCount(const fs::path& dir)
-{
-    return static_cast<size_t>(std::distance(fs::directory_iterator(dir), fs::directory_iterator()));
-}
-
-void writePlain(const fs::path& path, const std::string& data)
-{
-    std::ofstream(path, std::ios::binary) << data;
-}
-
 std::string readByName(const fs::path& path)
 {
     std::string s;
     REQUIRE(readWholeFile(path, s));
     return s;
 }
-
-// Hold a file open the way another reader would, by default sharing all access.
-struct HeldFile {
-#ifdef _WIN32
-    HANDLE h;
-    explicit HeldFile(const fs::path& path, DWORD share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
-        : h(CreateFileW(path.c_str(), GENERIC_READ, share, nullptr, OPEN_EXISTING, 0, nullptr))
-    {
-        REQUIRE(h != INVALID_HANDLE_VALUE);
-    }
-    ~HeldFile() { CloseHandle(h); }
-    std::string read()
-    {
-        char buf[256];
-        DWORD n = 0;
-        REQUIRE(ReadFile(h, buf, sizeof(buf), &n, nullptr));
-        return std::string(buf, n);
-    }
-#else
-    std::ifstream f;
-    explicit HeldFile(const fs::path& path) : f(path, std::ios::binary) { REQUIRE(f.is_open()); }
-    std::string read() { return std::string(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>()); }
-#endif
-};
 
 } // namespace
 
