@@ -1,8 +1,8 @@
 //! Rotating encrypted offsite backups to Dropbox.
 //!
 //! A scheduled (or manually triggered) run snapshots the SQLite DB with
-//! `VACUUM INTO`, tars it together with the signing key, the two secret
-//! files and `docs/` (optionally `releases/`), encrypts the archive with
+//! `VACUUM INTO`, tars it together with `docs/` and `website/` (optionally
+//! `releases/`), encrypts the archive with
 //! chunked AES-256-GCM under `SUSI_BACKUP_KEY`, uploads it to the app's
 //! Dropbox App Folder via upload sessions, and prunes old archives with a
 //! grandfather-father-son retention scheme (daily/weekly/monthly).
@@ -12,8 +12,12 @@
 //! refresh token is stored sealed with the DB at-rest key. Access tokens are
 //! minted per run and never persisted.
 //!
+//! The archive deliberately excludes `private.pem`, `db_secret.bin` and
+//! `jwt_secret.bin` so one leaked backup key cannot collapse every layer of
+//! key separation; keep those three offline for a restore.
+//!
 //! Restore: `susi-server decrypt-backup <archive> --key <hex>` then untar
-//! into a fresh /data volume.
+//! into a fresh /data volume and copy the three key files back in.
 
 use std::collections::HashSet;
 use std::fs::File;
