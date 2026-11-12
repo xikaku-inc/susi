@@ -139,6 +139,20 @@ impl LicenseDb {
         Ok(n > 0)
     }
 
+    /// Delete a revoked or expired token row. Returns false if the row is
+    /// unknown or still active - active tokens must be revoked first.
+    pub fn delete_api_token(&self, id: i64) -> Result<bool, LicenseError> {
+        let now = Utc::now().to_rfc3339();
+        let n = self
+            .conn
+            .execute(
+                "DELETE FROM api_tokens WHERE id = ?1 AND (revoked_at IS NOT NULL OR expires_at < ?2)",
+                params![id, now],
+            )
+            .map_err(|e| LicenseError::Other(format!("DB delete: {}", e)))?;
+        Ok(n > 0)
+    }
+
     /// Revoke every live API token of a user. Called on password change and
     /// reset: those events must invalidate everything the old credential ever
     /// minted, not only the session JWTs.

@@ -427,6 +427,58 @@ pub(crate) async fn handle_revoke_any_api_token(
     Ok(Json(serde_json::json!({ "status": "OK" })))
 }
 
+pub(crate) async fn handle_delete_my_api_token(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    if principal.source != AuthSource::Jwt {
+        return Err(error_response(StatusCode::FORBIDDEN, "API tokens can only be managed from a browser session"));
+    }
+    let deleted = {
+        let db = state.db.lock();
+        let owner = db
+            .get_api_token_owner(id)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+        match owner {
+            None => return Err(error_response(StatusCode::NOT_FOUND, "Token not found")),
+            Some(o) if o != principal.username => {
+                return Err(error_response(StatusCode::FORBIDDEN, "Token belongs to another user"))
+            }
+            _ => {}
+        }
+        db.delete_api_token(id)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+    };
+    if !deleted {
+        return Err(error_response(StatusCode::CONFLICT, "Revoke the token before deleting it"));
+    }
+    log::info!("API token id={} deleted by {}", id, principal.username);
+    audit(&state, &principal.username, "api_token.delete", &id.to_string(), "");
+    Ok(Json(serde_json::json!({ "status": "OK" })))
+}
+
+pub(crate) async fn handle_delete_any_api_token(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let principal = validate_principal(&headers, &state)?;
+    require_admin_full(&state, &principal)?;
+    let deleted = {
+        let db = state.db.lock();
+        db.delete_api_token(id)
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+    };
+    if !deleted {
+        return Err(error_response(StatusCode::CONFLICT, "Token not found or still active"));
+    }
+    log::info!("API token id={} deleted by admin {}", id, principal.username);
+    audit(&state, &principal.username, "api_token.delete_any", &id.to_string(), "");
+    Ok(Json(serde_json::json!({ "status": "OK" })))
+}
+
 pub(crate) async fn handle_set_my_email(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,

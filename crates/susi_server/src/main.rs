@@ -3362,6 +3362,8 @@ async fn main() -> Result<()> {
         .route("/api/v1/auth/api-tokens/{id}", axum::routing::delete(users::handle_revoke_my_api_token))
         .route("/api/v1/auth/api-tokens/all", get(users::handle_list_all_api_tokens))
         .route("/api/v1/auth/api-tokens/all/{id}", axum::routing::delete(users::handle_revoke_any_api_token))
+        .route("/api/v1/auth/api-tokens/{id}/delete", post(users::handle_delete_my_api_token))
+        .route("/api/v1/auth/api-tokens/all/{id}/delete", post(users::handle_delete_any_api_token))
         // User management
         .route("/api/v1/auth/users", get(users::handle_list_users))
         .route("/api/v1/auth/users", post(users::handle_create_user))

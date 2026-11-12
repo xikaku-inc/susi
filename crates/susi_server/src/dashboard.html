@@ -5145,9 +5145,11 @@ function closeApiTokensModal() {
     document.getElementById('apiTokensModal').classList.remove('visible');
 }
 
+function tokenExpired(t) { return !!t.expires_at && new Date(t.expires_at) < new Date(); }
+function tokenInactive(t) { return !!t.revoked_at || tokenExpired(t); }
 function fmtTokenStatus(t) {
     if (t.revoked_at) return '<span class="pat-revoked">Revoked</span>';
-    if (t.expires_at && new Date(t.expires_at) < new Date()) return '<span class="pat-revoked">Expired</span>';
+    if (tokenExpired(t)) return '<span class="pat-revoked">Expired</span>';
     return '<span class="pat-active">Active</span>';
 }
 function fmtTokenDate(s) {
@@ -5166,8 +5168,8 @@ async function loadMyApiTokens() {
             return;
         }
         tbody.innerHTML = tokens.map(t => {
-            const actions = t.revoked_at
-                ? '<span style="color:var(--text2);font-size:11px;">-</span>'
+            const actions = tokenInactive(t)
+                ? '<button class="danger" onclick="deleteMyApiToken(' + t.id + ')">Delete</button>'
                 : '<button class="danger" onclick="revokeMyApiToken(' + t.id + ')">Revoke</button>';
             return '<tr>'
                 + '<td>' + esc(t.name) + '</td>'
@@ -5194,8 +5196,8 @@ async function loadAllApiTokens() {
             return;
         }
         tbody.innerHTML = tokens.map(t => {
-            const actions = t.revoked_at
-                ? '<span style="color:var(--text2);font-size:11px;">-</span>'
+            const actions = tokenInactive(t)
+                ? '<button class="danger" onclick="deleteAnyApiToken(' + t.id + ')">Delete</button>'
                 : '<button class="danger" onclick="revokeAnyApiToken(' + t.id + ')">Revoke</button>';
             return '<tr>'
                 + '<td>' + esc(t.username) + '</td>'
@@ -5280,6 +5282,28 @@ async function revokeAnyApiToken(id) {
         const resp = await fetch(API + '/auth/api-tokens/all/' + id, { method: 'DELETE', headers: authHeaders() });
         if (!resp.ok) { const d = await resp.json(); toast('Error: ' + d.error, 'error'); return; }
         toast('Token revoked', 'success');
+        await loadAllApiTokens();
+        await loadMyApiTokens();
+    } catch (e) { toast('Failed: ' + e.message, 'error'); }
+}
+
+async function deleteMyApiToken(id) {
+    if (!confirm('Delete this token permanently?')) return;
+    try {
+        const resp = await fetch(API + '/auth/api-tokens/' + id + '/delete', { method: 'POST', headers: authHeaders() });
+        if (!resp.ok) { const d = await resp.json(); toast('Error: ' + d.error, 'error'); return; }
+        toast('Token deleted', 'success');
+        await loadMyApiTokens();
+        if (roleIsAdmin(userRole)) await loadAllApiTokens();
+    } catch (e) { toast('Failed: ' + e.message, 'error'); }
+}
+
+async function deleteAnyApiToken(id) {
+    if (!confirm('Delete this token permanently (admin)?')) return;
+    try {
+        const resp = await fetch(API + '/auth/api-tokens/all/' + id + '/delete', { method: 'POST', headers: authHeaders() });
+        if (!resp.ok) { const d = await resp.json(); toast('Error: ' + d.error, 'error'); return; }
+        toast('Token deleted', 'success');
         await loadAllApiTokens();
         await loadMyApiTokens();
     } catch (e) { toast('Failed: ' + e.message, 'error'); }

@@ -5719,6 +5719,31 @@ fn test_site_i18n() {
     let en_section = llms.split("## Pages (ja)").next().unwrap();
     assert!(!en_section.contains("会社情報"), "ja pages stay out of the default-language list");
 
+    // A /ja/-keyed redirect overrides the shared key for ja requests only.
+    let resp = http
+        .post(format!("{}/website/redirects/import?site=lpr", server.api_url))
+        .bearer_auth(&token)
+        .json(&json!({ "redirects": [
+            { "from_path": "/old-product", "to_path": "/about" },
+            { "from_path": "/ja/old-product", "to_path": "/ja/home" },
+            { "from_path": "/legacy-only", "to_path": "/about" },
+        ] }))
+        .send().expect("import redirects");
+    assert_eq!(resp.status().as_u16(), 200);
+    let no_follow = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build().unwrap();
+    let location = |path: &str| {
+        let resp = no_follow.get(format!("{}/site{}", server.url, path))
+            .header("Host", "www.lp-research.com")
+            .send().expect("redirect probe");
+        assert_eq!(resp.status().as_u16(), 301, "{path}");
+        resp.headers()["location"].to_str().unwrap().to_string()
+    };
+    assert_eq!(location("/old-product"), "/about");
+    assert_eq!(location("/ja/old-product"), "/ja/home");
+    assert_eq!(location("/ja/legacy-only"), "/about", "ja falls back to the shared key");
+
     // The other site declares no languages: /site/ja is a plain slug there.
     let shell = http.get(format!("{}/site/ja", server.url))
         .header("Host", "xikaku.com")
@@ -8092,4 +8117,57 @@ fn test_page_nav_title() {
     assert_eq!(put(json!({ "title": "LPMS-IG1 High-Precision 9-Axis IMU", "body_md": "# y", "nav_title": "" })), 200);
     assert_eq!(get()["nav_title"].as_str().unwrap(), "");
     assert_eq!(put(json!({ "title": "t", "body_md": "# y", "nav_title": "x".repeat(101) })), 400);
+}
+
+/// Deleting an API token only works once it is revoked; the row then
+/// disappears from both the owner's and the admin listing.
+#[test]
+fn test_delete_api_token() {
+    let server = TestServer::start();
+    let admin = server.admin_token();
+    let client = server.http();
+
+    let mint = |name: &str| -> i64 {
+        client
+            .post(format!("{}/auth/api-tokens", server.api_url))
+            .bearer_auth(&admin)
+            .json(&json!({"name": name}))
+            .send()
+            .expect("mint")
+            .json::<Value>()
+            .expect("json")["id"]
+            .as_i64()
+            .expect("id")
+    };
+    let status = |req: reqwest::blocking::RequestBuilder| req.bearer_auth(&admin).send().expect("send").status().as_u16();
+    let count = |path: &str| -> usize {
+        client
+            .get(format!("{}{}", server.api_url, path))
+            .bearer_auth(&admin)
+            .send()
+            .expect("list")
+            .json::<Value>()
+            .expect("json")
+            .as_array()
+            .expect("array")
+            .len()
+    };
+
+    let own = mint("own");
+    let other = mint("other");
+    assert_eq!(count("/auth/api-tokens"), 2);
+
+    let del_own = format!("{}/auth/api-tokens/{}/delete", server.api_url, own);
+    assert_eq!(status(client.post(&del_own)), 409, "active token must be revoked first");
+    assert_eq!(status(client.delete(format!("{}/auth/api-tokens/{}", server.api_url, own))), 200);
+    assert_eq!(status(client.post(&del_own)), 200);
+    assert_eq!(status(client.post(&del_own)), 404);
+
+    let del_other = format!("{}/auth/api-tokens/all/{}/delete", server.api_url, other);
+    assert_eq!(status(client.post(&del_other)), 409);
+    assert_eq!(status(client.delete(format!("{}/auth/api-tokens/all/{}", server.api_url, other))), 200);
+    assert_eq!(status(client.post(&del_other)), 200);
+
+    assert_eq!(count("/auth/api-tokens"), 0);
+    assert_eq!(count("/auth/api-tokens/all"), 0);
 }

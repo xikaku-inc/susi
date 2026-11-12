@@ -2322,6 +2322,24 @@ mod tests {
             .unwrap()
             .expect("present");
         assert!(row.revoked);
+
+        // Delete removes the revoked row entirely.
+        assert!(db.delete_api_token(id).unwrap());
+        assert!(!db.delete_api_token(id).unwrap());
+        assert!(db.find_api_token_by_hash("h-abcdef").unwrap().is_none());
+        assert!(db.list_api_tokens_for_user("admin").unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_api_token_delete_requires_inactive() {
+        let db = test_db();
+        db.seed_admin("hash").unwrap();
+        let active = db.insert_api_token("admin", "a", "h-a", "p-a", 365).unwrap();
+        assert!(!db.delete_api_token(active).unwrap());
+        assert!(db.find_api_token_by_hash("h-a").unwrap().is_some());
+
+        let expired = db.insert_api_token("admin", "e", "h-e", "p-e", -1).unwrap();
+        assert!(db.delete_api_token(expired).unwrap());
     }
 
     #[test]
