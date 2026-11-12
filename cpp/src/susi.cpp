@@ -677,7 +677,8 @@ SusiClient::LicenseStatus SusiClient::verifySignedLicenseJson(const std::string&
         return LicenseStatus::Error;
     }
 
-    if (!signedLicense.contains("license_data") || !signedLicense.contains("signature")) {
+    if (!signedLicense.contains("license_data") || !signedLicense.contains("signature") ||
+        !signedLicense.at("license_data").is_string() || !signedLicense.at("signature").is_string()) {
         SUSI_LOG("License missing required fields (license_data, signature)");
         return LicenseStatus::Error;
     }
