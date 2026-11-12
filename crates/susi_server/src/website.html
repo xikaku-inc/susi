@@ -1413,6 +1413,8 @@ function renderInline(s) {
             if (h) extra += ' height="' + h[1] + '"';
             const classes = [...attrs.matchAll(/\.([A-Za-z][\w-]*)/g)].map(m => m[1]);
             if (classes.length) extra += ' class="' + classes.join(' ') + '"';
+            const p = isVideo && attrs.match(/\bposter\s*=\s*"?([^\s"}]+)/i);
+            if (p) extra += ' poster="' + resolveAssetUrl(p[1]) + '"';
         }
         if (isVideo) {
             return '<video src="' + resolveAssetUrl(url) + '"' + extra

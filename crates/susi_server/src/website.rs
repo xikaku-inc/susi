@@ -1643,6 +1643,8 @@ pub(crate) struct PandocImage<'a> {
     pub(crate) width: Option<&'a str>,
     pub(crate) height: Option<&'a str>,
     pub(crate) classes: Vec<&'a str>,
+    /// Still frame shown before a video starts; ignored on images.
+    pub(crate) poster: Option<&'a str>,
     /// Byte length of the whole occurrence, attribute span included.
     consumed: usize,
 }
@@ -1718,6 +1720,9 @@ fn rewrite_pandoc_image_attrs(body_md: &str) -> String {
             }
             if !img.classes.is_empty() {
                 html.push_str(&format!(r#" class="{}""#, html_escape(&img.classes.join(" "))));
+            }
+            if let Some(p) = img.poster {
+                html.push_str(&format!(r#" poster="{}""#, html_escape(p)));
             }
             html.push_str(" autoplay muted loop playsinline></video>");
             return html;
@@ -1799,6 +1804,7 @@ fn scan_pandoc_image(s: &str) -> Option<PandocImage<'_>> {
     let mut classes: Vec<&str> = Vec::new();
     let mut width: Option<&str> = None;
     let mut height: Option<&str> = None;
+    let mut poster: Option<&str> = None;
     for tok in attrs.split_whitespace() {
         if let Some(c) = tok.strip_prefix('.') {
             if !c.is_empty()
@@ -1811,10 +1817,12 @@ fn scan_pandoc_image(s: &str) -> Option<PandocImage<'_>> {
             width = Some(v.trim_matches('"'));
         } else if let Some(v) = tok.strip_prefix("height=") {
             height = Some(v.trim_matches('"'));
+        } else if let Some(v) = tok.strip_prefix("poster=") {
+            poster = Some(v.trim_matches('"')).filter(|p| !p.is_empty());
         }
     }
 
-    Some(PandocImage { alt, url, width, height, classes, consumed })
+    Some(PandocImage { alt, url, width, height, classes, poster, consumed })
 }
 
 /// Render markdown body into HTML for SSR injection, with tables, footnotes,
@@ -1845,7 +1853,7 @@ pub(crate) fn render_body_html(body_md: &str) -> String {
     let clean = ammonia::Builder::default()
         .add_generic_attributes(&["class", "id"])
         .add_tags(&["video"])
-        .add_tag_attributes("video", &["src", "autoplay", "muted", "loop", "playsinline", "width", "height"])
+        .add_tag_attributes("video", &["src", "poster", "autoplay", "muted", "loop", "playsinline", "width", "height"])
         .add_tag_attributes("img", &["style"])
         .attribute_filter(|element, attribute, value| {
             if element == "img" && attribute == "style" {
@@ -2577,7 +2585,9 @@ fn render_website(
             db.get_website_page(site.id, &lang, s).ok().flatten().map_or(true, |r| r.6)
         };
         if hidden_or_missing && sq.edit.is_none() {
-            if let Some(to) = lookup_site_redirect(state, site, &lookup_path(post_path, s)) {
+            let key = lookup_path(post_path, s);
+            let lang_hit = if lang.is_empty() { None } else { lookup_site_redirect(state, site, &format!("/{}{}", lang, key)) };
+            if let Some(to) = lang_hit.or_else(|| lookup_site_redirect(state, site, &key)) {
                 let loc = redirect_map_location(&to, is_marketing_host(headers));
                 return (StatusCode::MOVED_PERMANENTLY, [(header::LOCATION, loc)]).into_response();
             }
@@ -2810,10 +2820,14 @@ fn render_blog_index(
 /// SSR body via `render_body_html` - docs bodies arrive with rooted paths
 /// already and pass through untouched.
 fn absolutize_bare_img_srcs(html: &str) -> String {
+    absolutize_bare_attr(&absolutize_bare_attr(html, "src=\""), "poster=\"")
+}
+
+fn absolutize_bare_attr(html: &str, attr: &str) -> String {
     let mut out = String::with_capacity(html.len() + 64);
     let mut i = 0;
-    while let Some(p) = html[i..].find("src=\"") {
-        let start = i + p + 5;
+    while let Some(p) = html[i..].find(attr) {
+        let start = i + p + attr.len();
         out.push_str(&html[i..start]);
         i = start;
         let Some(e) = html[start..].find('"') else { break };
@@ -3844,8 +3858,8 @@ fn normalize_redirect_path(path: &str) -> String {
     p
 }
 
-/// The redirect-map key for a page's own address. The lookup is language-
-/// agnostic (nginx strips the /{lang}/ prefix), so no prefix here either.
+/// The redirect-map key for a page's own address, without a language prefix.
+/// Translations try the /{lang}-prefixed key first, then fall back to this.
 fn lookup_path(is_post: bool, slug: &str) -> String {
     if is_post { format!("/blog/{}", slug) } else { format!("/{}", slug) }
 }
@@ -4495,6 +4509,21 @@ mod tests {
             assert!(html.contains(attr), "{attr} stripped: {html}");
         }
         assert!(!html.contains("<img"), "{html}");
+    }
+
+    #[test]
+    fn video_poster_attr_survives_and_is_absolutized() {
+        let html = render_body_html("![](hero.mp4){poster=hero.jpg width=1200px}
+");
+        assert!(html.contains(r#"poster="/api/v1/website/assets/hero.jpg""#), "{html}");
+        assert!(html.contains(r#"src="/api/v1/website/assets/hero.mp4""#), "{html}");
+        assert!(html.contains(r#"width="1200px""#), "{html}");
+        let html = render_body_html("![](hero.mp4){poster=/static/p.png}
+");
+        assert!(html.contains(r#"poster="/static/p.png""#), "{html}");
+        let html = render_body_html("![x](a.png){poster=b.jpg}
+");
+        assert!(!html.contains("poster"), "{html}");
     }
 
     #[test]
