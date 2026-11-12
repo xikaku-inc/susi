@@ -1,0 +1,34 @@
+name: C++
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  test:
+
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    runs-on: ${{ matrix.os }}
+
+    defaults:
+      run:
+        working-directory: cpp/tests
+
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+    - name: Install Conan
+      run: |
+        pip install conan
+        conan profile detect
+    - name: Build
+      run: conan build . --build=missing
+    - name: Run tests
+      run: ctest --preset conan-release --output-on-failure
