@@ -231,7 +231,7 @@ Then you can use it in your project:
 SusiClient susi("your-public-key");
 
 // Pass path to license file
-auto status = susi.checkLicense("license.json");
+auto status = susi.verifyFile("license.json");
 
 switch (status) {
     case SusiClient::LicenseStatus::Valid:
@@ -289,6 +289,8 @@ All verification methods return a status indicating the result. The following ta
 | License key not recognized                                             | `LicenseStatus::InvalidLicenseKey`                              | `LicenseStatus::InvalidLicenseKey` |
 | License has been revoked                                               | `LicenseStatus::Revoked`                                        | `LicenseStatus::Revoked`           |
 | Binary is not code-signed (requires_signed_binary license flag is set) | `LicenseStatus::UnsignedBinary`                                 | `LicenseStatus::UnsignedBinary`    |
+| Machine was removed from the license by an administrator               | `LicenseStatus::Deactivated`                                    | `LicenseStatus::Deactivated`       |
+| Machine not activated yet (no cached license file)                     | `LicenseStatus::NotActivated`                                   | `LicenseStatus::NotActivated`      |
 | No USB token found                                                     | `LicenseStatus::TokenNotFound`                                  | `LicenseStatus::TokenNotFound`     |
 | License file not found on disk                                         | `LicenseStatus::FileNotFound(String)`                           | `LicenseStatus::FileNotFound`      |
 | Other error (parse error, crypto failure, etc.)                        | `LicenseStatus::Error(String)`                                  | `LicenseStatus::Error`             |
@@ -391,7 +393,7 @@ if status.is_valid() {
 
 ```cpp
 SusiClient susi("your-public-key");
-auto status = susi.checkLicenseToken();
+auto status = susi.verifyToken();
 
 if (susi.isValid()) {
     // license valid
@@ -787,7 +789,13 @@ SusiClient susi("your-public-key", "https://license.example.com/api/v1");
 
 // Contacts the server to renew the lease, writes the updated license.json,
 // then verifies it. Falls back to the cached file if the server is unreachable.
-auto status = susi.checkLicenseAndRefresh("license.json", "XXXXX-XXXXX-XXXXX-XXXXX");
+// Never activates: returns NotActivated if no license.json exists yet.
+auto status = susi.verifyAndRefresh("license.json", "XXXXX-XXXXX-XXXXX-XXXXX");
+
+if (status == SusiClient::LicenseStatus::NotActivated) {
+    // Only when the user explicitly activates: claims a machine slot and writes license.json
+    status = susi.activate("license.json", "XXXXX-XXXXX-XXXXX-XXXXX");
+}
 
 if (susi.isValid()) {
     // license valid
@@ -801,7 +809,7 @@ if (susi.isInGracePeriod() || susi.isLeaseExpired()){
 }
 ```
 
-Call `verify_and_refresh`/`checkLicenseAndRefresh` periodically (e.g. at startup and every few hours) to keep the lease alive. The server will renew the lease on each successful call.
+Call `verify_and_refresh`/`verifyAndRefresh` periodically (e.g. at startup and every few hours) to keep the lease alive. The server will renew the lease on each successful call.
 
 ## Lease System
 

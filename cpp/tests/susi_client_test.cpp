@@ -198,13 +198,13 @@ private:
 
 } // namespace
 
-TEST_CASE("checkLicense accepts a valid license", "[checkLicense]")
+TEST_CASE("verifyFile accepts a valid license", "[verifyFile]")
 {
     CacheFile cache("valid");
     writePlain(cache.path, signedLicense(validPayload()));
     SusiClient client(serverKey().publicPem);
 
-    CHECK(client.checkLicense(cache.path) == Status::Valid);
+    CHECK(client.verifyFile(cache.path) == Status::Valid);
     CHECK(client.isValid());
     CHECK(client.product() == "TestProduct");
     CHECK(client.customer() == "Test Corp");
@@ -216,7 +216,7 @@ TEST_CASE("checkLicense accepts a valid license", "[checkLicense]")
     CHECK_FALSE(client.isLeaseExpired());
 }
 
-TEST_CASE("checkLicense accepts a license without expiry date", "[checkLicense]")
+TEST_CASE("verifyFile accepts a license without expiry date", "[verifyFile]")
 {
     CacheFile cache("perpetual");
     json payload = validPayload();
@@ -224,10 +224,10 @@ TEST_CASE("checkLicense accepts a license without expiry date", "[checkLicense]"
     writePlain(cache.path, signedLicense(payload));
     SusiClient client(serverKey().publicPem);
 
-    CHECK(client.checkLicense(cache.path) == Status::Valid);
+    CHECK(client.verifyFile(cache.path) == Status::Valid);
 }
 
-TEST_CASE("checkLicense rejects an expired license", "[checkLicense]")
+TEST_CASE("verifyFile rejects an expired license", "[verifyFile]")
 {
     CacheFile cache("expired");
     json payload = validPayload();
@@ -235,12 +235,12 @@ TEST_CASE("checkLicense rejects an expired license", "[checkLicense]")
     writePlain(cache.path, signedLicense(payload));
     SusiClient client(serverKey().publicPem);
 
-    CHECK(client.checkLicense(cache.path) == Status::Expired);
+    CHECK(client.verifyFile(cache.path) == Status::Expired);
     CHECK_FALSE(client.isValid());
     CHECK(client.features().empty());
 }
 
-TEST_CASE("checkLicense rejects licenses that fail signature verification", "[checkLicense]")
+TEST_CASE("verifyFile rejects licenses that fail signature verification", "[verifyFile]")
 {
     CacheFile cache("signature");
     SusiClient client(serverKey().publicPem);
@@ -264,11 +264,11 @@ TEST_CASE("checkLicense rejects licenses that fail signature verification", "[ch
         writePlain(cache.path, license.dump());
     }
 
-    CHECK(client.checkLicense(cache.path) == Status::InvalidSignature);
+    CHECK(client.verifyFile(cache.path) == Status::InvalidSignature);
     CHECK_FALSE(client.isValid());
 }
 
-TEST_CASE("checkLicense reports malformed license files as errors", "[checkLicense]")
+TEST_CASE("verifyFile reports malformed license files as errors", "[verifyFile]")
 {
     CacheFile cache("malformed");
     SusiClient client(serverKey().publicPem);
@@ -285,20 +285,20 @@ TEST_CASE("checkLicense reports malformed license files as errors", "[checkLicen
     }
 
     writePlain(cache.path, contents);
-    CHECK(client.checkLicense(cache.path) == Status::Error);
+    CHECK(client.verifyFile(cache.path) == Status::Error);
     CHECK_FALSE(client.isValid());
 }
 
-TEST_CASE("checkLicense reports a missing file", "[checkLicense]")
+TEST_CASE("verifyFile reports a missing file", "[verifyFile]")
 {
     CacheFile cache("missing");
     SusiClient client(serverKey().publicPem);
 
-    CHECK(client.checkLicense(cache.path) == Status::FileNotFound);
+    CHECK(client.verifyFile(cache.path) == Status::FileNotFound);
     CHECK_FALSE(client.isValid());
 }
 
-TEST_CASE("checkLicense rejects a license for another machine", "[checkLicense]")
+TEST_CASE("verifyFile rejects a license for another machine", "[verifyFile]")
 {
     CacheFile cache("other_machine");
     json payload = validPayload();
@@ -306,11 +306,11 @@ TEST_CASE("checkLicense rejects a license for another machine", "[checkLicense]"
     writePlain(cache.path, signedLicense(payload));
     SusiClient client(serverKey().publicPem);
 
-    CHECK(client.checkLicense(cache.path) == Status::InvalidMachine);
+    CHECK(client.verifyFile(cache.path) == Status::InvalidMachine);
     CHECK_FALSE(client.isValid());
 }
 
-TEST_CASE("checkLicense enforces the lease and its grace period", "[checkLicense]")
+TEST_CASE("verifyFile enforces the lease and its grace period", "[verifyFile]")
 {
     CacheFile cache("lease");
     SusiClient client(serverKey().publicPem);
@@ -320,7 +320,7 @@ TEST_CASE("checkLicense enforces the lease and its grace period", "[checkLicense
     {
         payload["lease_expires"] = timeFromNow(72h);
         writePlain(cache.path, signedLicense(payload));
-        CHECK(client.checkLicense(cache.path) == Status::Valid);
+        CHECK(client.verifyFile(cache.path) == Status::Valid);
         CHECK(client.isLeaseValid());
         CHECK_FALSE(client.isInGracePeriod());
         CHECK_FALSE(client.isLeaseExpired());
@@ -329,7 +329,7 @@ TEST_CASE("checkLicense enforces the lease and its grace period", "[checkLicense
     {
         payload["lease_expires"] = timeFromNow(-1h);
         writePlain(cache.path, signedLicense(payload));
-        CHECK(client.checkLicense(cache.path) == Status::ValidGracePeriod);
+        CHECK(client.verifyFile(cache.path) == Status::ValidGracePeriod);
         CHECK(client.isValid());
         CHECK_FALSE(client.isLeaseValid());
         CHECK(client.isInGracePeriod());
@@ -339,7 +339,7 @@ TEST_CASE("checkLicense enforces the lease and its grace period", "[checkLicense
     {
         payload["lease_expires"] = timeFromNow(-25h);
         writePlain(cache.path, signedLicense(payload));
-        CHECK(client.checkLicense(cache.path) == Status::LeaseExpired);
+        CHECK(client.verifyFile(cache.path) == Status::LeaseExpired);
         CHECK_FALSE(client.isValid());
         CHECK(client.isLeaseExpired());
     }
@@ -348,18 +348,18 @@ TEST_CASE("checkLicense enforces the lease and its grace period", "[checkLicense
         payload["lease_expires"] = timeFromNow(-3h);
         payload["lease_grace_period"] = 4;
         writePlain(cache.path, signedLicense(payload));
-        CHECK(client.checkLicense(cache.path) == Status::ValidGracePeriod);
+        CHECK(client.verifyFile(cache.path) == Status::ValidGracePeriod);
     }
     SECTION("lease expired, past a custom grace period")
     {
         payload["lease_expires"] = timeFromNow(-3h);
         payload["lease_grace_period"] = 2;
         writePlain(cache.path, signedLicense(payload));
-        CHECK(client.checkLicense(cache.path) == Status::LeaseExpired);
+        CHECK(client.verifyFile(cache.path) == Status::LeaseExpired);
     }
 }
 
-TEST_CASE("checkLicense enforces require_signed_binary", "[checkLicense]")
+TEST_CASE("verifyFile enforces require_signed_binary", "[verifyFile]")
 {
     CacheFile cache("signed_binary");
     json payload = validPayload();
@@ -369,16 +369,16 @@ TEST_CASE("checkLicense enforces require_signed_binary", "[checkLicense]")
 
 #if defined(_WIN32)
     // The test executable isn't Authenticode-signed.
-    CHECK(client.checkLicense(cache.path) == Status::UnsignedBinary);
+    CHECK(client.verifyFile(cache.path) == Status::UnsignedBinary);
 #elif defined(__linux__)
     // Linux has no binary signature check.
-    CHECK(client.checkLicense(cache.path) == Status::Valid);
+    CHECK(client.verifyFile(cache.path) == Status::Valid);
 #else
     SKIP("Depends on how the test executable is signed");
 #endif
 }
 
-TEST_CASE("checkLicense accepts a public key without PEM armor", "[checkLicense]")
+TEST_CASE("verifyFile accepts a public key without PEM armor", "[verifyFile]")
 {
     std::string base64Key;
     std::istringstream lines(serverKey().publicPem);
@@ -390,32 +390,34 @@ TEST_CASE("checkLicense accepts a public key without PEM armor", "[checkLicense]
     writePlain(cache.path, signedLicense(validPayload()));
     SusiClient client(base64Key);
 
-    CHECK(client.checkLicense(cache.path) == Status::Valid);
+    CHECK(client.verifyFile(cache.path) == Status::Valid);
 }
 
-TEST_CASE("checkLicense clears the result of the previous check", "[checkLicense]")
+TEST_CASE("verifyFile clears the result of the previous check", "[verifyFile]")
 {
     CacheFile cache("reset");
     writePlain(cache.path, signedLicense(validPayload()));
     SusiClient client(serverKey().publicPem);
-    REQUIRE(client.checkLicense(cache.path) == Status::Valid);
+    REQUIRE(client.verifyFile(cache.path) == Status::Valid);
 
     fs::remove(cache.path);
 
-    CHECK(client.checkLicense(cache.path) == Status::FileNotFound);
+    CHECK(client.verifyFile(cache.path) == Status::FileNotFound);
     CHECK_FALSE(client.isValid());
     CHECK(client.features().empty());
     CHECK(client.product().empty());
 }
 
-TEST_CASE("checkLicenseAndRefresh activates and stores the license", "[refresh]")
+
+TEST_CASE("activate activates and stores the license", "[activate]")
 {
     const std::string license = signedLicense(validPayload());
     CannedServer server(200, license);
-    CacheFile cache("refresh_store");
+    CacheFile cache("activate_store");
     SusiClient client(serverKey().publicPem, server.url());
 
-    CHECK(client.checkLicenseAndRefresh(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::Valid);
+    CHECK(client.activate(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::Valid);
+    CHECK(client.isValid());
     CHECK(client.features() == validFeatures);
     CHECK(readPlain(cache.path) == license);
     CHECK(entryCount(cache.dir) == 1);
@@ -426,37 +428,17 @@ TEST_CASE("checkLicenseAndRefresh activates and stores the license", "[refresh]"
     CHECK(request.at("friendly_name").is_string());
 }
 
-TEST_CASE("checkLicenseAndRefresh replaces a cached license that a reader holds open", "[refresh]")
+TEST_CASE("activate sends the given friendly name", "[activate]")
 {
-    json payload = validPayload();
-    const std::string oldLicense = signedLicense(payload);
-    payload["lease_expires"] = timeFromNow(72h);
-    const std::string newLicense = signedLicense(payload);
-    CannedServer server(200, newLicense);
-    CacheFile cache("refresh_held");
-    writePlain(cache.path, oldLicense);
-    SusiClient client(serverKey().publicPem, server.url());
-    HeldFile held(cache.path);
-
-    CHECK(client.checkLicenseAndRefresh(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::Valid);
-    CHECK(readPlain(cache.path) == newLicense);
-    CHECK(held.read() == oldLicense);
-}
-
-TEST_CASE("checkLicenseAndRefresh keeps the cached license when the response doesn't verify", "[refresh]")
-{
-    const std::string cached = signedLicense(validPayload());
-    CannedServer server(200, signedLicense(validPayload(), otherKey()));
-    CacheFile cache("refresh_bad_response");
-    writePlain(cache.path, cached);
+    CannedServer server(200, signedLicense(validPayload()));
+    CacheFile cache("activate_name");
     SusiClient client(serverKey().publicPem, server.url());
 
-    CHECK(client.checkLicenseAndRefresh(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::InvalidSignature);
-    CHECK_FALSE(client.isValid());
-    CHECK(readPlain(cache.path) == cached);
+    REQUIRE(client.activate(cache.path, "AAAA-BBBB-CCCC-DDDD", "Lab PC 3") == Status::Valid);
+    CHECK(server.requestBody().at("friendly_name") == "Lab PC 3");
 }
 
-TEST_CASE("checkLicenseAndRefresh maps server rejections and removes the cached license", "[refresh]")
+TEST_CASE("activate maps server rejections and stores nothing", "[activate]")
 {
     struct Rejection {
         int status;
@@ -465,27 +447,143 @@ TEST_CASE("checkLicenseAndRefresh maps server rejections and removes the cached 
     };
     const Rejection rejection = GENERATE(values<Rejection>({
         {403, "License has been revoked", Status::Revoked},
+        {403, "Machine was removed by an administrator; re-activation is blocked for 1440 more minutes",
+         Status::Deactivated},
         {403, "License has expired", Status::Expired},
         {403, "Machine limit reached (max 2)", Status::InvalidMachine},
         {403, "Binary signing certificate chain does not terminate at the trusted CA", Status::UnsignedBinary},
-        {403, "Machine was removed by an administrator; re-activation is blocked for 1440 more minutes",
-         Status::Deactivated},
         {404, "License key not found", Status::InvalidLicenseKey},
+        {500, "Internal error", Status::Error},
     }));
     CAPTURE(rejection.status, rejection.message);
     CannedServer server(rejection.status, json{{"error", rejection.message}}.dump());
-    CacheFile cache("refresh_rejected");
-    writePlain(cache.path, signedLicense(validPayload()));
+    CacheFile cache("activate_rejected");
     SusiClient client(serverKey().publicPem, server.url());
 
-    CHECK(client.checkLicenseAndRefresh(cache.path, "AAAA-BBBB-CCCC-DDDD") == rejection.expected);
+    CHECK(client.activate(cache.path, "AAAA-BBBB-CCCC-DDDD") == rejection.expected);
     CHECK_FALSE(client.isValid());
     CHECK_FALSE(fs::exists(cache.path));
 }
 
-TEST_CASE("checkLicenseAndRefresh falls back to the cached license", "[refresh]")
+TEST_CASE("activate fails without a reachable server", "[activate]")
 {
-    CacheFile cache("refresh_fallback");
+    CacheFile cache("activate_offline");
+
+    SECTION("server unreachable")
+    {
+        // Nothing listens on port 1.
+        SusiClient client(serverKey().publicPem, "http://127.0.0.1:1/api/v1");
+        CHECK(client.activate(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::Error);
+    }
+    SECTION("no server configured")
+    {
+        SusiClient client(serverKey().publicPem);
+        CHECK(client.activate(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::Error);
+    }
+
+    CHECK_FALSE(fs::exists(cache.path));
+}
+
+TEST_CASE("Online checks keep the cached license when the response doesn't verify", "[activate][verify]")
+{
+    const std::string cached = signedLicense(validPayload());
+    CannedServer server(200, signedLicense(validPayload(), otherKey()));
+    CacheFile cache("online_bad_response");
+    writePlain(cache.path, cached);
+    SusiClient client(serverKey().publicPem, server.url());
+
+    SECTION("activate")
+    {
+        CHECK(client.activate(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::InvalidSignature);
+    }
+    SECTION("verifyAndRefresh")
+    {
+        CHECK(client.verifyAndRefresh(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::InvalidSignature);
+    }
+
+    CHECK_FALSE(client.isValid());
+    CHECK(readPlain(cache.path) == cached);
+}
+
+TEST_CASE("verifyAndRefresh without a cached license reports NotActivated", "[verify]")
+{
+    CannedServer server(200, signedLicense(validPayload()));
+    CacheFile cache("verify_not_activated");
+    SusiClient client(serverKey().publicPem, server.url());
+
+    CHECK(client.verifyAndRefresh(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::NotActivated);
+    CHECK_FALSE(client.isValid());
+    CHECK(server.path().empty());
+    CHECK_FALSE(fs::exists(cache.path));
+}
+
+TEST_CASE("verifyAndRefresh renews and stores the license", "[verify]")
+{
+    json payload = validPayload();
+    payload["lease_expires"] = timeFromNow(1h);
+    CacheFile cache("verify_store");
+    writePlain(cache.path, signedLicense(payload));
+    payload["lease_expires"] = timeFromNow(72h);
+    const std::string renewed = signedLicense(payload);
+    CannedServer server(200, renewed);
+    SusiClient client(serverKey().publicPem, server.url());
+
+    CHECK(client.verifyAndRefresh(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::Valid);
+    CHECK(client.features() == validFeatures);
+    CHECK(readPlain(cache.path) == renewed);
+    CHECK(entryCount(cache.dir) == 1);
+    CHECK(server.path() == "/api/v1/verify");
+    const json request = server.requestBody();
+    CHECK(request.at("license_key") == "AAAA-BBBB-CCCC-DDDD");
+    CHECK_FALSE(request.at("machine_code").get<std::string>().empty());
+    CHECK_FALSE(request.contains("friendly_name"));
+}
+
+TEST_CASE("verifyAndRefresh replaces a cached license that a reader holds open", "[verify]")
+{
+    json payload = validPayload();
+    const std::string oldLicense = signedLicense(payload);
+    payload["lease_expires"] = timeFromNow(72h);
+    const std::string newLicense = signedLicense(payload);
+    CannedServer server(200, newLicense);
+    CacheFile cache("verify_held");
+    writePlain(cache.path, oldLicense);
+    SusiClient client(serverKey().publicPem, server.url());
+    HeldFile held(cache.path);
+
+    CHECK(client.verifyAndRefresh(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::Valid);
+    CHECK(readPlain(cache.path) == newLicense);
+    CHECK(held.read() == oldLicense);
+}
+
+TEST_CASE("verifyAndRefresh maps server rejections and removes the cached license", "[verify]")
+{
+    struct Rejection {
+        int status;
+        const char* message;
+        Status expected;
+    };
+    const Rejection rejection = GENERATE(values<Rejection>({
+        {403, "License has been revoked", Status::Revoked},
+        {403, "Machine not authorized for this license", Status::Deactivated},
+        {403, "License has expired", Status::Expired},
+        {403, "Binary signing certificate chain does not terminate at the trusted CA", Status::UnsignedBinary},
+        {404, "License key not found", Status::InvalidLicenseKey},
+    }));
+    CAPTURE(rejection.status, rejection.message);
+    CannedServer server(rejection.status, json{{"error", rejection.message}}.dump());
+    CacheFile cache("verify_rejected");
+    writePlain(cache.path, signedLicense(validPayload()));
+    SusiClient client(serverKey().publicPem, server.url());
+
+    CHECK(client.verifyAndRefresh(cache.path, "AAAA-BBBB-CCCC-DDDD") == rejection.expected);
+    CHECK_FALSE(client.isValid());
+    CHECK_FALSE(fs::exists(cache.path));
+}
+
+TEST_CASE("verifyAndRefresh falls back to the cached license", "[verify]")
+{
+    CacheFile cache("verify_fallback");
     const std::string cached = signedLicense(validPayload());
     writePlain(cache.path, cached);
 
@@ -493,58 +591,56 @@ TEST_CASE("checkLicenseAndRefresh falls back to the cached license", "[refresh]"
     {
         CannedServer server(500, R"({"error": "Internal error"})");
         SusiClient client(serverKey().publicPem, server.url());
-        CHECK(client.checkLicenseAndRefresh(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::Valid);
+        CHECK(client.verifyAndRefresh(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::Valid);
+    }
+    SECTION("rejection the client doesn't act on")
+    {
+        CannedServer server(403, json{{"error", "Machine limit reached (max 2)"}}.dump());
+        SusiClient client(serverKey().publicPem, server.url());
+        CHECK(client.verifyAndRefresh(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::Valid);
     }
     SECTION("server unreachable")
     {
         // Nothing listens on port 1.
         SusiClient client(serverKey().publicPem, "http://127.0.0.1:1/api/v1");
-        CHECK(client.checkLicenseAndRefresh(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::Valid);
+        CHECK(client.verifyAndRefresh(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::Valid);
     }
     SECTION("no server configured")
     {
         SusiClient client(serverKey().publicPem);
-        CHECK(client.checkLicenseAndRefresh(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::Valid);
+        CHECK(client.verifyAndRefresh(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::Valid);
     }
 
     CHECK(readPlain(cache.path) == cached);
 }
 
-TEST_CASE("checkLicenseAndRefresh without server or cached license reports a missing file", "[refresh]")
-{
-    CacheFile cache("refresh_nothing");
-    SusiClient client(serverKey().publicPem);
-
-    CHECK(client.checkLicenseAndRefresh(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::FileNotFound);
-}
-
-TEST_CASE("checkLicense accepts a license for the machine code sent to the server", "[refresh]")
+TEST_CASE("verifyFile accepts a license for the machine code sent to the server", "[activate]")
 {
     CannedServer server(200, signedLicense(validPayload()));
     CacheFile cache("machine_code");
     SusiClient client(serverKey().publicPem, server.url());
-    REQUIRE(client.checkLicenseAndRefresh(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::Valid);
+    REQUIRE(client.activate(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::Valid);
     const std::string machineCode = server.requestBody().at("machine_code").get<std::string>();
 
     json payload = validPayload();
     payload["machine_codes"] = json::array({machineCode});
     writePlain(cache.path, signedLicense(payload));
 
-    CHECK(client.checkLicense(cache.path) == Status::Valid);
+    CHECK(client.verifyFile(cache.path) == Status::Valid);
 }
 
 #ifdef _WIN32
-TEST_CASE("checkLicenseAndRefresh doesn't throw when the cached license can't be removed", "[refresh]")
+TEST_CASE("verifyAndRefresh doesn't throw when the cached license can't be removed", "[verify]")
 {
     CannedServer server(403, R"({"error": "License has been revoked"})");
-    CacheFile cache("refresh_locked");
+    CacheFile cache("verify_locked");
     writePlain(cache.path, signedLicense(validPayload()));
     SusiClient client(serverKey().publicPem, server.url());
     // MSVC's std::ifstream opens files like this, and removing the file then fails.
     HeldFile held(cache.path, FILE_SHARE_READ | FILE_SHARE_WRITE);
 
     Status status = Status::Valid;
-    REQUIRE_NOTHROW(status = client.checkLicenseAndRefresh(cache.path, "AAAA-BBBB-CCCC-DDDD"));
+    REQUIRE_NOTHROW(status = client.verifyAndRefresh(cache.path, "AAAA-BBBB-CCCC-DDDD"));
     CHECK(status == Status::Revoked);
 }
 #endif
