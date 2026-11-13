@@ -19,6 +19,11 @@ public:
         Revoked,
         /// The license requires a signed binary, but this binary is unsigned or tampered.
         UnsignedBinary,
+        /// This machine was removed from the license by an administrator. Unlike Revoked,
+        /// only this machine slot is affected. Re-activation is blocked for the tombstone window.
+        Deactivated,
+        /// No cached license exists, so this machine has never been activated (or was deactivated).
+        NotActivated,
         TokenNotFound,
         FileNotFound,
         Error,
