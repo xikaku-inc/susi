@@ -245,6 +245,7 @@ pub(crate) async fn handle_export_token(
     };
 
     db.add_machine_activation(&license.id, &activation_code, &name, None)
+        .and_then(|_| db.mark_machine_offline(&license.id, &activation_code))
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
     let payload = susi_core::LicensePayload {
@@ -418,6 +419,7 @@ pub(crate) async fn handle_my_deactivate_machine(
 
     let db = state.db.lock();
     let license = get_owned_license(&db, &key, &principal)?;
+    reject_offline_removal(&license, &machine_code)?;
 
     db.remove_machine_activation(&license.id, &machine_code)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;

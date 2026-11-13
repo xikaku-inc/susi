@@ -968,6 +968,7 @@ struct MachineSummary {
     last_seen_at: String,
     lease_expires_at: Option<String>,
     lease_active: bool,
+    offline: bool,
 }
 
 fn license_to_summary(lic: &License, users: Vec<String>) -> LicenseSummary {
@@ -998,6 +999,7 @@ fn license_to_summary(lic: &License, users: Vec<String>) -> LicenseSummary {
                 last_seen_at: m.last_seen().to_rfc3339(),
                 lease_expires_at: m.lease_expires_at.map(|dt| dt.to_rfc3339()),
                 lease_active: m.is_lease_active(now),
+                offline: m.offline,
             })
             .collect(),
         revoked: lic.revoked,
@@ -2170,6 +2172,7 @@ fn export_license_file(
     // as USB token exports. The seat is held until the machine is removed in
     // the dashboard; the license expiry date still applies.
     db.add_machine_activation(&license.id, &req.machine_code, &name, None)
+        .and_then(|_| db.mark_machine_offline(&license.id, &req.machine_code))
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
     // Re-fetch with the activation
@@ -2231,6 +2234,21 @@ fn get_owned_license(
         return Err(error_response(StatusCode::NOT_FOUND, "License key not found"));
     }
     Ok(license)
+}
+
+/// License files and USB tokens stay valid offline after removal, so only an
+/// admin may free those seats.
+fn reject_offline_removal(
+    license: &License,
+    machine_code: &str,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    if license.machines.iter().any(|m| m.machine_code == machine_code && m.offline) {
+        return Err(error_response(
+            StatusCode::FORBIDDEN,
+            "Offline activations (license file or USB token) can only be removed by an administrator",
+        ));
+    }
+    Ok(())
 }
 
 

@@ -1740,13 +1740,68 @@ fn test_license_user_self_serve_flow() {
         .json::<Value>()
         .expect("json");
     assert_eq!(mine[0]["machines"].as_array().expect("machines").len(), 1);
+    assert_eq!(mine[0]["machines"][0]["offline"], json!(true));
 
-    // Self-service machine removal frees the slot (and tombstones it).
+    // The exported file stays valid offline, so the customer must not be able
+    // to free its seat - neither via the portal nor the public client API.
     let resp = client
         .delete(format!(
             "{}/my/licenses/{}/machines/{}",
             server.api_url, key, TEST_MACHINE_CODE
         ))
+        .bearer_auth(&cust)
+        .send()
+        .expect("remove offline machine");
+    assert_eq!(resp.status().as_u16(), 403);
+    let resp = client
+        .post(format!("{}/deactivate", server.api_url))
+        .json(&json!({"license_key": key, "machine_code": TEST_MACHINE_CODE}))
+        .send()
+        .expect("public deactivate offline machine");
+    assert_eq!(resp.status().as_u16(), 403);
+
+    // Online activation of the same machine keeps the offline flag.
+    let resp = client
+        .post(format!("{}/activate", server.api_url))
+        .json(&json!({"license_key": key, "machine_code": TEST_MACHINE_CODE}))
+        .send()
+        .expect("online activate exported machine");
+    assert!(resp.status().is_success(), "activate: {}", resp.text().unwrap_or_default());
+    let mine = client
+        .get(format!("{}/my/licenses", server.api_url))
+        .bearer_auth(&cust)
+        .send()
+        .expect("my licenses")
+        .json::<Value>()
+        .expect("json");
+    assert_eq!(mine[0]["machines"][0]["offline"], json!(true));
+
+    // Admin can still remove it.
+    let resp = client
+        .delete(format!("{}/licenses/{}/machines/{}", server.api_url, key, TEST_MACHINE_CODE))
+        .bearer_auth(&admin)
+        .send()
+        .expect("admin remove offline machine");
+    assert!(resp.status().is_success(), "admin remove: {}", resp.text().unwrap_or_default());
+
+    // Online activations remain self-service removable.
+    let online_code = machine_code_for('b');
+    let resp = client
+        .post(format!("{}/activate", server.api_url))
+        .json(&json!({"license_key": key, "machine_code": online_code}))
+        .send()
+        .expect("online activate");
+    assert!(resp.status().is_success(), "activate: {}", resp.text().unwrap_or_default());
+    let mine = client
+        .get(format!("{}/my/licenses", server.api_url))
+        .bearer_auth(&cust)
+        .send()
+        .expect("my licenses")
+        .json::<Value>()
+        .expect("json");
+    assert_eq!(mine[0]["machines"][0]["offline"], json!(false));
+    let resp = client
+        .delete(format!("{}/my/licenses/{}/machines/{}", server.api_url, key, online_code))
         .bearer_auth(&cust)
         .send()
         .expect("remove machine");
