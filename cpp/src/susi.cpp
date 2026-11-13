@@ -808,7 +808,7 @@ SusiClient::LicenseStatus SusiClient::verifySignedLicenseJson(const std::string&
 // ---------------------------------------------------------------------------
 // License check from file
 // ---------------------------------------------------------------------------
-SusiClient::LicenseStatus SusiClient::checkLicense(const std::filesystem::path& licensePath)
+SusiClient::LicenseStatus SusiClient::verifyFile(const std::filesystem::path& licensePath)
 {
     m_features.clear();
     m_product.clear();
@@ -829,93 +829,112 @@ SusiClient::LicenseStatus SusiClient::checkLicense(const std::filesystem::path& 
 }
 
 // ---------------------------------------------------------------------------
-// Online license check
+// Online activation and lease refresh
 // ---------------------------------------------------------------------------
-SusiClient::LicenseStatus SusiClient::checkLicenseAndRefresh(const std::filesystem::path& licensePath, const std::string& licenseKey)
+static long postLicenseRequest(std::string url, const char* endpoint, json body, std::string& response)
 {
+    if (!url.empty() && url.back() == '/') url.pop_back();
+    body["machine_code"] = getMachineCode();
+
+    auto certChain = getSigningCertChain();
+    if (!certChain.empty()) {
+        json chainArr = json::array();
+        for (const auto& der : certChain)
+            chainArr.push_back(base64Encode(der.data(), der.size()));
+        body["signing_cert_chain"] = chainArr;
+    }
+
+    return httpPost(url + "/" + endpoint, body.dump(), response);
+}
+
+SusiClient::LicenseStatus SusiClient::storeServerLicense(const std::filesystem::path& licensePath, const std::string& signedLicenseStr)
+{
+    auto status = verifySignedLicenseJson(signedLicenseStr);
+    m_isValid = (status == LicenseStatus::Valid || status == LicenseStatus::ValidGracePeriod);
+    if (m_isValid && !susi::details::writeFileReplace(licensePath, signedLicenseStr)) {
+        SUSI_LOG("Failed to write license file: %s", licensePath.string().c_str());
+    }
+    return status;
+}
+
+SusiClient::LicenseStatus SusiClient::activate(const std::filesystem::path& licensePath, const std::string& licenseKey, const std::string& friendlyName)
+{
+    m_isValid = false;
     m_features.clear();
     m_product.clear();
     m_customer.clear();
     m_leaseExpiresEpoch = 0;
     m_graceHours = DEFAULT_LEASE_GRACE_HOURS;
 
+    if (m_serverUrl.empty()) {
+        SUSI_LOG("No license server configured - cannot activate");
+        return LicenseStatus::Error;
+    }
+
+    json body = {
+        {"license_key", licenseKey},
+        {"friendly_name", friendlyName.empty() ? getHostname() : friendlyName},
+    };
+    std::string response;
+    long httpCode = postLicenseRequest(m_serverUrl, "activate", std::move(body), response);
+    if (httpCode >= 200 && httpCode < 300) {
+        return storeServerLicense(licensePath, response);
+    }
+
+    SUSI_LOG("Activation failed (HTTP %ld): %s", httpCode, response.c_str());
+    auto says = [&](const char* text) { return response.find(text) != std::string::npos; };
+    if (httpCode == 404) return LicenseStatus::InvalidLicenseKey;
+    if (httpCode == 403) {
+        if (says("revoked")) return LicenseStatus::Revoked;
+        if (says("removed by an administrator")) return LicenseStatus::Deactivated;
+        if (says("expired")) return LicenseStatus::Expired;
+        if (says("Machine limit")) return LicenseStatus::InvalidMachine;
+        if (says("certificate chain")) return LicenseStatus::UnsignedBinary;
+    }
+    return LicenseStatus::Error;
+}
+
+SusiClient::LicenseStatus SusiClient::verifyAndRefresh(const std::filesystem::path& licensePath, const std::string& licenseKey)
+{
+    m_isValid = false;
+    m_features.clear();
+    m_product.clear();
+    m_customer.clear();
+    m_leaseExpiresEpoch = 0;
+    m_graceHours = DEFAULT_LEASE_GRACE_HOURS;
+
+    std::error_code ec;
+    if (!std::filesystem::exists(licensePath, ec)) {
+        SUSI_LOG("No cached license - this machine has not been activated: %s", licensePath.string().c_str());
+        return LicenseStatus::NotActivated;
+    }
+
     if (!m_serverUrl.empty()) {
-        std::string url = m_serverUrl;
-        if (!url.empty() && url.back() == '/') url.pop_back();
-        url += "/activate";
-
-        json body;
-        body["license_key"] = licenseKey;
-        body["machine_code"] = getMachineCode();
-        body["friendly_name"] = getHostname();
-
-        auto certChain = getSigningCertChain();
-        if (!certChain.empty()) {
-            json chainArr = json::array();
-            for (const auto& der : certChain)
-                chainArr.push_back(base64Encode(der.data(), der.size()));
-            body["signing_cert_chain"] = chainArr;
-        }
-
         std::string response;
-        long httpCode = httpPost(url, body.dump(), response);
+        long httpCode = postLicenseRequest(m_serverUrl, "verify", {{"license_key", licenseKey}}, response);
         if (httpCode >= 200 && httpCode < 300) {
-            auto status = verifySignedLicenseJson(response);
-            m_isValid = (status == LicenseStatus::Valid || status == LicenseStatus::ValidGracePeriod);
-
-            if (m_isValid && !susi::details::writeFileReplace(licensePath, response)) {
-                SUSI_LOG("Failed to write license file: %s", licensePath.string().c_str());
-            }
-
-            return status;
-        } else if (httpCode == 403) {
-            std::error_code ec;
-            std::filesystem::remove(licensePath, ec);
-            m_isValid = false;
-
-            if (response.find("revoked") != std::string::npos){
-                SUSI_LOG("License has been revoked - removing chached file");
-                return LicenseStatus::Revoked;
-            } else if (response.find("expired") != std::string::npos) {
-                SUSI_LOG("License has expired - removing chached file");
-                return LicenseStatus::Expired;
-            } else if (response.find("Machine limit") != std::string::npos){
-                SUSI_LOG("License machine limit exceeded - removing chached file");
-                return LicenseStatus::InvalidMachine;
-            } else if(response.find("certificate chain") != std::string::npos){
-                SUSI_LOG("Binary not signed correctly - removing chached file");
-                return LicenseStatus::UnsignedBinary;
-            } else if (response.find("removed by an administrator") != std::string::npos) {
-                SUSI_LOG("Machine was removed from the license - removing cached file");
-                return LicenseStatus::Deactivated;
-            } else {
-                SUSI_LOG("Server rejected license (HTTP 403) - removing cached file");
-                return LicenseStatus::Error;
-            }
-        } else if (httpCode == 404) {
-            SUSI_LOG("License not found on server (HTTP 404) - removing cached file");
-            std::error_code ec;
-            std::filesystem::remove(licensePath, ec);
-            m_isValid = false;
-            return LicenseStatus::InvalidLicenseKey;
-        } else {
-            SUSI_LOG("Online license refresh failed, falling back to cached file");
+            return storeServerLicense(licensePath, response);
         }
+
+        auto says = [&](const char* text) { return response.find(text) != std::string::npos; };
+        auto reject = [&](LicenseStatus status, const char* reason) {
+            SUSI_LOG("%s - removing cached file", reason);
+            std::filesystem::remove(licensePath, ec);
+            return status;
+        };
+        if (httpCode == 404) return reject(LicenseStatus::InvalidLicenseKey, "License not found on server");
+        if (httpCode == 403) {
+            if (says("revoked")) return reject(LicenseStatus::Revoked, "License has been revoked");
+            if (says("not authorized")) return reject(LicenseStatus::Deactivated, "Machine is no longer activated on the server");
+            if (says("expired")) return reject(LicenseStatus::Expired, "License has expired");
+            if (says("certificate chain")) return reject(LicenseStatus::UnsignedBinary, "Binary not signed correctly");
+        }
+        SUSI_LOG("Online license verify failed (HTTP %ld), falling back to cached file", httpCode);
     } else {
-        SUSI_LOG("No server supplied. Online license check will fail. Falling back to cached file.");
+        SUSI_LOG("No server supplied. Falling back to cached file.");
     }
 
-    // Fall back to local file
-    std::string licenseContents;
-    if (!susi::details::readWholeFile(licensePath, licenseContents)) {
-        SUSI_LOG("Cached license file cannot be found: %s", licensePath.string().c_str());
-        m_isValid = false;
-        return LicenseStatus::FileNotFound;
-    }
-
-    auto status = verifySignedLicenseJson(licenseContents);
-    m_isValid = (status == LicenseStatus::Valid || status == LicenseStatus::ValidGracePeriod);
-    return status;
+    return verifyFile(licensePath);
 }
 
 // ---------------------------------------------------------------------------
@@ -1352,7 +1371,7 @@ static std::string decryptToken(const std::vector<unsigned char>& blob, const st
     return plaintext;
 }
 
-SusiClient::LicenseStatus SusiClient::checkLicenseToken()
+SusiClient::LicenseStatus SusiClient::verifyToken()
 {
     m_features.clear();
     m_product.clear();

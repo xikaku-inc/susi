@@ -1,7 +1,7 @@
 // Integration test binary for the susi C++ client.
 //
-// Runs against a live susi-server and verifies the full activate →
-// verify round-trip.  Exits 0 on success, 1 on any failure.
+// Runs against a live susi-server and verifies the full not-activated →
+// activate → verify round-trip.  Exits 0 on success, 1 on any failure.
 //
 // Usage:
 //   PackageTest --server-url <url> --public-key-file <path> --license-key <key>
@@ -87,12 +87,20 @@ int main(int argc, char** argv)
     SusiClient client(publicKey, serverUrl);
 
     // -----------------------------------------------------------------------
-    // Test 1: verify_and_refresh - should activate and return Valid
+    // Test 1: verifyAndRefresh before activation - must not activate
     // -----------------------------------------------------------------------
-    std::cout << "[susi-cpp-test] Test 1: checkLicenseAndRefresh\n";
-    auto status = client.checkLicenseAndRefresh(licenseFile, licenseKey);
+    std::cout << "[susi-cpp-test] Test 1: verifyAndRefresh before activation\n";
+    auto status = client.verifyAndRefresh(licenseFile, licenseKey);
+    if (status != SusiClient::LicenseStatus::NotActivated)
+        fail("verifyAndRefresh before activation: expected NotActivated");
+
+    // -----------------------------------------------------------------------
+    // Test 2: activate - should claim a slot and return Valid
+    // -----------------------------------------------------------------------
+    std::cout << "[susi-cpp-test] Test 2: activate\n";
+    status = client.activate(licenseFile, licenseKey);
     if (!client.isValid())
-        fail("checkLicenseAndRefresh: expected Valid, got non-valid status");
+        fail("activate: expected Valid, got non-valid status");
 
     std::cout << "  product:  " << client.product()  << "\n";
     std::cout << "  customer: " << client.customer() << "\n";
@@ -107,20 +115,20 @@ int main(int argc, char** argv)
         fail("unexpected feature 'vehicular_fusion' present");
 
     // -----------------------------------------------------------------------
-    // Test 2: lease renewal - calling again must still be Valid
+    // Test 3: lease renewal - verifyAndRefresh must now be Valid
     // -----------------------------------------------------------------------
-    std::cout << "[susi-cpp-test] Test 2: lease renewal\n";
+    std::cout << "[susi-cpp-test] Test 3: lease renewal\n";
     SusiClient client2(publicKey, serverUrl);
-    status = client2.checkLicenseAndRefresh(licenseFile, licenseKey);
+    status = client2.verifyAndRefresh(licenseFile, licenseKey);
     if (!client2.isValid())
         fail("lease renewal: expected Valid");
 
     // -----------------------------------------------------------------------
-    // Test 3: offline fallback - checkLicense from the cached file
+    // Test 4: offline fallback - verifyFile from the cached file
     // -----------------------------------------------------------------------
-    std::cout << "[susi-cpp-test] Test 3: offline fallback (cached file)\n";
+    std::cout << "[susi-cpp-test] Test 4: offline fallback (cached file)\n";
     SusiClient client3(publicKey);
-    status = client3.checkLicense(licenseFile);
+    status = client3.verifyFile(licenseFile);
     if (!client3.isValid())
         fail("offline fallback: expected Valid from cached file");
 
