@@ -38,6 +38,8 @@ struct StringMaker<Status> {
         case Status::InvalidLicenseKey: return "InvalidLicenseKey";
         case Status::Revoked: return "Revoked";
         case Status::UnsignedBinary: return "UnsignedBinary";
+        case Status::Deactivated: return "Deactivated";
+        case Status::NotActivated: return "NotActivated";
         case Status::TokenNotFound: return "TokenNotFound";
         case Status::FileNotFound: return "FileNotFound";
         case Status::Error: return "Error";
@@ -467,7 +469,7 @@ TEST_CASE("checkLicenseAndRefresh maps server rejections and removes the cached 
         {403, "Machine limit reached (max 2)", Status::InvalidMachine},
         {403, "Binary signing certificate chain does not terminate at the trusted CA", Status::UnsignedBinary},
         {403, "Machine was removed by an administrator; re-activation is blocked for 1440 more minutes",
-         Status::Error},
+         Status::Deactivated},
         {404, "License key not found", Status::InvalidLicenseKey},
     }));
     CAPTURE(rejection.status, rejection.message);

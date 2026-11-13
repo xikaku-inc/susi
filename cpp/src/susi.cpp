@@ -885,6 +885,9 @@ SusiClient::LicenseStatus SusiClient::checkLicenseAndRefresh(const std::filesyst
             } else if(response.find("certificate chain") != std::string::npos){
                 SUSI_LOG("Binary not signed correctly - removing chached file");
                 return LicenseStatus::UnsignedBinary;
+            } else if (response.find("removed by an administrator") != std::string::npos) {
+                SUSI_LOG("Machine was removed from the license - removing cached file");
+                return LicenseStatus::Deactivated;
             } else {
                 SUSI_LOG("Server rejected license (HTTP 403) - removing cached file");
                 return LicenseStatus::Error;
