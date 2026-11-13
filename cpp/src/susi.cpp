@@ -10,6 +10,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -160,7 +161,7 @@ static std::string normalizeId(const std::string& s)
 
 #ifdef _WIN32
 // On Windows the machine code consists of the BIOS UUID and the CPU processor ID.
-static std::string getMachineCode()
+static std::pair<std::string, std::string> getHardwareIds()
 {
     std::string biosUuid, processorId;
 
@@ -216,10 +217,7 @@ static std::string getMachineCode()
         if (comInitByUs) CoUninitialize();
     }
 
-    std::string combined = normalizeId(biosUuid) + "|" + normalizeId(processorId);
-    unsigned char hash[SHA256_DIGEST_LENGTH];
-    SHA256(reinterpret_cast<const unsigned char*>(combined.data()), combined.size(), hash);
-    return hexEncode(hash, SHA256_DIGEST_LENGTH);
+    return {biosUuid, processorId};
 }
 
 static std::string getHostname()
@@ -264,14 +262,9 @@ static std::string getIOPlatformValue(const char* key)
 }
 
 // On macOS the machine code consists of the IOPlatformUUID and the IOPlatformSerialNumber.
-static std::string getMachineCode()
+static std::pair<std::string, std::string> getHardwareIds()
 {
-    std::string uuid = getIOPlatformValue("IOPlatformUUID");
-    std::string serial = getIOPlatformValue("IOPlatformSerialNumber");
-    std::string combined = normalizeId(uuid) + "|" + normalizeId(serial);
-    unsigned char hash[SHA256_DIGEST_LENGTH];
-    SHA256(reinterpret_cast<const unsigned char*>(combined.data()), combined.size(), hash);
-    return hexEncode(hash, SHA256_DIGEST_LENGTH);
+    return {getIOPlatformValue("IOPlatformUUID"), getIOPlatformValue("IOPlatformSerialNumber")};
 }
 
 static std::string getHostname()
@@ -336,7 +329,7 @@ static std::string getRootDiskSerial()
 }
 
 // On linux the machine code consists of the contents of /etc/machine-id and the root disk serial number.
-static std::string getMachineCode()
+static std::pair<std::string, std::string> getHardwareIds()
 {
     std::string machineId;
     {
@@ -348,12 +341,7 @@ static std::string getMachineCode()
         }
     }
 
-    std::string diskSerial = getRootDiskSerial();
-
-    std::string combined = normalizeId(machineId) + "|" + normalizeId(diskSerial);
-    unsigned char hash[SHA256_DIGEST_LENGTH];
-    SHA256(reinterpret_cast<const unsigned char*>(combined.data()), combined.size(), hash);
-    return hexEncode(hash, SHA256_DIGEST_LENGTH);
+    return {machineId, getRootDiskSerial()};
 }
 
 static std::string getHostname()
@@ -374,9 +362,9 @@ static std::string getHostname()
     return "";
 }
 #else
-static std::string getMachineCode()
+static std::pair<std::string, std::string> getHardwareIds()
 {
-    return "";
+    return {};
 }
 
 static std::string getHostname()
@@ -386,6 +374,40 @@ static std::string getHostname()
     return "";
 }
 #endif
+
+namespace susi::details {
+// Not static so the tests can reach it.
+std::string machineCodeFromIds(const std::string& id1, const std::string& id2)
+{
+    const std::string a = normalizeId(id1);
+    const std::string b = normalizeId(id2);
+    // A partial read would yield a different but valid-looking code and claim a new machine slot.
+    if (a.empty() || b.empty()) {
+        SUSI_LOG("Hardware fingerprint incomplete (id1=%s id2=%s); refusing to generate an unstable machine code",
+                 a.empty() ? "empty" : "ok", b.empty() ? "empty" : "ok");
+        return "";
+    }
+    const std::string combined = a + "|" + b;
+    unsigned char hash[SHA256_DIGEST_LENGTH];
+    SHA256(reinterpret_cast<const unsigned char*>(combined.data()), combined.size(), hash);
+    return hexEncode(hash, SHA256_DIGEST_LENGTH);
+}
+} // namespace susi::details
+
+/// Returns an empty string if the hardware IDs can't be read completely.
+static std::string getMachineCode()
+{
+    // Hardware identity can't change mid-process. Keep the first successful read so a later
+    // transient failure can't flip the code and the hardware isn't queried on every check.
+    static std::mutex mutex;
+    static std::string cached;
+    std::lock_guard<std::mutex> lock(mutex);
+    if (cached.empty()) {
+        const auto ids = getHardwareIds();
+        cached = susi::details::machineCodeFromIds(ids.first, ids.second);
+    }
+    return cached;
+}
 
 // ---------------------------------------------------------------------------
 // ISO 8601 date parsing (enough for RFC 3339 timestamps from our licenses)
@@ -722,6 +744,10 @@ SusiClient::LicenseStatus SusiClient::verifySignedLicenseJson(const std::string&
         if (!codes.empty()) {
             if(codeToCheck.empty()){
                 codeToCheck = getMachineCode();
+                if (codeToCheck.empty()) {
+                    SUSI_LOG("Could not compute machine fingerprint");
+                    return LicenseStatus::Error;
+                }
             }
             bool found = false;
             for (const auto& code : codes) {
@@ -835,7 +861,12 @@ SusiClient::LicenseStatus SusiClient::verifyFile(const std::filesystem::path& li
 static long postLicenseRequest(std::string url, const char* endpoint, json body, std::string& response)
 {
     if (!url.empty() && url.back() == '/') url.pop_back();
-    body["machine_code"] = getMachineCode();
+    const std::string machineCode = getMachineCode();
+    if (machineCode.empty()) {
+        SUSI_LOG("Could not compute machine fingerprint - not contacting the license server");
+        return 0;
+    }
+    body["machine_code"] = machineCode;
 
     auto certChain = getSigningCertChain();
     if (!certChain.empty()) {

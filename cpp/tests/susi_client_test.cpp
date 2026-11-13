@@ -20,6 +20,11 @@
 #include <thread>
 #include <vector>
 
+namespace susi::details {
+// Defined in susi.cpp: hash two hardware IDs into a machine code, empty if either ID is empty.
+std::string machineCodeFromIds(const std::string& id1, const std::string& id2);
+}
+
 namespace fs = std::filesystem;
 using json = nlohmann::json;
 using Status = SusiClient::LicenseStatus;
@@ -710,6 +715,26 @@ TEST_CASE("verifyAndRefresh doesn't throw when the cached license can't be remov
     CHECK(status == Status::Revoked);
 }
 #endif
+
+TEST_CASE("machineCodeFromIds refuses incomplete hardware IDs", "[machineCode]")
+{
+    using susi::details::machineCodeFromIds;
+    CHECK(machineCodeFromIds("", "").empty());
+    CHECK(machineCodeFromIds("", "CPUID-ABC123").empty());
+    CHECK(machineCodeFromIds("BIOS-UUID-0001", "").empty());
+    CHECK(machineCodeFromIds("---", "CPUID-ABC123").empty());
+}
+
+TEST_CASE("machineCodeFromIds hashes the normalized IDs", "[machineCode]")
+{
+    using susi::details::machineCodeFromIds;
+    // SHA-256 of "biosuuid0001|cpuidabc123", as susi_core::fingerprint computes it.
+    const std::string expected = "7b20c46578b75b6b05d1375158760355c94198f24602e78266bf3cb41c686a03";
+    CHECK(machineCodeFromIds("BIOS-UUID-0001", "CPUID-ABC123") == expected);
+    CHECK(machineCodeFromIds("biosuuid0001", "cpuidabc123") == expected);
+    CHECK(machineCodeFromIds("BIOS--UUID--0001", "CPUID-ABC-123") == expected);
+    CHECK(machineCodeFromIds("BIOS-UUID-9999", "CPUID-ABC123") != expected);
+}
 
 TEST_CASE("verifyTokenOn accepts a valid token", "[verifyToken]")
 {
