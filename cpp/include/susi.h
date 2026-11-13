@@ -28,6 +28,12 @@ public:
         FileNotFound,
         Error,
     };
+
+    struct UsbDevice {
+        std::string serial;
+        std::string mountPath;
+        std::string name;
+    };
 private:
     bool m_isValid = false;
     std::vector<std::string> m_features;
@@ -50,6 +56,10 @@ public:
     LicenseStatus verifyFile(const std::filesystem::path& licensePath);
     /// Checks for a license token on attached USB devices, and verifies it if found.
     LicenseStatus verifyToken();
+    /// Verifies the tokens on the given USB devices. A readable but invalid token reports its
+    /// own status (e.g. Expired), a token that can't be decrypted reports Error, and
+    /// TokenNotFound means none of the devices carries a token.
+    LicenseStatus verifyTokenOn(const std::vector<UsbDevice>& devices);
     /// Activates this machine on the license server (claims a machine slot), stores the
     /// signed license at the given path and verifies it. Call this when the user explicitly
     /// activates. An empty friendly name falls back to the hostname.

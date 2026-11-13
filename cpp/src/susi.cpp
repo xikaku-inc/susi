@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -941,12 +942,6 @@ SusiClient::LicenseStatus SusiClient::verifyAndRefresh(const std::filesystem::pa
 // USB hardware token support
 // ---------------------------------------------------------------------------
 
-struct UsbDeviceInfo {
-    std::string serial;
-    std::string mountPath;
-    std::string name;
-};
-
 #ifdef _WIN32
 // UTF-16 (no trailing null) -> UTF-8; matches Linux sysfs serial trimming in spirit.
 static std::string wideToUtf8Span(const wchar_t* wstr, size_t wcharCount)
@@ -1052,9 +1047,9 @@ static std::string win32UsbInstanceSerialForDiskNumber(DWORD diskNumber)
     return serialUtf8;
 }
 
-static std::vector<UsbDeviceInfo> enumerateUsbDevices()
+static std::vector<SusiClient::UsbDevice> enumerateUsbDevices()
 {
-    std::vector<UsbDeviceInfo> devices;
+    std::vector<SusiClient::UsbDevice> devices;
 
     wchar_t driveStrings[512];
     DWORD len = GetLogicalDriveStringsW(sizeof(driveStrings) / sizeof(wchar_t), driveStrings);
@@ -1134,9 +1129,9 @@ static std::string ioUsbSerialForService(io_service_t service)
     return serial;
 }
 
-static std::vector<UsbDeviceInfo> enumerateUsbDevices()
+static std::vector<SusiClient::UsbDevice> enumerateUsbDevices()
 {
-    std::vector<UsbDeviceInfo> devices;
+    std::vector<SusiClient::UsbDevice> devices;
 
     // Build map: /dev/diskNsM -> mount point
     std::unordered_map<std::string, std::string> mountMap;
@@ -1194,9 +1189,9 @@ static std::vector<UsbDeviceInfo> enumerateUsbDevices()
     return devices;
 }
 #elif defined(__linux__)
-static std::vector<UsbDeviceInfo> enumerateUsbDevices()
+static std::vector<SusiClient::UsbDevice> enumerateUsbDevices()
 {
-    std::vector<UsbDeviceInfo> devices;
+    std::vector<SusiClient::UsbDevice> devices;
 
     // Parse /proc/mounts
     std::unordered_map<std::string, std::string> mounts;
@@ -1271,7 +1266,7 @@ static std::vector<UsbDeviceInfo> enumerateUsbDevices()
     return devices;
 }
 #else
-static std::vector<UsbDeviceInfo> enumerateUsbDevices()
+static std::vector<SusiClient::UsbDevice> enumerateUsbDevices()
 {
     return {};
 }
@@ -1373,18 +1368,20 @@ static std::string decryptToken(const std::vector<unsigned char>& blob, const st
 
 SusiClient::LicenseStatus SusiClient::verifyToken()
 {
+    return verifyTokenOn(enumerateUsbDevices());
+}
+
+SusiClient::LicenseStatus SusiClient::verifyTokenOn(const std::vector<UsbDevice>& devices)
+{
+    m_isValid = false;
     m_features.clear();
     m_product.clear();
     m_customer.clear();
     m_leaseExpiresEpoch = 0;
     m_graceHours = DEFAULT_LEASE_GRACE_HOURS;
 
-    auto devices = enumerateUsbDevices();
-    if (devices.empty()) {
-        SUSI_LOG("No USB mass storage devices found");
-        m_isValid = false;
-        return LicenseStatus::TokenNotFound;
-    }
+    std::optional<LicenseStatus> lastInvalid;
+    bool decryptionFailed = false;
 
     for (const auto& dev : devices) {
         std::string tokenPath = dev.mountPath;
@@ -1411,12 +1408,18 @@ SusiClient::LicenseStatus SusiClient::verifyToken()
         f.close();
 
         std::string decrypted = decryptToken(blob, dev.serial);
-        if (decrypted.empty()) continue;
+        if (decrypted.empty()) {
+            SUSI_LOG("Token on %s decryption failed (wrong USB device or corrupted token)", tokenPath.c_str());
+            decryptionFailed = true;
+            continue;
+        }
 
         std::string usbActivationCode = "usb:" + dev.serial;
 
         LicenseStatus status = verifySignedLicenseJson(decrypted, usbActivationCode);
         if (status != LicenseStatus::Valid && status != LicenseStatus::ValidGracePeriod) {
+            SUSI_LOG("Token on %s is invalid", tokenPath.c_str());
+            lastInvalid = status;
             continue;
         }
 
@@ -1425,8 +1428,12 @@ SusiClient::LicenseStatus SusiClient::verifyToken()
         return status;
     }
 
-    SUSI_LOG("No valid USB license token found");
-    m_isValid = false;
+    if (lastInvalid) return *lastInvalid;
+    if (decryptionFailed) {
+        SUSI_LOG("No valid USB license token found");
+        return LicenseStatus::Error;
+    }
+    SUSI_LOG("No USB license token found");
     return LicenseStatus::TokenNotFound;
 }
 

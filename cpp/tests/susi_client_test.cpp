@@ -7,7 +7,9 @@
 #include <catch2/generators/catch_generators.hpp>
 #include <nlohmann/json.hpp>
 #include <openssl/evp.h>
+#include <openssl/kdf.h>
 #include <openssl/pem.h>
+#include <openssl/rand.h>
 
 #include <chrono>
 #include <ctime>
@@ -147,6 +149,70 @@ struct CacheFile {
         fs::remove_all(dir, ec);
     }
 };
+
+const unsigned char* bytes(const std::string& s)
+{
+    return reinterpret_cast<const unsigned char*>(s.data());
+}
+
+// Encrypt a token like susi-admin export-token: AES-256-GCM, key = HKDF-SHA256 of the USB serial.
+std::string encryptToken(const std::string& plaintext, const std::string& serial)
+{
+    const std::string salt = "susi-token-v1";
+    const std::string info = "license-encryption";
+    unsigned char key[32];
+    size_t keyLen = sizeof(key);
+    std::unique_ptr<EVP_PKEY_CTX, decltype(&EVP_PKEY_CTX_free)> kdf(
+        EVP_PKEY_CTX_new_id(EVP_PKEY_HKDF, nullptr), EVP_PKEY_CTX_free);
+    REQUIRE(EVP_PKEY_derive_init(kdf.get()) == 1);
+    REQUIRE(EVP_PKEY_CTX_set_hkdf_md(kdf.get(), EVP_sha256()) == 1);
+    REQUIRE(EVP_PKEY_CTX_set1_hkdf_salt(kdf.get(), bytes(salt), static_cast<int>(salt.size())) == 1);
+    REQUIRE(EVP_PKEY_CTX_set1_hkdf_key(kdf.get(), bytes(serial), static_cast<int>(serial.size())) == 1);
+    REQUIRE(EVP_PKEY_CTX_add1_hkdf_info(kdf.get(), bytes(info), static_cast<int>(info.size())) == 1);
+    REQUIRE(EVP_PKEY_derive(kdf.get(), key, &keyLen) == 1);
+
+    unsigned char nonce[12];
+    REQUIRE(RAND_bytes(nonce, sizeof(nonce)) == 1);
+    std::unique_ptr<EVP_CIPHER_CTX, decltype(&EVP_CIPHER_CTX_free)> ctx(EVP_CIPHER_CTX_new(), EVP_CIPHER_CTX_free);
+    REQUIRE(EVP_EncryptInit_ex(ctx.get(), EVP_aes_256_gcm(), nullptr, key, nonce) == 1);
+    std::vector<unsigned char> ciphertext(plaintext.size() + 16);
+    int len = 0;
+    REQUIRE(EVP_EncryptUpdate(ctx.get(), ciphertext.data(), &len, bytes(plaintext), static_cast<int>(plaintext.size())) == 1);
+    int finalLen = 0;
+    REQUIRE(EVP_EncryptFinal_ex(ctx.get(), ciphertext.data() + len, &finalLen) == 1);
+    unsigned char tag[16];
+    REQUIRE(EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_GET_TAG, sizeof(tag), tag) == 1);
+
+    std::string blob(reinterpret_cast<const char*>(nonce), sizeof(nonce));
+    blob.append(reinterpret_cast<const char*>(ciphertext.data()), static_cast<size_t>(len + finalLen));
+    blob.append(reinterpret_cast<const char*>(tag), sizeof(tag));
+    return blob;
+}
+
+// A directory standing in for the mount point of a USB stick.
+struct UsbStick {
+    fs::path dir;
+    SusiClient::UsbDevice device;
+    UsbStick(const std::string& name, const std::string& serial)
+        : dir(emptyTestDir(name)), device{serial, dir.string(), name} {}
+    ~UsbStick()
+    {
+        std::error_code ec;
+        fs::remove_all(dir, ec);
+    }
+    void writeToken(const std::string& blob)
+    {
+        fs::create_directories(dir / ".susi");
+        writePlain(dir / ".susi" / "license.bin", blob);
+    }
+};
+
+json tokenPayload(const std::string& serial)
+{
+    json payload = validPayload();
+    payload["machine_codes"] = json::array({"usb:" + serial});
+    return payload;
+}
 
 // Answer every POST with a fixed response and record the last request.
 class CannedServer {
@@ -644,3 +710,112 @@ TEST_CASE("verifyAndRefresh doesn't throw when the cached license can't be remov
     CHECK(status == Status::Revoked);
 }
 #endif
+
+TEST_CASE("verifyTokenOn accepts a valid token", "[verifyToken]")
+{
+    UsbStick stick("token_valid", "SERIAL-A");
+    stick.writeToken(encryptToken(signedLicense(tokenPayload("SERIAL-A")), "SERIAL-A"));
+    SusiClient client(serverKey().publicPem);
+
+    CHECK(client.verifyTokenOn({stick.device}) == Status::Valid);
+    CHECK(client.isValid());
+    CHECK(client.features() == validFeatures);
+}
+
+TEST_CASE("verifyTokenOn reports why a token is invalid", "[verifyToken]")
+{
+    UsbStick stick("token_invalid", "SERIAL-A");
+    json payload = tokenPayload("SERIAL-A");
+    const Key* key = &serverKey();
+    Status expected = Status::Valid;
+
+    SECTION("expired")
+    {
+        payload["expires"] = timeFromNow(-1h);
+        expected = Status::Expired;
+    }
+    SECTION("bound to another USB stick")
+    {
+        payload["machine_codes"] = json::array({"usb:SERIAL-B"});
+        expected = Status::InvalidMachine;
+    }
+    SECTION("signed with another key")
+    {
+        key = &otherKey();
+        expected = Status::InvalidSignature;
+    }
+
+    stick.writeToken(encryptToken(signedLicense(payload, *key), "SERIAL-A"));
+    SusiClient client(serverKey().publicPem);
+    CHECK(client.verifyTokenOn({stick.device}) == expected);
+    CHECK_FALSE(client.isValid());
+    CHECK(client.features().empty());
+}
+
+TEST_CASE("verifyTokenOn prefers a valid token over an invalid one", "[verifyToken]")
+{
+    UsbStick expired("token_prefer_expired", "SERIAL-A");
+    json payload = tokenPayload("SERIAL-A");
+    payload["expires"] = timeFromNow(-1h);
+    expired.writeToken(encryptToken(signedLicense(payload), "SERIAL-A"));
+    UsbStick valid("token_prefer_valid", "SERIAL-B");
+    valid.writeToken(encryptToken(signedLicense(tokenPayload("SERIAL-B")), "SERIAL-B"));
+    SusiClient client(serverKey().publicPem);
+
+    CHECK(client.verifyTokenOn({expired.device, valid.device}) == Status::Valid);
+    CHECK(client.isValid());
+}
+
+TEST_CASE("verifyTokenOn reports an error for a token it can't decrypt", "[verifyToken]")
+{
+    UsbStick stick("token_undecryptable", "SERIAL-A");
+    SECTION("encrypted for another USB stick")
+    {
+        stick.writeToken(encryptToken(signedLicense(tokenPayload("SERIAL-A")), "SERIAL-B"));
+    }
+    SECTION("corrupted")
+    {
+        std::string blob = encryptToken(signedLicense(tokenPayload("SERIAL-A")), "SERIAL-A");
+        blob.back() ^= 0x01;
+        stick.writeToken(blob);
+    }
+    SECTION("too short") { stick.writeToken("short"); }
+    SusiClient client(serverKey().publicPem);
+
+    CHECK(client.verifyTokenOn({stick.device}) == Status::Error);
+    CHECK_FALSE(client.isValid());
+}
+
+TEST_CASE("verifyTokenOn reports an invalid token over one it can't decrypt", "[verifyToken]")
+{
+    UsbStick expired("token_mixed_expired", "SERIAL-A");
+    json payload = tokenPayload("SERIAL-A");
+    payload["expires"] = timeFromNow(-1h);
+    expired.writeToken(encryptToken(signedLicense(payload), "SERIAL-A"));
+    UsbStick undecryptable("token_mixed_undecryptable", "SERIAL-B");
+    undecryptable.writeToken(encryptToken(signedLicense(tokenPayload("SERIAL-B")), "SERIAL-C"));
+    SusiClient client(serverKey().publicPem);
+
+    const bool expiredFirst = GENERATE(true, false);
+    CAPTURE(expiredFirst);
+    const std::vector<SusiClient::UsbDevice> devices = expiredFirst
+        ? std::vector<SusiClient::UsbDevice>{expired.device, undecryptable.device}
+        : std::vector<SusiClient::UsbDevice>{undecryptable.device, expired.device};
+    CHECK(client.verifyTokenOn(devices) == Status::Expired);
+}
+
+TEST_CASE("verifyTokenOn reports TokenNotFound without a token", "[verifyToken]")
+{
+    SusiClient client(serverKey().publicPem);
+
+    SECTION("no USB devices")
+    {
+        CHECK(client.verifyTokenOn({}) == Status::TokenNotFound);
+    }
+    SECTION("USB device without a token")
+    {
+        UsbStick stick("token_none", "SERIAL-A");
+        CHECK(client.verifyTokenOn({stick.device}) == Status::TokenNotFound);
+    }
+    CHECK_FALSE(client.isValid());
+}
