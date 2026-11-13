@@ -346,8 +346,15 @@ body.no-topbar.has-bg .page-scroll { top: 0; }
 .EasyMDEContainer .editor-preview-side div.grid {
     display: grid;
     grid-template-columns: repeat(var(--cols, 2), minmax(0, 1fr));
-    gap: 28px; align-items: start; margin: 16px 0;
+    gap: 8px 28px; align-items: start; margin: 16px 0;
 }
+/* Captions hug their photo; the item spacing goes above each photo row. */
+.content div.grid > div:has(img),
+.EasyMDEContainer .editor-preview div.grid > div:has(img),
+.EasyMDEContainer .editor-preview-side div.grid > div:has(img) { margin-top: 20px; }
+.content div.grid:has(> div:first-child img),
+.EasyMDEContainer .editor-preview div.grid:has(> div:first-child img),
+.EasyMDEContainer .editor-preview-side div.grid:has(> div:first-child img) { margin-top: -4px; }
 div.grid.cols-3 { --cols: 3; }
 div.grid.cols-4 { --cols: 4; }
 div.grid.cols-5 { --cols: 5; }
@@ -363,8 +370,6 @@ div.grid.cols-6 { --cols: 6; }
     .content div.grid.people.cols-4 > div:nth-child(4n+2) { order: 1; }
     .content div.grid.people.cols-4 > div:nth-child(4n+3) { order: 2; }
     .content div.grid.people.cols-4 > div:nth-child(4n) { order: 3; }
-    .content div.grid.people > div:has(img) { margin-top: 14px; }
-    .content div.grid.people > div:first-child { margin-top: 0; }
 }
 @media (max-width: 640px) {
     .content div.grid.cols-2 { grid-template-columns: 1fr; }
@@ -393,6 +398,7 @@ div.grid.cols-6 { --cols: 6; }
 .EasyMDEContainer .editor-preview-side img.no-radius { border-radius: 0; }
 .content hr { border: none; border-top: 1px solid var(--border); margin: 22px 0; }
 .content td img, .content th img, .content div.grid img { display: inline-block; margin: 0; }
+.content div.grid img { vertical-align: top; }
 .content h1, .content h2, .content h3, .content h4 { scroll-margin-top: 72px; }
 
 .meta {
