@@ -12,7 +12,9 @@ env:
 jobs:
   build:
 
-    runs-on: ubuntu-latest
+    # Pinned to the image whose default compiler (gcc 13) has prebuilt
+    # conancenter binaries.
+    runs-on: ubuntu-24.04
 
     # With Conan installed, the susi_server build script builds the C++ client
     # for test_cpp_client_against_server, with the versions in cpp/conan-ci.lock.
