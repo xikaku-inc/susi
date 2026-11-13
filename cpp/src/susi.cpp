@@ -858,6 +858,14 @@ SusiClient::LicenseStatus SusiClient::verifyFile(const std::filesystem::path& li
 // ---------------------------------------------------------------------------
 // Online activation and lease refresh
 // ---------------------------------------------------------------------------
+// True if the response has the shape of a signed license (whether it verifies is checked later).
+static bool isSignedLicenseJson(const std::string& response)
+{
+    const json j = json::parse(response, nullptr, false);
+    return j.is_object() && j.contains("license_data") && j.at("license_data").is_string() &&
+           j.contains("signature") && j.at("signature").is_string();
+}
+
 static long postLicenseRequest(std::string url, const char* endpoint, json body, std::string& response)
 {
     if (!url.empty() && url.back() == '/') url.pop_back();
@@ -944,7 +952,8 @@ SusiClient::LicenseStatus SusiClient::verifyAndRefresh(const std::filesystem::pa
     if (!m_serverUrl.empty()) {
         std::string response;
         long httpCode = postLicenseRequest(m_serverUrl, "verify", {{"license_key", licenseKey}}, response);
-        if (httpCode >= 200 && httpCode < 300) {
+        // A 2xx that isn't a license (e.g. a captive portal page) counts as the server being unreachable.
+        if (httpCode >= 200 && httpCode < 300 && isSignedLicenseJson(response)) {
             return storeServerLicense(licensePath, response);
         }
 

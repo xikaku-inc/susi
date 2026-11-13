@@ -144,6 +144,17 @@ std::string signedLicense(const json& payload, const Key& key = serverKey())
 
 const std::vector<std::string> validFeatures{"feature_a", "feature_b"};
 
+// 2xx bodies that aren't a signed license, e.g. from a captive portal.
+auto notALicense()
+{
+    return Catch::Generators::values<std::string>({
+        "<html><body>Please log in to the hotel Wi-Fi</body></html>",
+        "",
+        R"({"status": "ok"})",
+        R"({"license_data": 5, "signature": "AAAA"})",
+    });
+}
+
 struct CacheFile {
     fs::path dir;
     fs::path path;
@@ -551,6 +562,14 @@ TEST_CASE("activate fails without a reachable server", "[activate]")
         SusiClient client(serverKey().publicPem);
         CHECK(client.activate(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::Error);
     }
+    SECTION("success response that isn't a license")
+    {
+        const std::string body = GENERATE(notALicense());
+        CAPTURE(body);
+        CannedServer server(200, body);
+        SusiClient client(serverKey().publicPem, server.url());
+        CHECK(client.activate(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::Error);
+    }
 
     CHECK_FALSE(fs::exists(cache.path));
 }
@@ -667,6 +686,14 @@ TEST_CASE("verifyAndRefresh falls back to the cached license", "[verify]")
     SECTION("rejection the client doesn't act on")
     {
         CannedServer server(403, json{{"error", "Machine limit reached (max 2)"}}.dump());
+        SusiClient client(serverKey().publicPem, server.url());
+        CHECK(client.verifyAndRefresh(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::Valid);
+    }
+    SECTION("success response that isn't a license")
+    {
+        const std::string body = GENERATE(notALicense());
+        CAPTURE(body);
+        CannedServer server(200, body);
         SusiClient client(serverKey().publicPem, server.url());
         CHECK(client.verifyAndRefresh(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::Valid);
     }
