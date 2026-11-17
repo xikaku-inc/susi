@@ -306,21 +306,33 @@ static std::string wholeDisk(const std::filesystem::path& root, const std::strin
 /// are followed down to the physical disk.
 static std::string rootBlockDevice(const std::filesystem::path& root)
 {
-    std::string dev;
-    std::ifstream f(root / "proc/mounts");
+    // The last mount on "/" is the visible one. Fields: id, parent id, major:minor, root, mount point, ...,
+    // "-", fs type, source, options.
+    std::string number, source;
+    std::ifstream f(root / "proc/self/mountinfo");
     std::string line;
     while (std::getline(f, line)) {
         std::istringstream iss(line);
-        std::string device, mount;
-        if ((iss >> device >> mount) && mount == "/") {
-            dev = device;
-            break;
+        std::string id, parent, num, mountRoot, mount;
+        if ((iss >> id >> parent >> num >> mountRoot >> mount) && mount == "/") {
+            number = num;
+            const auto sep = line.find(" - ");
+            std::string fsType;
+            source.clear();
+            if (sep != std::string::npos) std::istringstream(line.substr(sep + 3)) >> fsType >> source;
         }
     }
-    if (dev.compare(0, 5, "/dev/") != 0) return "";
-    dev.erase(0, 5);
+    if (number.empty()) return "";
 
+    // Resolve the device number first: the source can be a name without a device node, such as "/dev/root"
+    // when the kernel mounts root without an initramfs (e.g. on Azure VMs).
     std::error_code ec;
+    std::string dev = std::filesystem::canonical(root / "sys/dev/block" / number, ec).filename().string();
+    // Filesystems such as btrfs report an anonymous device number.
+    if (ec || dev.empty()) {
+        if (source.compare(0, 5, "/dev/") != 0) return "";
+        dev = source.substr(5);
+    }
     if (dev.compare(0, 7, "mapper/") == 0) {
         const std::string mapperName = dev.substr(7);
         dev.clear();
@@ -347,14 +359,17 @@ static std::string rootBlockDevice(const std::filesystem::path& root)
     return wholeDisk(root, dev);
 }
 
-/// Returns the name of a stable udev link to the disk in /dev/disk/by-id, preferring serial, then wwn, then
-/// dm-uuid entries. These links work for direct disks, NVMe and LVM without root. Ties are broken by name so
+/// Returns the name of a stable udev link to the disk in /dev/disk/by-id, preferring serial, then world-wide IDs
+/// (wwn, NVMe eui/uuid), then dm-uuid entries. These links work for direct disks, NVMe and LVM without root. Ties are broken by name so
 /// the result doesn't depend on directory order.
 static std::string diskIdFromById(const std::filesystem::path& root, const std::string& disk)
 {
+    // Model and serial links can carry a placeholder serial (Azure NVMe disks all report "SN: 00000"), so prefer
+    // the IDs unique to the disk.
     const auto rank = [](const std::string& s) {
         if (s.find("serial") != std::string::npos) return 0;
-        if (s.compare(0, 4, "wwn-") == 0) return 1;
+        if (s.compare(0, 4, "wwn-") == 0 || s.compare(0, 9, "nvme-eui.") == 0 || s.compare(0, 10, "nvme-uuid.") == 0)
+            return 1;
         if (s.compare(0, 7, "dm-uuid") == 0) return 2;
         return 3;
     };
