@@ -288,6 +288,10 @@ impl LicenseClient {
             };
         }
 
+        if payload.require_signed_binary && !binary_signing::is_binary_signed() {
+            return LicenseStatus::UnsignedBinary;
+        }
+
         // Check lease expiry; prefer grace hours from the payload over the client default
         if payload.is_lease_expired() {
             let grace_hours = payload
@@ -303,10 +307,6 @@ impl LicenseClient {
             return LicenseStatus::LeaseExpired {
                 lease_expired_at: payload.lease_expires.unwrap(),
             };
-        }
-
-        if payload.require_signed_binary && !binary_signing::is_binary_signed() {
-            return LicenseStatus::UnsignedBinary;
         }
 
         LicenseStatus::Valid { payload }
