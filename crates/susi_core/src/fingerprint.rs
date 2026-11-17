@@ -129,30 +129,31 @@ fn get_hardware_ids() -> Result<(String, String), LicenseError> {
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
 
-    let disk_serial = root_disk_serial();
+    let disk_serial = root_disk_serial(std::path::Path::new("/"));
     Ok((machine_id, disk_serial))
 }
 
+/// Stable ID of the disk holding the root filesystem. /proc, /sys and /dev are
+/// read below `root`, so tests can use a fake tree.
 #[cfg(target_os = "linux")]
-fn root_disk_serial() -> String {
-    let root_dev = root_block_device();
-    let disk = match root_dev {
+fn root_disk_serial(root: &std::path::Path) -> String {
+    let disk = match root_block_device(root) {
         Some(d) => d,
         None => return String::new(),
     };
 
     // /dev/disk/by-id/ contains stable udev-managed symlinks (works for direct
     // disks, NVMe, and LVM dm-uuid entries) without requiring root.
-    if let Some(id) = disk_id_from_by_id(&disk) {
+    if let Some(id) = disk_id_from_by_id(root, &disk) {
         return id;
     }
 
     // Sysfs serial attributes (SATA/SCSI direct path)
     for path in &[
-        format!("/sys/block/{}/device/serial", disk),
-        format!("/sys/block/{}/serial", disk),
+        format!("sys/block/{}/device/serial", disk),
+        format!("sys/block/{}/serial", disk),
     ] {
-        if let Ok(s) = std::fs::read_to_string(path) {
+        if let Ok(s) = std::fs::read_to_string(root.join(path)) {
             let s = s.trim().to_string();
             if !s.is_empty() {
                 return s;
@@ -160,14 +161,13 @@ fn root_disk_serial() -> String {
         }
     }
 
-    // NVMe: /sys/class/nvme/nvme0/serial (disk name like "nvme0n1" → controller "nvme0")
-    if disk.starts_with("nvme") {
-        if let Some(ctrl) = disk.split('n').next() {
-            if let Ok(s) = std::fs::read_to_string(format!("/sys/class/nvme/{}/serial", ctrl)) {
-                let s = s.trim().to_string();
-                if !s.is_empty() {
-                    return s;
-                }
+    // NVMe: /sys/class/nvme/nvme0/serial (namespace "nvme0n1" → controller "nvme0")
+    if let Some(i) = disk.strip_prefix("nvme").and_then(|rest| rest.find('n')) {
+        let ctrl = &disk[..4 + i];
+        if let Ok(s) = std::fs::read_to_string(root.join(format!("sys/class/nvme/{}/serial", ctrl))) {
+            let s = s.trim().to_string();
+            if !s.is_empty() {
+                return s;
             }
         }
     }
@@ -175,11 +175,11 @@ fn root_disk_serial() -> String {
     String::new()
 }
 
-/// Resolve the root block device name (e.g. "sda", "nvme0n1", "dm-0").
-/// For LVM/dm devices, also tries to follow slaves to the underlying disk.
+/// Resolve the disk holding the root filesystem (e.g. "sda", "nvme0n1", "dm-0").
+/// Device-mapper devices (LVM, LUKS) are followed down to the physical disk.
 #[cfg(target_os = "linux")]
-fn root_block_device() -> Option<String> {
-    let mounts = std::fs::read_to_string("/proc/mounts").ok()?;
+fn root_block_device(root: &std::path::Path) -> Option<String> {
+    let mounts = std::fs::read_to_string(root.join("proc/mounts")).ok()?;
     let raw = mounts
         .lines()
         .find(|l| l.split_whitespace().nth(1) == Some("/"))?
@@ -188,42 +188,34 @@ fn root_block_device() -> Option<String> {
         .strip_prefix("/dev/")?
         .to_string();
 
-    // mapper device → resolve via sysfs dm slaves
-    if raw.starts_with("mapper/") || raw.starts_with("dm-") {
-        let dm = if raw.starts_with("mapper/") {
-            // /dev/mapper/foo → find the dm-N that is its slave
-            resolve_mapper_to_dm(raw.strip_prefix("mapper/").unwrap_or(&raw))?
-        } else {
-            raw
-        };
-
-        // Follow one level of slaves to the physical disk
-        let slaves_dir = format!("/sys/block/{}/slaves", dm);
-        if let Ok(rd) = std::fs::read_dir(&slaves_dir) {
-            for entry in rd.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if !name.is_empty() {
-                    // Strip partition suffix from the slave disk name
-                    return Some(strip_partition_suffix(&name));
-                }
-            }
+    let mut dev = match raw.strip_prefix("mapper/") {
+        Some(name) => resolve_mapper_to_dm(root, name)?,
+        None => raw,
+    };
+    // Take the smallest slave name so a volume spanning several disks resolves
+    // the same way on every run.
+    while dev.starts_with("dm-") {
+        let slave = std::fs::read_dir(root.join(format!("sys/block/{}/slaves", dev)))
+            .ok()
+            .and_then(|rd| rd.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).min());
+        match slave {
+            Some(s) => dev = s,
+            None => break,
         }
-        return Some(dm);
     }
-
-    Some(strip_partition_suffix(&raw))
+    Some(whole_disk(root, &dev))
 }
 
 #[cfg(target_os = "linux")]
-fn resolve_mapper_to_dm(mapper_name: &str) -> Option<String> {
+fn resolve_mapper_to_dm(root: &std::path::Path, mapper_name: &str) -> Option<String> {
     // /sys/block/dm-N/dm/name contains the mapper name
-    if let Ok(rd) = std::fs::read_dir("/sys/block") {
+    if let Ok(rd) = std::fs::read_dir(root.join("sys/block")) {
         for entry in rd.flatten() {
             let bname = entry.file_name().to_string_lossy().to_string();
             if !bname.starts_with("dm-") {
                 continue;
             }
-            let name_path = format!("/sys/block/{}/dm/name", bname);
+            let name_path = root.join(format!("sys/block/{}/dm/name", bname));
             if let Ok(n) = std::fs::read_to_string(&name_path) {
                 if n.trim() == mapper_name {
                     return Some(bname);
@@ -234,45 +226,31 @@ fn resolve_mapper_to_dm(mapper_name: &str) -> Option<String> {
     None
 }
 
-/// Strip trailing partition number from a block device name.
-/// NVMe/eMMC: "nvme0n1p3" → "nvme0n1", SATA: "sda1" → "sda".
+/// The disk a partition belongs to, from sysfs ("sda1" → "sda", "nvme0n1p3" →
+/// "nvme0n1"). Whole disks such as "nvme0n1" or "dm-0" are returned unchanged.
 #[cfg(target_os = "linux")]
-fn strip_partition_suffix(dev: &str) -> String {
-    if let Some(p) = dev.rfind('p') {
-        let suffix = &dev[p + 1..];
-        if p > 0 && !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) {
-            return dev[..p].to_string();
+fn whole_disk(root: &std::path::Path, dev: &str) -> String {
+    // /sys/class/block/<partition> links into the directory of its disk.
+    let sys = root.join("sys/class/block").join(dev);
+    if sys.join("partition").exists() {
+        if let Some(disk) = std::fs::canonicalize(&sys)
+            .ok()
+            .as_deref()
+            .and_then(std::path::Path::parent)
+            .and_then(std::path::Path::file_name)
+        {
+            return disk.to_string_lossy().into_owned();
         }
     }
-    dev.trim_end_matches(|c: char| c.is_ascii_digit())
-        .to_string()
+    dev.to_string()
 }
 
 /// Find a stable ID for `disk` in /dev/disk/by-id/.
-/// Prefers entries that contain "serial", then "wwn", then "dm-uuid", then any match.
+/// Prefers entries that contain "serial", then "wwn", then "dm-uuid", then any
+/// match. Ties are broken by name so the result doesn't depend on directory order.
 #[cfg(target_os = "linux")]
-fn disk_id_from_by_id(disk: &str) -> Option<String> {
-    let rd = std::fs::read_dir("/dev/disk/by-id").ok()?;
-    let mut candidates: Vec<String> = Vec::new();
-
-    for entry in rd.flatten() {
-        let link_name = entry.file_name().to_string_lossy().to_string();
-        // Each entry is a symlink; its target ends with the device name (possibly with partition)
-        if let Ok(target) = std::fs::read_link(entry.path()) {
-            let target_str = target.to_string_lossy();
-            let target_dev = target_str.rsplit('/').next().unwrap_or("");
-            let target_disk = strip_partition_suffix(target_dev);
-            if target_disk == disk {
-                // Skip partition-specific entries (they include "-partN" suffix)
-                if !link_name.contains("-part") {
-                    candidates.push(link_name);
-                }
-            }
-        }
-    }
-
-    // Rank: serial > wwn > dm-uuid > anything else
-    let rank = |s: &String| -> u8 {
+fn disk_id_from_by_id(root: &std::path::Path, disk: &str) -> Option<String> {
+    let rank = |s: &str| -> u8 {
         if s.contains("serial") {
             0
         } else if s.starts_with("wwn-") {
@@ -283,8 +261,17 @@ fn disk_id_from_by_id(disk: &str) -> Option<String> {
             3
         }
     };
-    candidates.sort_by_key(rank);
-    candidates.into_iter().next()
+    std::fs::read_dir(root.join("dev/disk/by-id"))
+        .ok()?
+        .flatten()
+        .filter_map(|entry| {
+            let link_name = entry.file_name().to_string_lossy().into_owned();
+            let target = std::fs::read_link(entry.path()).ok()?;
+            // Skip partition-specific entries (they include "-partN" suffix)
+            (target.file_name()? == std::ffi::OsStr::new(disk) && !link_name.contains("-part"))
+                .then_some(link_name)
+        })
+        .min_by_key(|s| (rank(s), s.clone()))
 }
 
 /// macOS: IOPlatformUUID + IOPlatformSerialNumber (via ioreg)
@@ -489,5 +476,150 @@ mod tests {
             assert_eq!(got, good, "cached code must be reused across calls");
         }
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// Fake filesystem root with the parts of /proc, /sys and /dev that the
+    /// Linux disk lookup reads.
+    #[cfg(target_os = "linux")]
+    struct FakeRoot(std::path::PathBuf);
+
+    #[cfg(target_os = "linux")]
+    impl FakeRoot {
+        fn new(name: &str, root_dev: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("susi_fp_{}_{}", name, std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            let root = FakeRoot(dir);
+            root.file("proc/mounts", &format!("sysfs /sys sysfs rw 0 0\n{} / ext4 rw 0 0\n", root_dev));
+            root
+        }
+
+        fn file(&self, path: &str, contents: &str) -> &Self {
+            let p = self.0.join(path);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, contents).unwrap();
+            self
+        }
+
+        fn link(&self, path: &str, target: &str) -> &Self {
+            let p = self.0.join(path);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(target, p).unwrap();
+            self
+        }
+
+        /// Register a block device in /sys/class/block, as a partition of `disk` if given.
+        fn block(&self, name: &str, disk: Option<&str>) -> &Self {
+            let dev = match disk {
+                Some(d) => format!("sys/devices/{}/{}", d, name),
+                None => format!("sys/devices/{}", name),
+            };
+            std::fs::create_dir_all(self.0.join(&dev)).unwrap();
+            if disk.is_some() {
+                self.file(&format!("{}/partition", dev), "1\n");
+            }
+            self.link(&format!("sys/class/block/{}", name), &format!("../../../{}", dev))
+        }
+
+        fn by_id(&self, name: &str, dev: &str) -> &Self {
+            self.link(&format!("dev/disk/by-id/{}", name), &format!("../../{}", dev))
+        }
+
+        fn disk_id(&self) -> String {
+            root_disk_serial(&self.0)
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Drop for FakeRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_disk_id_prefers_wwn_link_of_partitioned_sata_disk() {
+        let root = FakeRoot::new("sata", "/dev/sda2");
+        root.block("sda", None)
+            .block("sda2", Some("sda"))
+            .by_id("ata-Samsung_SSD_860_S3Z9NB0K123", "sda")
+            .by_id("ata-Samsung_SSD_860_S3Z9NB0K123-part2", "sda2")
+            .by_id("wwn-0x5002538e40a1b2c3", "sda")
+            .by_id("wwn-0x5002538e40a1b2c3-part2", "sda2");
+        assert_eq!(root.disk_id(), "wwn-0x5002538e40a1b2c3");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_disk_id_matches_disk_names_ending_in_a_digit() {
+        // Stripping digits used to turn "nvme0n1" into "nvme0n", so no link matched.
+        let root = FakeRoot::new("nvme", "/dev/nvme0n1p3");
+        root.block("nvme0n1", None)
+            .block("nvme0n1p3", Some("nvme0n1"))
+            .by_id("nvme-eui.002538b981b2c3d4", "nvme0n1")
+            .by_id("nvme-Samsung_SSD_970_S467NX0M123", "nvme0n1")
+            .by_id("nvme-Samsung_SSD_970_S467NX0M123-part3", "nvme0n1p3")
+            .file("sys/block/nvme0n1/device/serial", "S467NX0M123\n");
+        assert_eq!(root.disk_id(), "nvme-Samsung_SSD_970_S467NX0M123");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_disk_id_follows_lvm_on_luks_to_the_physical_disk() {
+        // Every dm-N used to strip to "dm-", so any dm link could be picked.
+        let root = FakeRoot::new("luks", "/dev/mapper/vgubuntu-root");
+        root.file("sys/block/dm-0/dm/name", "nvme0n1p3_crypt\n")
+            .file("sys/block/dm-0/slaves/nvme0n1p3", "")
+            .file("sys/block/dm-1/dm/name", "vgubuntu-root\n")
+            .file("sys/block/dm-1/slaves/dm-0", "")
+            .file("sys/block/dm-2/dm/name", "vgubuntu-swap_1\n")
+            .file("sys/block/dm-2/slaves/dm-0", "")
+            .block("nvme0n1", None)
+            .block("nvme0n1p3", Some("nvme0n1"))
+            .by_id("dm-uuid-CRYPT-LUKS2-0a1b2c3d-nvme0n1p3_crypt", "dm-0")
+            .by_id("dm-uuid-LVM-root", "dm-1")
+            .by_id("dm-uuid-LVM-swap", "dm-2")
+            .by_id("nvme-Samsung_SSD_970_S467NX0M123", "nvme0n1");
+        assert_eq!(root.disk_id(), "nvme-Samsung_SSD_970_S467NX0M123");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_disk_id_uses_dm_uuid_of_a_dm_device_without_slaves() {
+        let root = FakeRoot::new("dm", "/dev/dm-0");
+        root.file("sys/block/dm-0/dm/name", "root\n")
+            .block("dm-0", None)
+            .by_id("dm-name-root", "dm-0")
+            .by_id("dm-uuid-LVM-other", "dm-1")
+            .by_id("dm-uuid-LVM-root", "dm-0");
+        assert_eq!(root.disk_id(), "dm-uuid-LVM-root");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_disk_id_falls_back_to_sysfs_serial() {
+        let root = FakeRoot::new("sysfs", "/dev/sda1");
+        root.block("sda", None)
+            .block("sda1", Some("sda"))
+            .file("sys/block/sda/device/serial", "  WD-WCC4N1234567 \n");
+        assert_eq!(root.disk_id(), "WD-WCC4N1234567");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_disk_id_falls_back_to_nvme_controller_serial() {
+        let root = FakeRoot::new("nvmectrl", "/dev/nvme0n1p1");
+        root.block("nvme0n1", None)
+            .block("nvme0n1p1", Some("nvme0n1"))
+            .file("sys/class/nvme/nvme0/serial", "S467NX0M123\n");
+        assert_eq!(root.disk_id(), "S467NX0M123");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_disk_id_is_empty_without_any_id() {
+        let root = FakeRoot::new("none", "/dev/sda1");
+        root.block("sda", None).block("sda1", Some("sda"));
+        assert_eq!(root.disk_id(), "");
     }
 }

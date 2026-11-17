@@ -23,6 +23,10 @@
 namespace susi::details {
 // Defined in susi.cpp: hash two hardware IDs into a machine code, empty if either ID is empty.
 std::string machineCodeFromIds(const std::string& id1, const std::string& id2);
+#ifdef __linux__
+// Defined in susi.cpp: ID of the disk holding the root filesystem, read from /proc, /sys and /dev below root.
+std::string rootDiskSerial(const std::filesystem::path& root);
+#endif
 }
 
 namespace fs = std::filesystem;
@@ -762,6 +766,116 @@ TEST_CASE("machineCodeFromIds hashes the normalized IDs", "[machineCode]")
     CHECK(machineCodeFromIds("BIOS--UUID--0001", "CPUID-ABC-123") == expected);
     CHECK(machineCodeFromIds("BIOS-UUID-9999", "CPUID-ABC123") != expected);
 }
+
+#ifdef __linux__
+// Fake filesystem root with the parts of /proc, /sys and /dev that the Linux disk lookup reads.
+struct FakeRoot {
+    fs::path dir;
+    FakeRoot(const std::string& name, const std::string& rootDev) : dir(emptyTestDir("fp_" + name))
+    {
+        file("proc/mounts", "sysfs /sys sysfs rw 0 0\n" + rootDev + " / ext4 rw 0 0\n");
+    }
+    FakeRoot& file(const std::string& path, const std::string& contents)
+    {
+        fs::create_directories((dir / path).parent_path());
+        writePlain(dir / path, contents);
+        return *this;
+    }
+    FakeRoot& link(const std::string& path, const std::string& target)
+    {
+        fs::create_directories((dir / path).parent_path());
+        fs::create_symlink(target, dir / path);
+        return *this;
+    }
+    // Register a block device in /sys/class/block, as a partition of disk if given.
+    FakeRoot& block(const std::string& name, const std::string& disk = "")
+    {
+        const std::string dev = disk.empty() ? "sys/devices/" + name : "sys/devices/" + disk + "/" + name;
+        fs::create_directories(dir / dev);
+        if (!disk.empty()) file(dev + "/partition", "1\n");
+        return link("sys/class/block/" + name, "../../../" + dev);
+    }
+    FakeRoot& byId(const std::string& name, const std::string& dev)
+    {
+        return link("dev/disk/by-id/" + name, "../../" + dev);
+    }
+    std::string diskId() const { return susi::details::rootDiskSerial(dir); }
+};
+
+TEST_CASE("rootDiskSerial prefers the wwn link of a partitioned SATA disk", "[machineCode]")
+{
+    FakeRoot root("sata", "/dev/sda2");
+    root.block("sda")
+        .block("sda2", "sda")
+        .byId("ata-Samsung_SSD_860_S3Z9NB0K123", "sda")
+        .byId("ata-Samsung_SSD_860_S3Z9NB0K123-part2", "sda2")
+        .byId("wwn-0x5002538e40a1b2c3", "sda")
+        .byId("wwn-0x5002538e40a1b2c3-part2", "sda2");
+    CHECK(root.diskId() == "wwn-0x5002538e40a1b2c3");
+}
+
+TEST_CASE("rootDiskSerial matches disk names ending in a digit", "[machineCode]")
+{
+    FakeRoot root("nvme", "/dev/nvme0n1p3");
+    root.block("nvme0n1")
+        .block("nvme0n1p3", "nvme0n1")
+        .byId("nvme-eui.002538b981b2c3d4", "nvme0n1")
+        .byId("nvme-Samsung_SSD_970_S467NX0M123", "nvme0n1")
+        .byId("nvme-Samsung_SSD_970_S467NX0M123-part3", "nvme0n1p3")
+        .file("sys/block/nvme0n1/device/serial", "S467NX0M123\n");
+    CHECK(root.diskId() == "nvme-Samsung_SSD_970_S467NX0M123");
+}
+
+TEST_CASE("rootDiskSerial follows LVM on LUKS to the physical disk", "[machineCode]")
+{
+    FakeRoot root("luks", "/dev/mapper/vgubuntu-root");
+    root.file("sys/block/dm-0/dm/name", "nvme0n1p3_crypt\n")
+        .file("sys/block/dm-0/slaves/nvme0n1p3", "")
+        .file("sys/block/dm-1/dm/name", "vgubuntu-root\n")
+        .file("sys/block/dm-1/slaves/dm-0", "")
+        .file("sys/block/dm-2/dm/name", "vgubuntu-swap_1\n")
+        .file("sys/block/dm-2/slaves/dm-0", "")
+        .block("nvme0n1")
+        .block("nvme0n1p3", "nvme0n1")
+        .byId("dm-uuid-CRYPT-LUKS2-0a1b2c3d-nvme0n1p3_crypt", "dm-0")
+        .byId("dm-uuid-LVM-root", "dm-1")
+        .byId("dm-uuid-LVM-swap", "dm-2")
+        .byId("nvme-Samsung_SSD_970_S467NX0M123", "nvme0n1");
+    CHECK(root.diskId() == "nvme-Samsung_SSD_970_S467NX0M123");
+}
+
+TEST_CASE("rootDiskSerial uses the dm-uuid of a dm device without slaves", "[machineCode]")
+{
+    FakeRoot root("dm", "/dev/dm-0");
+    root.file("sys/block/dm-0/dm/name", "root\n")
+        .block("dm-0")
+        .byId("dm-name-root", "dm-0")
+        .byId("dm-uuid-LVM-other", "dm-1")
+        .byId("dm-uuid-LVM-root", "dm-0");
+    CHECK(root.diskId() == "dm-uuid-LVM-root");
+}
+
+TEST_CASE("rootDiskSerial falls back to the sysfs serial", "[machineCode]")
+{
+    FakeRoot root("sysfs", "/dev/sda1");
+    root.block("sda").block("sda1", "sda").file("sys/block/sda/device/serial", "  WD-WCC4N1234567 \n");
+    CHECK(root.diskId() == "WD-WCC4N1234567");
+}
+
+TEST_CASE("rootDiskSerial falls back to the NVMe controller serial", "[machineCode]")
+{
+    FakeRoot root("nvmectrl", "/dev/nvme0n1p1");
+    root.block("nvme0n1").block("nvme0n1p1", "nvme0n1").file("sys/class/nvme/nvme0/serial", "S467NX0M123\n");
+    CHECK(root.diskId() == "S467NX0M123");
+}
+
+TEST_CASE("rootDiskSerial is empty without any disk ID", "[machineCode]")
+{
+    FakeRoot root("none", "/dev/sda1");
+    root.block("sda").block("sda1", "sda");
+    CHECK(root.diskId().empty());
+}
+#endif
 
 TEST_CASE("verifyTokenOn accepts a valid token", "[verifyToken]")
 {
