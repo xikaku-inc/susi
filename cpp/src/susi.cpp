@@ -274,74 +274,125 @@ static std::string getHostname()
     return "";
 }
 #elif defined(__linux__)
-static std::string getRootDiskSerial()
+/// Returns the whole file without surrounding whitespace, or an empty string if it can't be read.
+static std::string readTrimmed(const std::filesystem::path& path)
 {
-    // Find device mounted at "/" from /proc/mounts
-    std::string rootDev;
-    {
-        std::ifstream f("/proc/mounts");
-        std::string line;
-        while (std::getline(f, line)) {
-            std::istringstream iss(line);
-            std::string dev, mount;
-            if ((iss >> dev >> mount) && mount == "/") {
-                rootDev = dev;
+    std::ifstream f(path);
+    const std::string s((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    const char* ws = " \t\n\v\f\r";
+    const auto first = s.find_first_not_of(ws);
+    if (first == std::string::npos) return "";
+    return s.substr(first, s.find_last_not_of(ws) - first + 1);
+}
+
+/// Returns the disk a partition belongs to, from sysfs ("sda1" -> "sda", "nvme0n1p3" -> "nvme0n1").
+/// Whole disks such as "nvme0n1" or "dm-0" are returned unchanged.
+static std::string wholeDisk(const std::filesystem::path& root, const std::string& dev)
+{
+    // /sys/class/block/<partition> links into the directory of its disk.
+    const auto sys = root / "sys/class/block" / dev;
+    std::error_code ec;
+    if (std::filesystem::exists(sys / "partition", ec)) {
+        const auto resolved = std::filesystem::canonical(sys, ec);
+        if (!ec) {
+            std::string disk = resolved.parent_path().filename().string();
+            if (!disk.empty()) return disk;
+        }
+    }
+    return dev;
+}
+
+/// Returns the disk holding the root filesystem ("sda", "nvme0n1", "dm-0"). Device-mapper devices (LVM, LUKS)
+/// are followed down to the physical disk.
+static std::string rootBlockDevice(const std::filesystem::path& root)
+{
+    std::string dev;
+    std::ifstream f(root / "proc/mounts");
+    std::string line;
+    while (std::getline(f, line)) {
+        std::istringstream iss(line);
+        std::string device, mount;
+        if ((iss >> device >> mount) && mount == "/") {
+            dev = device;
+            break;
+        }
+    }
+    if (dev.compare(0, 5, "/dev/") != 0) return "";
+    dev.erase(0, 5);
+
+    std::error_code ec;
+    if (dev.compare(0, 7, "mapper/") == 0) {
+        const std::string mapperName = dev.substr(7);
+        dev.clear();
+        for (std::filesystem::directory_iterator it(root / "sys/block", ec), end; !ec && it != end; it.increment(ec)) {
+            const std::string name = it->path().filename().string();
+            if (name.compare(0, 3, "dm-") == 0 && readTrimmed(root / "sys/block" / name / "dm/name") == mapperName) {
+                dev = name;
                 break;
             }
         }
+        if (dev.empty()) return "";
     }
-    if (rootDev.size() <= 5 || rootDev.compare(0, 5, "/dev/") != 0) return "";
-
-    std::string disk = rootDev.substr(5); // e.g. "sda1", "nvme0n1p1"
-
-    // NVMe/eMMC: strip trailing "p<digits>" → "nvme0n1p1" → "nvme0n1"
-    bool stripped = false;
-    {
-        const auto p = disk.rfind('p');
-        if (p != std::string::npos && p > 0) {
-            const auto suffix = disk.substr(p + 1);
-            if (!suffix.empty() && std::all_of(suffix.begin(), suffix.end(),
-                    [](unsigned char c) { return std::isdigit(c); })) {
-                disk = disk.substr(0, p);
-                stripped = true;
-            }
+    // Take the smallest slave name so a volume spanning several disks resolves the same way on every run.
+    while (dev.compare(0, 3, "dm-") == 0) {
+        std::string slave;
+        for (std::filesystem::directory_iterator it(root / "sys/block" / dev / "slaves", ec), end; !ec && it != end;
+             it.increment(ec)) {
+            const std::string name = it->path().filename().string();
+            if (slave.empty() || name < slave) slave = name;
         }
+        if (slave.empty()) break;
+        dev = slave;
     }
-    // SATA/SCSI: strip trailing digits → "sda1" → "sda"
-    if (!stripped) {
-        while (!disk.empty() && std::isdigit(static_cast<unsigned char>(disk.back())))
-            disk.pop_back();
-    }
-
-    for (const std::string& path : {
-        "/sys/block/" + disk + "/device/serial",
-        "/sys/block/" + disk + "/serial"
-    }) {
-        std::ifstream f(path);
-        if (!f.is_open()) continue;
-        std::string serial;
-        std::getline(f, serial);
-        while (!serial.empty() && (serial.back() == '\n' || serial.back() == '\r' || serial.back() == ' '))
-            serial.pop_back();
-        if (!serial.empty()) return serial;
-    }
-    return "";
+    return wholeDisk(root, dev);
 }
 
-// On linux the machine code consists of the contents of /etc/machine-id and the root disk serial number.
+/// Returns the name of a stable udev link to the disk in /dev/disk/by-id, preferring serial, then wwn, then
+/// dm-uuid entries. These links work for direct disks, NVMe and LVM without root. Ties are broken by name so
+/// the result doesn't depend on directory order.
+static std::string diskIdFromById(const std::filesystem::path& root, const std::string& disk)
+{
+    const auto rank = [](const std::string& s) {
+        if (s.find("serial") != std::string::npos) return 0;
+        if (s.compare(0, 4, "wwn-") == 0) return 1;
+        if (s.compare(0, 7, "dm-uuid") == 0) return 2;
+        return 3;
+    };
+    std::string best;
+    std::error_code ec;
+    for (std::filesystem::directory_iterator it(root / "dev/disk/by-id", ec), end; !ec && it != end;
+         it.increment(ec)) {
+        std::error_code linkEc;
+        const auto target = std::filesystem::read_symlink(it->path(), linkEc);
+        const std::string name = it->path().filename().string();
+        // Skip partition-specific entries (they include a "-partN" suffix).
+        if (linkEc || target.filename().string() != disk ||name.find("-part") != std::string::npos) continue;
+        if (best.empty() || std::make_pair(rank(name), name) < std::make_pair(rank(best), best)) best = name;
+    }
+    return best;
+}
+
+namespace susi::details {
+// Not static so the tests can reach it. /proc, /sys and /dev are read below root.
+std::string rootDiskSerial(const std::filesystem::path& root)
+{
+    const std::string disk = rootBlockDevice(root);
+    if (disk.empty()) return "";
+    if (std::string id = diskIdFromById(root, disk); !id.empty()) return id;
+    for (const auto& path : {root / "sys/block" / disk / "device/serial", root / "sys/block" / disk / "serial"}) {
+        if (std::string serial = readTrimmed(path); !serial.empty()) return serial;
+    }
+    // NVMe namespace "nvme0n1" belongs to controller "nvme0".
+    if (const auto n = disk.find('n', 4); disk.compare(0, 4, "nvme") == 0 && n != std::string::npos)
+        return readTrimmed(root / "sys/class/nvme" / disk.substr(0, n) / "serial");
+    return "";
+}
+} // namespace susi::details
+
+// On linux the machine code consists of the contents of /etc/machine-id and the root disk ID.
 static std::pair<std::string, std::string> getHardwareIds()
 {
-    std::string machineId;
-    {
-        std::ifstream f("/etc/machine-id");
-        if (f.is_open()) {
-            std::getline(f, machineId);
-            while (!machineId.empty() && (machineId.back() == '\n' || machineId.back() == '\r' || machineId.back() == ' '))
-                machineId.pop_back();
-        }
-    }
-
-    return {machineId, getRootDiskSerial()};
+    return {readTrimmed("/etc/machine-id"), susi::details::rootDiskSerial("/")};
 }
 
 static std::string getHostname()
