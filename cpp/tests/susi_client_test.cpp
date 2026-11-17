@@ -771,9 +771,12 @@ TEST_CASE("machineCodeFromIds hashes the normalized IDs", "[machineCode]")
 // Fake filesystem root with the parts of /proc, /sys and /dev that the Linux disk lookup reads.
 struct FakeRoot {
     fs::path dir;
-    FakeRoot(const std::string& name, const std::string& rootDev) : dir(emptyTestDir("fp_" + name))
+    // Root filesystem mounted from device number ("major:minor") with the given source.
+    FakeRoot(const std::string& name, const std::string& number, const std::string& source)
+        : dir(emptyTestDir("fp_" + name))
     {
-        file("proc/mounts", "sysfs /sys sysfs rw 0 0\n" + rootDev + " / ext4 rw 0 0\n");
+        file("proc/self/mountinfo", "24 1 " + number + " / / rw,relatime shared:1 - ext4 " + source +
+                                        " rw\n25 24 0:22 / /sys rw,nosuid shared:7 - sysfs sysfs rw\n");
     }
     FakeRoot& file(const std::string& path, const std::string& contents)
     {
@@ -787,13 +790,14 @@ struct FakeRoot {
         fs::create_symlink(target, dir / path);
         return *this;
     }
-    // Register a block device in /sys/class/block, as a partition of disk if given.
-    FakeRoot& block(const std::string& name, const std::string& disk = "")
+    // Register a block device with the device number in /sys/class/block and /sys/dev/block, as a partition of
+    // disk if given.
+    FakeRoot& block(const std::string& name, const std::string& number, const std::string& disk = "")
     {
         const std::string dev = disk.empty() ? "sys/devices/" + name : "sys/devices/" + disk + "/" + name;
         fs::create_directories(dir / dev);
         if (!disk.empty()) file(dev + "/partition", "1\n");
-        return link("sys/class/block/" + name, "../../../" + dev);
+        return link("sys/class/block/" + name, "../../../" + dev).link("sys/dev/block/" + number, "../../../" + dev);
     }
     FakeRoot& byId(const std::string& name, const std::string& dev)
     {
@@ -804,9 +808,9 @@ struct FakeRoot {
 
 TEST_CASE("rootDiskSerial prefers the wwn link of a partitioned SATA disk", "[machineCode]")
 {
-    FakeRoot root("sata", "/dev/sda2");
-    root.block("sda")
-        .block("sda2", "sda")
+    FakeRoot root("sata", "8:2", "/dev/sda2");
+    root.block("sda", "8:0")
+        .block("sda2", "8:2", "sda")
         .byId("ata-Samsung_SSD_860_S3Z9NB0K123", "sda")
         .byId("ata-Samsung_SSD_860_S3Z9NB0K123-part2", "sda2")
         .byId("wwn-0x5002538e40a1b2c3", "sda")
@@ -814,12 +818,57 @@ TEST_CASE("rootDiskSerial prefers the wwn link of a partitioned SATA disk", "[ma
     CHECK(root.diskId() == "wwn-0x5002538e40a1b2c3");
 }
 
+TEST_CASE("rootDiskSerial resolves /dev/root and skips placeholder serials", "[machineCode]")
+{
+    // Layout of an Azure VM: root is mounted as "/dev/root" without a device node, and every disk reports the
+    // serial "SN: 00000".
+    FakeRoot root("azure", "259:1", "/dev/root");
+    root.block("nvme0n1", "259:0")
+        .block("nvme0n1p1", "259:1", "nvme0n1")
+        .byId("nvme-MSFT_NVMe_Accelerator_v1.0_SN:_00000", "nvme0n1")
+        .byId("nvme-MSFT_NVMe_Accelerator_v1.0_SN:_00000-part1", "nvme0n1p1")
+        .byId("nvme-MSFT_NVMe_Accelerator_v1.0_SN:_00000_1", "nvme0n1")
+        .byId("nvme-eui.0b7bb4bc50584c62a0ca333f6cbcec01", "nvme0n1")
+        .byId("nvme-eui.0b7bb4bc50584c62a0ca333f6cbcec01-part1", "nvme0n1p1")
+        .file("sys/block/nvme0n1/device/serial", "SN: 00000\n");
+    CHECK(root.diskId() == "nvme-eui.0b7bb4bc50584c62a0ca333f6cbcec01");
+}
+
+TEST_CASE("rootDiskSerial follows a snapshot root to its disk", "[machineCode]")
+{
+    // Layout of an AWS VM: root is a device-mapper snapshot of the EBS volume.
+    FakeRoot root("aws", "252:0", "/dev/mapper/cow-root");
+    root.file("sys/block/dm-0/dm/name", "cow-root\n")
+        .file("sys/block/dm-0/slaves/nvme0n1p1", "")
+        .block("dm-0", "252:0")
+        .block("nvme0n1", "259:0")
+        .block("nvme0n1p1", "259:1", "nvme0n1")
+        .byId("dm-name-cow-root", "dm-0")
+        .byId("nvme-Amazon_Elastic_Block_Store_vol059e04ef34c1f365f", "nvme0n1")
+        .byId("nvme-Amazon_Elastic_Block_Store_vol059e04ef34c1f365f_1", "nvme0n1")
+        .byId("nvme-uuid.d6dd1855-3c3b-5af4-bc41-87880af0260f", "nvme0n1");
+    CHECK(root.diskId() == "nvme-uuid.d6dd1855-3c3b-5af4-bc41-87880af0260f");
+}
+
+TEST_CASE("rootDiskSerial falls back to the mount source for anonymous devices", "[machineCode]")
+{
+    // btrfs reports an anonymous device number, so the mapper name is resolved instead.
+    FakeRoot root("btrfs", "0:31", "/dev/mapper/luks-root");
+    root.file("sys/block/dm-0/dm/name", "luks-root\n")
+        .file("sys/block/dm-0/slaves/nvme0n1p2", "")
+        .block("dm-0", "253:0")
+        .block("nvme0n1", "259:0")
+        .block("nvme0n1p2", "259:2", "nvme0n1")
+        .byId("dm-uuid-CRYPT-LUKS2-0a1b2c3d-luks-root", "dm-0")
+        .byId("nvme-Samsung_SSD_970_S467NX0M123", "nvme0n1");
+    CHECK(root.diskId() == "nvme-Samsung_SSD_970_S467NX0M123");
+}
+
 TEST_CASE("rootDiskSerial matches disk names ending in a digit", "[machineCode]")
 {
-    FakeRoot root("nvme", "/dev/nvme0n1p3");
-    root.block("nvme0n1")
-        .block("nvme0n1p3", "nvme0n1")
-        .byId("nvme-eui.002538b981b2c3d4", "nvme0n1")
+    FakeRoot root("nvme", "259:3", "/dev/nvme0n1p3");
+    root.block("nvme0n1", "259:0")
+        .block("nvme0n1p3", "259:3", "nvme0n1")
         .byId("nvme-Samsung_SSD_970_S467NX0M123", "nvme0n1")
         .byId("nvme-Samsung_SSD_970_S467NX0M123-part3", "nvme0n1p3")
         .file("sys/block/nvme0n1/device/serial", "S467NX0M123\n");
@@ -828,15 +877,18 @@ TEST_CASE("rootDiskSerial matches disk names ending in a digit", "[machineCode]"
 
 TEST_CASE("rootDiskSerial follows LVM on LUKS to the physical disk", "[machineCode]")
 {
-    FakeRoot root("luks", "/dev/mapper/vgubuntu-root");
+    FakeRoot root("luks", "253:1", "/dev/mapper/vgubuntu-root");
     root.file("sys/block/dm-0/dm/name", "nvme0n1p3_crypt\n")
         .file("sys/block/dm-0/slaves/nvme0n1p3", "")
         .file("sys/block/dm-1/dm/name", "vgubuntu-root\n")
         .file("sys/block/dm-1/slaves/dm-0", "")
         .file("sys/block/dm-2/dm/name", "vgubuntu-swap_1\n")
         .file("sys/block/dm-2/slaves/dm-0", "")
-        .block("nvme0n1")
-        .block("nvme0n1p3", "nvme0n1")
+        .block("dm-0", "253:0")
+        .block("dm-1", "253:1")
+        .block("dm-2", "253:2")
+        .block("nvme0n1", "259:0")
+        .block("nvme0n1p3", "259:3", "nvme0n1")
         .byId("dm-uuid-CRYPT-LUKS2-0a1b2c3d-nvme0n1p3_crypt", "dm-0")
         .byId("dm-uuid-LVM-root", "dm-1")
         .byId("dm-uuid-LVM-swap", "dm-2")
@@ -846,9 +898,9 @@ TEST_CASE("rootDiskSerial follows LVM on LUKS to the physical disk", "[machineCo
 
 TEST_CASE("rootDiskSerial uses the dm-uuid of a dm device without slaves", "[machineCode]")
 {
-    FakeRoot root("dm", "/dev/dm-0");
+    FakeRoot root("dm", "253:0", "/dev/dm-0");
     root.file("sys/block/dm-0/dm/name", "root\n")
-        .block("dm-0")
+        .block("dm-0", "253:0")
         .byId("dm-name-root", "dm-0")
         .byId("dm-uuid-LVM-other", "dm-1")
         .byId("dm-uuid-LVM-root", "dm-0");
@@ -857,22 +909,22 @@ TEST_CASE("rootDiskSerial uses the dm-uuid of a dm device without slaves", "[mac
 
 TEST_CASE("rootDiskSerial falls back to the sysfs serial", "[machineCode]")
 {
-    FakeRoot root("sysfs", "/dev/sda1");
-    root.block("sda").block("sda1", "sda").file("sys/block/sda/device/serial", "  WD-WCC4N1234567 \n");
+    FakeRoot root("sysfs", "8:1", "/dev/sda1");
+    root.block("sda", "8:0").block("sda1", "8:1", "sda").file("sys/block/sda/device/serial", "  WD-WCC4N1234567 \n");
     CHECK(root.diskId() == "WD-WCC4N1234567");
 }
 
 TEST_CASE("rootDiskSerial falls back to the NVMe controller serial", "[machineCode]")
 {
-    FakeRoot root("nvmectrl", "/dev/nvme0n1p1");
-    root.block("nvme0n1").block("nvme0n1p1", "nvme0n1").file("sys/class/nvme/nvme0/serial", "S467NX0M123\n");
+    FakeRoot root("nvmectrl", "259:1", "/dev/nvme0n1p1");
+    root.block("nvme0n1", "259:0").block("nvme0n1p1", "259:1", "nvme0n1").file("sys/class/nvme/nvme0/serial", "S467NX0M123\n");
     CHECK(root.diskId() == "S467NX0M123");
 }
 
 TEST_CASE("rootDiskSerial is empty without any disk ID", "[machineCode]")
 {
-    FakeRoot root("none", "/dev/sda1");
-    root.block("sda").block("sda1", "sda");
+    FakeRoot root("none", "8:1", "/dev/sda1");
+    root.block("sda", "8:0").block("sda1", "8:1", "sda");
     CHECK(root.diskId().empty());
 }
 #endif
