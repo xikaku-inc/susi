@@ -356,18 +356,7 @@ mod tests {
 
     #[test]
     fn test_get_machine_code_is_stable() {
-        // Some CI runners (e.g. GitHub ubuntu-latest) have an empty root-disk
-        // serial, which get_machine_code intentionally refuses. Treat that as
-        // "test environment can't exercise this" rather than a real failure -
-        // the pure-hash invariants are already covered by the regression tests
-        // against machine_code_from_ids.
-        let code = match get_machine_code() {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("skipping: hardware fingerprint unavailable ({})", e);
-                return;
-            }
-        };
+        let code = get_machine_code().unwrap();
         assert_eq!(code.len(), 64);
         assert!(code.chars().all(|c| c.is_ascii_hexdigit()));
         let code2 = get_machine_code().unwrap();
@@ -414,13 +403,6 @@ mod tests {
 
     #[test]
     fn test_get_or_cache_rejects_corrupt_and_writes_fresh() {
-        // Requires a real hardware fingerprint as fallback - skip on CI
-        // runners that don't expose a root-disk serial. See comment on
-        // test_get_machine_code_is_stable.
-        if get_machine_code().is_err() {
-            eprintln!("skipping: hardware fingerprint unavailable");
-            return;
-        }
         let dir = std::env::temp_dir().join("susi_fp_test_corrupt");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("mc");

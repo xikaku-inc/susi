@@ -670,11 +670,8 @@ mod tests {
         }
     }
 
-    // Real fingerprint lookup fails on some CI runners (e.g. GitHub's
-    // ubuntu-latest where /sys/block/<disk>/serial is empty), which would
-    // cause every verify_signed call to fall through to LicenseStatus::Error
-    // regardless of actual signature validity. The tests do not care about
-    // machine-binding - pin a stable synthetic code via the override.
+    // Pin a synthetic machine code so the tests don't depend on the hardware
+    // they run on and machine-bound licenses can be built for a known code.
     const TEST_MACHINE_CODE: &str =
         "0000000000000000000000000000000000000000000000000000000000000000";
 
