@@ -34,7 +34,7 @@ option(SUSI_BUILD_TESTS "Build the tests in tests/" OFF)
 
 add_library(susi STATIC src/susi.cpp src/file_io.cpp src/file_io.h include/susi.h)
 target_include_directories(susi PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_compile_features(susi PUBLIC cxx_std_17)
+target_compile_features(susi PUBLIC cxx_std_17 PRIVATE cxx_std_23)
 target_compile_options(susi PRIVATE "$<$<CXX_COMPILER_ID:MSVC>:/utf-8>")
 
 # OpenSSL

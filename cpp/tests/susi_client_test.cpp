@@ -15,6 +15,7 @@
 #include <ctime>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -25,7 +26,7 @@ namespace susi::details {
 std::string machineCodeFromIds(const std::string& id1, const std::string& id2);
 #ifdef __linux__
 // Defined in susi.cpp: ID of the disk holding the root filesystem, read from /proc, /sys and /dev below root.
-std::string rootDiskSerial(const std::filesystem::path& root);
+std::optional<std::string> rootDiskSerial(const std::filesystem::path& root);
 #endif
 }
 
@@ -803,7 +804,7 @@ struct FakeRoot {
     {
         return link("dev/disk/by-id/" + name, "../../" + dev);
     }
-    std::string diskId() const { return susi::details::rootDiskSerial(dir); }
+    std::optional<std::string> diskId() const { return susi::details::rootDiskSerial(dir); }
 };
 
 TEST_CASE("rootDiskSerial prefers the wwn link of a partitioned SATA disk", "[machineCode]")
@@ -925,7 +926,15 @@ TEST_CASE("rootDiskSerial is empty without any disk ID", "[machineCode]")
 {
     FakeRoot root("none", "8:1", "/dev/sda1");
     root.block("sda", "8:0").block("sda1", "8:1", "sda");
-    CHECK(root.diskId().empty());
+    CHECK_FALSE(root.diskId());
+}
+
+TEST_CASE("rootDiskSerial is empty if the mount source is not a block device", "[machineCode]")
+{
+    // The anonymous device number falls back to a source that sysfs doesn't know.
+    FakeRoot root("noblock", "0:31", "/dev/sdb");
+    root.byId("ata-Stale_Disk_123", "sdb").file("sys/block/sdb/device/serial", "STALE123\n");
+    CHECK_FALSE(root.diskId());
 }
 #endif
 
