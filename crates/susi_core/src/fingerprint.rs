@@ -197,7 +197,13 @@ fn root_block_device(root: &std::path::Path) -> Option<String> {
         Some(dev) => dev,
         // Filesystems such as btrfs report an anonymous device number.
         None => {
-            let raw = line.split_once(" - ")?.1.split_whitespace().nth(1)?.strip_prefix("/dev/")?;
+            let raw = line
+                .split_once(" - ")?
+                .1
+                .split_whitespace()
+                .nth(1)?
+                .strip_prefix("/dev/")
+                .filter(|s| !s.is_empty())?;
             match raw.strip_prefix("mapper/") {
                 Some(name) => resolve_mapper_to_dm(root, name)?,
                 None => raw.to_string(),
@@ -215,7 +221,7 @@ fn root_block_device(root: &std::path::Path) -> Option<String> {
             None => break,
         }
     }
-    Some(whole_disk(root, &dev))
+    whole_disk(root, &dev)
 }
 
 #[cfg(target_os = "linux")]
@@ -239,22 +245,20 @@ fn resolve_mapper_to_dm(root: &std::path::Path, mapper_name: &str) -> Option<Str
 }
 
 /// The disk a partition belongs to, from sysfs ("sda1" → "sda", "nvme0n1p3" →
-/// "nvme0n1"). Whole disks such as "nvme0n1" or "dm-0" are returned unchanged.
+/// "nvme0n1"). Whole disks such as "nvme0n1" or "dm-0" are returned unchanged,
+/// anything that isn't a block device gives `None`.
 #[cfg(target_os = "linux")]
-fn whole_disk(root: &std::path::Path, dev: &str) -> String {
-    // /sys/class/block/<partition> links into the directory of its disk.
+fn whole_disk(root: &std::path::Path, dev: &str) -> Option<String> {
     let sys = root.join("sys/class/block").join(dev);
-    if sys.join("partition").exists() {
-        if let Some(disk) = std::fs::canonicalize(&sys)
-            .ok()
-            .as_deref()
-            .and_then(std::path::Path::parent)
-            .and_then(std::path::Path::file_name)
-        {
-            return disk.to_string_lossy().into_owned();
-        }
+    if !sys.exists() {
+        return None;
     }
-    dev.to_string()
+    if !sys.join("partition").exists() {
+        return Some(dev.to_string());
+    }
+    // /sys/class/block/<partition> links into the directory of its disk.
+    let resolved = std::fs::canonicalize(&sys).ok()?;
+    Some(resolved.parent()?.file_name()?.to_string_lossy().into_owned())
 }
 
 /// Find a stable ID for `disk` in /dev/disk/by-id/.
@@ -678,6 +682,15 @@ mod tests {
     fn linux_disk_id_is_empty_without_any_id() {
         let root = FakeRoot::new("none", "8:1", "/dev/sda1");
         root.block("sda", "8:0", None).block("sda1", "8:1", Some("sda"));
+        assert_eq!(root.disk_id(), "");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_disk_id_is_empty_if_the_mount_source_is_not_a_block_device() {
+        // The anonymous device number falls back to a source that sysfs doesn't know.
+        let root = FakeRoot::new("noblock", "0:31", "/dev/sdb");
+        root.by_id("ata-Stale_Disk_123", "sdb").file("sys/block/sdb/device/serial", "STALE123\n");
         assert_eq!(root.disk_id(), "");
     }
 }

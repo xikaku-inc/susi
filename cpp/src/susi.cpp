@@ -8,8 +8,10 @@
 #include <fstream>
 #include <mutex>
 #include <optional>
+#include <ranges>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -274,140 +276,172 @@ static std::string getHostname()
     return "";
 }
 #elif defined(__linux__)
-/// Returns the whole file without surrounding whitespace, or an empty string if it can't be read.
-static std::string readTrimmed(const std::filesystem::path& path)
+/// Returns the whole file without surrounding whitespace, or nothing if it is empty or can't be read.
+static std::optional<std::string> readTrimmed(const std::filesystem::path& path)
 {
     std::ifstream f(path);
     const std::string s((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     const char* ws = " \t\n\v\f\r";
     const auto first = s.find_first_not_of(ws);
-    if (first == std::string::npos) return "";
+    if (first == std::string::npos) return std::nullopt;
     return s.substr(first, s.find_last_not_of(ws) - first + 1);
 }
 
-/// Returns the disk a partition belongs to, from sysfs ("sda1" -> "sda", "nvme0n1p3" -> "nvme0n1").
-/// Whole disks such as "nvme0n1" or "dm-0" are returned unchanged.
-static std::string wholeDisk(const std::filesystem::path& root, const std::string& dev)
+/// Returns the file name a path resolves to, or nothing if it can't be resolved.
+static std::optional<std::string> canonicalName(const std::filesystem::path& path)
 {
-    // /sys/class/block/<partition> links into the directory of its disk.
+    std::error_code ec;
+    std::string name = std::filesystem::canonical(path, ec).filename().string();
+    if (ec || name.empty()) return std::nullopt;
+    return name;
+}
+
+/// Returns the disk a partition belongs to, from sysfs ("sda1" -> "sda", "nvme0n1p3" -> "nvme0n1").
+/// Whole disks such as "nvme0n1" or "dm-0" are returned unchanged, anything that isn't a block device gives nothing.
+static std::optional<std::string> wholeDisk(const std::filesystem::path& root, const std::string& dev)
+{
     const auto sys = root / "sys/class/block" / dev;
     std::error_code ec;
-    if (std::filesystem::exists(sys / "partition", ec)) {
-        const auto resolved = std::filesystem::canonical(sys, ec);
-        if (!ec) {
-            std::string disk = resolved.parent_path().filename().string();
-            if (!disk.empty()) return disk;
-        }
+    if (!std::filesystem::exists(sys, ec)) return std::nullopt;
+    if (!std::filesystem::exists(sys / "partition", ec)) return dev;
+    // /sys/class/block/<partition> links into the directory of its disk.
+    return canonicalName(sys / "..");
+}
+
+struct RootMount {
+    std::string majorMinor, source;
+};
+
+/// Returns the device number and source of the visible root mount.
+static std::optional<RootMount> rootMount(const std::filesystem::path& root)
+{
+    /// Returns the n-th space-separated field of s
+    const auto field = [](std::string_view s, size_t n) -> std::optional<std::string> {
+        for (const auto f : s | std::views::split(' '))
+            if (n-- == 0) return std::string(f.begin(), f.end());
+        return std::nullopt;
+    };
+    // The last mount on "/" is the visible one. Fields: id parent_id major:minor root mount_point ...
+    // "-" fs_type source options
+    std::optional<RootMount> result;
+    std::ifstream f(root / "proc/self/mountinfo");
+    std::string line;
+    while (std::getline(f, line)) {
+        if (field(line, 4) != "/") continue; // Mount point is not /
+        const auto sep = line.find(" - ");
+        // Source is second field after -
+        const auto source = sep == std::string::npos ? std::nullopt : field(std::string_view(line).substr(sep + 3), 1);
+        const auto majorMinor = field(line, 2);
+        result = RootMount{majorMinor.value_or(""), source.value_or("")};
     }
-    return dev;
+    return result;
+}
+
+/// Returns the device-mapper device ("dm-0") with the given name.
+static std::optional<std::string> dmByName(const std::filesystem::path& root, const std::string& name)
+{
+    std::error_code ec;
+    std::filesystem::directory_iterator it(root / "sys/block", ec), end;
+    for (; !ec && it != end; it.increment(ec)) {
+        std::string dev = it->path().filename().string();
+        if (dev.compare(0, 3, "dm-") == 0 && readTrimmed(root / "sys/block" / dev / "dm/name") == name) return dev;
+    }
+    return std::nullopt;
+}
+
+/// Follows a device-mapper device down to the physical disk.
+static std::optional<std::string> physicalDisk(const std::filesystem::path& root, std::string dev)
+{
+    // Take the smallest slave name so a volume spanning several disks resolves the same way on every run.
+    while (dev.compare(0, 3, "dm-") == 0) {
+        std::optional<std::string> slave;
+        std::error_code ec;
+        std::filesystem::directory_iterator it(root / "sys/block" / dev / "slaves", ec), end;
+        for (; !ec && it != end; it.increment(ec)) {
+            const std::string name = it->path().filename().string();
+            if (!slave || name < *slave) slave = name;
+        }
+        if (!slave) break;
+        dev = *slave;
+    }
+    return wholeDisk(root, dev);
 }
 
 /// Returns the disk holding the root filesystem ("sda", "nvme0n1", "dm-0"). Device-mapper devices (LVM, LUKS)
 /// are followed down to the physical disk.
-static std::string rootBlockDevice(const std::filesystem::path& root)
+static std::optional<std::string> rootBlockDevice(const std::filesystem::path& root)
 {
-    // The last mount on "/" is the visible one. Fields: id, parent id, major:minor, root, mount point, ...,
-    // "-", fs type, source, options.
-    std::string number, source;
-    std::ifstream f(root / "proc/self/mountinfo");
-    std::string line;
-    while (std::getline(f, line)) {
-        std::istringstream iss(line);
-        std::string id, parent, num, mountRoot, mount;
-        if ((iss >> id >> parent >> num >> mountRoot >> mount) && mount == "/") {
-            number = num;
-            const auto sep = line.find(" - ");
-            std::string fsType;
-            source.clear();
-            if (sep != std::string::npos) std::istringstream(line.substr(sep + 3)) >> fsType >> source;
-        }
-    }
-    if (number.empty()) return "";
-
-    // Resolve the device number first: the source can be a name without a device node, such as "/dev/root"
-    // when the kernel mounts root without an initramfs (e.g. on Azure VMs).
-    std::error_code ec;
-    std::string dev = std::filesystem::canonical(root / "sys/dev/block" / number, ec).filename().string();
-    // Filesystems such as btrfs report an anonymous device number.
-    if (ec || dev.empty()) {
-        if (source.compare(0, 5, "/dev/") != 0) return "";
-        dev = source.substr(5);
-    }
-    if (dev.compare(0, 7, "mapper/") == 0) {
-        const std::string mapperName = dev.substr(7);
-        dev.clear();
-        for (std::filesystem::directory_iterator it(root / "sys/block", ec), end; !ec && it != end; it.increment(ec)) {
-            const std::string name = it->path().filename().string();
-            if (name.compare(0, 3, "dm-") == 0 && readTrimmed(root / "sys/block" / name / "dm/name") == mapperName) {
-                dev = name;
-                break;
-            }
-        }
-        if (dev.empty()) return "";
-    }
-    // Take the smallest slave name so a volume spanning several disks resolves the same way on every run.
-    while (dev.compare(0, 3, "dm-") == 0) {
-        std::string slave;
-        for (std::filesystem::directory_iterator it(root / "sys/block" / dev / "slaves", ec), end; !ec && it != end;
-             it.increment(ec)) {
-            const std::string name = it->path().filename().string();
-            if (slave.empty() || name < slave) slave = name;
-        }
-        if (slave.empty()) break;
-        dev = slave;
-    }
-    return wholeDisk(root, dev);
+    return rootMount(root)
+        .and_then([&](const RootMount& m) {
+            // Resolve the device number first: the source can be a name without a device node, such as "/dev/root"
+            // when the kernel mounts root without an initramfs (e.g. on Azure VMs).
+            return canonicalName(root / "sys/dev/block" / m.majorMinor).or_else([&]() -> std::optional<std::string> {
+                // Filesystems such as btrfs report an anonymous device number.
+                if (!m.source.starts_with("/dev/") || m.source.size() == 5) return std::nullopt;
+                return m.source.substr(5);
+            });
+        })
+        .and_then([&](const std::string& dev) {
+            return dev.compare(0, 7, "mapper/") == 0 ? dmByName(root, dev.substr(7)) : std::optional(dev);
+        })
+        .and_then([&](const std::string& dev) { return physicalDisk(root, dev); });
 }
 
 /// Returns the name of a stable udev link to the disk in /dev/disk/by-id, preferring serial, then world-wide IDs
 /// (wwn, NVMe eui/uuid), then dm-uuid entries. These links work for direct disks, NVMe and LVM without root. Ties are broken by name so
 /// the result doesn't depend on directory order.
-static std::string diskIdFromById(const std::filesystem::path& root, const std::string& disk)
+static std::optional<std::string> diskIdFromById(const std::filesystem::path& root, const std::string& disk)
 {
     // Model and serial links can carry a placeholder serial (Azure NVMe disks all report "SN: 00000"), so prefer
     // the IDs unique to the disk.
     const auto rank = [](const std::string& s) {
-        if (s.find("serial") != std::string::npos) return 0;
+        if (s.find("serial") != std::string::npos)
+            return 0;
         if (s.compare(0, 4, "wwn-") == 0 || s.compare(0, 9, "nvme-eui.") == 0 || s.compare(0, 10, "nvme-uuid.") == 0)
             return 1;
-        if (s.compare(0, 7, "dm-uuid") == 0) return 2;
+        if (s.compare(0, 7, "dm-uuid") == 0)
+            return 2;
         return 3;
     };
-    std::string best;
+    std::optional<std::string> best;
     std::error_code ec;
-    for (std::filesystem::directory_iterator it(root / "dev/disk/by-id", ec), end; !ec && it != end;
-         it.increment(ec)) {
+    std::filesystem::directory_iterator it(root / "dev/disk/by-id", ec), end;
+    for (; !ec && it != end; it.increment(ec)) {
         std::error_code linkEc;
         const auto target = std::filesystem::read_symlink(it->path(), linkEc);
+        if(linkEc || target.filename().string() != disk) continue;
         const std::string name = it->path().filename().string();
         // Skip partition-specific entries (they include a "-partN" suffix).
-        if (linkEc || target.filename().string() != disk ||name.find("-part") != std::string::npos) continue;
-        if (best.empty() || std::make_pair(rank(name), name) < std::make_pair(rank(best), best)) best = name;
+        if (name.find("-part") != std::string::npos) continue;
+        if (!best || std::make_pair(rank(name), name) < std::make_pair(rank(*best), *best)) best = name;
     }
     return best;
 }
 
 namespace susi::details {
 // Not static so the tests can reach it. /proc, /sys and /dev are read below root.
-std::string rootDiskSerial(const std::filesystem::path& root)
+std::optional<std::string> rootDiskSerial(const std::filesystem::path& root)
 {
-    const std::string disk = rootBlockDevice(root);
-    if (disk.empty()) return "";
-    if (std::string id = diskIdFromById(root, disk); !id.empty()) return id;
-    for (const auto& path : {root / "sys/block" / disk / "device/serial", root / "sys/block" / disk / "serial"}) {
-        if (std::string serial = readTrimmed(path); !serial.empty()) return serial;
-    }
-    // NVMe namespace "nvme0n1" belongs to controller "nvme0".
-    if (const auto n = disk.find('n', 4); disk.compare(0, 4, "nvme") == 0 && n != std::string::npos)
-        return readTrimmed(root / "sys/class/nvme" / disk.substr(0, n) / "serial");
-    return "";
+    return rootBlockDevice(root)
+        .and_then([&](const std::string& disk) {
+            return diskIdFromById(root, disk)
+                .or_else([&] { return readTrimmed(root / "sys/block" / disk / "device/serial"); })
+                .or_else([&] { return readTrimmed(root / "sys/block" / disk / "serial"); })
+                .or_else([&] {
+                    // NVMe namespace "nvme0n1" belongs to controller "nvme0".
+                    const auto n = disk.find('n', 4);
+                    return disk.compare(0, 4, "nvme") == 0 && n != std::string::npos
+                               ? readTrimmed(root / "sys/class/nvme" / disk.substr(0, n) / "serial")
+                               : std::nullopt;
+                });
+        });
 }
 } // namespace susi::details
 
 // On linux the machine code consists of the contents of /etc/machine-id and the root disk ID.
 static std::pair<std::string, std::string> getHardwareIds()
 {
-    return {readTrimmed("/etc/machine-id"), susi::details::rootDiskSerial("/")};
+    return {readTrimmed("/etc/machine-id").value_or(""), susi::details::rootDiskSerial("/").value_or("")};
 }
 
 static std::string getHostname()
@@ -804,10 +838,10 @@ SusiClient::LicenseStatus SusiClient::verifySignedLicenseJson(const std::string&
     }
 
     // Check machine code
-    std::string codeToCheck = activationCode;
     if (payload.contains("machine_codes") && payload.at("machine_codes").is_array()) {
         const auto& codes = payload.at("machine_codes");
         if (!codes.empty()) {
+            std::string codeToCheck = activationCode;
             if(codeToCheck.empty()){
                 codeToCheck = getMachineCode();
                 if (codeToCheck.empty()) {
