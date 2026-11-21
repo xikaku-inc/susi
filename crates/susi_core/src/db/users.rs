@@ -164,7 +164,7 @@ impl LicenseDb {
                         EXISTS(SELECT 1 FROM newsletter_subscribers s
                                WHERE s.site = '{}' AND s.status = 'confirmed'
                                  AND s.email = LOWER(TRIM(users.email))),
-                        first_name, last_name
+                        first_name, last_name, admin_sites
                  FROM users ORDER BY created_at",
                 DEFAULT_SITE
             ))
@@ -181,6 +181,7 @@ impl LicenseDb {
                     newsletter_opt_in: r.get::<_, i32>(6)? != 0,
                     first_name: r.get(7)?,
                     last_name: r.get(8)?,
+                    admin_sites: r.get(9)?,
                 })
             })
             .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))?

@@ -225,10 +225,11 @@ pub async fn handle_list_products(
 ) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
     let site = resolve_site(&headers, &sq)?;
     require_shop(site)?;
-    let rows = {
+    let mut rows = {
         let db = state.db.lock();
         db.list_products(site.id, true).map_err(db_err)?
     };
+    withhold_jpy(&state, site, &mut rows);
     let products: Vec<Value> = rows.into_iter().map(product_to_json).collect();
     Ok(Json(json!({ "products": products })))
 }
@@ -241,7 +242,7 @@ pub async fn handle_get_product(
 ) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
     let site = resolve_site(&headers, &sq)?;
     require_shop(site)?;
-    let row = {
+    let mut row = {
         let db = state.db.lock();
         db.get_product(site.id, &sku).map_err(db_err)?
     }
@@ -249,6 +250,7 @@ pub async fn handle_get_product(
     if !row.7 {
         return Err(error_response(StatusCode::NOT_FOUND, "Product not found"));
     }
+    withhold_jpy(&state, site, std::slice::from_mut(&mut row));
     Ok(Json(product_to_json(row)))
 }
 
@@ -462,6 +464,9 @@ pub async fn handle_create_checkout_session(
     // chrome localizes via `locale`, and the invoice PDF's built-in fonts
     // cannot render Japanese.
     let want_jpy = req.currency.eq_ignore_ascii_case("jpy");
+    if want_jpy && ja_inquiry_only(&state, site) {
+        return Err(error_response(StatusCode::BAD_REQUEST, "JPY checkout is not available"));
+    }
     let mut resolved: Vec<(String, String, i64, String, String, i64)> = Vec::with_capacity(req.items.len()); // sku, title, amount, currency, tax_code, qty
     let mut cart_currency: Option<String> = None;
     for item in &req.items {
@@ -689,7 +694,7 @@ fn verify_stripe_signature(
     Err("signature mismatch")
 }
 
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() { return false; }
     let mut r = 0u8;
     for i in 0..a.len() { r |= a[i] ^ b[i]; }
@@ -1148,6 +1153,7 @@ const SETTING_CUSTOMER_EMAIL_ENABLED: &str = "customer_email_enabled";
 const SETTING_SUPPORT_CONTACT: &str = "support_contact";
 const SETTING_SHIPPING_COUNTRIES: &str = "shipping_countries";
 const SETTING_INVOICE_FROM: &str = "invoice_from";
+const SETTING_JA_INQUIRY_ONLY: &str = "ja_inquiry_only";
 // Stored sealed (at-rest key); the settings API only ever returns the mask.
 const SETTING_STRIPE_SECRET_KEY: &str = "stripe_secret_key";
 const SETTING_STRIPE_WEBHOOK_SECRET: &str = "stripe_webhook_secret";
@@ -1200,6 +1206,20 @@ fn customer_email_enabled(state: &AppState, site: &SiteConfig) -> bool {
 fn get_setting_str(state: &AppState, site: &SiteConfig, key: &str) -> String {
     let db = state.db.lock();
     db.get_shop_setting(&shop_setting_key(site, key)).ok().flatten().unwrap_or_default()
+}
+
+/// An inquiry-only Japanese storefront lists products without yen prices or
+/// a cart; customers in Japan are sent to the contact page instead.
+pub(crate) fn ja_inquiry_only(state: &AppState, site: &SiteConfig) -> bool {
+    get_setting_str(state, site, SETTING_JA_INQUIRY_ONLY) == "1"
+}
+
+/// Strip yen prices from rows headed for the public when the Japanese
+/// storefront is inquiry-only. Must not be called with the DB lock held.
+pub(crate) fn withhold_jpy(state: &AppState, site: &SiteConfig, rows: &mut [susi_core::db::ShopProductRow]) {
+    if !rows.is_empty() && ja_inquiry_only(state, site) {
+        rows.iter_mut().for_each(|r| r.12 = 0);
+    }
 }
 
 /// The customer order confirmation: the shop's template filled with this
@@ -1996,6 +2016,7 @@ const KNOWN_SETTING_KEYS: &[&str] = &[
     SETTING_SUPPORT_CONTACT,
     SETTING_SHIPPING_COUNTRIES,
     SETTING_INVOICE_FROM,
+    SETTING_JA_INQUIRY_ONLY,
     SETTING_STRIPE_SECRET_KEY,
     SETTING_STRIPE_WEBHOOK_SECRET,
 ];
@@ -2126,6 +2147,12 @@ pub async fn handle_admin_put_settings(
                     _ => return Err(error_response(StatusCode::BAD_REQUEST, "customer_email_enabled must be 0 or 1")),
                 }
             }
+            SETTING_JA_INQUIRY_ONLY => {
+                match v.as_str() {
+                    "1" | "0" | "" => v.clone(),
+                    _ => return Err(error_response(StatusCode::BAD_REQUEST, "ja_inquiry_only must be 0 or 1")),
+                }
+            }
             SETTING_SUPPORT_CONTACT => v.trim().to_string(),
             SETTING_SHIPPING_COUNTRIES => normalize_shipping_countries(v)?,
             _ => v.clone(),
@@ -2133,6 +2160,7 @@ pub async fn handle_admin_put_settings(
         let db = state.db.lock();
         db.set_shop_setting(&shop_setting_key(site, k), &normalized).map_err(db_err)?;
     }
+    crate::website::invalidate_page_cache();
     crate::audit(&state, &p.username, "shop.settings_update", "", site.id);
     Ok(Json(json!({ "status": "OK" })))
 }
@@ -2274,10 +2302,11 @@ pub fn shop_shell_response(
          <meta property=\"og:type\" content=\"website\">\n",
     );
     if !sku.is_empty() {
-        let row = {
+        let mut row = {
             let db = state.db.lock();
             db.get_product(site.id, sku).ok().flatten().filter(|r| r.7)
         };
+        withhold_jpy(state, site, row.as_mut_slice());
         if let Some(block) = row.and_then(|r| crate::website::product_jsonld_block(site, lang, &r)) {
             head.push_str(&format!("<script type=\"application/ld+json\">{}</script>\n", block));
         }
@@ -2322,10 +2351,11 @@ pub fn shop_feed_response(
     if !site.has_shop {
         return (StatusCode::NOT_FOUND, "Not found").into_response();
     }
-    let rows = {
+    let mut rows = {
         let db = state.db.lock();
         db.list_products(site.id, true).unwrap_or_default()
     };
+    withhold_jpy(state, site, &mut rows);
     let esc = crate::website::html_escape;
     let ja = lang == "ja";
     let lang_seg = if lang.is_empty() { String::new() } else { format!("/{}", lang) };

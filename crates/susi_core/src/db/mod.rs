@@ -21,6 +21,10 @@ pub const DEFAULT_PRODUCT: &str = "fusionhub";
 //   admin  - full site administration
 //   owner  - admin, plus newsletter sending and granting/revoking owner
 //
+// `site_admin` sits outside the tiers: a `user` who may additionally edit the
+// websites listed in `users.admin_sites`, and nothing else. It is NOT an
+// admin role - every admin gate keeps denying it.
+//
 // `owner` is a SUPERSET of `admin`, so no admin gate may compare the role
 // against "admin" directly - an owner failing such a check would silently lose
 // access to the rest of the application. Every gate goes through
@@ -29,6 +33,7 @@ pub const DEFAULT_PRODUCT: &str = "fusionhub";
 pub const ROLE_USER: &str = "user";
 pub const ROLE_ADMIN: &str = "admin";
 pub const ROLE_OWNER: &str = "owner";
+pub const ROLE_SITE_ADMIN: &str = "site_admin";
 
 /// The site owning unscoped legacy data - the same fixed id the server's site
 /// registry uses. Account-level newsletter consent maps onto this site's
@@ -46,7 +51,18 @@ pub fn is_owner_role(role: &str) -> bool {
 }
 
 pub fn is_valid_role(role: &str) -> bool {
-    matches!(role, ROLE_USER | ROLE_ADMIN | ROLE_OWNER)
+    matches!(role, ROLE_USER | ROLE_ADMIN | ROLE_OWNER | ROLE_SITE_ADMIN)
+}
+
+/// Roles that can publish or administer, and so must hold a password and 2FA.
+pub fn is_privileged_role(role: &str) -> bool {
+    is_admin_role(role) || role == ROLE_SITE_ADMIN
+}
+
+/// Whether a `site_admin` with the given comma-separated `admin_sites` grant
+/// may administer `site`.
+pub fn site_admin_covers(role: &str, admin_sites: &str, site: &str) -> bool {
+    role == ROLE_SITE_ADMIN && admin_sites.split(',').any(|s| s == site)
 }
 
 #[derive(Debug, Serialize)]
@@ -60,6 +76,8 @@ pub struct UserInfo {
     pub newsletter_opt_in: bool,
     pub first_name: String,
     pub last_name: String,
+    /// Comma-separated site ids a `site_admin` may edit; empty otherwise.
+    pub admin_sites: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -965,6 +983,9 @@ impl LicenseDb {
         let _ = self
             .conn
             .execute_batch("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'admin';");
+        let _ = self
+            .conn
+            .execute_batch("ALTER TABLE users ADD COLUMN admin_sites TEXT NOT NULL DEFAULT '';");
 
         // Tag doc pages / assets with their origin so a new release tag can
         // inherit hand-authored pages from the prior release without dragging

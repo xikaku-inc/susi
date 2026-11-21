@@ -47,7 +47,8 @@ use rand::{Rng, RngCore};
 use sha2::{Digest, Sha256};
 use susi_core::crypto::{private_key_from_pem, sign_license};
 use susi_core::db::{
-    is_admin_role, is_owner_role, is_valid_role, LicenseDb, DEFAULT_PRODUCT,
+    is_admin_role, is_owner_role, is_privileged_role, is_valid_role, site_admin_covers, LicenseDb,
+    DEFAULT_PRODUCT, ROLE_SITE_ADMIN,
 };
 use susi_core::{License, DEFAULT_LEASE_DURATION_HOURS, DEFAULT_LEASE_GRACE_HOURS};
 use rsa::RsaPrivateKey;
@@ -1350,6 +1351,7 @@ fn is_public_api_route(method: &Method, path: &str) -> bool {
         ["newsletter", "confirm"] => get,
         ["newsletter", "google", "callback"] => get,
         ["newsletter", "public"] => get,
+        ["site-access"] => post,
         ["website", "pages"] => get,
         ["website", "pages", _] => get,
         ["website", "assets", _] => get,
@@ -1396,6 +1398,24 @@ pub(crate) fn require_admin_full(
     state: &AppState,
     principal: &Principal,
 ) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    require_admin_scoped(state, principal, None)
+}
+
+/// The website-editing gate: full admins, plus a `site_admin` granted this
+/// one site. Same password-change and 2FA requirements as `require_admin_full`.
+pub(crate) fn require_site_admin(
+    state: &AppState,
+    principal: &Principal,
+    site: &str,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    require_admin_scoped(state, principal, Some(site))
+}
+
+fn require_admin_scoped(
+    state: &AppState,
+    principal: &Principal,
+    site: Option<&str>,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
     // API tokens skip both the password-change gate (UI-only) and the
     // TOTP requirement (the bearer is itself a strong factor).
     let row = {
@@ -1403,7 +1423,7 @@ pub(crate) fn require_admin_full(
         db.get_user_admin_check(&principal.username)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
     };
-    let Some((role, must_change, totp_enabled)) = row else {
+    let Some((role, must_change, totp_enabled, admin_sites)) = row else {
         return Err(error_response(StatusCode::FORBIDDEN, "Admin access required"));
     };
     if principal.source == AuthSource::Jwt && must_change {
@@ -1412,7 +1432,7 @@ pub(crate) fn require_admin_full(
             "Password change required before accessing admin features",
         ));
     }
-    if !is_admin_role(&role) {
+    if !is_admin_role(&role) && !site.is_some_and(|s| site_admin_covers(&role, &admin_sites, s)) {
         return Err(error_response(StatusCode::FORBIDDEN, "Admin access required"));
     }
     if principal.source == AuthSource::Jwt && !totp_enabled {
@@ -2252,6 +2272,9 @@ struct CreateUserRequest {
     password: Option<String>,
     #[serde(default = "default_user_role")]
     role: String,
+    /// Site ids a `site_admin` may edit; ignored for every other role.
+    #[serde(default)]
+    sites: Vec<String>,
     email: String,
     #[serde(default)]
     first_name: String,
@@ -2328,6 +2351,8 @@ struct RenameUserRequest {
 #[derive(Deserialize)]
 struct SetUserRoleRequest {
     role: String,
+    #[serde(default)]
+    sites: Vec<String>,
 }
 
 
@@ -3591,6 +3616,7 @@ async fn main() -> Result<()> {
             post(docs::handle_rename_doc_page_p),
         )
         // Website - public read
+        .route("/api/v1/site-access", post(website::handle_site_access))
         .route("/api/v1/website/pages", get(website::handle_list_pages))
         .route("/api/v1/website/pages/{slug}", get(website::handle_get_page))
         .route("/api/v1/website/assets/{file}", get(website::handle_get_asset))
@@ -3760,6 +3786,10 @@ async fn main() -> Result<()> {
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&state),
             enforce_api_auth,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            website::enforce_site_password,
         ))
         // Output security headers on every response. Inline script/style stay
         // allowed (the dashboard/docs/site/shop shells are inline-heavy SPAs);

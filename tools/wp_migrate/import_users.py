@@ -62,7 +62,7 @@ for w in plan["workspaces"]:
         if a.dry_run:
             count["member"] += len(w["members"])
             continue
-        wid = api("POST", "/workspaces", {"name": w["name"], "description": "Migrated from the LP-Research customer area"})["id"]
+        wid = api("POST", "/workspaces", {"name": w["name"]})["id"]
         man["workspaces"][w["name"]] = wid; save()
     have = {m["username"] for m in api("GET", f"/workspaces/{wid}")["members"]}
     for m in w["members"]:

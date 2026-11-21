@@ -12,9 +12,9 @@ use std::time::{Duration, Instant};
 
 use axum::{
     body::{Body, Bytes},
-    extract::{Multipart, Path, Query, State},
+    extract::{ConnectInfo, Multipart, Path, Query, State},
     http::{header, HeaderMap, StatusCode},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     Json,
 };
 use serde::Deserialize;
@@ -23,7 +23,10 @@ use susi_core::error::LicenseError;
 
 use crate::docs::{docs_llms_section, docs_sitemap_entries, harden_svg_response, safe_filename, DOCS_PUBLIC_BASE};
 use crate::sites::{self, SiteConfig};
-use crate::{error_response, require_admin_full, require_owner, validate_principal, AppState, ErrorResponse};
+use crate::{
+    check_login_rate_limit, client_ip, error_response, require_admin_full, require_owner,
+    require_site_admin, validate_principal, AppState, ErrorResponse,
+};
 
 fn assets_dir(state: &AppState, site: &SiteConfig) -> std::path::PathBuf {
     std::path::Path::new(&state.data_dir)
@@ -175,13 +178,29 @@ fn visible_pages(mut pages: Vec<PageRow>) -> Vec<PageRow> {
     pages
 }
 
-/// True when the request carries a valid full-admin principal. The public
-/// read endpoints use this to include hidden pages for the dashboard/editor.
+/// True when the request carries a valid full-admin principal.
 pub(crate) fn is_admin_request(headers: &HeaderMap, state: &AppState) -> bool {
     validate_principal(headers, state)
         .ok()
         .map(|p| require_admin_full(state, &p).is_ok())
         .unwrap_or(false)
+}
+
+/// True when the request may edit `site`. The public read endpoints use this
+/// to include hidden pages for the dashboard/editor.
+fn is_site_admin_request(headers: &HeaderMap, state: &AppState, site: &SiteConfig) -> bool {
+    validate_principal(headers, state)
+        .ok()
+        .map(|p| require_site_admin(state, &p, site.id).is_ok())
+        .unwrap_or(false)
+}
+
+/// The site ids a `site_admin` caller is limited to; None for everyone else.
+fn site_admin_grant(headers: &HeaderMap, state: &AppState) -> Option<Vec<String>> {
+    let p = validate_principal(headers, state).ok()?;
+    let (role, _, _, admin_sites) = state.db.lock().get_user_admin_check(&p.username).ok()??;
+    (role == susi_core::db::ROLE_SITE_ADMIN)
+        .then(|| admin_sites.split(',').map(str::to_string).collect())
 }
 
 pub async fn handle_list_pages(
@@ -190,7 +209,8 @@ pub async fn handle_list_pages(
     Query(sq): Query<SiteQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let site = resolve_site(&headers, &sq)?;
-    let is_admin = is_admin_request(&headers, &state);
+    let is_admin = is_site_admin_request(&headers, &state, site);
+    let grant = site_admin_grant(&headers, &state);
     let nav = nav_structure_json(&state, site);
     let db = state.db.lock();
     let mut pages = db.list_website_pages(site.id).map_err(db_err)?;
@@ -229,7 +249,7 @@ pub async fn handle_list_pages(
         .collect();
     Ok(Json(json!({
         "site": site.id,
-        "sites": sites::all_sites().iter().map(|s| json!({ "id": s.id, "name": s.name, "langs": s.langs, "public_base": s.public_base })).collect::<Vec<_>>(),
+        "sites": sites::all_sites().iter().filter(|s| grant.as_ref().is_none_or(|g| g.iter().any(|x| x == s.id))).map(|s| json!({ "id": s.id, "name": s.name, "langs": s.langs, "public_base": s.public_base })).collect::<Vec<_>>(),
         "pages": pages_json,
         "assets": assets_json,
         "nav": nav,
@@ -245,7 +265,7 @@ pub async fn handle_get_page(
     let site = resolve_site(&headers, &sq)?;
     let lang = require_lang(site, &sq)?;
     safe_slug(&slug)?;
-    let is_admin = is_admin_request(&headers, &state);
+    let is_admin = is_site_admin_request(&headers, &state, site);
     let db = state.db.lock();
     let page = db
         .get_website_page(site.id, &lang, &slug)
@@ -476,7 +496,8 @@ pub async fn handle_upsert_page(
     let site = resolve_site(&headers, &sq)?;
     let lang = require_lang(site, &sq)?;
     let principal = validate_principal(&headers, &state)?;
-    require_admin_full(&state, &principal)?;
+    require_site_admin(&state, &principal, site.id)?;
+    let full_admin = require_admin_full(&state, &principal).is_ok();
     safe_slug(&slug)?;
 
     let (id, url, hidden) = {
@@ -519,8 +540,14 @@ pub async fn handle_upsert_page(
             .trim()
             .to_string();
         if page_kind == "post" {
+            // A byline publishes the account's real name, so a site admin may
+            // only sign as themselves or keep the author already on the post.
+            let foreign_author = author_username != principal.username
+                && existing.as_ref().is_none_or(|r| r.9 != author_username);
             if author_username.is_empty() {
                 author_username = principal.username.clone();
+            } else if foreign_author && !full_admin {
+                return Err(error_response(StatusCode::FORBIDDEN, "Site admins can only sign posts as themselves"));
             } else if !db.user_exists(&author_username).unwrap_or(false) {
                 return Err(error_response(StatusCode::BAD_REQUEST, "Unknown author"));
             }
@@ -615,7 +642,7 @@ pub async fn handle_list_page_revisions(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let site = resolve_site(&headers, &sq)?;
     let principal = validate_principal(&headers, &state)?;
-    require_admin_full(&state, &principal)?;
+    require_site_admin(&state, &principal, site.id)?;
     safe_slug(&slug)?;
     let db = state.db.lock();
     let rows = db.list_page_revisions(site.id, &require_lang(site, &sq)?, &slug).map_err(db_err)?;
@@ -641,7 +668,7 @@ pub async fn handle_get_page_revision(
     let site = resolve_site(&headers, &sq)?;
     let lang = require_lang(site, &sq)?;
     let principal = validate_principal(&headers, &state)?;
-    require_admin_full(&state, &principal)?;
+    require_site_admin(&state, &principal, site.id)?;
     safe_slug(&slug)?;
     let db = state.db.lock();
     let row = db
@@ -666,7 +693,7 @@ pub async fn handle_restore_page_revision(
     let site = resolve_site(&headers, &sq)?;
     let lang = require_lang(site, &sq)?;
     let principal = validate_principal(&headers, &state)?;
-    require_admin_full(&state, &principal)?;
+    require_site_admin(&state, &principal, site.id)?;
     safe_slug(&slug)?;
     let mut db = state.db.lock();
     let rev = db
@@ -718,7 +745,7 @@ pub async fn handle_list_assets_with_usage(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let site = resolve_site(&headers, &sq)?;
     let principal = validate_principal(&headers, &state)?;
-    require_admin_full(&state, &principal)?;
+    require_site_admin(&state, &principal, site.id)?;
     let db = state.db.lock();
     let rows = db.list_website_assets_with_usage(site.id).map_err(db_err)?;
     let assets: Vec<_> = rows
@@ -759,7 +786,7 @@ pub async fn handle_rename_asset(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let site = resolve_site(&headers, &sq)?;
     let principal = validate_principal(&headers, &state)?;
-    require_admin_full(&state, &principal)?;
+    require_site_admin(&state, &principal, site.id)?;
     safe_filename(&file_name)?;
     let new_name = req.new_name.trim();
     safe_filename(new_name)?;
@@ -815,7 +842,7 @@ pub async fn handle_rename_page(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let site = resolve_site(&headers, &sq)?;
     let principal = validate_principal(&headers, &state)?;
-    require_admin_full(&state, &principal)?;
+    require_site_admin(&state, &principal, site.id)?;
     let new_slug = req.new_slug.trim();
     if new_slug.is_empty() || new_slug.contains('/') || new_slug.contains('\\') || new_slug.contains('\0') {
         return Err(error_response(StatusCode::BAD_REQUEST, "Invalid slug"));
@@ -870,7 +897,7 @@ pub async fn handle_set_page_hidden(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let site = resolve_site(&headers, &sq)?;
     let principal = validate_principal(&headers, &state)?;
-    require_admin_full(&state, &principal)?;
+    require_site_admin(&state, &principal, site.id)?;
     safe_slug(&slug)?;
 
     let lang = require_lang(site, &sq)?;
@@ -902,7 +929,7 @@ pub async fn handle_delete_page(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let site = resolve_site(&headers, &sq)?;
     let principal = validate_principal(&headers, &state)?;
-    require_admin_full(&state, &principal)?;
+    require_site_admin(&state, &principal, site.id)?;
     safe_slug(&slug)?;
 
     let lang = require_lang(site, &sq)?;
@@ -928,7 +955,7 @@ pub async fn handle_upload_asset(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let site = resolve_site(&headers, &sq)?;
     let principal = validate_principal(&headers, &state)?;
-    require_admin_full(&state, &principal)?;
+    require_site_admin(&state, &principal, site.id)?;
 
     let mut file_name = String::new();
     let mut bytes: Vec<u8> = Vec::new();
@@ -980,7 +1007,7 @@ pub async fn handle_delete_asset(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let site = resolve_site(&headers, &sq)?;
     let principal = validate_principal(&headers, &state)?;
-    require_admin_full(&state, &principal)?;
+    require_site_admin(&state, &principal, site.id)?;
     safe_filename(&file_name)?;
 
     let removed = {
@@ -2370,6 +2397,7 @@ fn site_config_script(
             "brand_logo": brand_logo,
             "brand_logo_dark": brand_logo_dark,
             "has_shop": site.has_shop,
+            "ja_inquiry": site.has_shop && crate::shop::ja_inquiry_only(state, site),
             "has_newsletter": site.has_newsletter,
             // Every newsletter runs on a subscriber list now, so any site
             // with one accepts public signups.
@@ -2566,13 +2594,14 @@ fn render_website(
 
     // All languages stay loaded - translation links cross the sets; rendering
     // and nav work from the request language's slice.
-    let (pages, products) = {
+    let (pages, mut products) = {
         let db = state.db.lock();
         (
             visible_pages(db.list_website_pages(site.id).unwrap_or_default()),
             if site.has_shop { db.list_products(site.id, true).unwrap_or_default() } else { Vec::new() },
         )
     };
+    crate::shop::withhold_jpy(state, site, &mut products);
     let lang_pages = pages_in_lang(&pages, &lang);
 
     // A hidden or unknown slug may be covered by the redirect map (a retired
@@ -3071,6 +3100,7 @@ pub const SETTING_SIDEBAR_LOGO: &str = "sidebar_logo";
 pub const SETTING_LOGO_HEIGHT: &str = "logo_height";
 /// Body font preset: "mono" / "serif" / "inter"; empty = the compiled-in sans stack.
 pub const SETTING_FONT: &str = "font";
+pub const SETTING_ACCESS_PASSWORD: &str = "access_password";
 
 /// Self-hosted Inter variable font (served from /docs/, see main.rs). The
 /// Latin slice is preloaded; Latin-ext only downloads when a page uses it.
@@ -3573,6 +3603,7 @@ const KNOWN_SITE_SETTING_KEYS: &[&str] = &[
     SETTING_LOGO_HEIGHT,
     SETTING_FAVICON_IMAGE,
     SETTING_FONT,
+    SETTING_ACCESS_PASSWORD,
 ];
 
 pub async fn handle_admin_get_site_settings(
@@ -3582,7 +3613,7 @@ pub async fn handle_admin_get_site_settings(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let site = resolve_site(&headers, &sq)?;
     let p = validate_principal(&headers, &state)?;
-    require_admin_full(&state, &p)?;
+    require_site_admin(&state, &p, site.id)?;
     let mut out = serde_json::Map::new();
     let db = state.db.lock();
     for k in KNOWN_SITE_SETTING_KEYS {
@@ -3609,7 +3640,8 @@ pub async fn handle_admin_put_site_settings(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let site = resolve_site(&headers, &sq)?;
     let p = validate_principal(&headers, &state)?;
-    require_admin_full(&state, &p)?;
+    require_site_admin(&state, &p, site.id)?;
+    let full_admin = require_admin_full(&state, &p).is_ok();
     for (k, v) in &req.fields {
         if !KNOWN_SITE_SETTING_KEYS.contains(&k.as_str()) {
             return Err(error_response(StatusCode::BAD_REQUEST, &format!("Unknown setting: {}", k)));
@@ -3649,6 +3681,17 @@ pub async fn handle_admin_put_site_settings(
             if !matches!(trimmed, "" | "light" | "dark") {
                 return Err(error_response(StatusCode::BAD_REQUEST, "theme_mode must be \"light\", \"dark\" or empty"));
             }
+        } else if k == SETTING_ACCESS_PASSWORD {
+            // Taking a site public or private is not a site admin's call.
+            if !full_admin {
+                return Err(error_response(StatusCode::FORBIDDEN, "Admin access required"));
+            }
+            if !trimmed.is_empty() && site.id == sites::DEFAULT_SITE_ID {
+                return Err(error_response(StatusCode::BAD_REQUEST, "The default site cannot be password protected"));
+            }
+            if trimmed.len() > 128 || trimmed.chars().any(char::is_control) {
+                return Err(error_response(StatusCode::BAD_REQUEST, "access_password must be at most 128 characters"));
+            }
         } else if k == SETTING_FONT {
             if !matches!(trimmed, "" | "mono" | "serif" | "inter") {
                 return Err(error_response(StatusCode::BAD_REQUEST, "font must be \"mono\", \"serif\", \"inter\" or empty"));
@@ -3663,12 +3706,150 @@ pub async fn handle_admin_put_site_settings(
         let db = state.db.lock();
         db.set_site_setting(&sites::setting_key(site, k), trimmed).map_err(db_err)?;
     }
-    // A logo change flips the JSON-LD logo URL baked into the registry.
-    if req.fields.contains_key(SETTING_LOGO_IMAGE) || req.fields.contains_key(SETTING_LOGO_DARK_IMAGE) {
+    // A logo change flips the JSON-LD logo URL baked into the registry, which
+    // also carries the access password.
+    if [SETTING_LOGO_IMAGE, SETTING_LOGO_DARK_IMAGE, SETTING_ACCESS_PASSWORD].iter().any(|k| req.fields.contains_key(*k)) {
         sites::reload_from_db(&state.db.lock());
     }
     invalidate_page_cache();
     Ok(Json(json!({ "status": "OK" })))
+}
+
+// ---------------------------------------------------------------------------
+// Site access password
+// ---------------------------------------------------------------------------
+
+const SITE_ACCESS_MAX_AGE_SECS: u32 = 30 * 24 * 3600;
+
+const SITE_PASSWORD_PAGE: &str = r#"<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex"><title>Password required</title>
+<style>
+:root{color-scheme:light dark}
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;font:16px system-ui,sans-serif}
+form{display:flex;flex-direction:column;gap:12px;width:260px;padding:16px}
+input,button{font:inherit;padding:10px 12px;border-radius:6px;border:1px solid #8886}
+button{cursor:pointer}
+#e{color:#c0392b;min-height:1.2em;font-size:14px}
+</style></head><body>
+<form id="f"><label for="p">Password</label><input id="p" type="password" autocomplete="current-password" autofocus required><button>Enter</button><div id="e"></div></form>
+<script>
+document.getElementById('f').onsubmit = async ev => {
+    ev.preventDefault();
+    const r = await fetch('/api/v1/site-access?site={site}', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: document.getElementById('p').value }),
+    });
+    if (r.ok) location.reload();
+    else document.getElementById('e').textContent = r.status === 429 ? 'Too many attempts' : 'Wrong password';
+};
+</script></body></html>"#;
+
+/// The unlock cookie value. Keyed with the server secret and bound to the
+/// current password, so changing the password locks everyone out again.
+fn site_access_token(state: &AppState, site: &SiteConfig, password: &str) -> String {
+    use hmac::Mac;
+    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(&state.jwt_secret).expect("any key length is valid");
+    mac.update(b"susi-site-access:");
+    mac.update(site.id.as_bytes());
+    mac.update(b":");
+    mac.update(password.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}
+
+fn site_access_cookie(state: &AppState, site: &SiteConfig) -> header::HeaderValue {
+    format!(
+        "susi_site_{}={}; Path=/; Max-Age={}; HttpOnly; Secure; SameSite=Lax",
+        site.id,
+        site_access_token(state, site, site.access_password),
+        SITE_ACCESS_MAX_AGE_SECS,
+    )
+    .parse()
+    .expect("site ids and hex are header-safe")
+}
+
+fn has_site_access_cookie(headers: &HeaderMap, state: &AppState, site: &SiteConfig) -> bool {
+    let name = format!("susi_site_{}=", site.id);
+    let expected = site_access_token(state, site, site.access_password);
+    headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(';'))
+        .filter_map(|c| c.trim().strip_prefix(name.as_str()))
+        .any(|v| crate::shop::constant_time_eq(v.as_bytes(), expected.as_bytes()))
+}
+
+/// Serve nothing of a password-protected site until the visitor has unlocked
+/// it. Both the Host site and any `?site=` are checked: handlers pick either.
+/// A site's admins pass on their session and get the cookie, so the images
+/// the dashboard loads without an Authorization header work too.
+pub async fn enforce_site_password(
+    State(state): State<Arc<AppState>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let path = req.uri().path();
+    if path == "/health" || path == "/api/v1/site-access" || path.starts_with("/api/v1/auth/") {
+        return next.run(req).await;
+    }
+    let mut protected: Vec<&'static SiteConfig> = Vec::new();
+    let named = Query::<Vec<(String, String)>>::try_from_uri(req.uri()).map(|q| q.0).unwrap_or_default();
+    let by_query = named.iter().filter(|(k, _)| k == "site").filter_map(|(_, id)| sites::site_by_id(id));
+    for site in sites::site_from_headers(req.headers()).into_iter().chain(by_query) {
+        if !site.access_password.is_empty() && !protected.iter().any(|s| s.id == site.id) {
+            protected.push(site);
+        }
+    }
+    let mut cookies = Vec::new();
+    for site in protected {
+        if has_site_access_cookie(req.headers(), &state, site) {
+            continue;
+        }
+        if is_site_admin_request(req.headers(), &state, site) {
+            cookies.push(site_access_cookie(&state, site));
+            continue;
+        }
+        let no_store = [(header::CACHE_CONTROL, "no-store")];
+        return if path.starts_with("/api/") {
+            (no_store, error_response(StatusCode::UNAUTHORIZED, "Site password required")).into_response()
+        } else {
+            (
+                StatusCode::UNAUTHORIZED,
+                no_store,
+                axum::response::Html(SITE_PASSWORD_PAGE.replace("{site}", site.id)),
+            )
+                .into_response()
+        };
+    }
+    let mut resp = next.run(req).await;
+    for c in cookies {
+        resp.headers_mut().append(header::SET_COOKIE, c);
+    }
+    resp
+}
+
+#[derive(Deserialize)]
+pub struct SiteAccessRequest {
+    password: String,
+}
+
+pub async fn handle_site_access(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
+    Query(sq): Query<SiteQuery>,
+    Json(req): Json<SiteAccessRequest>,
+) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+    check_login_rate_limit(&state, client_ip(peer, &headers))?;
+    let site = resolve_site(&headers, &sq)?;
+    let given = site_access_token(&state, site, req.password.trim());
+    let expected = site_access_token(&state, site, site.access_password);
+    if site.access_password.is_empty() || !crate::shop::constant_time_eq(given.as_bytes(), expected.as_bytes()) {
+        return Err(error_response(StatusCode::UNAUTHORIZED, "Wrong password"));
+    }
+    Ok(([(header::SET_COOKIE, site_access_cookie(&state, site))], Json(json!({ "status": "OK" }))).into_response())
 }
 
 // ---------------------------------------------------------------------------
@@ -3766,18 +3947,22 @@ pub async fn handle_admin_list_sites(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let p = validate_principal(&headers, &state)?;
-    require_admin_full(&state, &p)?;
     let rows = {
         let db = state.db.lock();
         db.list_sites().map_err(db_err)?
     };
+    // A site admin sees only the sites they were granted.
     let sites_json: Vec<_> = rows
         .iter()
+        .filter(|(id, _)| require_site_admin(&state, &p, id).is_ok())
         .filter_map(|(id, json_str)| {
             let def: sites::SiteDef = serde_json::from_str(json_str).ok()?;
             Some(json!({ "id": id, "is_default": id == sites::DEFAULT_SITE_ID, "def": def }))
         })
         .collect();
+    if sites_json.is_empty() {
+        return Err(error_response(StatusCode::FORBIDDEN, "Admin access required"));
+    }
     Ok(Json(json!({ "sites": sites_json })))
 }
 
@@ -3969,7 +4154,7 @@ pub async fn handle_list_redirects(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let site = resolve_site(&headers, &sq)?;
     let principal = validate_principal(&headers, &state)?;
-    require_admin_full(&state, &principal)?;
+    require_site_admin(&state, &principal, site.id)?;
     let rows = {
         let db = state.db.lock();
         db.list_site_redirects(site.id).map_err(db_err)?
@@ -3997,7 +4182,7 @@ pub async fn handle_upsert_redirect(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let site = resolve_site(&headers, &sq)?;
     let principal = validate_principal(&headers, &state)?;
-    require_admin_full(&state, &principal)?;
+    require_site_admin(&state, &principal, site.id)?;
     let (from, to) = validate_redirect_pair(&req.from_path, &req.to_path)?;
     {
         let db = state.db.lock();
@@ -4014,7 +4199,7 @@ pub async fn handle_delete_redirect(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let site = resolve_site(&headers, &sq)?;
     let principal = validate_principal(&headers, &state)?;
-    require_admin_full(&state, &principal)?;
+    require_site_admin(&state, &principal, site.id)?;
     let removed = {
         let db = state.db.lock();
         db.delete_site_redirect(site.id, id).map_err(db_err)?
@@ -4371,7 +4556,7 @@ pub async fn handle_indexnow_key_file(
 /// the network request runs in a background task. Silently no-ops when there's
 /// no key (e.g., DB error during bootstrap).
 pub fn ping_indexnow(state: &Arc<AppState>, site: &SiteConfig, urls: Vec<String>) {
-    if urls.is_empty() { return; }
+    if urls.is_empty() || !site.access_password.is_empty() { return; }
     let Some(key) = get_or_create_indexnow_key(state, site) else { return };
     let host = site.public_base
         .trim_start_matches("https://")

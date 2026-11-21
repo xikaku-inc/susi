@@ -402,7 +402,7 @@ pub(crate) async fn handle_magic_login(
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
             .ok_or_else(invalid)?;
         let role = db.get_user_role(&username).unwrap_or_else(|_| "user".into());
-        if is_admin_role(&role) {
+        if is_privileged_role(&role) {
             // Admin invites must go through password setup; their link points
             // at /#/reset/<token>, so landing here means a tampered URL.
             return Err(invalid());
@@ -511,17 +511,22 @@ pub(crate) async fn handle_auth_status(
     let db = state.db.lock();
     let must_change = db.user_must_change_password(&principal.username).unwrap_or(false);
     let totp_enabled = db.user_totp_enabled(&principal.username).unwrap_or(false);
-    let role = db.get_user_role(&principal.username).unwrap_or_else(|_| "user".into());
+    let (role, admin_sites) = db
+        .get_user_admin_check(&principal.username)
+        .ok()
+        .flatten()
+        .map_or_else(|| ("user".to_string(), String::new()), |r| (r.0, r.3));
     let email = db.get_user_email(&principal.username).ok().flatten();
     let backup_codes_remaining = db.count_unused_backup_codes(&principal.username).unwrap_or(0);
     let newsletter_opt_in = db.get_user_newsletter_opt_in(&principal.username).unwrap_or(false);
     let (first_name, last_name) = db.get_user_name(&principal.username).unwrap_or_default();
-    let must_enable_totp = is_admin_role(&role) && !totp_enabled;
+    let must_enable_totp = is_privileged_role(&role) && !totp_enabled;
     Ok(Json(serde_json::json!({
         "must_change_password": must_change,
         "totp_enabled": totp_enabled,
         "username": principal.username,
         "role": role,
+        "admin_sites": admin_sites.split(',').filter(|s| !s.is_empty()).collect::<Vec<_>>(),
         "email": email,
         "first_name": first_name,
         "last_name": last_name,

@@ -2789,6 +2789,62 @@ fn test_shop_bilingual() {
         .unwrap();
     assert_eq!(orders["orders"][0]["lang"], json!("ja"));
 
+    // Inquiry-only mode withholds yen prices everywhere public and refuses
+    // JPY checkout, while the admin catalog and USD checkout are untouched.
+    let ja_get = |path: &str| {
+        client
+            .get(format!("{}{}", server.url, path))
+            .header("Host", "jshop.example.com")
+            .send()
+            .expect("ja get")
+            .text()
+            .unwrap()
+    };
+    assert!(ja_get("/site/ja/shop/lpms-b2").contains(r#""priceCurrency":"JPY""#));
+    assert!(ja_get("/site/ja/shop/feed.xml").contains("58000 JPY"));
+    let resp = client
+        .put(format!("{}/shop/admin/settings?site=jshop", server.api_url))
+        .bearer_auth(&admin)
+        .json(&json!({ "ja_inquiry_only": "1" }))
+        .send()
+        .expect("enable inquiry mode");
+    assert_eq!(resp.status().as_u16(), 200, "{}", resp.text().unwrap_or_default());
+    let listing = client
+        .get(format!("{}/shop/products", server.api_url))
+        .header("Host", "jshop.example.com")
+        .send()
+        .expect("list")
+        .text()
+        .unwrap();
+    assert!(!listing.contains("58000"), "public listing leaks yen: {}", listing);
+    let one = client
+        .get(format!("{}/shop/products/lpms-b2", server.api_url))
+        .header("Host", "jshop.example.com")
+        .send()
+        .expect("get")
+        .json::<Value>()
+        .unwrap();
+    assert_eq!(one["price_jpy"], json!(0));
+    assert_eq!(one["price_cents"], json!(29900));
+    let shell = ja_get("/site/ja/shop/lpms-b2");
+    assert!(shell.contains(r#""ja_inquiry":true"#), "flag reaches the client");
+    assert!(!shell.contains(r#""priceCurrency":"JPY""#) && !shell.contains("58000"), "ja shell leaks yen");
+    assert!(ja_get("/site/shop/lpms-b2").contains(r#""price":"299.00""#), "en JSON-LD stays");
+    assert!(!ja_get("/site/ja/shop/feed.xml").contains("<item>"), "ja feed must be empty");
+    let resp = checkout(json!({ "items": [{"sku": "lpms-b2", "qty": 1}], "currency": "jpy" }));
+    assert_eq!(resp.status().as_u16(), 400);
+    assert!(resp.text().unwrap_or_default().contains("JPY checkout is not available"));
+    let resp = checkout(json!({ "items": [{"sku": "lpms-b2", "qty": 1}] }));
+    assert_eq!(resp.status().as_u16(), 502, "USD checkout still reaches Stripe");
+    let admin_list = client
+        .get(format!("{}/shop/admin/products?site=jshop", server.api_url))
+        .bearer_auth(&admin)
+        .send()
+        .expect("admin list")
+        .text()
+        .unwrap();
+    assert!(admin_list.contains("58000"), "admin keeps the stored yen price");
+
     // The email template editor: the ja preview serves the Japanese default,
     // an override (body + subject) is applied on the next preview, and reset
     // restores the defaults.
@@ -3557,6 +3613,301 @@ fn test_set_user_role() {
         .send()
         .expect("ghost role");
     assert_eq!(resp.status().as_u16(), 404, "unknown user must 404");
+}
+
+/// A `site_admin` edits the sites granted to them and nothing else: other
+/// sites, and every company-facing admin surface, stay closed.
+#[test]
+fn test_site_password_locks_the_whole_site() {
+    let server = TestServer::start();
+    let admin = server.admin_token();
+    let http = server.http();
+    let api = &server.api_url;
+    const HOST: &str = "venicerobotics.co";
+
+    http.post(format!("{}/sites", api)).bearer_auth(&admin)
+        .json(&json!({ "id": "venice", "name": "Venice Robotics", "hosts": [HOST], "public_base": "https://venicerobotics.co" }))
+        .send().expect("create site").error_for_status().expect("create site ok");
+    http.put(format!("{}/website/pages/home?site=venice", api)).bearer_auth(&admin)
+        .json(&json!({ "title": "Home", "body_md": "# Venice Robotics secret plans" }))
+        .send().expect("page").error_for_status().expect("page ok");
+    http.post(format!("{}/auth/users", api)).bearer_auth(&admin)
+        .json(&json!({
+            "username": "student", "email": "student@example.com", "role": "site_admin",
+            "first_name": "Sam", "last_name": "Student", "password": "studentpw123", "sites": ["venice"],
+        }))
+        .send().expect("create student").error_for_status().expect("student ok");
+    let student = server.elevated_token("student", "studentpw123");
+
+    let set_password = |token: &str, site: &str, pw: &str| {
+        http.put(format!("{}/site/admin/settings?site={}", api, site)).bearer_auth(token)
+            .json(&json!({ "access_password": pw })).send().expect("set password").status().as_u16()
+    };
+    // Anonymous fetch: (status, body, Set-Cookie).
+    let fetch = |url: String, host: Option<&str>, cookie: Option<&str>| {
+        let mut req = http.get(url);
+        if let Some(h) = host { req = req.header("Host", h); }
+        if let Some(c) = cookie { req = req.header("Cookie", c); }
+        let resp = req.send().expect("fetch");
+        let set_cookie = resp.headers().get("set-cookie").map(|v| v.to_str().unwrap().to_string());
+        (resp.status().as_u16(), resp.text().unwrap_or_default(), set_cookie)
+    };
+    let unlock = |pw: &str| {
+        let resp = http.post(format!("{}/site-access", api)).header("Host", HOST)
+            .json(&json!({ "password": pw })).send().expect("unlock");
+        let cookie = resp.headers().get("set-cookie").map(|v| v.to_str().unwrap().to_string());
+        (resp.status().as_u16(), cookie)
+    };
+
+    // Open by default; only a full admin may lock it, and never the default site.
+    assert_eq!(fetch(format!("{}/site/home", server.url), Some(HOST), None).0, 200);
+    assert_eq!(unlock("anything").0, 401, "an open site has nothing to unlock");
+    assert_eq!(set_password(&student, "venice", "robots"), 403);
+    assert_eq!(set_password(&admin, "xikaku", "robots"), 400);
+    assert_eq!(set_password(&admin, "venice", "robots"), 200);
+
+    // Every public surface of the site is locked, by host and by ?site=.
+    let (code, body, _) = fetch(format!("{}/site/home", server.url), Some(HOST), None);
+    assert_eq!(code, 401);
+    assert!(body.contains("type=\"password\"") && !body.contains("secret plans"), "{}", body);
+    for (url, host) in [
+        (format!("{}/site", server.url), Some(HOST)),
+        (format!("{}/site/home?site=venice", server.url), None),
+        (format!("{}/site/home?site=xikaku", server.url), Some(HOST)),
+        (format!("{}/site/home?site=xikaku&site=venice", server.url), None),
+        (format!("{}/site/home?site=venice&page=x", server.url), None),
+        (format!("{}/website/pages?site=venice", api), None),
+        (format!("{}/website/pages/home", api), Some(HOST)),
+        (format!("{}/website/assets/logo.png?site=venice", api), None),
+        (format!("{}/site/blog/rss.xml", server.url), Some(HOST)),
+        (format!("{}/sitemap.xml", server.url), Some(HOST)),
+        (format!("{}/llms.txt", server.url), Some(HOST)),
+        (format!("{}/robots.txt", server.url), Some(HOST)),
+        (format!("{}/static/logo.png", server.url), Some(HOST)),
+        (format!("{}/shop", server.url), Some(HOST)),
+        (format!("{}/shop/products?site=venice", api), None),
+    ] {
+        let (code, body, _) = fetch(url.clone(), host, None);
+        assert_eq!(code, 401, "{} must be locked", url);
+        assert!(!body.contains("secret plans"), "{} leaked content", url);
+    }
+    // Other sites and the health probe are untouched.
+    assert_eq!(fetch(format!("{}/site", server.url), None, None).0, 200);
+    assert_eq!(fetch(format!("{}/health", server.url), Some(HOST), None).0, 200);
+
+    // The right password yields a cookie that opens the site.
+    assert_eq!(unlock("wrong"), (401, None));
+    let (code, cookie) = unlock("robots");
+    assert_eq!(code, 200);
+    let cookie = cookie.expect("unlock sets a cookie");
+    assert!(cookie.contains("HttpOnly") && cookie.contains("Secure"), "{}", cookie);
+    let cookie = cookie.split(';').next().unwrap().to_string();
+    let (code, body, _) = fetch(format!("{}/site/home", server.url), Some(HOST), Some(&cookie));
+    assert_eq!(code, 200);
+    assert!(body.contains("secret plans"));
+    assert_eq!(fetch(format!("{}/site/home", server.url), Some(HOST), Some("susi_site_venice=deadbeef")).0, 401);
+
+    // The site's admins pass on their session and are handed the cookie.
+    for token in [&admin, &student] {
+        let resp = http.get(format!("{}/website/pages?site=venice", api)).bearer_auth(token).send().expect("admin read");
+        assert_eq!(resp.status().as_u16(), 200);
+        assert_eq!(resp.headers().get("set-cookie").map(|v| v.to_str().unwrap().split(';').next().unwrap()), Some(cookie.as_str()));
+    }
+    let resp = http.post(format!("{}/auth/login", api)).header("Host", HOST)
+        .json(&json!({ "username": "student", "password": "nope" })).send().expect("login");
+    assert!(resp.text().unwrap().contains("Invalid credentials"), "sign-in endpoints stay reachable on a locked host");
+
+    // A new password invalidates old cookies; clearing it reopens the site.
+    assert_eq!(set_password(&admin, "venice", "gears"), 200);
+    assert_eq!(fetch(format!("{}/site/home", server.url), Some(HOST), Some(&cookie)).0, 401);
+    assert_eq!(set_password(&admin, "venice", ""), 200);
+    assert_eq!(fetch(format!("{}/site/home", server.url), Some(HOST), None).0, 200);
+}
+
+#[test]
+fn test_site_admin_is_scoped_to_granted_sites() {
+    let server = TestServer::start();
+    let admin = server.admin_token();
+    let http = server.http();
+    let api = &server.api_url;
+
+    let resp = http.post(format!("{}/sites", api)).bearer_auth(&admin)
+        .json(&json!({
+            "id": "venice",
+            "name": "Venice Robotics",
+            "hosts": ["venicerobotics.co"],
+            "public_base": "https://venicerobotics.co",
+        }))
+        .send().expect("create site");
+    assert_eq!(resp.status().as_u16(), 200, "{}", resp.text().unwrap_or_default());
+
+    // A hidden company page the student must never be able to read.
+    http.put(format!("{}/website/pages/internal?site=xikaku", api)).bearer_auth(&admin)
+        .json(&json!({ "title": "Internal", "body_md": "company draft", "hidden": true }))
+        .send().expect("company page").error_for_status().expect("company page ok");
+
+    // The grant is mandatory and must name real sites.
+    let create = |sites: Value| {
+        http.post(format!("{}/auth/users", api)).bearer_auth(&admin)
+            .json(&json!({
+                "username": "student", "email": "student@example.com", "role": "site_admin",
+                "first_name": "Sam", "last_name": "Student",
+                "password": "studentpw123", "sites": sites,
+            }))
+            .send().expect("create student").status().as_u16()
+    };
+    assert_eq!(create(json!([])), 400, "a site admin without sites must be rejected");
+    assert_eq!(create(json!(["nope"])), 400, "unknown sites must be rejected");
+    assert_eq!(create(json!(["venice", "venice"])), 200);
+
+    let user_row = |name: &str| -> Value {
+        http.get(format!("{}/auth/users", api)).bearer_auth(&admin)
+            .send().expect("list users").json::<Value>().unwrap()
+            .as_array().unwrap().iter().find(|u| u["username"] == name).cloned().expect("user row")
+    };
+    assert_eq!(user_row("student")["role"], json!("site_admin"));
+    assert_eq!(user_row("student")["admin_sites"], json!(["venice"]));
+
+    let put_page = |token: &str, site: &str, slug: &str, body: Value| {
+        http.put(format!("{}/website/pages/{}?site={}", api, slug, site)).bearer_auth(token)
+            .json(&body).send().expect("put page").status().as_u16()
+    };
+    let home = json!({ "title": "Home", "body_md": "# Venice Robotics" });
+
+    // Like every admin, a site admin needs a changed password and 2FA first.
+    let raw = server.login_token("student", "studentpw123");
+    assert_eq!(put_page(&raw, "venice", "home", home.clone()), 403);
+    let status = http.get(format!("{}/auth/status", api)).bearer_auth(&raw)
+        .send().expect("status").json::<Value>().unwrap();
+    assert_eq!(status["must_enable_totp"], json!(true));
+
+    let student = server.elevated_token("student", "studentpw123");
+    let status = http.get(format!("{}/auth/status", api)).bearer_auth(&student)
+        .send().expect("status").json::<Value>().unwrap();
+    assert_eq!(status["role"], json!("site_admin"));
+    assert_eq!(status["admin_sites"], json!(["venice"]));
+
+    // Their own site: pages, drafts, settings, redirects and assets all work.
+    assert_eq!(put_page(&student, "venice", "home", home.clone()), 200);
+    assert_eq!(put_page(&student, "venice", "draft", json!({ "title": "Draft", "body_md": "wip", "hidden": true })), 200);
+    let pages = http.get(format!("{}/website/pages?site=venice", api)).bearer_auth(&student)
+        .send().expect("own pages").json::<Value>().unwrap();
+    let slugs: Vec<_> = pages["pages"].as_array().unwrap().iter().map(|p| p["slug"].as_str().unwrap()).collect();
+    assert!(slugs.contains(&"draft"), "a site admin sees their own drafts: {:?}", slugs);
+    let listed: Vec<_> = pages["sites"].as_array().unwrap().iter().map(|s| s["id"].as_str().unwrap()).collect();
+    assert_eq!(listed, vec!["venice"], "the site switcher only offers granted sites");
+    let rendered = http.get(format!("{}/site/home", server.url)).header("Host", "venicerobotics.co")
+        .send().expect("render").text().unwrap();
+    assert!(rendered.contains("Venice Robotics"));
+
+    let own = |method: reqwest::Method, path: &str, body: Value| {
+        http.request(method, format!("{}{}", api, path)).bearer_auth(&student)
+            .json(&body).send().expect("student request").status().as_u16()
+    };
+    use reqwest::Method as M;
+    assert_eq!(own(M::GET, "/site/admin/settings?site=venice", json!({})), 200);
+    assert_eq!(own(M::PUT, "/site/admin/settings?site=venice", json!({ "theme_mode": "dark" })), 200);
+    assert_eq!(own(M::PUT, "/website/redirects?site=venice", json!({ "from_path": "/old", "to_path": "/home" })), 200);
+    assert_eq!(own(M::GET, "/website/admin/assets?site=venice", json!({})), 200);
+    assert_eq!(own(M::GET, "/website/pages/home/revisions?site=venice", json!({})), 200);
+    let sites = http.get(format!("{}/sites", api)).bearer_auth(&student)
+        .send().expect("sites").json::<Value>().unwrap();
+    let ids: Vec<_> = sites["sites"].as_array().unwrap().iter().map(|s| s["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, vec!["venice"]);
+
+    // Every other site is closed, whether named or reached as the default.
+    assert_eq!(put_page(&student, "xikaku", "home", home.clone()), 403);
+    assert_eq!(put_page(&student, "lpr", "home", home.clone()), 403);
+    let resp = http.put(format!("{}/website/pages/home", api)).bearer_auth(&student)
+        .json(&home).send().expect("default site");
+    assert_eq!(resp.status().as_u16(), 403, "the default site must not be writable");
+    for (method, path, body) in [
+        (M::GET, "/site/admin/settings?site=xikaku", json!({})),
+        (M::PUT, "/site/admin/settings?site=xikaku", json!({ "theme_mode": "dark" })),
+        (M::PUT, "/website/redirects?site=xikaku", json!({ "from_path": "/a", "to_path": "/b" })),
+        (M::GET, "/website/redirects?site=xikaku", json!({})),
+        (M::GET, "/website/admin/assets?site=xikaku", json!({})),
+        (M::DELETE, "/website/pages/internal?site=xikaku", json!({})),
+        (M::POST, "/website/pages/internal/visibility?site=xikaku", json!({ "hidden": false })),
+        (M::POST, "/website/pages/internal/rename?site=xikaku", json!({ "new_slug": "public" })),
+        (M::GET, "/website/pages/internal/revisions?site=xikaku", json!({})),
+        (M::DELETE, "/website/assets/logo.png?site=xikaku", json!({})),
+    ] {
+        assert_eq!(own(method.clone(), path, body), 403, "{} {} must be denied", method, path);
+    }
+    let resp = http.get(format!("{}/website/pages/internal?site=xikaku", api)).bearer_auth(&student)
+        .send().expect("foreign hidden page");
+    assert_eq!(resp.status().as_u16(), 404, "hidden pages of other sites stay hidden");
+    let foreign = http.get(format!("{}/website/pages?site=xikaku", api)).bearer_auth(&student)
+        .send().expect("foreign pages").json::<Value>().unwrap();
+    assert!(
+        foreign["pages"].as_array().unwrap().iter().all(|p| p["slug"] != "internal"),
+        "hidden pages of other sites must not be listed"
+    );
+
+    // The rest of the backend: users, licenses, shop, newsletter, backups,
+    // audit, releases, tickets, email templates and the site registry.
+    let evil_site = json!({
+        "id": "evil", "name": "Evil", "hosts": ["evil.example.com"], "public_base": "https://evil.example.com",
+    });
+    for (method, path, body) in [
+        (M::GET, "/auth/users", json!({})),
+        (M::POST, "/auth/users", json!({ "username": "x", "email": "x@example.com", "role": "admin", "password": "xpassword123" })),
+        (M::PUT, "/auth/users/student/role", json!({ "role": "admin" })),
+        (M::GET, "/auth/api-tokens/all", json!({})),
+        (M::GET, "/licenses", json!({})),
+        (M::POST, "/licenses", json!({ "customer": "Evil", "days": 30, "features": [] })),
+        (M::GET, "/releases", json!({})),
+        (M::GET, "/shop/admin/orders", json!({})),
+        (M::GET, "/shop/admin/products", json!({})),
+        (M::GET, "/shop/admin/settings?site=venice", json!({})),
+        (M::GET, "/newsletter/issues", json!({})),
+        (M::GET, "/newsletter/audience", json!({})),
+        (M::GET, "/admin/backup/status", json!({})),
+        (M::GET, "/admin/email_templates", json!({})),
+        (M::GET, "/admin/tickets", json!({})),
+        (M::GET, "/audit", json!({})),
+        (M::POST, "/sites", evil_site.clone()),
+        (M::PUT, "/sites/venice", evil_site.clone()),
+        (M::POST, "/website/redirects/import?site=venice", json!({ "redirects": [] })),
+    ] {
+        assert_eq!(own(method.clone(), path, body), 403, "{} {} must be denied", method, path);
+    }
+    let resp = http.post(format!("{}/website/import?site=venice", api)).bearer_auth(&student)
+        .header("content-type", "multipart/form-data; boundary=XB")
+        .body("--XB\r\nContent-Disposition: form-data; name=\"manifest\"\r\n\r\n{}\r\n--XB--\r\n")
+        .send().expect("bulk import");
+    assert_eq!(resp.status().as_u16(), 403, "the bulk importer stays full-admin");
+    let workspaces = http.get(format!("{}/workspaces", api)).bearer_auth(&student)
+        .send().expect("workspaces").json::<Value>().unwrap();
+    assert_eq!(workspaces["workspaces"], json!([]), "no workspace is visible");
+
+    // A byline publishes the account's real name, so it cannot be borrowed.
+    let post = |author: Value| {
+        put_page(&student, "venice", "news", json!({
+            "title": "News", "body_md": "hello", "page_kind": "post", "author_username": author,
+        }))
+    };
+    assert_eq!(post(json!("admin")), 403, "a site admin cannot sign as someone else");
+    assert_eq!(post(json!("")), 200);
+    let news = http.get(format!("{}/website/pages/news?site=venice", api)).bearer_auth(&student)
+        .send().expect("news").json::<Value>().unwrap();
+    assert_eq!(news["author_username"], json!("student"));
+    assert_eq!(post(json!("student")), 200);
+
+    // Moving the grant moves the access; dropping the role removes it.
+    let set_role = |body: Value| {
+        http.put(format!("{}/auth/users/student/role", api)).bearer_auth(&admin)
+            .json(&body).send().expect("set role").status().as_u16()
+    };
+    assert_eq!(set_role(json!({ "role": "site_admin" })), 400, "the grant cannot be emptied");
+    assert_eq!(set_role(json!({ "role": "site_admin", "sites": ["lpr"] })), 200);
+    assert_eq!(put_page(&student, "venice", "home", home.clone()), 403);
+    assert_eq!(put_page(&student, "lpr", "student-page", home.clone()), 200);
+    assert_eq!(set_role(json!({ "role": "user", "sites": ["lpr"] })), 200);
+    assert_eq!(user_row("student")["admin_sites"], json!([]), "a plain user keeps no grant");
+    assert_eq!(put_page(&student, "lpr", "student-page", home.clone()), 403);
+    assert_eq!(own(M::GET, "/sites", json!({})), 403);
 }
 
 // ---------------------------------------------------------------------------

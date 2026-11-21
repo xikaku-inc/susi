@@ -1028,6 +1028,8 @@ const L10N = {
         'Customer Area': 'カスタマーエリア',
         'Shipping to the United States or Canada?': '米国・カナダへの配送をご希望ですか？',
         'Order from the Xikaku store.': 'Xikakuストアでご注文ください。',
+        'Orders within Japan are handled by our local distributor.': '日本国内のご注文は、販売代理店を通じて承っております。',
+        'Contact us': 'お問い合わせ',
         'Thanks - your message is on its way.': 'お問い合わせありがとうございます。メッセージを送信しました。',
         'show email': 'メールを表示',
         // Shop storefront chrome.
@@ -1112,7 +1114,7 @@ function previewPageLink(u) {
         brand.textContent = SITE.name;
     }
     // No shop (or a paused one): no cart button.
-    if (!SITE.has_shop) {
+    if (!SITE.has_shop || (SITE.ja_inquiry && SITE.lang === 'ja')) {
         const cartBtn = document.getElementById('btnCart');
         if (cartBtn) cartBtn.style.display = 'none';
     }
@@ -1285,7 +1287,8 @@ async function resolveAdminStatus() {
         const r = await fetch('/api/v1/auth/status', { headers: { 'Authorization': 'Bearer ' + authToken() }});
         if (r.ok) {
             const d = await r.json();
-            isAdmin = (d.role === 'admin' || d.role === 'owner');
+            isAdmin = d.role === 'admin' || d.role === 'owner'
+                || (d.role === 'site_admin' && (d.admin_sites || []).includes(SITE.id));
         } else if (r.status === 401) {
             localStorage.removeItem('auth_token');
             isAdmin = false;
@@ -3122,6 +3125,17 @@ function shopPrice(p) {
     if (LANG === 'ja' && p.price_jpy > 0) return { amount: p.price_jpy, currency: 'jpy' };
     return { amount: p.price_cents, currency: p.currency };
 }
+// An inquiry-only Japanese storefront shows no prices and has no cart.
+const SHOP_INQUIRY = LANG === 'ja' && !!SITE.ja_inquiry;
+function shopPriceLabel(p) {
+    if (SHOP_INQUIRY) return t('Contact us');
+    const pr = shopPrice(p);
+    return shopFmtMoney(pr.amount, pr.currency);
+}
+function contactHref() {
+    const tr = LANG && pages.find(p => (p.lang || '') === LANG && p.translation_of === 'contact');
+    return pageHref(tr ? tr.slug : 'contact');
+}
 function shopTitle(p) { return (LANG === 'ja' && p.title_ja) ? p.title_ja : p.title; }
 function shopDesc(p) { return (LANG === 'ja' && p.description_md_ja) ? p.description_md_ja : p.description_md; }
 
@@ -3326,6 +3340,16 @@ function northAmericaNotice(margin) {
         + '</div>';
 }
 
+// Japan is served through the distributor while the storefront is
+// inquiry-only; shown in every language.
+function japanNotice(margin) {
+    if (!SITE.ja_inquiry) return '';
+    return '<div style="background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px;margin:' + (margin || '0 0 24px') + ';">'
+        + escHtml(t('Orders within Japan are handled by our local distributor.')) + ' '
+        + '<a href="' + escHtml(contactHref()) + '">' + escHtml(t('Contact us')) + '</a>'
+        + '</div>';
+}
+
 function renderShopGrid() {
     currentSlug = '__shop__';
     const c = document.getElementById('content');
@@ -3338,16 +3362,15 @@ function renderShopGrid() {
         return;
     }
     const cards = shopProducts.map(p => {
-        const pr = shopPrice(p);
         const img = p.image_url ? '<img src="' + escHtml(p.image_url) + '" alt="">' : '<div>' + escHtml(t('no image')) + '</div>';
         return '<a class="shop-card" href="' + shopHref('/' + encodeURIComponent(p.sku)) + '">'
             + '<div class="shop-card-img">' + img + '</div>'
             + '<div class="shop-card-body">'
             +   '<div class="shop-card-title">' + escHtml(shopTitle(p)) + '</div>'
-            +   '<div class="shop-card-price">' + escHtml(shopFmtMoney(pr.amount, pr.currency)) + '</div>'
-            +   '<div class="shop-card-actions">'
+            +   '<div class="shop-card-price">' + escHtml(shopPriceLabel(p)) + '</div>'
+            +   (SHOP_INQUIRY ? '' : '<div class="shop-card-actions">'
             +     '<button class="btn primary" onclick="event.stopPropagation();event.preventDefault();addToCart(\'' + escHtml(p.sku) + '\', 1)">' + escHtml(t('Add to cart')) + '</button>'
-            +   '</div>'
+            +   '</div>')
             + '</div>'
             + '</a>';
     }).join('');
@@ -3357,8 +3380,9 @@ function renderShopGrid() {
             ? 'Order Xikaku sensors directly. Shipped from our Los Angeles office.'
             : 'Order ' + SITE.name + ' products directly.');
     c.innerHTML = '<h1>' + escHtml(t('Shop')) + '</h1>'
-        + '<p style="color:var(--text2);">' + escHtml(intro) + '</p>'
+        + (SHOP_INQUIRY ? '' : '<p style="color:var(--text2);">' + escHtml(intro) + '</p>')
         + northAmericaNotice()
+        + japanNotice()
         + '<div class="shop-grid">' + cards + '</div>';
 }
 
@@ -3374,7 +3398,6 @@ function renderShopDetail(sku) {
     }
     document.title = shopTitle(p) + ' - ' + SITE.name;
     renderSidebar();
-    const pr = shopPrice(p);
     const img = p.image_url ? '<img src="' + escHtml(p.image_url) + '" alt="">' : escHtml(t('no image'));
     const desc = renderMarkdown(shopDesc(p) || '');
     c.innerHTML =
@@ -3383,13 +3406,16 @@ function renderShopDetail(sku) {
         +   '<div class="shop-detail-img">' + img + '</div>'
         +   '<div>'
         +     '<h1 style="margin-top:0;">' + escHtml(shopTitle(p)) + '</h1>'
-        +     '<p style="font-size:18px;color:var(--text1);margin:0 0 16px;">' + escHtml(shopFmtMoney(pr.amount, pr.currency)) + '</p>'
+        +     (SHOP_INQUIRY ? '' : '<p style="font-size:18px;color:var(--text1);margin:0 0 16px;">' + escHtml(shopPriceLabel(p)) + '</p>')
         +     '<div class="content">' + desc + '</div>'
         +     '<div class="shop-detail-buy">'
-        +       '<input id="detailQty" type="number" min="1" value="1">'
-        +       '<button class="btn primary" onclick="addToCart(\'' + escHtml(p.sku) + '\', document.getElementById(\'detailQty\').value)">' + escHtml(t('Add to cart')) + '</button>'
+        +     (SHOP_INQUIRY
+                ? '<a class="btn primary" href="' + escHtml(contactHref()) + '">' + escHtml(t('Contact us')) + '</a>'
+                : '<input id="detailQty" type="number" min="1" value="1">'
+        +       '<button class="btn primary" onclick="addToCart(\'' + escHtml(p.sku) + '\', document.getElementById(\'detailQty\').value)">' + escHtml(t('Add to cart')) + '</button>')
         +     '</div>'
         +     northAmericaNotice('24px 0 0')
+        +     japanNotice('24px 0 0')
         +   '</div>'
         + '</div>';
 }
@@ -3446,13 +3472,12 @@ function injectBuyCallout(slug) {
     const c = document.getElementById('content');
     if (!c) return;
     const cards = matches.map(p => {
-        const pr = shopPrice(p);
         const img = p.image_url ? '<img src="' + escHtml(p.image_url) + '" alt="">' : '';
         return '<a class="buy-card" href="' + shopHref('/' + encodeURIComponent(p.sku)) + '">'
             + '<div class="buy-card-img">' + img + '</div>'
             + '<div class="buy-card-body">'
             +   '<div class="buy-card-title">' + escHtml(shopTitle(p)) + '</div>'
-            +   '<div class="buy-card-price">' + escHtml(shopFmtMoney(pr.amount, pr.currency)) + '</div>'
+            +   '<div class="buy-card-price">' + escHtml(shopPriceLabel(p)) + '</div>'
             + '</div>'
             + '</a>';
     }).join('');

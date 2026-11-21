@@ -279,13 +279,15 @@ impl LicenseDb {
             .map_err(|e| LicenseError::Other(format!("DB query: {}", e)))
     }
 
-    pub fn set_user_role(&self, username: &str, role: &str) -> Result<(), LicenseError> {
+    /// `admin_sites` is the comma-separated site grant of a `site_admin`;
+    /// pass "" for every other role.
+    pub fn set_user_role(&self, username: &str, role: &str, admin_sites: &str) -> Result<(), LicenseError> {
         let now = Utc::now().to_rfc3339();
         let n = self
             .conn
             .execute(
-                "UPDATE users SET role = ?2, updated_at = ?3 WHERE username = ?1",
-                params![username, role, now],
+                "UPDATE users SET role = ?2, admin_sites = ?4, updated_at = ?3 WHERE username = ?1",
+                params![username, role, now, admin_sites],
             )
             .map_err(|e| LicenseError::Other(format!("DB update: {}", e)))?;
         if n == 0 {
@@ -295,7 +297,7 @@ impl LicenseDb {
     }
 
     /// Single-row fetch of every user attribute the admin gate needs:
-    /// (role, must_change_password, totp_enabled). Replaces the three
+    /// (role, must_change_password, totp_enabled, admin_sites). Replaces the three
     /// separate `get_user_role` / `user_must_change_password` /
     /// `user_totp_enabled` calls - saves two SQLite round-trips and two
     /// extra mutex cycles per admin request. Returns `None` if the
@@ -304,16 +306,17 @@ impl LicenseDb {
     pub fn get_user_admin_check(
         &self,
         username: &str,
-    ) -> Result<Option<(String, bool, bool)>, LicenseError> {
+    ) -> Result<Option<(String, bool, bool, String)>, LicenseError> {
         self.conn
             .query_row(
-                "SELECT role, must_change_password, totp_enabled FROM users WHERE username = ?1",
+                "SELECT role, must_change_password, totp_enabled, admin_sites FROM users WHERE username = ?1",
                 params![username],
                 |r| {
                     Ok((
                         r.get::<_, String>(0)?,
                         r.get::<_, i64>(1)? != 0,
                         r.get::<_, i64>(2)? != 0,
+                        r.get::<_, String>(3)?,
                     ))
                 },
             )

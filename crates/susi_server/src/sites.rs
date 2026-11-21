@@ -90,6 +90,9 @@ pub struct SiteConfig {
     pub has_blog: bool,
     pub show_updated: bool,
     pub langs: &'static [&'static str],
+    /// The `access_password` site setting; non-empty = visitors must unlock
+    /// the site before any of it is served.
+    pub access_password: &'static str,
     org_jsonld: &'static str,
 }
 
@@ -206,7 +209,7 @@ fn svec(v: &[String]) -> &'static [&'static str] {
 
 /// `has_logo` decides whether JSON-LD carries a logo URL: true for sites with
 /// compiled artwork or an uploaded `logo_image` setting.
-fn build_config(id: &str, def: &SiteDef, has_logo: bool) -> &'static SiteConfig {
+fn build_config(id: &str, def: &SiteDef, has_logo: bool, access_password: &str) -> &'static SiteConfig {
     let logo_url = if has_logo {
         format!("{}/static/logo.png", def.public_base)
     } else {
@@ -233,6 +236,7 @@ fn build_config(id: &str, def: &SiteDef, has_logo: bool) -> &'static SiteConfig 
         has_blog: def.has_blog,
         show_updated: def.show_updated,
         langs: svec(&def.langs),
+        access_password: sstr(access_password),
         org_jsonld: "",
     };
     cfg.org_jsonld = sstr(&build_org_jsonld(&cfg));
@@ -242,7 +246,7 @@ fn build_config(id: &str, def: &SiteDef, has_logo: bool) -> &'static SiteConfig 
 // Boots from the built-in definitions so lookups work before (and without)
 // DB init; `reload_from_db` swaps in the stored registry at startup.
 static REGISTRY: LazyLock<RwLock<Vec<&'static SiteConfig>>> = LazyLock::new(|| {
-    RwLock::new(builtin_defs().iter().map(|(id, d)| build_config(id, d, true)).collect())
+    RwLock::new(builtin_defs().iter().map(|(id, d)| build_config(id, d, true, "")).collect())
 });
 
 pub fn all_sites() -> Vec<&'static SiteConfig> {
@@ -292,7 +296,8 @@ pub fn init_from_db(db: &LicenseDb) {
 }
 
 /// Rebuild the registry from the DB. Called at startup and after any write
-/// to a site or its logo settings (the JSON-LD logo URL depends on both).
+/// to a site, its logo settings (the JSON-LD logo URL depends on both) or
+/// its access password.
 pub fn reload_from_db(db: &LicenseDb) {
     let rows = match db.list_sites() {
         Ok(r) => r,
@@ -317,7 +322,12 @@ pub fn reload_from_db(db: &LicenseDb) {
                     .ok()
                     .flatten()
                     .map_or(false, |v| !v.is_empty());
-            Some(build_config(id, &def, has_logo))
+            let access_password = db
+                .get_site_setting(&scoped_key(id, crate::website::SETTING_ACCESS_PASSWORD))
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            Some(build_config(id, &def, has_logo, &access_password))
         })
         .collect();
     if built.is_empty() {
@@ -500,7 +510,7 @@ mod tests {
             r#"{"name":"K","tagline":"t","hosts":["k.example.com"],"public_base":"https://k.example.com","social_links":["https://soundcloud.com/x"]}"#,
         )
         .unwrap();
-        let cfg = build_config("ktest", &def, false);
+        let cfg = build_config("ktest", &def, false, "");
         let j = org_jsonld(cfg);
         assert!(!j.contains("legalName"));
         assert!(!j.contains("email"));
@@ -516,7 +526,7 @@ mod tests {
             r#"{"name":"K","tagline":"t","hosts":["k.example.com"],"public_base":"https://k.example.com","person_name":"Klaus P","social_links":["https://soundcloud.com/x"]}"#,
         )
         .unwrap();
-        let cfg = build_config("ptest", &def, false);
+        let cfg = build_config("ptest", &def, false, "");
         let j = org_jsonld(cfg);
         assert!(j.starts_with(r#"{"@context":"https://schema.org","@type":"Person","name":"Klaus P""#), "{}", j);
         assert!(j.contains(r#""sameAs":["https://soundcloud.com/x"]"#));
@@ -532,7 +542,7 @@ mod tests {
             r#"{"name":"K's \"Site\"","tagline":"a & b","hosts":["k.example.com"],"public_base":"https://k.example.com","social_links":["https://scholar.example.com/c?user=1&hl=en"]}"#,
         )
         .unwrap();
-        let j = org_jsonld(build_config("ktest2", &def, false));
+        let j = org_jsonld(build_config("ktest2", &def, false, ""));
         let v: serde_json::Value = serde_json::from_str(j).unwrap();
         assert_eq!(v["name"], "K's \"Site\"");
         assert_eq!(v["slogan"], "a & b");

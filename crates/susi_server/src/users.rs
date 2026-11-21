@@ -2,6 +2,26 @@
 
 use crate::*;
 
+/// The `admin_sites` value to store for a role: the validated, deduplicated
+/// grant of a `site_admin`, empty for every other role.
+fn admin_sites_for(role: &str, sites: &[String]) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
+    if role != ROLE_SITE_ADMIN {
+        return Ok(String::new());
+    }
+    let mut ids: Vec<&str> = Vec::new();
+    for s in sites {
+        let site = crate::sites::site_by_id(s.trim())
+            .ok_or_else(|| error_response(StatusCode::BAD_REQUEST, &format!("Unknown site: {}", s)))?;
+        if !ids.contains(&site.id) {
+            ids.push(site.id);
+        }
+    }
+    if ids.is_empty() {
+        return Err(error_response(StatusCode::BAD_REQUEST, "A site admin needs at least one site"));
+    }
+    Ok(ids.join(","))
+}
+
 pub(crate) async fn handle_list_users(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -27,6 +47,7 @@ pub(crate) async fn handle_list_users(
             serde_json::json!({
                 "username": u.username,
                 "role": u.role,
+                "admin_sites": u.admin_sites.split(',').filter(|s| !s.is_empty()).collect::<Vec<_>>(),
                 "totp_enabled": u.totp_enabled,
                 "must_change_password": u.must_change_password,
                 "created_at": u.created_at,
@@ -55,8 +76,9 @@ pub(crate) async fn handle_create_user(
         return Err(error_response(StatusCode::BAD_REQUEST, "Username must be 1-64 characters"));
     }
     if !is_valid_role(&req.role) {
-        return Err(error_response(StatusCode::BAD_REQUEST, "Role must be owner, admin or user"));
+        return Err(error_response(StatusCode::BAD_REQUEST, "Role must be owner, admin, site_admin or user"));
     }
+    let admin_sites = admin_sites_for(&req.role, &req.sites)?;
     // Creating an owner is granting ownership, so it needs the same gate.
     if is_owner_role(&req.role) {
         require_owner(&state, &principal)?;
@@ -111,6 +133,10 @@ pub(crate) async fn handle_create_user(
         let db = state.db.lock();
         db.create_user(username, &pw_hash, &req.role)
             .map_err(|e| error_response(StatusCode::CONFLICT, &e.to_string()))?;
+        if !admin_sites.is_empty() {
+            db.set_user_role(username, &req.role, &admin_sites)
+                .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+        }
         db.set_user_email(username, Some(&email))
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
         db.set_user_name(username, &req.first_name, &req.last_name)
@@ -121,7 +147,7 @@ pub(crate) async fn handle_create_user(
         issue_and_send_invitation(&state, username, &email).await?;
     }
 
-    audit(&state, &principal.username, "user.create", username, &format!("role={}", req.role));
+    audit(&state, &principal.username, "user.create", username, &format!("role={} sites={}", req.role, admin_sites));
     Ok(Json(serde_json::json!({
         "status": "OK",
         "username": username,
@@ -230,8 +256,9 @@ pub(crate) async fn handle_set_user_role(
     require_admin_full(&state, &principal)?;
 
     if !is_valid_role(&req.role) {
-        return Err(error_response(StatusCode::BAD_REQUEST, "Role must be owner, admin or user"));
+        return Err(error_response(StatusCode::BAD_REQUEST, "Role must be owner, admin, site_admin or user"));
     }
+    let admin_sites = admin_sites_for(&req.role, &req.sites)?;
     // Block self-demotion so an admin can't lock the org out of admin access.
     if principal.username == username {
         return Err(error_response(StatusCode::BAD_REQUEST, "Cannot change your own role"));
@@ -252,10 +279,10 @@ pub(crate) async fn handle_set_user_role(
     if !db.user_exists(&username).unwrap_or(false) {
         return Err(error_response(StatusCode::NOT_FOUND, "User does not exist"));
     }
-    db.set_user_role(&username, &req.role)
+    db.set_user_role(&username, &req.role, &admin_sites)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
-    audit_db(&db, &principal.username, "user.set_role", &username, &format!("role={}", req.role));
+    audit_db(&db, &principal.username, "user.set_role", &username, &format!("role={} sites={}", req.role, admin_sites));
     Ok(Json(serde_json::json!({ "status": "OK" })))
 }
 
@@ -304,7 +331,7 @@ pub(crate) async fn handle_create_api_token(
         db.get_user_admin_check(&principal.username)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
     };
-    let Some((role, must_change, totp_enabled)) = row else {
+    let Some((role, must_change, totp_enabled, _)) = row else {
         return Err(error_response(StatusCode::UNAUTHORIZED, "Unknown user"));
     };
     if must_change {
@@ -313,7 +340,7 @@ pub(crate) async fn handle_create_api_token(
             "Password change required before creating API tokens",
         ));
     }
-    if is_admin_role(&role) && !totp_enabled {
+    if is_privileged_role(&role) && !totp_enabled {
         return Err(error_response(
             StatusCode::FORBIDDEN,
             "Admin accounts must enable two-factor authentication before creating API tokens",

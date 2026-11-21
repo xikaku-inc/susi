@@ -1459,6 +1459,10 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                     <input type="checkbox" id="shopSetCustomerEnabled">
                     <label for="shopSetCustomerEnabled">Send branded order confirmation email to customer</label>
                 </div>
+                <div class="toggle-row">
+                    <input type="checkbox" id="shopSetJaInquiry">
+                    <label for="shopSetJaInquiry">Japanese storefront: inquiry only (no yen prices, no cart)</label>
+                </div>
                 <div class="form-row">
                     <label for="shopSetSupport">Customer support contact (shown in emails)</label>
                     <input type="text" id="shopSetSupport">
@@ -2080,6 +2084,10 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
                     <label for="siteSetLogoHeight">Top bar logo height (px)</label>
                     <input type="number" id="siteSetLogoHeight" min="16" max="120" style="width:180px;">
                 </div>
+                <div class="form-row" id="siteSetAccessPasswordRow">
+                    <label for="siteSetAccessPassword">Site password</label>
+                    <input type="text" id="siteSetAccessPassword" autocomplete="off" readonly onfocus="this.removeAttribute('readonly')" style="width:180px;">
+                </div>
                 <div id="siteSetError" class="form-error" style="display:none;"></div>
             </div>
             <div class="form-footer">
@@ -2535,11 +2543,16 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
             </div>
             <div class="form-row">
                 <label>Role</label>
-                <select id="newUserRole">
+                <select id="newUserRole" onchange="renderRoleSites('newUser')">
                     <option value="user">User</option>
+                    <option value="site_admin">Site admin</option>
                     <option value="admin">Admin</option>
                     <option value="owner" id="newUserRoleOwner">Owner</option>
                 </select>
+            </div>
+            <div class="form-row" id="newUserSitesRow" style="display:none;">
+                <label>Sites</label>
+                <div id="newUserSites"></div>
             </div>
             <details style="margin-top:10px;">
                 <summary style="font-size:12px;color:var(--text2);cursor:pointer;">Advanced: set a password manually (no email sent)</summary>
@@ -2580,11 +2593,16 @@ a.feature-tag:hover { color: var(--accent); border-color: var(--accent); }
             </div>
             <div class="form-row" id="editUserRoleRow">
                 <label>Role</label>
-                <select id="editUserRole">
+                <select id="editUserRole" onchange="renderRoleSites('editUser')">
                     <option value="user">User</option>
+                    <option value="site_admin">Site admin</option>
                     <option value="admin">Admin</option>
                     <option value="owner" id="editUserRoleOwner">Owner</option>
                 </select>
+            </div>
+            <div class="form-row" id="editUserSitesRow" style="display:none;">
+                <label>Sites</label>
+                <div id="editUserSites"></div>
             </div>
             <div id="editUserNewsletterRow" style="display:flex;align-items:center;gap:9px;">
                 <input type="checkbox" id="editUserNewsletter" style="width:auto;margin:0;cursor:pointer;accent-color:var(--accent);">
@@ -2939,6 +2957,10 @@ let userRole = '';
 // must accept both, or an owner sees less than an admin.
 function roleIsAdmin(r) { return r === 'admin' || r === 'owner'; }
 function roleIsOwner(r) { return r === 'owner'; }
+// A site admin edits the websites granted to them and sees nothing else.
+function roleIsSiteAdmin(r) { return r === 'site_admin'; }
+function roleCanEditSites(r) { return roleIsAdmin(r) || roleIsSiteAdmin(r); }
+function defaultPage() { return roleIsAdmin(userRole) ? 'releases' : roleIsSiteAdmin(userRole) ? 'website' : 'mylicenses'; }
 let licenses = [];
 let selectedKey = null;
 let totpEnabled = false;
@@ -3126,13 +3148,14 @@ function route() {
     }
     if (authToken && (target === '' || target === 'home')) {
         // Logged-in user landing on / - pick the first available section.
-        target = roleIsAdmin(userRole) ? 'releases' : 'mylicenses';
+        target = defaultPage();
         if (location.hash !== '#/' + target) location.hash = '#/' + target;
     }
+    if (authToken && roleIsSiteAdmin(userRole) && target !== 'account') target = 'website';
     if (authToken && target === 'account') {
         // Account settings is a modal now - honour the old hash by redirecting
         // to a real page and opening the modal on top of it.
-        target = roleIsAdmin(userRole) ? 'releases' : 'mylicenses';
+        target = defaultPage();
         location.hash = '#/' + target;
         showAccountModal();
     }
@@ -3187,14 +3210,16 @@ function renderNav() {
     if (!nav) return;
     const isAdmin = roleIsAdmin(userRole);
     const isOwner = roleIsOwner(userRole);
+    const siteAdmin = roleIsSiteAdmin(userRole);
     // Keep in sync with renderTopNav() in docs.html. group:'admin' items
     // collapse into the Admin dropdown on desktop and an Admin section in
     // the mobile drawer.
     const items = [
-        { page: 'docs', label: 'Documentation', href: '/docs', show: true },
-        { page: 'mylicenses', label: 'My Licenses', href: '#/mylicenses', show: !!authToken && !isAdmin },
-        { page: 'workspaces', label: 'Workspaces', href: '#/workspaces', show: !!authToken },
-        { page: 'releases', label: 'Releases', href: '#/releases', show: !!authToken },
+        { page: 'docs', label: 'Documentation', href: '/docs', show: !siteAdmin },
+        { page: 'mylicenses', label: 'My Licenses', href: '#/mylicenses', show: !!authToken && !isAdmin && !siteAdmin },
+        { page: 'workspaces', label: 'Workspaces', href: '#/workspaces', show: !!authToken && !siteAdmin },
+        { page: 'releases', label: 'Releases', href: '#/releases', show: !!authToken && !siteAdmin },
+        { page: 'website', label: 'Website', href: '#/website', show: !!authToken && siteAdmin },
         { page: 'licenses', label: 'Licenses', href: '#/licenses', show: !!authToken && isAdmin },
         { page: 'users', label: 'Users', href: '#/users', show: !!authToken && isAdmin },
         { page: 'tickets', label: 'Tickets', href: '#/tickets', show: !!authToken && isAdmin, group: 'admin' },
@@ -3294,7 +3319,7 @@ async function submitLogin() {
         localStorage.setItem('auth_token', authToken);
         totpEnabled = data.totp_enabled;
         userRole = data.role || 'user';
-        mustEnableTotp = roleIsAdmin(userRole) && !totpEnabled;
+        mustEnableTotp = roleCanEditSites(userRole) && !totpEnabled;
 
         document.getElementById('loginOverlay').classList.remove('visible');
         if (data.must_change_password) {
@@ -3363,7 +3388,7 @@ async function submitSigninCode() {
         localStorage.setItem('auth_token', authToken);
         userRole = data.role || 'user';
         totpEnabled = !!data.totp_enabled;
-        mustEnableTotp = roleIsAdmin(userRole) && !totpEnabled;
+        mustEnableTotp = roleCanEditSites(userRole) && !totpEnabled;
         pendingSigninUsername = '';
         document.getElementById('signinCodeOverlay').classList.remove('visible');
         if (data.must_change_password) {
@@ -3540,7 +3565,7 @@ async function submitResetPassword() {
             userRole = data.role || 'user';
             currentUsername = data.username || '';
             toast('Password set - you are signed in', 'success');
-            location.hash = roleIsAdmin(userRole) ? '#/releases' : '#/mylicenses';
+            location.hash = '#/' + defaultPage();
             await checkAuthStatus();
         } else {
             toast('Password reset - please sign in', 'success');
@@ -3785,11 +3810,17 @@ function enterDashboard() {
         loadWebsiteRedirects();
         loadSiteSettings();
         loadAssignableUsers();
+    } else if (roleIsSiteAdmin(userRole)) {
+        // The default site is not theirs: resolve the granted one first.
+        websiteSiteFromHash();
+        loadWebsitePages().then(() => { loadWebsiteAssets(); loadWebsiteRedirects(); loadSiteSettings(); });
     } else {
         loadMyLicenses();
     }
-    loadReleases();
-    loadWorkspaces();
+    if (!roleIsSiteAdmin(userRole)) {
+        loadReleases();
+        loadWorkspaces();
+    }
     route(); // pick the right page based on hash + role
 }
 
@@ -4883,6 +4914,7 @@ function showAddUserModal() {
     document.getElementById('newUserLastName').value = '';
     document.getElementById('newPassword').value = '';
     document.getElementById('newUserRole').value = 'user';
+    renderRoleSites('newUser', []);
     // Only an owner may create another owner.
     const ownerOpt = document.getElementById('newUserRoleOwner');
     if (ownerOpt) ownerOpt.style.display = roleIsOwner(userRole) ? '' : 'none';
@@ -4950,7 +4982,8 @@ function renderUsers() {
         const newsletter = u.newsletter_opt_in
             ? '<span style="color:var(--green);">Subscribed</span>'
             : '<span style="color:var(--text2);">Not subscribed</span>';
-        const roleBadge = '<span class="badge">' + esc(u.role || 'user') + '</span>';
+        const roleBadge = '<span class="badge">' + esc(roleIsSiteAdmin(u.role)
+            ? 'site admin: ' + (u.admin_sites || []).join(', ') : (u.role || 'user')) + '</span>';
         // Resend appears for any user still on must_change_password=1 and
         // with an email on file - covers both pending and expired-invite cases.
         const canResend = !isSelf && u.must_change_password && u.email;
@@ -5034,6 +5067,7 @@ async function createUser() {
 
     const body = {
         username, email, role,
+        sites: checkedRoleSites('newUser'),
         first_name: document.getElementById('newUserFirstName').value.trim(),
         last_name: document.getElementById('newUserLastName').value.trim(),
     };
@@ -5130,6 +5164,23 @@ async function resetUserPassword(username) {
 
 let editUserOriginal = null;
 
+// The site checklist of a user dialog, shown only for the site admin role.
+// Passing `selected` rebuilds the list; omitting it just toggles the row.
+function renderRoleSites(prefix, selected) {
+    document.getElementById(prefix + 'SitesRow').style.display =
+        roleIsSiteAdmin(document.getElementById(prefix + 'Role').value) ? '' : 'none';
+    if (!selected) return;
+    document.getElementById(prefix + 'Sites').innerHTML = websiteSites.map(s =>
+        '<label style="display:flex;align-items:center;gap:9px;margin:4px 0;cursor:pointer;text-transform:none;letter-spacing:0;font-size:13px;font-weight:400;color:var(--text);">' +
+        '<input type="checkbox" value="' + esc(s.id) + '"' + (selected.includes(s.id) ? ' checked' : '') +
+        ' style="width:auto;margin:0;cursor:pointer;accent-color:var(--accent);">' + esc(s.name) + '</label>').join('');
+}
+
+function checkedRoleSites(prefix) {
+    if (!roleIsSiteAdmin(document.getElementById(prefix + 'Role').value)) return [];
+    return [...document.querySelectorAll('#' + prefix + 'Sites input:checked')].map(i => i.value);
+}
+
 function showEditUserModal(username) {
     const u = allUsers.find(x => x.username === username);
     if (!u) return;
@@ -5139,6 +5190,7 @@ function showEditUserModal(username) {
     document.getElementById('editUserLastName').value = u.last_name || '';
     document.getElementById('editUserEmail').value = u.email || '';
     document.getElementById('editUserRole').value = u.role || 'user';
+    renderRoleSites('editUser', u.admin_sites || []);
     document.getElementById('editUserNewsletter').checked = !!u.newsletter_opt_in;
     // Role and newsletter carry gates the server enforces anyway; hiding the
     // controls that would only ever 403 keeps the dialog honest. Nobody
@@ -5206,8 +5258,10 @@ async function saveUserProfile() {
 
         const roleRow = document.getElementById('editUserRoleRow');
         const role = document.getElementById('editUserRole').value;
-        if (roleRow.style.display !== 'none' && role !== before.role) {
-            await put(target, 'role', { role });
+        const sites = checkedRoleSites('editUser');
+        const sitesChanged = sites.slice().sort().join() !== (before.admin_sites || []).slice().sort().join();
+        if (roleRow.style.display !== 'none' && (role !== before.role || sitesChanged)) {
+            await put(target, 'role', { role, sites });
         }
 
         const newsRow = document.getElementById('editUserNewsletterRow');
@@ -7022,6 +7076,7 @@ async function loadShopSettings() {
         // Customer email defaults to ON when never set; treat empty as on.
         const ce = s.customer_email_enabled;
         document.getElementById('shopSetCustomerEnabled').checked = (ce === '' || ce === '1' || ce === 'true' || ce == null);
+        document.getElementById('shopSetJaInquiry').checked = s.ja_inquiry_only === '1';
         document.getElementById('shopSetSupport').value = s.support_contact || '';
         document.getElementById('shopSetInvoiceFrom').value = s.invoice_from || '';
         document.getElementById('shopSetStripeKey').value = s.stripe_secret_key || '';
@@ -7048,6 +7103,7 @@ async function saveShopSettings() {
     const body = {
         notification_emails: document.getElementById('shopSetEmails').value,
         customer_email_enabled: document.getElementById('shopSetCustomerEnabled').checked ? '1' : '0',
+        ja_inquiry_only: document.getElementById('shopSetJaInquiry').checked ? '1' : '0',
         support_contact: document.getElementById('shopSetSupport').value,
         invoice_from: document.getElementById('shopSetInvoiceFrom').value,
         stripe_secret_key: document.getElementById('shopSetStripeKey').value,
@@ -7067,7 +7123,7 @@ async function saveShopSettings() {
 }
 
 async function loadSiteSettings() {
-    if (!roleIsAdmin(userRole)) return;
+    if (!roleCanEditSites(userRole)) return;
     const identityCard = document.getElementById('siteIdentityCard');
     if (identityCard) {
         const owner = roleIsOwner(userRole);
@@ -7097,6 +7153,8 @@ async function loadSiteSettings() {
         document.getElementById('siteSetNoTopbar').checked = s.no_topbar === '1';
         document.getElementById('siteSetSidebarLogo').checked = s.sidebar_logo === '1';
         document.getElementById('siteSetLogoHeight').value = s.logo_height || '';
+        document.getElementById('siteSetAccessPassword').value = s.access_password || '';
+        document.getElementById('siteSetAccessPasswordRow').style.display = canSetSitePassword() ? '' : 'none';
     } catch (e) {
         // Non-fatal - settings just won't pre-fill.
     }
@@ -7165,6 +7223,9 @@ function removeSiteFavicon() {
     renderSiteLogoRows();
 }
 
+// Full admins only, and never the default site.
+function canSetSitePassword() { return roleIsAdmin(userRole) && websiteSite !== 'xikaku'; }
+
 async function saveSiteSettings() {
     const errEl = document.getElementById('siteSetError');
     errEl.style.display = 'none';
@@ -7192,6 +7253,7 @@ async function saveSiteSettings() {
         logo_dark_image: siteLogoDarkImage,
         favicon_image: siteFaviconImage,
     };
+    if (canSetSitePassword()) body.access_password = document.getElementById('siteSetAccessPassword').value.trim();
     try {
         const resp = await fetch(API + '/site/admin/settings' + wsQ(), {
             method: 'PUT',
@@ -8538,7 +8600,7 @@ function websiteTab(name) {
 }
 
 async function loadWebsiteRedirects() {
-    if (!roleIsAdmin(userRole)) return;
+    if (!roleCanEditSites(userRole)) return;
     const tbody = document.getElementById('websiteRedirectsBody');
     try {
         const resp = await fetch(API + '/website/redirects' + wsQ(), { headers: authHeaders() });
@@ -8595,14 +8657,20 @@ async function deleteWebsiteRedirect(id) {
 }
 
 async function loadWebsitePages() {
-    if (!roleIsAdmin(userRole)) return;
+    if (!roleCanEditSites(userRole)) return;
     const tbody = document.getElementById('websitePagesBody');
     try {
         const resp = await fetch(API + '/website/pages' + wsQ(), { headers: authHeaders() });
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
         const data = await resp.json();
-        websitePages = data.pages || [];
         if (Array.isArray(data.sites)) websiteSites = data.sites;
+        // A site admin only gets their own sites back; move off any other.
+        if (websiteSites.length && !websiteSites.some(s => s.id === websiteSite)) {
+            websiteSite = websiteSites[0].id;
+            if (location.hash.startsWith('#/website')) history.replaceState(null, '', '#/website/' + encodeURIComponent(websiteSite));
+            return loadWebsitePages();
+        }
+        websitePages = data.pages || [];
         const sel = document.getElementById('websiteSiteSelect');
         if (sel && !sel.options.length && Array.isArray(data.sites)) {
             sel.innerHTML = data.sites.map(s =>
@@ -8895,7 +8963,7 @@ function fmtAssetSize(bytes) {
 }
 
 async function loadWebsiteAssets() {
-    if (!roleIsAdmin(userRole)) return;
+    if (!roleCanEditSites(userRole)) return;
     const tbody = document.getElementById('websiteAssetsBody');
     try {
         const resp = await fetch(API + '/website/admin/assets' + wsQ(), { headers: authHeaders() });
