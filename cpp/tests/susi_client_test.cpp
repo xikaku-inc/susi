@@ -7,16 +7,28 @@
 #include <catch2/generators/catch_generators.hpp>
 #include <nlohmann/json.hpp>
 #include <openssl/evp.h>
+#include <openssl/kdf.h>
 #include <openssl/pem.h>
+#include <openssl/rand.h>
 
 #include <chrono>
 #include <ctime>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
+
+namespace susi::details {
+// Defined in susi.cpp: hash two hardware IDs into a machine code, empty if either ID is empty.
+std::string machineCodeFromIds(const std::string& id1, const std::string& id2);
+#ifdef __linux__
+// Defined in susi.cpp: ID of the disk holding the root filesystem, read from /proc, /sys and /dev below root.
+std::optional<std::string> rootDiskSerial(const std::filesystem::path& root);
+#endif
+}
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -38,6 +50,8 @@ struct StringMaker<Status> {
         case Status::InvalidLicenseKey: return "InvalidLicenseKey";
         case Status::Revoked: return "Revoked";
         case Status::UnsignedBinary: return "UnsignedBinary";
+        case Status::Deactivated: return "Deactivated";
+        case Status::NotActivated: return "NotActivated";
         case Status::TokenNotFound: return "TokenNotFound";
         case Status::FileNotFound: return "FileNotFound";
         case Status::Error: return "Error";
@@ -135,6 +149,17 @@ std::string signedLicense(const json& payload, const Key& key = serverKey())
 
 const std::vector<std::string> validFeatures{"feature_a", "feature_b"};
 
+// 2xx bodies that aren't a signed license, e.g. from a captive portal.
+auto notALicense()
+{
+    return Catch::Generators::values<std::string>({
+        "<html><body>Please log in to the hotel Wi-Fi</body></html>",
+        "",
+        R"({"status": "ok"})",
+        R"({"license_data": 5, "signature": "AAAA"})",
+    });
+}
+
 struct CacheFile {
     fs::path dir;
     fs::path path;
@@ -145,6 +170,70 @@ struct CacheFile {
         fs::remove_all(dir, ec);
     }
 };
+
+const unsigned char* bytes(const std::string& s)
+{
+    return reinterpret_cast<const unsigned char*>(s.data());
+}
+
+// Encrypt a token like susi-admin export-token: AES-256-GCM, key = HKDF-SHA256 of the USB serial.
+std::string encryptToken(const std::string& plaintext, const std::string& serial)
+{
+    const std::string salt = "susi-token-v1";
+    const std::string info = "license-encryption";
+    unsigned char key[32];
+    size_t keyLen = sizeof(key);
+    std::unique_ptr<EVP_PKEY_CTX, decltype(&EVP_PKEY_CTX_free)> kdf(
+        EVP_PKEY_CTX_new_id(EVP_PKEY_HKDF, nullptr), EVP_PKEY_CTX_free);
+    REQUIRE(EVP_PKEY_derive_init(kdf.get()) == 1);
+    REQUIRE(EVP_PKEY_CTX_set_hkdf_md(kdf.get(), EVP_sha256()) == 1);
+    REQUIRE(EVP_PKEY_CTX_set1_hkdf_salt(kdf.get(), bytes(salt), static_cast<int>(salt.size())) == 1);
+    REQUIRE(EVP_PKEY_CTX_set1_hkdf_key(kdf.get(), bytes(serial), static_cast<int>(serial.size())) == 1);
+    REQUIRE(EVP_PKEY_CTX_add1_hkdf_info(kdf.get(), bytes(info), static_cast<int>(info.size())) == 1);
+    REQUIRE(EVP_PKEY_derive(kdf.get(), key, &keyLen) == 1);
+
+    unsigned char nonce[12];
+    REQUIRE(RAND_bytes(nonce, sizeof(nonce)) == 1);
+    std::unique_ptr<EVP_CIPHER_CTX, decltype(&EVP_CIPHER_CTX_free)> ctx(EVP_CIPHER_CTX_new(), EVP_CIPHER_CTX_free);
+    REQUIRE(EVP_EncryptInit_ex(ctx.get(), EVP_aes_256_gcm(), nullptr, key, nonce) == 1);
+    std::vector<unsigned char> ciphertext(plaintext.size() + 16);
+    int len = 0;
+    REQUIRE(EVP_EncryptUpdate(ctx.get(), ciphertext.data(), &len, bytes(plaintext), static_cast<int>(plaintext.size())) == 1);
+    int finalLen = 0;
+    REQUIRE(EVP_EncryptFinal_ex(ctx.get(), ciphertext.data() + len, &finalLen) == 1);
+    unsigned char tag[16];
+    REQUIRE(EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_GET_TAG, sizeof(tag), tag) == 1);
+
+    std::string blob(reinterpret_cast<const char*>(nonce), sizeof(nonce));
+    blob.append(reinterpret_cast<const char*>(ciphertext.data()), static_cast<size_t>(len + finalLen));
+    blob.append(reinterpret_cast<const char*>(tag), sizeof(tag));
+    return blob;
+}
+
+// A directory standing in for the mount point of a USB stick.
+struct UsbStick {
+    fs::path dir;
+    SusiClient::UsbDevice device;
+    UsbStick(const std::string& name, const std::string& serial)
+        : dir(emptyTestDir(name)), device{serial, dir.string(), name} {}
+    ~UsbStick()
+    {
+        std::error_code ec;
+        fs::remove_all(dir, ec);
+    }
+    void writeToken(const std::string& blob)
+    {
+        fs::create_directories(dir / ".susi");
+        writePlain(dir / ".susi" / "license.bin", blob);
+    }
+};
+
+json tokenPayload(const std::string& serial)
+{
+    json payload = validPayload();
+    payload["machine_codes"] = json::array({"usb:" + serial});
+    return payload;
+}
 
 // Answer every POST with a fixed response and record the last request.
 class CannedServer {
@@ -196,13 +285,13 @@ private:
 
 } // namespace
 
-TEST_CASE("checkLicense accepts a valid license", "[checkLicense]")
+TEST_CASE("verifyFile accepts a valid license", "[verifyFile]")
 {
     CacheFile cache("valid");
     writePlain(cache.path, signedLicense(validPayload()));
     SusiClient client(serverKey().publicPem);
 
-    CHECK(client.checkLicense(cache.path) == Status::Valid);
+    CHECK(client.verifyFile(cache.path) == Status::Valid);
     CHECK(client.isValid());
     CHECK(client.product() == "TestProduct");
     CHECK(client.customer() == "Test Corp");
@@ -214,7 +303,7 @@ TEST_CASE("checkLicense accepts a valid license", "[checkLicense]")
     CHECK_FALSE(client.isLeaseExpired());
 }
 
-TEST_CASE("checkLicense accepts a license without expiry date", "[checkLicense]")
+TEST_CASE("verifyFile accepts a license without expiry date", "[verifyFile]")
 {
     CacheFile cache("perpetual");
     json payload = validPayload();
@@ -222,10 +311,10 @@ TEST_CASE("checkLicense accepts a license without expiry date", "[checkLicense]"
     writePlain(cache.path, signedLicense(payload));
     SusiClient client(serverKey().publicPem);
 
-    CHECK(client.checkLicense(cache.path) == Status::Valid);
+    CHECK(client.verifyFile(cache.path) == Status::Valid);
 }
 
-TEST_CASE("checkLicense rejects an expired license", "[checkLicense]")
+TEST_CASE("verifyFile rejects an expired license", "[verifyFile]")
 {
     CacheFile cache("expired");
     json payload = validPayload();
@@ -233,12 +322,12 @@ TEST_CASE("checkLicense rejects an expired license", "[checkLicense]")
     writePlain(cache.path, signedLicense(payload));
     SusiClient client(serverKey().publicPem);
 
-    CHECK(client.checkLicense(cache.path) == Status::Expired);
+    CHECK(client.verifyFile(cache.path) == Status::Expired);
     CHECK_FALSE(client.isValid());
     CHECK(client.features().empty());
 }
 
-TEST_CASE("checkLicense rejects licenses that fail signature verification", "[checkLicense]")
+TEST_CASE("verifyFile rejects licenses that fail signature verification", "[verifyFile]")
 {
     CacheFile cache("signature");
     SusiClient client(serverKey().publicPem);
@@ -262,11 +351,11 @@ TEST_CASE("checkLicense rejects licenses that fail signature verification", "[ch
         writePlain(cache.path, license.dump());
     }
 
-    CHECK(client.checkLicense(cache.path) == Status::InvalidSignature);
+    CHECK(client.verifyFile(cache.path) == Status::InvalidSignature);
     CHECK_FALSE(client.isValid());
 }
 
-TEST_CASE("checkLicense reports malformed license files as errors", "[checkLicense]")
+TEST_CASE("verifyFile reports malformed license files as errors", "[verifyFile]")
 {
     CacheFile cache("malformed");
     SusiClient client(serverKey().publicPem);
@@ -283,20 +372,20 @@ TEST_CASE("checkLicense reports malformed license files as errors", "[checkLicen
     }
 
     writePlain(cache.path, contents);
-    CHECK(client.checkLicense(cache.path) == Status::Error);
+    CHECK(client.verifyFile(cache.path) == Status::Error);
     CHECK_FALSE(client.isValid());
 }
 
-TEST_CASE("checkLicense reports a missing file", "[checkLicense]")
+TEST_CASE("verifyFile reports a missing file", "[verifyFile]")
 {
     CacheFile cache("missing");
     SusiClient client(serverKey().publicPem);
 
-    CHECK(client.checkLicense(cache.path) == Status::FileNotFound);
+    CHECK(client.verifyFile(cache.path) == Status::FileNotFound);
     CHECK_FALSE(client.isValid());
 }
 
-TEST_CASE("checkLicense rejects a license for another machine", "[checkLicense]")
+TEST_CASE("verifyFile rejects a license for another machine", "[verifyFile]")
 {
     CacheFile cache("other_machine");
     json payload = validPayload();
@@ -304,11 +393,11 @@ TEST_CASE("checkLicense rejects a license for another machine", "[checkLicense]"
     writePlain(cache.path, signedLicense(payload));
     SusiClient client(serverKey().publicPem);
 
-    CHECK(client.checkLicense(cache.path) == Status::InvalidMachine);
+    CHECK(client.verifyFile(cache.path) == Status::InvalidMachine);
     CHECK_FALSE(client.isValid());
 }
 
-TEST_CASE("checkLicense enforces the lease and its grace period", "[checkLicense]")
+TEST_CASE("verifyFile enforces the lease and its grace period", "[verifyFile]")
 {
     CacheFile cache("lease");
     SusiClient client(serverKey().publicPem);
@@ -318,7 +407,7 @@ TEST_CASE("checkLicense enforces the lease and its grace period", "[checkLicense
     {
         payload["lease_expires"] = timeFromNow(72h);
         writePlain(cache.path, signedLicense(payload));
-        CHECK(client.checkLicense(cache.path) == Status::Valid);
+        CHECK(client.verifyFile(cache.path) == Status::Valid);
         CHECK(client.isLeaseValid());
         CHECK_FALSE(client.isInGracePeriod());
         CHECK_FALSE(client.isLeaseExpired());
@@ -327,7 +416,7 @@ TEST_CASE("checkLicense enforces the lease and its grace period", "[checkLicense
     {
         payload["lease_expires"] = timeFromNow(-1h);
         writePlain(cache.path, signedLicense(payload));
-        CHECK(client.checkLicense(cache.path) == Status::ValidGracePeriod);
+        CHECK(client.verifyFile(cache.path) == Status::ValidGracePeriod);
         CHECK(client.isValid());
         CHECK_FALSE(client.isLeaseValid());
         CHECK(client.isInGracePeriod());
@@ -337,7 +426,7 @@ TEST_CASE("checkLicense enforces the lease and its grace period", "[checkLicense
     {
         payload["lease_expires"] = timeFromNow(-25h);
         writePlain(cache.path, signedLicense(payload));
-        CHECK(client.checkLicense(cache.path) == Status::LeaseExpired);
+        CHECK(client.verifyFile(cache.path) == Status::LeaseExpired);
         CHECK_FALSE(client.isValid());
         CHECK(client.isLeaseExpired());
     }
@@ -346,18 +435,18 @@ TEST_CASE("checkLicense enforces the lease and its grace period", "[checkLicense
         payload["lease_expires"] = timeFromNow(-3h);
         payload["lease_grace_period"] = 4;
         writePlain(cache.path, signedLicense(payload));
-        CHECK(client.checkLicense(cache.path) == Status::ValidGracePeriod);
+        CHECK(client.verifyFile(cache.path) == Status::ValidGracePeriod);
     }
     SECTION("lease expired, past a custom grace period")
     {
         payload["lease_expires"] = timeFromNow(-3h);
         payload["lease_grace_period"] = 2;
         writePlain(cache.path, signedLicense(payload));
-        CHECK(client.checkLicense(cache.path) == Status::LeaseExpired);
+        CHECK(client.verifyFile(cache.path) == Status::LeaseExpired);
     }
 }
 
-TEST_CASE("checkLicense enforces require_signed_binary", "[checkLicense]")
+TEST_CASE("verifyFile enforces require_signed_binary", "[verifyFile]")
 {
     CacheFile cache("signed_binary");
     json payload = validPayload();
@@ -367,16 +456,16 @@ TEST_CASE("checkLicense enforces require_signed_binary", "[checkLicense]")
 
 #if defined(_WIN32)
     // The test executable isn't Authenticode-signed.
-    CHECK(client.checkLicense(cache.path) == Status::UnsignedBinary);
+    CHECK(client.verifyFile(cache.path) == Status::UnsignedBinary);
 #elif defined(__linux__)
     // Linux has no binary signature check.
-    CHECK(client.checkLicense(cache.path) == Status::Valid);
+    CHECK(client.verifyFile(cache.path) == Status::Valid);
 #else
     SKIP("Depends on how the test executable is signed");
 #endif
 }
 
-TEST_CASE("checkLicense accepts a public key without PEM armor", "[checkLicense]")
+TEST_CASE("verifyFile accepts a public key without PEM armor", "[verifyFile]")
 {
     std::string base64Key;
     std::istringstream lines(serverKey().publicPem);
@@ -388,32 +477,34 @@ TEST_CASE("checkLicense accepts a public key without PEM armor", "[checkLicense]
     writePlain(cache.path, signedLicense(validPayload()));
     SusiClient client(base64Key);
 
-    CHECK(client.checkLicense(cache.path) == Status::Valid);
+    CHECK(client.verifyFile(cache.path) == Status::Valid);
 }
 
-TEST_CASE("checkLicense clears the result of the previous check", "[checkLicense]")
+TEST_CASE("verifyFile clears the result of the previous check", "[verifyFile]")
 {
     CacheFile cache("reset");
     writePlain(cache.path, signedLicense(validPayload()));
     SusiClient client(serverKey().publicPem);
-    REQUIRE(client.checkLicense(cache.path) == Status::Valid);
+    REQUIRE(client.verifyFile(cache.path) == Status::Valid);
 
     fs::remove(cache.path);
 
-    CHECK(client.checkLicense(cache.path) == Status::FileNotFound);
+    CHECK(client.verifyFile(cache.path) == Status::FileNotFound);
     CHECK_FALSE(client.isValid());
     CHECK(client.features().empty());
     CHECK(client.product().empty());
 }
 
-TEST_CASE("checkLicenseAndRefresh activates and stores the license", "[refresh]")
+
+TEST_CASE("activate activates and stores the license", "[activate]")
 {
     const std::string license = signedLicense(validPayload());
     CannedServer server(200, license);
-    CacheFile cache("refresh_store");
+    CacheFile cache("activate_store");
     SusiClient client(serverKey().publicPem, server.url());
 
-    CHECK(client.checkLicenseAndRefresh(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::Valid);
+    CHECK(client.activate(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::Valid);
+    CHECK(client.isValid());
     CHECK(client.features() == validFeatures);
     CHECK(readPlain(cache.path) == license);
     CHECK(entryCount(cache.dir) == 1);
@@ -424,37 +515,17 @@ TEST_CASE("checkLicenseAndRefresh activates and stores the license", "[refresh]"
     CHECK(request.at("friendly_name").is_string());
 }
 
-TEST_CASE("checkLicenseAndRefresh replaces a cached license that a reader holds open", "[refresh]")
+TEST_CASE("activate sends the given friendly name", "[activate]")
 {
-    json payload = validPayload();
-    const std::string oldLicense = signedLicense(payload);
-    payload["lease_expires"] = timeFromNow(72h);
-    const std::string newLicense = signedLicense(payload);
-    CannedServer server(200, newLicense);
-    CacheFile cache("refresh_held");
-    writePlain(cache.path, oldLicense);
-    SusiClient client(serverKey().publicPem, server.url());
-    HeldFile held(cache.path);
-
-    CHECK(client.checkLicenseAndRefresh(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::Valid);
-    CHECK(readPlain(cache.path) == newLicense);
-    CHECK(held.read() == oldLicense);
-}
-
-TEST_CASE("checkLicenseAndRefresh keeps the cached license when the response doesn't verify", "[refresh]")
-{
-    const std::string cached = signedLicense(validPayload());
-    CannedServer server(200, signedLicense(validPayload(), otherKey()));
-    CacheFile cache("refresh_bad_response");
-    writePlain(cache.path, cached);
+    CannedServer server(200, signedLicense(validPayload()));
+    CacheFile cache("activate_name");
     SusiClient client(serverKey().publicPem, server.url());
 
-    CHECK(client.checkLicenseAndRefresh(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::InvalidSignature);
-    CHECK_FALSE(client.isValid());
-    CHECK(readPlain(cache.path) == cached);
+    REQUIRE(client.activate(cache.path, "AAAA-BBBB-CCCC-DDDD", "Lab PC 3") == Status::Valid);
+    CHECK(server.requestBody().at("friendly_name") == "Lab PC 3");
 }
 
-TEST_CASE("checkLicenseAndRefresh maps server rejections and removes the cached license", "[refresh]")
+TEST_CASE("activate maps server rejections and stores nothing", "[activate]")
 {
     struct Rejection {
         int status;
@@ -463,27 +534,151 @@ TEST_CASE("checkLicenseAndRefresh maps server rejections and removes the cached 
     };
     const Rejection rejection = GENERATE(values<Rejection>({
         {403, "License has been revoked", Status::Revoked},
+        {403, "Machine was removed by an administrator; re-activation is blocked for 1440 more minutes",
+         Status::Deactivated},
         {403, "License has expired", Status::Expired},
         {403, "Machine limit reached (max 2)", Status::InvalidMachine},
         {403, "Binary signing certificate chain does not terminate at the trusted CA", Status::UnsignedBinary},
-        {403, "Machine was removed by an administrator; re-activation is blocked for 1440 more minutes",
-         Status::Error},
         {404, "License key not found", Status::InvalidLicenseKey},
+        {500, "Internal error", Status::Error},
     }));
     CAPTURE(rejection.status, rejection.message);
     CannedServer server(rejection.status, json{{"error", rejection.message}}.dump());
-    CacheFile cache("refresh_rejected");
-    writePlain(cache.path, signedLicense(validPayload()));
+    CacheFile cache("activate_rejected");
     SusiClient client(serverKey().publicPem, server.url());
 
-    CHECK(client.checkLicenseAndRefresh(cache.path, "AAAA-BBBB-CCCC-DDDD") == rejection.expected);
+    CHECK(client.activate(cache.path, "AAAA-BBBB-CCCC-DDDD") == rejection.expected);
     CHECK_FALSE(client.isValid());
     CHECK_FALSE(fs::exists(cache.path));
 }
 
-TEST_CASE("checkLicenseAndRefresh falls back to the cached license", "[refresh]")
+TEST_CASE("activate fails without a reachable server", "[activate]")
 {
-    CacheFile cache("refresh_fallback");
+    CacheFile cache("activate_offline");
+
+    SECTION("server unreachable")
+    {
+        // Nothing listens on port 1.
+        SusiClient client(serverKey().publicPem, "http://127.0.0.1:1/api/v1");
+        CHECK(client.activate(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::Error);
+    }
+    SECTION("no server configured")
+    {
+        SusiClient client(serverKey().publicPem);
+        CHECK(client.activate(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::Error);
+    }
+    SECTION("success response that isn't a license")
+    {
+        const std::string body = GENERATE(notALicense());
+        CAPTURE(body);
+        CannedServer server(200, body);
+        SusiClient client(serverKey().publicPem, server.url());
+        CHECK(client.activate(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::Error);
+    }
+
+    CHECK_FALSE(fs::exists(cache.path));
+}
+
+TEST_CASE("Online checks keep the cached license when the response doesn't verify", "[activate][verify]")
+{
+    const std::string cached = signedLicense(validPayload());
+    CannedServer server(200, signedLicense(validPayload(), otherKey()));
+    CacheFile cache("online_bad_response");
+    writePlain(cache.path, cached);
+    SusiClient client(serverKey().publicPem, server.url());
+
+    SECTION("activate")
+    {
+        CHECK(client.activate(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::InvalidSignature);
+    }
+    SECTION("verifyAndRefresh")
+    {
+        CHECK(client.verifyAndRefresh(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::InvalidSignature);
+    }
+
+    CHECK_FALSE(client.isValid());
+    CHECK(readPlain(cache.path) == cached);
+}
+
+TEST_CASE("verifyAndRefresh without a cached license reports NotActivated", "[verify]")
+{
+    CannedServer server(200, signedLicense(validPayload()));
+    CacheFile cache("verify_not_activated");
+    SusiClient client(serverKey().publicPem, server.url());
+
+    CHECK(client.verifyAndRefresh(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::NotActivated);
+    CHECK_FALSE(client.isValid());
+    CHECK(server.path().empty());
+    CHECK_FALSE(fs::exists(cache.path));
+}
+
+TEST_CASE("verifyAndRefresh renews and stores the license", "[verify]")
+{
+    json payload = validPayload();
+    payload["lease_expires"] = timeFromNow(1h);
+    CacheFile cache("verify_store");
+    writePlain(cache.path, signedLicense(payload));
+    payload["lease_expires"] = timeFromNow(72h);
+    const std::string renewed = signedLicense(payload);
+    CannedServer server(200, renewed);
+    SusiClient client(serverKey().publicPem, server.url());
+
+    CHECK(client.verifyAndRefresh(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::Valid);
+    CHECK(client.features() == validFeatures);
+    CHECK(readPlain(cache.path) == renewed);
+    CHECK(entryCount(cache.dir) == 1);
+    CHECK(server.path() == "/api/v1/verify");
+    const json request = server.requestBody();
+    CHECK(request.at("license_key") == "AAAA-BBBB-CCCC-DDDD");
+    CHECK_FALSE(request.at("machine_code").get<std::string>().empty());
+    CHECK_FALSE(request.contains("friendly_name"));
+}
+
+TEST_CASE("verifyAndRefresh replaces a cached license that a reader holds open", "[verify]")
+{
+    json payload = validPayload();
+    const std::string oldLicense = signedLicense(payload);
+    payload["lease_expires"] = timeFromNow(72h);
+    const std::string newLicense = signedLicense(payload);
+    CannedServer server(200, newLicense);
+    CacheFile cache("verify_held");
+    writePlain(cache.path, oldLicense);
+    SusiClient client(serverKey().publicPem, server.url());
+    HeldFile held(cache.path);
+
+    CHECK(client.verifyAndRefresh(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::Valid);
+    CHECK(readPlain(cache.path) == newLicense);
+    CHECK(held.read() == oldLicense);
+}
+
+TEST_CASE("verifyAndRefresh maps server rejections and removes the cached license", "[verify]")
+{
+    struct Rejection {
+        int status;
+        const char* message;
+        Status expected;
+    };
+    const Rejection rejection = GENERATE(values<Rejection>({
+        {403, "License has been revoked", Status::Revoked},
+        {403, "Machine not authorized for this license", Status::Deactivated},
+        {403, "License has expired", Status::Expired},
+        {403, "Binary signing certificate chain does not terminate at the trusted CA", Status::UnsignedBinary},
+        {404, "License key not found", Status::InvalidLicenseKey},
+    }));
+    CAPTURE(rejection.status, rejection.message);
+    CannedServer server(rejection.status, json{{"error", rejection.message}}.dump());
+    CacheFile cache("verify_rejected");
+    writePlain(cache.path, signedLicense(validPayload()));
+    SusiClient client(serverKey().publicPem, server.url());
+
+    CHECK(client.verifyAndRefresh(cache.path, "AAAA-BBBB-CCCC-DDDD") == rejection.expected);
+    CHECK_FALSE(client.isValid());
+    CHECK_FALSE(fs::exists(cache.path));
+}
+
+TEST_CASE("verifyAndRefresh falls back to the cached license", "[verify]")
+{
+    CacheFile cache("verify_fallback");
     const std::string cached = signedLicense(validPayload());
     writePlain(cache.path, cached);
 
@@ -491,58 +686,363 @@ TEST_CASE("checkLicenseAndRefresh falls back to the cached license", "[refresh]"
     {
         CannedServer server(500, R"({"error": "Internal error"})");
         SusiClient client(serverKey().publicPem, server.url());
-        CHECK(client.checkLicenseAndRefresh(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::Valid);
+        CHECK(client.verifyAndRefresh(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::Valid);
+    }
+    SECTION("rejection the client doesn't act on")
+    {
+        CannedServer server(403, json{{"error", "Machine limit reached (max 2)"}}.dump());
+        SusiClient client(serverKey().publicPem, server.url());
+        CHECK(client.verifyAndRefresh(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::Valid);
+    }
+    SECTION("success response that isn't a license")
+    {
+        const std::string body = GENERATE(notALicense());
+        CAPTURE(body);
+        CannedServer server(200, body);
+        SusiClient client(serverKey().publicPem, server.url());
+        CHECK(client.verifyAndRefresh(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::Valid);
     }
     SECTION("server unreachable")
     {
         // Nothing listens on port 1.
         SusiClient client(serverKey().publicPem, "http://127.0.0.1:1/api/v1");
-        CHECK(client.checkLicenseAndRefresh(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::Valid);
+        CHECK(client.verifyAndRefresh(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::Valid);
     }
     SECTION("no server configured")
     {
         SusiClient client(serverKey().publicPem);
-        CHECK(client.checkLicenseAndRefresh(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::Valid);
+        CHECK(client.verifyAndRefresh(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::Valid);
     }
 
     CHECK(readPlain(cache.path) == cached);
 }
 
-TEST_CASE("checkLicenseAndRefresh without server or cached license reports a missing file", "[refresh]")
-{
-    CacheFile cache("refresh_nothing");
-    SusiClient client(serverKey().publicPem);
-
-    CHECK(client.checkLicenseAndRefresh(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::FileNotFound);
-}
-
-TEST_CASE("checkLicense accepts a license for the machine code sent to the server", "[refresh]")
+TEST_CASE("verifyFile accepts a license for the machine code sent to the server", "[activate]")
 {
     CannedServer server(200, signedLicense(validPayload()));
     CacheFile cache("machine_code");
     SusiClient client(serverKey().publicPem, server.url());
-    REQUIRE(client.checkLicenseAndRefresh(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::Valid);
+    REQUIRE(client.activate(cache.path, "AAAA-BBBB-CCCC-DDDD") == Status::Valid);
     const std::string machineCode = server.requestBody().at("machine_code").get<std::string>();
 
     json payload = validPayload();
     payload["machine_codes"] = json::array({machineCode});
     writePlain(cache.path, signedLicense(payload));
 
-    CHECK(client.checkLicense(cache.path) == Status::Valid);
+    CHECK(client.verifyFile(cache.path) == Status::Valid);
 }
 
 #ifdef _WIN32
-TEST_CASE("checkLicenseAndRefresh doesn't throw when the cached license can't be removed", "[refresh]")
+TEST_CASE("verifyAndRefresh doesn't throw when the cached license can't be removed", "[verify]")
 {
     CannedServer server(403, R"({"error": "License has been revoked"})");
-    CacheFile cache("refresh_locked");
+    CacheFile cache("verify_locked");
     writePlain(cache.path, signedLicense(validPayload()));
     SusiClient client(serverKey().publicPem, server.url());
     // MSVC's std::ifstream opens files like this, and removing the file then fails.
     HeldFile held(cache.path, FILE_SHARE_READ | FILE_SHARE_WRITE);
 
     Status status = Status::Valid;
-    REQUIRE_NOTHROW(status = client.checkLicenseAndRefresh(cache.path, "AAAA-BBBB-CCCC-DDDD"));
+    REQUIRE_NOTHROW(status = client.verifyAndRefresh(cache.path, "AAAA-BBBB-CCCC-DDDD"));
     CHECK(status == Status::Revoked);
 }
 #endif
+
+TEST_CASE("machineCodeFromIds refuses incomplete hardware IDs", "[machineCode]")
+{
+    using susi::details::machineCodeFromIds;
+    CHECK(machineCodeFromIds("", "").empty());
+    CHECK(machineCodeFromIds("", "CPUID-ABC123").empty());
+    CHECK(machineCodeFromIds("BIOS-UUID-0001", "").empty());
+    CHECK(machineCodeFromIds("---", "CPUID-ABC123").empty());
+}
+
+TEST_CASE("machineCodeFromIds hashes the normalized IDs", "[machineCode]")
+{
+    using susi::details::machineCodeFromIds;
+    // SHA-256 of "biosuuid0001|cpuidabc123", as susi_core::fingerprint computes it.
+    const std::string expected = "7b20c46578b75b6b05d1375158760355c94198f24602e78266bf3cb41c686a03";
+    CHECK(machineCodeFromIds("BIOS-UUID-0001", "CPUID-ABC123") == expected);
+    CHECK(machineCodeFromIds("biosuuid0001", "cpuidabc123") == expected);
+    CHECK(machineCodeFromIds("BIOS--UUID--0001", "CPUID-ABC-123") == expected);
+    CHECK(machineCodeFromIds("BIOS-UUID-9999", "CPUID-ABC123") != expected);
+}
+
+#ifdef __linux__
+// Fake filesystem root with the parts of /proc, /sys and /dev that the Linux disk lookup reads.
+struct FakeRoot {
+    fs::path dir;
+    // Root filesystem mounted from device number ("major:minor") with the given source.
+    FakeRoot(const std::string& name, const std::string& number, const std::string& source)
+        : dir(emptyTestDir("fp_" + name))
+    {
+        file("proc/self/mountinfo", "24 1 " + number + " / / rw,relatime shared:1 - ext4 " + source +
+                                        " rw\n25 24 0:22 / /sys rw,nosuid shared:7 - sysfs sysfs rw\n");
+    }
+    FakeRoot& file(const std::string& path, const std::string& contents)
+    {
+        fs::create_directories((dir / path).parent_path());
+        writePlain(dir / path, contents);
+        return *this;
+    }
+    FakeRoot& link(const std::string& path, const std::string& target)
+    {
+        fs::create_directories((dir / path).parent_path());
+        fs::create_symlink(target, dir / path);
+        return *this;
+    }
+    // Register a block device with the device number in /sys/class/block and /sys/dev/block, as a partition of
+    // disk if given.
+    FakeRoot& block(const std::string& name, const std::string& number, const std::string& disk = "")
+    {
+        const std::string dev = disk.empty() ? "sys/devices/" + name : "sys/devices/" + disk + "/" + name;
+        fs::create_directories(dir / dev);
+        if (!disk.empty()) file(dev + "/partition", "1\n");
+        return link("sys/class/block/" + name, "../../../" + dev).link("sys/dev/block/" + number, "../../../" + dev);
+    }
+    FakeRoot& byId(const std::string& name, const std::string& dev)
+    {
+        return link("dev/disk/by-id/" + name, "../../" + dev);
+    }
+    std::optional<std::string> diskId() const { return susi::details::rootDiskSerial(dir); }
+};
+
+TEST_CASE("rootDiskSerial prefers the wwn link of a partitioned SATA disk", "[machineCode]")
+{
+    FakeRoot root("sata", "8:2", "/dev/sda2");
+    root.block("sda", "8:0")
+        .block("sda2", "8:2", "sda")
+        .byId("ata-Samsung_SSD_860_S3Z9NB0K123", "sda")
+        .byId("ata-Samsung_SSD_860_S3Z9NB0K123-part2", "sda2")
+        .byId("wwn-0x5002538e40a1b2c3", "sda")
+        .byId("wwn-0x5002538e40a1b2c3-part2", "sda2");
+    CHECK(root.diskId() == "wwn-0x5002538e40a1b2c3");
+}
+
+TEST_CASE("rootDiskSerial resolves /dev/root and skips placeholder serials", "[machineCode]")
+{
+    // Layout of an Azure VM: root is mounted as "/dev/root" without a device node, and every disk reports the
+    // serial "SN: 00000".
+    FakeRoot root("azure", "259:1", "/dev/root");
+    root.block("nvme0n1", "259:0")
+        .block("nvme0n1p1", "259:1", "nvme0n1")
+        .byId("nvme-MSFT_NVMe_Accelerator_v1.0_SN:_00000", "nvme0n1")
+        .byId("nvme-MSFT_NVMe_Accelerator_v1.0_SN:_00000-part1", "nvme0n1p1")
+        .byId("nvme-MSFT_NVMe_Accelerator_v1.0_SN:_00000_1", "nvme0n1")
+        .byId("nvme-eui.0b7bb4bc50584c62a0ca333f6cbcec01", "nvme0n1")
+        .byId("nvme-eui.0b7bb4bc50584c62a0ca333f6cbcec01-part1", "nvme0n1p1")
+        .file("sys/block/nvme0n1/device/serial", "SN: 00000\n");
+    CHECK(root.diskId() == "nvme-eui.0b7bb4bc50584c62a0ca333f6cbcec01");
+}
+
+TEST_CASE("rootDiskSerial follows a snapshot root to its disk", "[machineCode]")
+{
+    // Layout of an AWS VM: root is a device-mapper snapshot of the EBS volume.
+    FakeRoot root("aws", "252:0", "/dev/mapper/cow-root");
+    root.file("sys/block/dm-0/dm/name", "cow-root\n")
+        .file("sys/block/dm-0/slaves/nvme0n1p1", "")
+        .block("dm-0", "252:0")
+        .block("nvme0n1", "259:0")
+        .block("nvme0n1p1", "259:1", "nvme0n1")
+        .byId("dm-name-cow-root", "dm-0")
+        .byId("nvme-Amazon_Elastic_Block_Store_vol059e04ef34c1f365f", "nvme0n1")
+        .byId("nvme-Amazon_Elastic_Block_Store_vol059e04ef34c1f365f_1", "nvme0n1")
+        .byId("nvme-uuid.d6dd1855-3c3b-5af4-bc41-87880af0260f", "nvme0n1");
+    CHECK(root.diskId() == "nvme-uuid.d6dd1855-3c3b-5af4-bc41-87880af0260f");
+}
+
+TEST_CASE("rootDiskSerial falls back to the mount source for anonymous devices", "[machineCode]")
+{
+    // btrfs reports an anonymous device number, so the mapper name is resolved instead.
+    FakeRoot root("btrfs", "0:31", "/dev/mapper/luks-root");
+    root.file("sys/block/dm-0/dm/name", "luks-root\n")
+        .file("sys/block/dm-0/slaves/nvme0n1p2", "")
+        .block("dm-0", "253:0")
+        .block("nvme0n1", "259:0")
+        .block("nvme0n1p2", "259:2", "nvme0n1")
+        .byId("dm-uuid-CRYPT-LUKS2-0a1b2c3d-luks-root", "dm-0")
+        .byId("nvme-Samsung_SSD_970_S467NX0M123", "nvme0n1");
+    CHECK(root.diskId() == "nvme-Samsung_SSD_970_S467NX0M123");
+}
+
+TEST_CASE("rootDiskSerial matches disk names ending in a digit", "[machineCode]")
+{
+    FakeRoot root("nvme", "259:3", "/dev/nvme0n1p3");
+    root.block("nvme0n1", "259:0")
+        .block("nvme0n1p3", "259:3", "nvme0n1")
+        .byId("nvme-Samsung_SSD_970_S467NX0M123", "nvme0n1")
+        .byId("nvme-Samsung_SSD_970_S467NX0M123-part3", "nvme0n1p3")
+        .file("sys/block/nvme0n1/device/serial", "S467NX0M123\n");
+    CHECK(root.diskId() == "nvme-Samsung_SSD_970_S467NX0M123");
+}
+
+TEST_CASE("rootDiskSerial follows LVM on LUKS to the physical disk", "[machineCode]")
+{
+    FakeRoot root("luks", "253:1", "/dev/mapper/vgubuntu-root");
+    root.file("sys/block/dm-0/dm/name", "nvme0n1p3_crypt\n")
+        .file("sys/block/dm-0/slaves/nvme0n1p3", "")
+        .file("sys/block/dm-1/dm/name", "vgubuntu-root\n")
+        .file("sys/block/dm-1/slaves/dm-0", "")
+        .file("sys/block/dm-2/dm/name", "vgubuntu-swap_1\n")
+        .file("sys/block/dm-2/slaves/dm-0", "")
+        .block("dm-0", "253:0")
+        .block("dm-1", "253:1")
+        .block("dm-2", "253:2")
+        .block("nvme0n1", "259:0")
+        .block("nvme0n1p3", "259:3", "nvme0n1")
+        .byId("dm-uuid-CRYPT-LUKS2-0a1b2c3d-nvme0n1p3_crypt", "dm-0")
+        .byId("dm-uuid-LVM-root", "dm-1")
+        .byId("dm-uuid-LVM-swap", "dm-2")
+        .byId("nvme-Samsung_SSD_970_S467NX0M123", "nvme0n1");
+    CHECK(root.diskId() == "nvme-Samsung_SSD_970_S467NX0M123");
+}
+
+TEST_CASE("rootDiskSerial uses the dm-uuid of a dm device without slaves", "[machineCode]")
+{
+    FakeRoot root("dm", "253:0", "/dev/dm-0");
+    root.file("sys/block/dm-0/dm/name", "root\n")
+        .block("dm-0", "253:0")
+        .byId("dm-name-root", "dm-0")
+        .byId("dm-uuid-LVM-other", "dm-1")
+        .byId("dm-uuid-LVM-root", "dm-0");
+    CHECK(root.diskId() == "dm-uuid-LVM-root");
+}
+
+TEST_CASE("rootDiskSerial falls back to the sysfs serial", "[machineCode]")
+{
+    FakeRoot root("sysfs", "8:1", "/dev/sda1");
+    root.block("sda", "8:0").block("sda1", "8:1", "sda").file("sys/block/sda/device/serial", "  WD-WCC4N1234567 \n");
+    CHECK(root.diskId() == "WD-WCC4N1234567");
+}
+
+TEST_CASE("rootDiskSerial falls back to the NVMe controller serial", "[machineCode]")
+{
+    FakeRoot root("nvmectrl", "259:1", "/dev/nvme0n1p1");
+    root.block("nvme0n1", "259:0").block("nvme0n1p1", "259:1", "nvme0n1").file("sys/class/nvme/nvme0/serial", "S467NX0M123\n");
+    CHECK(root.diskId() == "S467NX0M123");
+}
+
+TEST_CASE("rootDiskSerial is empty without any disk ID", "[machineCode]")
+{
+    FakeRoot root("none", "8:1", "/dev/sda1");
+    root.block("sda", "8:0").block("sda1", "8:1", "sda");
+    CHECK_FALSE(root.diskId());
+}
+
+TEST_CASE("rootDiskSerial is empty if the mount source is not a block device", "[machineCode]")
+{
+    // The anonymous device number falls back to a source that sysfs doesn't know.
+    FakeRoot root("noblock", "0:31", "/dev/sdb");
+    root.byId("ata-Stale_Disk_123", "sdb").file("sys/block/sdb/device/serial", "STALE123\n");
+    CHECK_FALSE(root.diskId());
+}
+#endif
+
+TEST_CASE("verifyTokenOn accepts a valid token", "[verifyToken]")
+{
+    UsbStick stick("token_valid", "SERIAL-A");
+    stick.writeToken(encryptToken(signedLicense(tokenPayload("SERIAL-A")), "SERIAL-A"));
+    SusiClient client(serverKey().publicPem);
+
+    CHECK(client.verifyTokenOn({stick.device}) == Status::Valid);
+    CHECK(client.isValid());
+    CHECK(client.features() == validFeatures);
+}
+
+TEST_CASE("verifyTokenOn reports why a token is invalid", "[verifyToken]")
+{
+    UsbStick stick("token_invalid", "SERIAL-A");
+    json payload = tokenPayload("SERIAL-A");
+    const Key* key = &serverKey();
+    Status expected = Status::Valid;
+
+    SECTION("expired")
+    {
+        payload["expires"] = timeFromNow(-1h);
+        expected = Status::Expired;
+    }
+    SECTION("bound to another USB stick")
+    {
+        payload["machine_codes"] = json::array({"usb:SERIAL-B"});
+        expected = Status::InvalidMachine;
+    }
+    SECTION("signed with another key")
+    {
+        key = &otherKey();
+        expected = Status::InvalidSignature;
+    }
+
+    stick.writeToken(encryptToken(signedLicense(payload, *key), "SERIAL-A"));
+    SusiClient client(serverKey().publicPem);
+    CHECK(client.verifyTokenOn({stick.device}) == expected);
+    CHECK_FALSE(client.isValid());
+    CHECK(client.features().empty());
+}
+
+TEST_CASE("verifyTokenOn prefers a valid token over an invalid one", "[verifyToken]")
+{
+    UsbStick expired("token_prefer_expired", "SERIAL-A");
+    json payload = tokenPayload("SERIAL-A");
+    payload["expires"] = timeFromNow(-1h);
+    expired.writeToken(encryptToken(signedLicense(payload), "SERIAL-A"));
+    UsbStick valid("token_prefer_valid", "SERIAL-B");
+    valid.writeToken(encryptToken(signedLicense(tokenPayload("SERIAL-B")), "SERIAL-B"));
+    SusiClient client(serverKey().publicPem);
+
+    CHECK(client.verifyTokenOn({expired.device, valid.device}) == Status::Valid);
+    CHECK(client.isValid());
+}
+
+TEST_CASE("verifyTokenOn reports an error for a token it can't decrypt", "[verifyToken]")
+{
+    UsbStick stick("token_undecryptable", "SERIAL-A");
+    SECTION("encrypted for another USB stick")
+    {
+        stick.writeToken(encryptToken(signedLicense(tokenPayload("SERIAL-A")), "SERIAL-B"));
+    }
+    SECTION("corrupted")
+    {
+        std::string blob = encryptToken(signedLicense(tokenPayload("SERIAL-A")), "SERIAL-A");
+        blob.back() ^= 0x01;
+        stick.writeToken(blob);
+    }
+    SECTION("too short") { stick.writeToken("short"); }
+    SusiClient client(serverKey().publicPem);
+
+    CHECK(client.verifyTokenOn({stick.device}) == Status::Error);
+    CHECK_FALSE(client.isValid());
+}
+
+TEST_CASE("verifyTokenOn reports an invalid token over one it can't decrypt", "[verifyToken]")
+{
+    UsbStick expired("token_mixed_expired", "SERIAL-A");
+    json payload = tokenPayload("SERIAL-A");
+    payload["expires"] = timeFromNow(-1h);
+    expired.writeToken(encryptToken(signedLicense(payload), "SERIAL-A"));
+    UsbStick undecryptable("token_mixed_undecryptable", "SERIAL-B");
+    undecryptable.writeToken(encryptToken(signedLicense(tokenPayload("SERIAL-B")), "SERIAL-C"));
+    SusiClient client(serverKey().publicPem);
+
+    const bool expiredFirst = GENERATE(true, false);
+    CAPTURE(expiredFirst);
+    const std::vector<SusiClient::UsbDevice> devices = expiredFirst
+        ? std::vector<SusiClient::UsbDevice>{expired.device, undecryptable.device}
+        : std::vector<SusiClient::UsbDevice>{undecryptable.device, expired.device};
+    CHECK(client.verifyTokenOn(devices) == Status::Expired);
+}
+
+TEST_CASE("verifyTokenOn reports TokenNotFound without a token", "[verifyToken]")
+{
+    SusiClient client(serverKey().publicPem);
+
+    SECTION("no USB devices")
+    {
+        CHECK(client.verifyTokenOn({}) == Status::TokenNotFound);
+    }
+    SECTION("USB device without a token")
+    {
+        UsbStick stick("token_none", "SERIAL-A");
+        CHECK(client.verifyTokenOn({stick.device}) == Status::TokenNotFound);
+    }
+    CHECK_FALSE(client.isValid());
+}

@@ -7,8 +7,12 @@
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <optional>
+#include <ranges>
 #include <sstream>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -159,7 +163,7 @@ static std::string normalizeId(const std::string& s)
 
 #ifdef _WIN32
 // On Windows the machine code consists of the BIOS UUID and the CPU processor ID.
-static std::string getMachineCode()
+static std::pair<std::string, std::string> getHardwareIds()
 {
     std::string biosUuid, processorId;
 
@@ -215,10 +219,7 @@ static std::string getMachineCode()
         if (comInitByUs) CoUninitialize();
     }
 
-    std::string combined = normalizeId(biosUuid) + "|" + normalizeId(processorId);
-    unsigned char hash[SHA256_DIGEST_LENGTH];
-    SHA256(reinterpret_cast<const unsigned char*>(combined.data()), combined.size(), hash);
-    return hexEncode(hash, SHA256_DIGEST_LENGTH);
+    return {biosUuid, processorId};
 }
 
 static std::string getHostname()
@@ -263,14 +264,9 @@ static std::string getIOPlatformValue(const char* key)
 }
 
 // On macOS the machine code consists of the IOPlatformUUID and the IOPlatformSerialNumber.
-static std::string getMachineCode()
+static std::pair<std::string, std::string> getHardwareIds()
 {
-    std::string uuid = getIOPlatformValue("IOPlatformUUID");
-    std::string serial = getIOPlatformValue("IOPlatformSerialNumber");
-    std::string combined = normalizeId(uuid) + "|" + normalizeId(serial);
-    unsigned char hash[SHA256_DIGEST_LENGTH];
-    SHA256(reinterpret_cast<const unsigned char*>(combined.data()), combined.size(), hash);
-    return hexEncode(hash, SHA256_DIGEST_LENGTH);
+    return {getIOPlatformValue("IOPlatformUUID"), getIOPlatformValue("IOPlatformSerialNumber")};
 }
 
 static std::string getHostname()
@@ -280,79 +276,172 @@ static std::string getHostname()
     return "";
 }
 #elif defined(__linux__)
-static std::string getRootDiskSerial()
+/// Returns the whole file without surrounding whitespace, or nothing if it is empty or can't be read.
+static std::optional<std::string> readTrimmed(const std::filesystem::path& path)
 {
-    // Find device mounted at "/" from /proc/mounts
-    std::string rootDev;
-    {
-        std::ifstream f("/proc/mounts");
-        std::string line;
-        while (std::getline(f, line)) {
-            std::istringstream iss(line);
-            std::string dev, mount;
-            if ((iss >> dev >> mount) && mount == "/") {
-                rootDev = dev;
-                break;
-            }
-        }
-    }
-    if (rootDev.size() <= 5 || rootDev.compare(0, 5, "/dev/") != 0) return "";
-
-    std::string disk = rootDev.substr(5); // e.g. "sda1", "nvme0n1p1"
-
-    // NVMe/eMMC: strip trailing "p<digits>" → "nvme0n1p1" → "nvme0n1"
-    bool stripped = false;
-    {
-        const auto p = disk.rfind('p');
-        if (p != std::string::npos && p > 0) {
-            const auto suffix = disk.substr(p + 1);
-            if (!suffix.empty() && std::all_of(suffix.begin(), suffix.end(),
-                    [](unsigned char c) { return std::isdigit(c); })) {
-                disk = disk.substr(0, p);
-                stripped = true;
-            }
-        }
-    }
-    // SATA/SCSI: strip trailing digits → "sda1" → "sda"
-    if (!stripped) {
-        while (!disk.empty() && std::isdigit(static_cast<unsigned char>(disk.back())))
-            disk.pop_back();
-    }
-
-    for (const std::string& path : {
-        "/sys/block/" + disk + "/device/serial",
-        "/sys/block/" + disk + "/serial"
-    }) {
-        std::ifstream f(path);
-        if (!f.is_open()) continue;
-        std::string serial;
-        std::getline(f, serial);
-        while (!serial.empty() && (serial.back() == '\n' || serial.back() == '\r' || serial.back() == ' '))
-            serial.pop_back();
-        if (!serial.empty()) return serial;
-    }
-    return "";
+    std::ifstream f(path);
+    const std::string s((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    const char* ws = " \t\n\v\f\r";
+    const auto first = s.find_first_not_of(ws);
+    if (first == std::string::npos) return std::nullopt;
+    return s.substr(first, s.find_last_not_of(ws) - first + 1);
 }
 
-// On linux the machine code consists of the contents of /etc/machine-id and the root disk serial number.
-static std::string getMachineCode()
+/// Returns the file name a path resolves to, or nothing if it can't be resolved.
+static std::optional<std::string> canonicalName(const std::filesystem::path& path)
 {
-    std::string machineId;
-    {
-        std::ifstream f("/etc/machine-id");
-        if (f.is_open()) {
-            std::getline(f, machineId);
-            while (!machineId.empty() && (machineId.back() == '\n' || machineId.back() == '\r' || machineId.back() == ' '))
-                machineId.pop_back();
-        }
+    std::error_code ec;
+    std::string name = std::filesystem::canonical(path, ec).filename().string();
+    if (ec || name.empty()) return std::nullopt;
+    return name;
+}
+
+/// Returns the disk a partition belongs to, from sysfs ("sda1" -> "sda", "nvme0n1p3" -> "nvme0n1").
+/// Whole disks such as "nvme0n1" or "dm-0" are returned unchanged, anything that isn't a block device gives nothing.
+static std::optional<std::string> wholeDisk(const std::filesystem::path& root, const std::string& dev)
+{
+    const auto sys = root / "sys/class/block" / dev;
+    std::error_code ec;
+    if (!std::filesystem::exists(sys, ec)) return std::nullopt;
+    if (!std::filesystem::exists(sys / "partition", ec)) return dev;
+    // /sys/class/block/<partition> links into the directory of its disk.
+    return canonicalName(sys / "..");
+}
+
+struct RootMount {
+    std::string majorMinor, source;
+};
+
+/// Returns the device number and source of the visible root mount.
+static std::optional<RootMount> rootMount(const std::filesystem::path& root)
+{
+    /// Returns the n-th space-separated field of s
+    const auto field = [](std::string_view s, size_t n) -> std::optional<std::string> {
+        for (const auto f : s | std::views::split(' '))
+            if (n-- == 0) return std::string(f.begin(), f.end());
+        return std::nullopt;
+    };
+    // The last mount on "/" is the visible one. Fields: id parent_id major:minor root mount_point ...
+    // "-" fs_type source options
+    std::optional<RootMount> result;
+    std::ifstream f(root / "proc/self/mountinfo");
+    std::string line;
+    while (std::getline(f, line)) {
+        if (field(line, 4) != "/") continue; // Mount point is not /
+        const auto sep = line.find(" - ");
+        // Source is second field after -
+        const auto source = sep == std::string::npos ? std::nullopt : field(std::string_view(line).substr(sep + 3), 1);
+        const auto majorMinor = field(line, 2);
+        result = RootMount{majorMinor.value_or(""), source.value_or("")};
     }
+    return result;
+}
 
-    std::string diskSerial = getRootDiskSerial();
+/// Returns the device-mapper device ("dm-0") with the given name.
+static std::optional<std::string> dmByName(const std::filesystem::path& root, const std::string& name)
+{
+    std::error_code ec;
+    std::filesystem::directory_iterator it(root / "sys/block", ec), end;
+    for (; !ec && it != end; it.increment(ec)) {
+        std::string dev = it->path().filename().string();
+        if (dev.compare(0, 3, "dm-") == 0 && readTrimmed(root / "sys/block" / dev / "dm/name") == name) return dev;
+    }
+    return std::nullopt;
+}
 
-    std::string combined = normalizeId(machineId) + "|" + normalizeId(diskSerial);
-    unsigned char hash[SHA256_DIGEST_LENGTH];
-    SHA256(reinterpret_cast<const unsigned char*>(combined.data()), combined.size(), hash);
-    return hexEncode(hash, SHA256_DIGEST_LENGTH);
+/// Follows a device-mapper device down to the physical disk.
+static std::optional<std::string> physicalDisk(const std::filesystem::path& root, std::string dev)
+{
+    // Take the smallest slave name so a volume spanning several disks resolves the same way on every run.
+    while (dev.compare(0, 3, "dm-") == 0) {
+        std::optional<std::string> slave;
+        std::error_code ec;
+        std::filesystem::directory_iterator it(root / "sys/block" / dev / "slaves", ec), end;
+        for (; !ec && it != end; it.increment(ec)) {
+            const std::string name = it->path().filename().string();
+            if (!slave || name < *slave) slave = name;
+        }
+        if (!slave) break;
+        dev = *slave;
+    }
+    return wholeDisk(root, dev);
+}
+
+/// Returns the disk holding the root filesystem ("sda", "nvme0n1", "dm-0"). Device-mapper devices (LVM, LUKS)
+/// are followed down to the physical disk.
+static std::optional<std::string> rootBlockDevice(const std::filesystem::path& root)
+{
+    return rootMount(root)
+        .and_then([&](const RootMount& m) {
+            // Resolve the device number first: the source can be a name without a device node, such as "/dev/root"
+            // when the kernel mounts root without an initramfs (e.g. on Azure VMs).
+            return canonicalName(root / "sys/dev/block" / m.majorMinor).or_else([&]() -> std::optional<std::string> {
+                // Filesystems such as btrfs report an anonymous device number.
+                if (!m.source.starts_with("/dev/") || m.source.size() == 5) return std::nullopt;
+                return m.source.substr(5);
+            });
+        })
+        .and_then([&](const std::string& dev) {
+            return dev.compare(0, 7, "mapper/") == 0 ? dmByName(root, dev.substr(7)) : std::optional(dev);
+        })
+        .and_then([&](const std::string& dev) { return physicalDisk(root, dev); });
+}
+
+/// Returns the name of a stable udev link to the disk in /dev/disk/by-id, preferring serial, then world-wide IDs
+/// (wwn, NVMe eui/uuid), then dm-uuid entries. These links work for direct disks, NVMe and LVM without root. Ties are broken by name so
+/// the result doesn't depend on directory order.
+static std::optional<std::string> diskIdFromById(const std::filesystem::path& root, const std::string& disk)
+{
+    // Model and serial links can carry a placeholder serial (Azure NVMe disks all report "SN: 00000"), so prefer
+    // the IDs unique to the disk.
+    const auto rank = [](const std::string& s) {
+        if (s.find("serial") != std::string::npos)
+            return 0;
+        if (s.compare(0, 4, "wwn-") == 0 || s.compare(0, 9, "nvme-eui.") == 0 || s.compare(0, 10, "nvme-uuid.") == 0)
+            return 1;
+        if (s.compare(0, 7, "dm-uuid") == 0)
+            return 2;
+        return 3;
+    };
+    std::optional<std::string> best;
+    std::error_code ec;
+    std::filesystem::directory_iterator it(root / "dev/disk/by-id", ec), end;
+    for (; !ec && it != end; it.increment(ec)) {
+        std::error_code linkEc;
+        const auto target = std::filesystem::read_symlink(it->path(), linkEc);
+        if(linkEc || target.filename().string() != disk) continue;
+        const std::string name = it->path().filename().string();
+        // Skip partition-specific entries (they include a "-partN" suffix).
+        if (name.find("-part") != std::string::npos) continue;
+        if (!best || std::make_pair(rank(name), name) < std::make_pair(rank(*best), *best)) best = name;
+    }
+    return best;
+}
+
+namespace susi::details {
+// Not static so the tests can reach it. /proc, /sys and /dev are read below root.
+std::optional<std::string> rootDiskSerial(const std::filesystem::path& root)
+{
+    return rootBlockDevice(root)
+        .and_then([&](const std::string& disk) {
+            return diskIdFromById(root, disk)
+                .or_else([&] { return readTrimmed(root / "sys/block" / disk / "device/serial"); })
+                .or_else([&] { return readTrimmed(root / "sys/block" / disk / "serial"); })
+                .or_else([&] {
+                    // NVMe namespace "nvme0n1" belongs to controller "nvme0".
+                    const auto n = disk.find('n', 4);
+                    return disk.compare(0, 4, "nvme") == 0 && n != std::string::npos
+                               ? readTrimmed(root / "sys/class/nvme" / disk.substr(0, n) / "serial")
+                               : std::nullopt;
+                });
+        });
+}
+} // namespace susi::details
+
+// On linux the machine code consists of the contents of /etc/machine-id and the root disk ID.
+static std::pair<std::string, std::string> getHardwareIds()
+{
+    return {readTrimmed("/etc/machine-id").value_or(""), susi::details::rootDiskSerial("/").value_or("")};
 }
 
 static std::string getHostname()
@@ -373,9 +462,9 @@ static std::string getHostname()
     return "";
 }
 #else
-static std::string getMachineCode()
+static std::pair<std::string, std::string> getHardwareIds()
 {
-    return "";
+    return {};
 }
 
 static std::string getHostname()
@@ -385,6 +474,40 @@ static std::string getHostname()
     return "";
 }
 #endif
+
+namespace susi::details {
+// Not static so the tests can reach it.
+std::string machineCodeFromIds(const std::string& id1, const std::string& id2)
+{
+    const std::string a = normalizeId(id1);
+    const std::string b = normalizeId(id2);
+    // A partial read would yield a different but valid-looking code and claim a new machine slot.
+    if (a.empty() || b.empty()) {
+        SUSI_LOG("Hardware fingerprint incomplete (id1=%s id2=%s); refusing to generate an unstable machine code",
+                 a.empty() ? "empty" : "ok", b.empty() ? "empty" : "ok");
+        return "";
+    }
+    const std::string combined = a + "|" + b;
+    unsigned char hash[SHA256_DIGEST_LENGTH];
+    SHA256(reinterpret_cast<const unsigned char*>(combined.data()), combined.size(), hash);
+    return hexEncode(hash, SHA256_DIGEST_LENGTH);
+}
+} // namespace susi::details
+
+/// Returns an empty string if the hardware IDs can't be read completely.
+static std::string getMachineCode()
+{
+    // Hardware identity can't change mid-process. Keep the first successful read so a later
+    // transient failure can't flip the code and the hardware isn't queried on every check.
+    static std::mutex mutex;
+    static std::string cached;
+    std::lock_guard<std::mutex> lock(mutex);
+    if (cached.empty()) {
+        const auto ids = getHardwareIds();
+        cached = susi::details::machineCodeFromIds(ids.first, ids.second);
+    }
+    return cached;
+}
 
 // ---------------------------------------------------------------------------
 // ISO 8601 date parsing (enough for RFC 3339 timestamps from our licenses)
@@ -715,12 +838,16 @@ SusiClient::LicenseStatus SusiClient::verifySignedLicenseJson(const std::string&
     }
 
     // Check machine code
-    std::string codeToCheck = activationCode;
     if (payload.contains("machine_codes") && payload.at("machine_codes").is_array()) {
         const auto& codes = payload.at("machine_codes");
         if (!codes.empty()) {
+            std::string codeToCheck = activationCode;
             if(codeToCheck.empty()){
                 codeToCheck = getMachineCode();
+                if (codeToCheck.empty()) {
+                    SUSI_LOG("Could not compute machine fingerprint");
+                    return LicenseStatus::Error;
+                }
             }
             bool found = false;
             for (const auto& code : codes) {
@@ -808,7 +935,7 @@ SusiClient::LicenseStatus SusiClient::verifySignedLicenseJson(const std::string&
 // ---------------------------------------------------------------------------
 // License check from file
 // ---------------------------------------------------------------------------
-SusiClient::LicenseStatus SusiClient::checkLicense(const std::filesystem::path& licensePath)
+SusiClient::LicenseStatus SusiClient::verifyFile(const std::filesystem::path& licensePath)
 {
     m_features.clear();
     m_product.clear();
@@ -829,101 +956,131 @@ SusiClient::LicenseStatus SusiClient::checkLicense(const std::filesystem::path& 
 }
 
 // ---------------------------------------------------------------------------
-// Online license check
+// Online activation and lease refresh
 // ---------------------------------------------------------------------------
-SusiClient::LicenseStatus SusiClient::checkLicenseAndRefresh(const std::filesystem::path& licensePath, const std::string& licenseKey)
+// True if the response has the shape of a signed license (whether it verifies is checked later).
+static bool isSignedLicenseJson(const std::string& response)
 {
+    const json j = json::parse(response, nullptr, false);
+    return j.is_object() && j.contains("license_data") && j.at("license_data").is_string() &&
+           j.contains("signature") && j.at("signature").is_string();
+}
+
+static long postLicenseRequest(std::string url, const char* endpoint, json body, std::string& response)
+{
+    if (!url.empty() && url.back() == '/') url.pop_back();
+    const std::string machineCode = getMachineCode();
+    if (machineCode.empty()) {
+        SUSI_LOG("Could not compute machine fingerprint - not contacting the license server");
+        return 0;
+    }
+    body["machine_code"] = machineCode;
+
+    auto certChain = getSigningCertChain();
+    if (!certChain.empty()) {
+        json chainArr = json::array();
+        for (const auto& der : certChain)
+            chainArr.push_back(base64Encode(der.data(), der.size()));
+        body["signing_cert_chain"] = chainArr;
+    }
+
+    return httpPost(url + "/" + endpoint, body.dump(), response);
+}
+
+SusiClient::LicenseStatus SusiClient::storeServerLicense(const std::filesystem::path& licensePath, const std::string& signedLicenseStr)
+{
+    auto status = verifySignedLicenseJson(signedLicenseStr);
+    m_isValid = (status == LicenseStatus::Valid || status == LicenseStatus::ValidGracePeriod);
+    if (m_isValid && !susi::details::writeFileReplace(licensePath, signedLicenseStr)) {
+        SUSI_LOG("Failed to write license file: %s", licensePath.string().c_str());
+    }
+    return status;
+}
+
+SusiClient::LicenseStatus SusiClient::activate(const std::filesystem::path& licensePath, const std::string& licenseKey, const std::string& friendlyName)
+{
+    m_isValid = false;
     m_features.clear();
     m_product.clear();
     m_customer.clear();
     m_leaseExpiresEpoch = 0;
     m_graceHours = DEFAULT_LEASE_GRACE_HOURS;
 
+    if (m_serverUrl.empty()) {
+        SUSI_LOG("No license server configured - cannot activate");
+        return LicenseStatus::Error;
+    }
+
+    json body = {
+        {"license_key", licenseKey},
+        {"friendly_name", friendlyName.empty() ? getHostname() : friendlyName},
+    };
+    std::string response;
+    long httpCode = postLicenseRequest(m_serverUrl, "activate", std::move(body), response);
+    if (httpCode >= 200 && httpCode < 300) {
+        return storeServerLicense(licensePath, response);
+    }
+
+    SUSI_LOG("Activation failed (HTTP %ld): %s", httpCode, response.c_str());
+    auto says = [&](const char* text) { return response.find(text) != std::string::npos; };
+    if (httpCode == 404) return LicenseStatus::InvalidLicenseKey;
+    if (httpCode == 403) {
+        if (says("revoked")) return LicenseStatus::Revoked;
+        if (says("removed by an administrator")) return LicenseStatus::Deactivated;
+        if (says("expired")) return LicenseStatus::Expired;
+        if (says("Machine limit")) return LicenseStatus::InvalidMachine;
+        if (says("certificate chain")) return LicenseStatus::UnsignedBinary;
+    }
+    return LicenseStatus::Error;
+}
+
+SusiClient::LicenseStatus SusiClient::verifyAndRefresh(const std::filesystem::path& licensePath, const std::string& licenseKey)
+{
+    m_isValid = false;
+    m_features.clear();
+    m_product.clear();
+    m_customer.clear();
+    m_leaseExpiresEpoch = 0;
+    m_graceHours = DEFAULT_LEASE_GRACE_HOURS;
+
+    std::error_code ec;
+    if (!std::filesystem::exists(licensePath, ec)) {
+        SUSI_LOG("No cached license - this machine has not been activated: %s", licensePath.string().c_str());
+        return LicenseStatus::NotActivated;
+    }
+
     if (!m_serverUrl.empty()) {
-        std::string url = m_serverUrl;
-        if (!url.empty() && url.back() == '/') url.pop_back();
-        url += "/activate";
-
-        json body;
-        body["license_key"] = licenseKey;
-        body["machine_code"] = getMachineCode();
-        body["friendly_name"] = getHostname();
-
-        auto certChain = getSigningCertChain();
-        if (!certChain.empty()) {
-            json chainArr = json::array();
-            for (const auto& der : certChain)
-                chainArr.push_back(base64Encode(der.data(), der.size()));
-            body["signing_cert_chain"] = chainArr;
-        }
-
         std::string response;
-        long httpCode = httpPost(url, body.dump(), response);
-        if (httpCode >= 200 && httpCode < 300) {
-            auto status = verifySignedLicenseJson(response);
-            m_isValid = (status == LicenseStatus::Valid || status == LicenseStatus::ValidGracePeriod);
-
-            if (m_isValid && !susi::details::writeFileReplace(licensePath, response)) {
-                SUSI_LOG("Failed to write license file: %s", licensePath.string().c_str());
-            }
-
-            return status;
-        } else if (httpCode == 403) {
-            std::error_code ec;
-            std::filesystem::remove(licensePath, ec);
-            m_isValid = false;
-
-            if (response.find("revoked") != std::string::npos){
-                SUSI_LOG("License has been revoked - removing chached file");
-                return LicenseStatus::Revoked;
-            } else if (response.find("expired") != std::string::npos) {
-                SUSI_LOG("License has expired - removing chached file");
-                return LicenseStatus::Expired;
-            } else if (response.find("Machine limit") != std::string::npos){
-                SUSI_LOG("License machine limit exceeded - removing chached file");
-                return LicenseStatus::InvalidMachine;
-            } else if(response.find("certificate chain") != std::string::npos){
-                SUSI_LOG("Binary not signed correctly - removing chached file");
-                return LicenseStatus::UnsignedBinary;
-            } else {
-                SUSI_LOG("Server rejected license (HTTP 403) - removing cached file");
-                return LicenseStatus::Error;
-            }
-        } else if (httpCode == 404) {
-            SUSI_LOG("License not found on server (HTTP 404) - removing cached file");
-            std::error_code ec;
-            std::filesystem::remove(licensePath, ec);
-            m_isValid = false;
-            return LicenseStatus::InvalidLicenseKey;
-        } else {
-            SUSI_LOG("Online license refresh failed, falling back to cached file");
+        long httpCode = postLicenseRequest(m_serverUrl, "verify", {{"license_key", licenseKey}}, response);
+        // A 2xx that isn't a license (e.g. a captive portal page) counts as the server being unreachable.
+        if (httpCode >= 200 && httpCode < 300 && isSignedLicenseJson(response)) {
+            return storeServerLicense(licensePath, response);
         }
+
+        auto says = [&](const char* text) { return response.find(text) != std::string::npos; };
+        auto reject = [&](LicenseStatus status, const char* reason) {
+            SUSI_LOG("%s - removing cached file", reason);
+            std::filesystem::remove(licensePath, ec);
+            return status;
+        };
+        if (httpCode == 404) return reject(LicenseStatus::InvalidLicenseKey, "License not found on server");
+        if (httpCode == 403) {
+            if (says("revoked")) return reject(LicenseStatus::Revoked, "License has been revoked");
+            if (says("not authorized")) return reject(LicenseStatus::Deactivated, "Machine is no longer activated on the server");
+            if (says("expired")) return reject(LicenseStatus::Expired, "License has expired");
+            if (says("certificate chain")) return reject(LicenseStatus::UnsignedBinary, "Binary not signed correctly");
+        }
+        SUSI_LOG("Online license verify failed (HTTP %ld), falling back to cached file", httpCode);
     } else {
-        SUSI_LOG("No server supplied. Online license check will fail. Falling back to cached file.");
+        SUSI_LOG("No server supplied. Falling back to cached file.");
     }
 
-    // Fall back to local file
-    std::string licenseContents;
-    if (!susi::details::readWholeFile(licensePath, licenseContents)) {
-        SUSI_LOG("Cached license file cannot be found: %s", licensePath.string().c_str());
-        m_isValid = false;
-        return LicenseStatus::FileNotFound;
-    }
-
-    auto status = verifySignedLicenseJson(licenseContents);
-    m_isValid = (status == LicenseStatus::Valid || status == LicenseStatus::ValidGracePeriod);
-    return status;
+    return verifyFile(licensePath);
 }
 
 // ---------------------------------------------------------------------------
 // USB hardware token support
 // ---------------------------------------------------------------------------
-
-struct UsbDeviceInfo {
-    std::string serial;
-    std::string mountPath;
-    std::string name;
-};
 
 #ifdef _WIN32
 // UTF-16 (no trailing null) -> UTF-8; matches Linux sysfs serial trimming in spirit.
@@ -1030,9 +1187,9 @@ static std::string win32UsbInstanceSerialForDiskNumber(DWORD diskNumber)
     return serialUtf8;
 }
 
-static std::vector<UsbDeviceInfo> enumerateUsbDevices()
+static std::vector<SusiClient::UsbDevice> enumerateUsbDevices()
 {
-    std::vector<UsbDeviceInfo> devices;
+    std::vector<SusiClient::UsbDevice> devices;
 
     wchar_t driveStrings[512];
     DWORD len = GetLogicalDriveStringsW(sizeof(driveStrings) / sizeof(wchar_t), driveStrings);
@@ -1112,9 +1269,9 @@ static std::string ioUsbSerialForService(io_service_t service)
     return serial;
 }
 
-static std::vector<UsbDeviceInfo> enumerateUsbDevices()
+static std::vector<SusiClient::UsbDevice> enumerateUsbDevices()
 {
-    std::vector<UsbDeviceInfo> devices;
+    std::vector<SusiClient::UsbDevice> devices;
 
     // Build map: /dev/diskNsM -> mount point
     std::unordered_map<std::string, std::string> mountMap;
@@ -1172,9 +1329,9 @@ static std::vector<UsbDeviceInfo> enumerateUsbDevices()
     return devices;
 }
 #elif defined(__linux__)
-static std::vector<UsbDeviceInfo> enumerateUsbDevices()
+static std::vector<SusiClient::UsbDevice> enumerateUsbDevices()
 {
-    std::vector<UsbDeviceInfo> devices;
+    std::vector<SusiClient::UsbDevice> devices;
 
     // Parse /proc/mounts
     std::unordered_map<std::string, std::string> mounts;
@@ -1249,7 +1406,7 @@ static std::vector<UsbDeviceInfo> enumerateUsbDevices()
     return devices;
 }
 #else
-static std::vector<UsbDeviceInfo> enumerateUsbDevices()
+static std::vector<SusiClient::UsbDevice> enumerateUsbDevices()
 {
     return {};
 }
@@ -1349,20 +1506,22 @@ static std::string decryptToken(const std::vector<unsigned char>& blob, const st
     return plaintext;
 }
 
-SusiClient::LicenseStatus SusiClient::checkLicenseToken()
+SusiClient::LicenseStatus SusiClient::verifyToken()
 {
+    return verifyTokenOn(enumerateUsbDevices());
+}
+
+SusiClient::LicenseStatus SusiClient::verifyTokenOn(const std::vector<UsbDevice>& devices)
+{
+    m_isValid = false;
     m_features.clear();
     m_product.clear();
     m_customer.clear();
     m_leaseExpiresEpoch = 0;
     m_graceHours = DEFAULT_LEASE_GRACE_HOURS;
 
-    auto devices = enumerateUsbDevices();
-    if (devices.empty()) {
-        SUSI_LOG("No USB mass storage devices found");
-        m_isValid = false;
-        return LicenseStatus::TokenNotFound;
-    }
+    std::optional<LicenseStatus> lastInvalid;
+    bool decryptionFailed = false;
 
     for (const auto& dev : devices) {
         std::string tokenPath = dev.mountPath;
@@ -1389,12 +1548,18 @@ SusiClient::LicenseStatus SusiClient::checkLicenseToken()
         f.close();
 
         std::string decrypted = decryptToken(blob, dev.serial);
-        if (decrypted.empty()) continue;
+        if (decrypted.empty()) {
+            SUSI_LOG("Token on %s decryption failed (wrong USB device or corrupted token)", tokenPath.c_str());
+            decryptionFailed = true;
+            continue;
+        }
 
         std::string usbActivationCode = "usb:" + dev.serial;
 
         LicenseStatus status = verifySignedLicenseJson(decrypted, usbActivationCode);
         if (status != LicenseStatus::Valid && status != LicenseStatus::ValidGracePeriod) {
+            SUSI_LOG("Token on %s is invalid", tokenPath.c_str());
+            lastInvalid = status;
             continue;
         }
 
@@ -1403,8 +1568,12 @@ SusiClient::LicenseStatus SusiClient::checkLicenseToken()
         return status;
     }
 
-    SUSI_LOG("No valid USB license token found");
-    m_isValid = false;
+    if (lastInvalid) return *lastInvalid;
+    if (decryptionFailed) {
+        SUSI_LOG("No valid USB license token found");
+        return LicenseStatus::Error;
+    }
+    SUSI_LOG("No USB license token found");
     return LicenseStatus::TokenNotFound;
 }
 
