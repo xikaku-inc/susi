@@ -22,7 +22,7 @@
 
 ### Documentation & websites
 - **Documentation knowledge base** - per-product, per-release doc sets at `/docs`, server-rendered with SEO meta, Markdown editor, drafts, asset uploads, bulk import, and origin tagging (pipeline-generated vs. user-edited pages)
-- **Multi-site CMS** - any number of public sites resolved from the Host header, each with pages, blog posts, drafts, revision history, redirect maps, nav structure, translations, branding, font presets, SEO (`sitemap.xml`, `robots.txt`, `llms.txt`, IndexNow, JSON-LD), and a consent-gated analytics layer
+- **Multi-site CMS** - any number of public sites resolved from the Host header, each with pages, blog posts, drafts, revision history, redirect maps, nav structure, translations, branding, font presets, SEO (`sitemap.xml`, `robots.txt`, `llms.txt`, IndexNow, JSON-LD), a consent-gated analytics layer, and an optional access password that keeps a site private before launch
 - **Newsletter** - per-site double-opt-in subscriber lists, Markdown issues with inline images and video posters, test sends, delivery reports, public archive, RFC 8058 one-click unsubscribe, SMTP or Gmail OAuth relay
 - **Email templates** - every transactional email editable from the dashboard, with per-site and per-language overrides
 
@@ -31,7 +31,7 @@
 - **Public contact form** - Cloudflare Turnstile + honeypot + per-IP rate limit, served in the site chrome
 
 ### Auth & ops
-- **Multi-user dashboard** with three roles (user / admin / owner), **Argon2id passwords**, **TOTP 2FA + backup codes**, **emailed sign-in code for new devices**, **trusted devices**, **session list + revocation**, **invitation and password-reset email**, and **API tokens** for headless clients
+- **Multi-user dashboard** with three roles (user / admin / owner) plus per-site **site admins**, **Argon2id passwords**, **TOTP 2FA + backup codes**, **emailed sign-in code for new devices**, **trusted devices**, **session list + revocation**, **invitation and password-reset email**, and **API tokens** for headless clients
 - **Audit log**, **self-serve data export and account deletion**, scheduled data-retention purges
 - **Encrypted offsite backups** to Dropbox with grandfather-father-son rotation
 - **One-command deploy** - Docker image built locally and shipped to the host; separate production / staging environments behind nginx
@@ -223,6 +223,8 @@ cmake --build build
 
 With this approach you must provide the dependecies (OpenSSL, nlohmann/json and libcurl) yourself and make sure CMake can find them.
 
+Building the library itself needs a C++23 compiler; the public header only requires C++17 from the consuming project.
+
 Then you can use it in your project:
 
 ```cpp
@@ -330,10 +332,10 @@ The `license_data` field is a JSON-serialized `LicensePayload`:
 
 Machine identity is computed differently depending on the operating system:
 - Windows: BIOS UUID + CPU processor ID
-- Linux: /etc/machine-id + serial number of root drive
+- Linux: /etc/machine-id + a stable ID of the disk holding the root filesystem. The root device is resolved by device number and followed through LVM / LUKS down to the physical disk; the ID is its `/dev/disk/by-id` link (serial, then WWN / NVMe EUI, then dm-uuid; placeholder serials are skipped), falling back to the sysfs serial and the NVMe controller serial
 - macOS: IOPlatformUUID + IOPlatformSerialNumber
 
-These values are combined and hashed with SHA-256 to produce a stable fingerprint. Print the current machine's fingerprint with:
+These values are combined and hashed with SHA-256 to produce a stable fingerprint. If either value cannot be read, both clients refuse to produce a machine code instead of returning an unstable one that would claim a new seat. The code is read once per process. Print the current machine's fingerprint with:
 
 ```bash
 susi-helper fingerprint
@@ -402,6 +404,8 @@ if (susi.isValid()) {
     }
 }
 ```
+
+A token that can be read but does not verify reports its own status (for example `Expired`), a token that cannot be decrypted reports `Error`, and `TokenNotFound` means no connected drive carries a token. `verify_token_on` (Rust) / `verifyTokenOn` (C++) run the same check against an explicit device list.
 
 ### Token file format
 
@@ -520,7 +524,7 @@ The check runs inside the process being verified, on hardware the licensee contr
 - Adding a self-signed certificate to the machine's trust store and re-signing a modified binary (Windows)
 - Signing a modified binary with any certificate (macOS, with the current `kSecCSDefaultFlags` / NULL requirement)
 
-The feature meaningfully raises the bar against casual binary patching but is not a hard cryptographic boundary against a determined local admin. Future server-side CA pinning (planned) will require the client to prove its signing certificate traces to the vendor's CA during every activation, closing the self-signed certificate bypass.
+The feature meaningfully raises the bar against casual binary patching but is not a hard cryptographic boundary against a determined local admin. Server-side CA pinning (`susi-server --trusted-signing-ca <pem>`, see [Server](#server)) closes the self-signed certificate bypass for online activation: the client must prove that its signing certificate chains to the vendor's CA on every activate / verify call.
 
 ## Susi Helper
 
@@ -535,6 +539,8 @@ susi-helper fingerprint
 # (use the serial shown here when exporting a USB token license)
 susi-helper list-usb-serials
 ```
+
+Started without arguments (for example by double-clicking it), it prints both the fingerprint and the USB serial list and waits for Enter before closing.
 
 Example output of `list-usb-serials`:
 
@@ -592,7 +598,7 @@ The public client endpoints share a per-IP limit of 60 requests per minute. "Adm
 
 ### Web Dashboard
 
-The server includes a built-in web dashboard at the root URL (`http://localhost:3100/`). Sections: Licenses, My Licenses (customer portal), Products, Releases, Workspaces (files, docs, configs, tickets), Tickets (cross-workspace admin queue), Website (sites, pages, posts, assets, redirects, settings), Newsletter, Shop, Emails (template editor), Users, Audit, and Backups. The account menu covers profile, sessions, 2FA, and API tokens. Non-admin users only see the customer-facing sections they have access to.
+The server includes a built-in web dashboard at the root URL (`http://localhost:3100/`). Sections: Licenses, My Licenses (customer portal), Products, Releases, Workspaces (files, docs, configs, tickets), Tickets (cross-workspace admin queue), Website (sites, pages, posts, assets, redirects, settings), Newsletter, Shop, Emails (template editor), Users, Audit, and Backups. The account menu covers profile, sessions, 2FA, and API tokens. Non-admin users only see the customer-facing sections they have access to; a site admin lands on Website, limited to the sites they were granted.
 
 Each public site's admin chrome has a Dashboard button, and the dashboard hands a session to the site's own origin through a single-use SSO ticket (`/api/v1/auth/sso-ticket` + `/api/v1/auth/sso-redeem`, 120 s TTL), so editing a site never requires a second login.
 
@@ -609,11 +615,11 @@ The server uses JWT-based authentication with multi-user support. Each team memb
 | `POST` | `/api/v1/auth/login` | None | Login with username or email + password (+ TOTP if enabled); new devices get an emailed sign-in code |
 | `POST` | `/api/v1/auth/signin-code` | None | Exchange an emailed 6-digit sign-in code for a JWT |
 | `POST` | `/api/v1/auth/request-code` | None | Re-request a sign-in code |
-| `POST` | `/api/v1/auth/magic-login` | None | Redeem an invitation link (non-admin accounts only) |
+| `POST` | `/api/v1/auth/magic-login` | None | Redeem an invitation link (`user` accounts only; admins and site admins go through password setup) |
 | `POST` | `/api/v1/auth/forgot-password` | None | Request a password-reset email (accepts username or email) |
 | `POST` | `/api/v1/auth/reset-password` | None | Submit a new password against a reset or invitation token |
 | `POST` | `/api/v1/auth/sso-ticket` / `sso-redeem` | JWT / None | Dashboard-to-site session handoff |
-| `GET` | `/api/v1/auth/status` | JWT | Session status: role, email, name, 2FA state, backup codes left |
+| `GET` | `/api/v1/auth/status` | JWT | Session status: role, `admin_sites`, email, name, 2FA state, backup codes left |
 | `POST` | `/api/v1/auth/logout` | JWT | Revoke the current session server-side |
 | `POST` | `/api/v1/auth/change-password` | JWT | Change own password (revokes all other sessions and API tokens) |
 | `POST` | `/api/v1/auth/setup-2fa` / `verify-2fa` / `disable-2fa` | JWT | TOTP enrolment (returns 8 backup codes) and removal |
@@ -626,9 +632,9 @@ The server uses JWT-based authentication with multi-user support. Each team memb
 | `POST` / `GET` / `DELETE` | `/api/v1/auth/api-tokens[/{id}]` | JWT | Create (`susi_pat_...`, shown once, 365-day expiry) / list / revoke own API tokens |
 | `GET` / `DELETE` | `/api/v1/auth/api-tokens/all[/{id}]` | Admin | List / revoke every user's API tokens |
 | `POST` | `/api/v1/auth/api-tokens[/all]/{id}/delete` | JWT / Admin | Permanently delete a revoked or expired API token (own / any user's) |
-| `GET` / `POST` | `/api/v1/auth/users` | Admin | List / create users (explicit password or invitation email) |
+| `GET` / `POST` | `/api/v1/auth/users` | Admin | List / create users (explicit password or invitation email; `role: "site_admin"` takes the granted site ids in `sites`) |
 | `DELETE` | `/api/v1/auth/users/{username}` | Admin | Delete a user (cannot delete self or last user) |
-| `PUT` | `/api/v1/auth/users/{username}/{email,profile,role}` | Admin | Set a user's email, name, or role (`user` / `admin` / `owner`) |
+| `PUT` | `/api/v1/auth/users/{username}/{email,profile,role}` | Admin | Set a user's email, name, or role (`user` / `site_admin` + `sites` / `admin` / `owner`) |
 | `POST` | `/api/v1/auth/users/{username}/{rename,reset-password,resend-invitation}` | Admin | Rename across every table, force a password reset, re-send the invitation |
 | `PUT` / `POST` | `/api/v1/auth/users/{username}/newsletter`, `/api/v1/auth/newsletter-bulk` | Owner | Set newsletter consent for one or up to 5000 accounts |
 | `GET` | `/api/v1/audit` | Admin | Audit log, newest first (`?limit=` up to 500, `?before=` cursor) |
@@ -642,14 +648,20 @@ The server uses JWT-based authentication with multi-user support. Each team memb
   owner account (change its role, reset its password, repoint its email, or
   delete it), since any of those is a route to taking it over. Bootstrap with
   `SUSI_OWNER_EMAILS`.
+- **Site admin** (`site_admin`) sits outside those tiers: a `user` who may
+  additionally edit the websites listed in their grant (pages, posts, assets,
+  redirects, site settings) and nothing else. It is not an admin role - every
+  other admin gate keeps denying it. Site admins cannot run bulk imports, set a
+  site's access password, or sign a blog post as someone else, and they need a
+  password and TOTP like admins do.
 - Passwords are hashed with **Argon2id** (off the async runtime)
 - Sessions use **HS256 JWT tokens** with a 30-day lifetime and a 7-day idle
   timeout. Every session has a server-side row, so logout, "revoke other
   sessions", password changes, and admin resets kill tokens immediately
 - 2FA uses **TOTP** (replay-protected) with one-shot **backup codes**, plus
   **trusted-device fingerprints** (30-day trust) so a known browser doesn't
-  re-prompt for the emailed code. Admins and owners must enable TOTP before any
-  admin endpoint accepts their browser session
+  re-prompt for the emailed code. Admins, owners, and site admins must enable
+  TOTP before any admin endpoint accepts their browser session
 - **Emailed sign-in code** is required the first time a user signs in from a
   new device - a 6-digit code is sent to the registered email (15-minute TTL);
   enabled when SMTP and `SUSI_MAGIC_LINK_BASE_URL` are configured. Five wrong
@@ -661,7 +673,7 @@ The server uses JWT-based authentication with multi-user support. Each team memb
   link flow with a 30-minute token. New users and admin resets force a password
   change on next login
 - **Per-IP sliding-window rate limits**: 10/min on every login-adjacent
-  endpoint, 60/min on the license client API, 10/min on shop checkout, 300/min
+  endpoint (including the site access password), 60/min on the license client API, 10/min on shop checkout, 300/min
   on the Stripe webhook, 5/hour on newsletter signup, 3/hour on the contact
   form. `X-Forwarded-For` / `X-Real-IP` are honoured only from trusted proxy
   peers (loopback and private IPv4 ranges by default, or the CIDRs in
@@ -771,10 +783,17 @@ let client = LicenseClient::with_server(
     "http://license.example.com/api/v1".to_string(),
 ).unwrap();
 
-let status = client.verify_and_refresh(
-    Path::new("license.json"),
-    "XXXXX-XXXXX-XXXXX-XXXXX",
-);
+let path = Path::new("license.json");
+let key = "XXXXX-XXXXX-XXXXX-XXXXX";
+
+// Renews the lease of an activated machine and rewrites license.json.
+// Never activates: returns NotActivated if no license.json exists yet.
+let mut status = client.verify_and_refresh(path, key, None);
+
+if matches!(status, LicenseStatus::NotActivated) {
+    // Only when the user explicitly activates: claims a machine slot and writes license.json
+    status = client.activate(path, key, Some("Server-1"));
+}
 
 if status.needs_renewal() {
     // Lease expired or in grace period - try again soon
@@ -810,6 +829,8 @@ if (susi.isInGracePeriod() || susi.isLeaseExpired()){
 ```
 
 Call `verify_and_refresh`/`verifyAndRefresh` periodically (e.g. at startup and every few hours) to keep the lease alive. The server will renew the lease on each successful call.
+
+Only an unreachable server falls back to the cached file. A definitive answer from the server is final: a revoked or expired license and a machine removed by an administrator delete the cached file and report `Revoked`, `Expired`, or `Deactivated`, so a cached lease cannot keep the license alive. A failed `activate` reports the server's answer but leaves the cache alone.
 
 ## Lease System
 
@@ -1005,7 +1026,7 @@ A small CMS that serves any number of public marketing sites from one server. Th
 
 The site registry is seeded from two built-in definitions (`xikaku` and `lpr`) on first boot and then managed from the dashboard. Each site definition holds: `name`, `tagline`, `hosts` (bare hostnames, including the staging name), `public_base` (canonical `https://` origin used for every canonical, sitemap, and RSS URL), `contact_email`, `org_legal_name`, `person_name` (non-empty switches the JSON-LD entity from Organization to Person), `addr_locality` / `addr_country`, `og_image_url`, `social_links`, `area_served`, `llms_blurb`, feature flags `has_shop`, `has_newsletter`, `has_blog`, `show_updated`, and `langs` (extra content languages served under `/{lang}/`).
 
-Per-site settings (dashboard Website -> Site Settings) cover analytics (`google_analytics_id`, `google_ads_id` + conversion labels, `reddit_pixel_id`), `nav_structure` (JSON groups of page slugs, `__blog__` / `__shop__` pseudo-entries, relabeled pages, and external links), branding (`logo_image`, `logo_dark_image`, `logo_height`, `favicon_image`, `bg_image`, `bg_veil`, `bg_parallax`, `theme_mode`, `no_topbar`, `sidebar_logo`), and `font` (`mono`, `serif`, or the self-hosted `inter` preset). Brand images are uploaded website assets; sites without a logo show their name as text.
+Per-site settings (dashboard Website -> Site Settings) cover analytics (`google_analytics_id`, `google_ads_id` + conversion labels, `reddit_pixel_id`), `nav_structure` (JSON groups of page slugs, `__blog__` / `__shop__` pseudo-entries, relabeled pages, and external links), branding (`logo_image`, `logo_dark_image`, `logo_height`, `favicon_image`, `bg_image`, `bg_veil`, `bg_parallax`, `theme_mode`, `no_topbar`, `sidebar_logo`), `font` (`mono`, `serif`, or the self-hosted `inter` preset), and `access_password` (see [Site access password](#site-access-password)). Brand images are uploaded website assets; sites without a logo show their name as text.
 
 Analytics and ad pixels load only after the visitor accepts the consent banner, which is shown to browsers in a European timezone or an EU territory; the choice is stored in `localStorage` and can be reopened from a `[data-cookie-settings]` link.
 
@@ -1025,6 +1046,12 @@ Analytics and ad pixels load only after the visitor accepts the consent banner, 
 
 Rendered pages are cached for 5 minutes per site, language, and slug; every content or settings write clears the cache.
 
+### Site access password
+
+A non-empty `access_password` setting makes a whole site private: until a visitor has unlocked it, every page request gets a minimal password form (401) and every API request for that site a 401, whether the site is addressed by Host or by `?site=`. `POST /api/v1/site-access` checks the password and sets a 30-day `susi_site_{id}` cookie, an HMAC bound to the current password, so changing the password locks everyone out again. The site's admins pass on their session. Only `/health` and `/api/v1/auth/...` stay reachable without it, and IndexNow pings are skipped while the password is set. Only full admins can set or clear the password, and the default site cannot be protected.
+
+In the table below, "admin" means a full admin or a site admin granted the resolved site; "full admin" excludes site admins.
+
 | Method | Endpoint | Auth | Description |
 |---|---|---|---|
 | `GET` | `/site`, `/site/{slug}`, `/site/blog/{slug}`, `/site/{lang}/...` | None | Public-rendered HTML (nginx rewrites `/{slug}` to `/site/{slug}` on the marketing hosts) |
@@ -1038,10 +1065,11 @@ Rendered pages are cached for 5 minutes per site, language, and slug; every cont
 | `GET` / `POST` / `DELETE` | `/api/v1/website/assets[/{file}]` | None / admin / admin | Serve (with `Range` support) / upload (up to 100 MB) / delete |
 | `POST` | `/api/v1/website/assets/{file}/rename` | admin | Rename an asset, rewriting references in pages and products |
 | `GET` | `/api/v1/website/admin/assets` | admin | Assets with usage counts |
-| `GET` / `PUT` / `DELETE` | `/api/v1/website/redirects[/{id}]` | admin | Redirect map CRUD; `POST .../redirects/import` bulk-loads up to 5000 |
-| `POST` | `/api/v1/website/import` | admin | Bulk import: multipart `manifest` (JSON keyed by slug), repeated `page` and `asset` fields; `tools/wp_migrate` builds one from a WordPress export |
-| `GET` / `PUT` | `/api/v1/site/admin/settings` | admin | Per-site settings |
-| `GET` / `POST` / `PUT` | `/api/v1/sites[/{id}]` | admin / owner / owner | Site registry |
+| `GET` / `PUT` / `DELETE` | `/api/v1/website/redirects[/{id}]` | admin | Redirect map CRUD; `POST .../redirects/import` (full admin) bulk-loads up to 5000 |
+| `POST` | `/api/v1/website/import` | full admin | Bulk import: multipart `manifest` (JSON keyed by slug), repeated `page` and `asset` fields; `tools/wp_migrate` builds one from a WordPress export |
+| `GET` / `PUT` | `/api/v1/site/admin/settings` | admin | Per-site settings (`access_password`: full admin) |
+| `POST` | `/api/v1/site-access` | None (10/min per IP) | Unlock a password-protected site (`password`), sets the access cookie |
+| `GET` / `POST` / `PUT` | `/api/v1/sites[/{id}]` | admin / owner / owner | Site registry (a site admin sees only the granted sites) |
 | `GET` | `/static/logo.png`, `/static/logo-dark.png`, `/static/icon.png`, `/static/favicon-*.png`, `/favicon.ico`, `/static/bg.jpg`, `/static/og-image.png` | None | Per-site brand assets (uploaded, else compiled-in for the built-in sites) |
 
 ## Newsletter
@@ -1088,7 +1116,7 @@ Stripe-backed checkout for physical goods, per site: every shop endpoint resolve
 
 Stripe keys come from the per-shop settings (entered in the dashboard, sealed at rest) or, as fallback, from the environment: `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` for the default site and `STRIPE_SECRET_KEY_{SITE}` / `STRIPE_WEBHOOK_SECRET_{SITE}` for other sites. Without a secret key the public product pages still render but checkout returns 503. The webhook identifies the site by which configured signing secret verifies the payload.
 
-Products carry an English and a Japanese title and description plus a base price in the product's currency and an optional whole-yen `price_jpy`. A Japanese storefront (`/ja/shop`) checks out in JPY; mixed currencies in one cart are rejected. Shipping is restricted to the admin-enabled destination countries (default `US`, `CA`) and the regions of the active shipping rates. A product whose title contains "pre-order" gets pre-order copy in the confirmation email and is left out of the Merchant Center feed.
+Products carry an English and a Japanese title and description plus a base price in the product's currency and an optional whole-yen `price_jpy`. A Japanese storefront (`/ja/shop`) checks out in JPY; mixed currencies in one cart are rejected. Shipping is restricted to the admin-enabled destination countries (default `US`, `CA`) and the regions of the active shipping rates. A product whose title contains "pre-order" gets pre-order copy in the confirmation email and is left out of the Merchant Center feed. With the `ja_inquiry_only` shop setting, the Japanese storefront lists products without yen prices or a cart and sends customers to the contact page instead; yen prices are withheld from the public catalog, JSON-LD, and feed, and JPY checkout is refused.
 
 After a successful checkout, susi:
 
@@ -1111,7 +1139,7 @@ After a successful checkout, susi:
 | `GET` / `DELETE` | `/api/v1/shop/admin/orders[/{id}]` | admin | Orders list (`?status=`) / detail with Stripe link / erase an order |
 | `POST` | `/api/v1/shop/admin/orders/{id}/ship` | admin | Mark shipped with carrier + tracking (optionally emails the customer) |
 | `PUT` | `/api/v1/shop/admin/orders/{id}/notes` | admin | Update internal notes |
-| `GET` / `PUT` | `/api/v1/shop/admin/settings` | admin | `notification_emails`, `customer_email_enabled`, `support_contact`, `shipping_countries`, `invoice_from`, `stripe_secret_key`, `stripe_webhook_secret` (secrets returned masked) |
+| `GET` / `PUT` | `/api/v1/shop/admin/settings` | admin | `notification_emails`, `customer_email_enabled`, `support_contact`, `shipping_countries`, `invoice_from`, `ja_inquiry_only`, `stripe_secret_key`, `stripe_webhook_secret` (secrets returned masked) |
 
 ## Public Contact Form
 
@@ -1394,7 +1422,7 @@ sudo cat $VOLUME_DIR/public.pem
 
 Embed this key in:
 - **Rust**: `LicenseClient::new(include_str!("public.pem"))`
-- **C++**: the `DEFAULT_PUBLIC_KEY` constant in `susi.cpp`
+- **C++**: the first argument of the `SusiClient` constructor
 
 ### 6. Create and activate licenses
 
@@ -1443,7 +1471,7 @@ cd /opt/susi
 docker compose logs -f          # view logs
 docker compose restart           # restart
 docker compose down              # stop
-docker compose up -d --build     # rebuild after code changes
+# Code changes: re-run ./deploy.sh locally (the host has no source tree to build from)
 
 # Backup the database
 VOLUME_DIR=$(docker volume inspect susi-data --format '{{.Mountpoint}}')
@@ -1541,8 +1569,13 @@ boot, then managed from the dashboard). Adding one:
    indexed). Copy both to `/etc/nginx/conf.d/` on the box, then
    `sudo nginx -t && sudo systemctl reload nginx`.
 
-Content and settings are per site; the shop and newsletter are shared
-instances that the per-site flags merely show or hide.
+Content, settings, the shop, and the newsletter are all per site; the
+`has_shop` / `has_newsletter` flags switch the latter two on. A shop needs its
+own Stripe keys and a newsletter its own SMTP relay (see
+[Configure environment variables](#3a-configure-environment-variables)). To
+keep the site private until launch, set an access password under Site
+Settings, and to hand its editing to someone without full admin rights, give
+them the `site_admin` role for it.
 
 ### Quick reference
 
@@ -1588,7 +1621,7 @@ cargo test -p susi_core --features db      # the SQLite tests are feature-gated
 cargo test -p susi_server --test integration
 ```
 
-The integration suite starts the real `susi-server` binary on an ephemeral port per test and drives it through the Rust client, raw HTTP, and (when Conan is available) the C++ `PackageTest` binary. It covers licensing, workspaces, docs, website, newsletter, shop (with synthetic signed Stripe webhooks), backups (against a mock Dropbox endpoint), and auth. GitHub Actions runs `cargo build` and `cargo test` on every push and pull request to `main`.
+The integration suite starts the real `susi-server` binary on an ephemeral port per test and drives it through the Rust client, raw HTTP, and (when Conan is available) the C++ `PackageTest` binary. It covers licensing, workspaces, docs, website, newsletter, shop (with synthetic signed Stripe webhooks), backups (against a mock Dropbox endpoint), and auth. GitHub Actions runs `cargo build` and `cargo test` on Linux, the `susi_client` tests on Windows, and a Conan build plus `ctest` of the C++ client on every push and pull request to `main`.
 
 ## Dependencies
 
