@@ -183,6 +183,7 @@ pub(crate) async fn handle_deactivate(
         .get_license_by_key(&req.license_key)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "License key not found"))?;
+    reject_offline_removal(&license, &req.machine_code)?;
 
     db.remove_machine_activation(&license.id, &req.machine_code)
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;

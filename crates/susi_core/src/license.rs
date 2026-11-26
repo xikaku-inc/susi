@@ -40,6 +40,10 @@ pub struct MachineActivation {
     pub last_seen_at: Option<DateTime<Utc>>,
     /// When the lease expires. `None` means no lease (perpetual activation).
     pub lease_expires_at: Option<DateTime<Utc>>,
+    /// Set once a license file or USB token was issued for this machine. The
+    /// signed artifact stays valid offline, so only admins may remove it.
+    #[serde(default)]
+    pub offline: bool,
 }
 
 /// The payload that gets signed and shipped to the client.
@@ -196,6 +200,7 @@ impl License {
                 activated_at: Utc::now(),
                 last_seen_at: Some(Utc::now()),
                 lease_expires_at,
+                offline: false,
             });
         }
     }
